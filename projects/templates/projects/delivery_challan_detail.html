@@ -1,6 +1,32 @@
 {% extends "base.html" %}
 {% block title %}DC {{ challan.dc_number }} — {{ project.project_id }}{% endblock %}
 
+{% block extra_head %}
+<style>
+  /* GRN line tables: the SE form and the SCM Edit GRN modal (class grn-lines). Below
+     992px each line is a bordered block, its inputs stacked full width and labelled
+     from data-label, so a phone never scrolls sideways. 992, not 768 as in
+     approvals/_lines_editor.html: modal-xl is only 500px wide until 992px, so the
+     modal's table scrolled at every width below that. ONE set of inputs restyled, never
+     a second phone copy: two inputs with one name would both post. */
+  @media (max-width: 991.98px) {
+    .grn-lines, .grn-lines tbody { display: block; }
+    .grn-lines thead { display: none; }
+    .grn-lines tr { display: block; border: 1px solid #dee2e6; border-radius: .375rem;
+                    padding: .5rem; margin-bottom: .5rem; }
+    .grn-lines td { display: block; border: 0; padding: .25rem 0; width: auto !important; }
+    /* Category badge and description share the line's first row. */
+    .grn-lines td.grn-cat, .grn-lines td.grn-desc { display: inline; padding: 0 .25rem 0 0; }
+    .grn-lines td.grn-ordered { text-align: left !important; }
+    .grn-lines td.grn-ordered::before { content: attr(data-label) " "; }
+    .grn-lines td.grn-field::before { content: attr(data-label); display: block;
+                                      font-size: .8rem; color: #6c757d; }
+    .grn-lines .form-control { min-height: 44px; }
+    .grn-submit { width: 100%; min-height: 44px; }
+  }
+</style>
+{% endblock %}
+
 {% block content %}
 
 {# Flash messages are rendered by base.html above this block; a loop here showed each twice. #}
@@ -264,7 +290,7 @@ them out of the query for anyone else), and only they see the Withdraw control.
     <form method="post" action="{% url 'confirm_grn' project.project_id challan.pk %}">
       {% csrf_token %}
       <div class="table-responsive">
-        <table class="table table-sm">
+        <table class="table table-sm grn-lines">
           <thead class="table-light">
             <tr>
               <th>Category</th>
@@ -278,29 +304,29 @@ them out of the query for anyone else), and only they see the Withdraw control.
           <tbody>
             {% for item in line_items %}
             <tr>
-              <td><span class="badge bg-light text-dark border">{{ item.boq_category }}</span></td>
-              <td class="small">{{ item.item_description }}</td>
-              <td class="text-end text-muted">{{ item.ordered_quantity }} {{ item.unit }}</td>
-              <td>
+              <td class="grn-cat"><span class="badge bg-light text-dark border">{{ item.boq_category }}</span></td>
+              <td class="small grn-desc">{{ item.item_description }}</td>
+              <td class="text-end text-muted grn-ordered" data-label="Ordered">{{ item.ordered_quantity }} {{ item.unit }}</td>
+              <td class="grn-field" data-label="Received qty">
                 <input type="number" name="received_qty_{{ item.pk }}"
                        class="form-control form-control-sm"
-                       step="any" min="0"
+                       step="any" min="0" inputmode="decimal"
                        value="{{ item.received_quantity|default:'' }}"
-                       placeholder="0">
+                       placeholder="0" aria-label="Received quantity">
               </td>
-              <td>
+              <td class="grn-field" data-label="Damaged">
                 <input type="number" name="damaged_qty_{{ item.pk }}"
                        class="form-control form-control-sm"
-                       step="1" min="0"
+                       step="1" min="0" inputmode="numeric"
                        value="{{ item.damaged_quantity }}"
-                       placeholder="0"
+                       placeholder="0" aria-label="Damaged quantity"
                        title="How many of the received units are damaged">
               </td>
-              <td>
+              <td class="grn-field" data-label="GRN notes">
                 <input type="text" name="grn_notes_{{ item.pk }}"
                        class="form-control form-control-sm"
                        value="{{ item.grn_notes|default:'' }}"
-                       placeholder="Optional note">
+                       placeholder="Optional note" aria-label="GRN notes">
               </td>
             </tr>
             {% endfor %}
@@ -308,7 +334,7 @@ them out of the query for anyone else), and only they see the Withdraw control.
         </table>
       </div>
       <div class="d-flex justify-content-end mt-2">
-        <button type="submit" class="btn btn-success">
+        <button type="submit" class="btn btn-success grn-submit">
           Confirm GRN
         </button>
       </div>
@@ -508,7 +534,7 @@ document.addEventListener('DOMContentLoaded', function () {
             </div>
           </div>
           <div class="table-responsive">
-            <table class="table table-sm">
+            <table class="table table-sm grn-lines">
               <thead class="table-light">
                 <tr>
                   <th>Category</th>
@@ -522,29 +548,29 @@ document.addEventListener('DOMContentLoaded', function () {
               <tbody>
                 {% for item in line_items %}
                 <tr>
-                  <td><span class="badge bg-light text-dark border">{{ item.boq_category }}</span></td>
-                  <td class="small">{{ item.item_description }}</td>
-                  <td class="text-end text-muted">{{ item.ordered_quantity }} {{ item.unit }}</td>
-                  <td>
+                  <td class="grn-cat"><span class="badge bg-light text-dark border">{{ item.boq_category }}</span></td>
+                  <td class="small grn-desc">{{ item.item_description }}</td>
+                  <td class="text-end text-muted grn-ordered" data-label="Ordered">{{ item.ordered_quantity }} {{ item.unit }}</td>
+                  <td class="grn-field" data-label="Received qty">
                     <input type="number" name="received_qty_{{ item.pk }}"
                            class="form-control form-control-sm"
-                           step="any" min="0"
+                           step="any" min="0" inputmode="decimal"
                            value="{{ item.received_quantity|default:'' }}"
-                           placeholder="0">
+                           placeholder="0" aria-label="Received quantity">
                   </td>
-                  <td>
+                  <td class="grn-field" data-label="Damaged">
                     <input type="number" name="damaged_qty_{{ item.pk }}"
                            class="form-control form-control-sm"
-                           step="1" min="0"
+                           step="1" min="0" inputmode="numeric"
                            value="{{ item.damaged_quantity }}"
-                           placeholder="0"
+                           placeholder="0" aria-label="Damaged quantity"
                            title="How many of the received units are damaged">
                   </td>
-                  <td>
+                  <td class="grn-field" data-label="GRN notes">
                     <input type="text" name="grn_notes_{{ item.pk }}"
                            class="form-control form-control-sm"
                            value="{{ item.grn_notes|default:'' }}"
-                           placeholder="Optional note">
+                           placeholder="Optional note" aria-label="GRN notes">
                   </td>
                 </tr>
                 {% endfor %}
@@ -554,7 +580,7 @@ document.addEventListener('DOMContentLoaded', function () {
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="submit" class="btn btn-warning">Save GRN Override</button>
+          <button type="submit" class="btn btn-warning grn-submit">Save GRN Override</button>
         </div>
       </form>
     </div>
