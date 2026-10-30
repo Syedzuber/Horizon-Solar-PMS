@@ -1745,8 +1745,11 @@ def dashboard_scm(request):
         status='Submitted', **_context_filter(ctx, 'project__'),
     ).count()
 
-    # Deliveries today: DCs with expected_delivery_date=today not yet fully received
+    # Deliveries today: DCs with expected_delivery_date=today not yet fully received.
+    # project__is_deleted=False: a soft-deleted project keeps its status (often Active),
+    # so the status filter alone counted its challans; this one and `overdue` below.
     deliveries_today = DeliveryChallan.objects.filter(
+        project__is_deleted=False,
         project__status__in=['Active', 'In Progress'],
         expected_delivery_date=today,
         status__in=[DeliveryChallan.EXPECTED, DeliveryChallan.PARTIALLY_RECEIVED],
@@ -1755,6 +1758,7 @@ def dashboard_scm(request):
 
     # Overdue: DCs whose expected date has passed and are still unresolved (including Rejected = severe)
     overdue = DeliveryChallan.objects.filter(
+        project__is_deleted=False,
         project__status__in=['Active', 'In Progress'],
         expected_delivery_date__lt=today,
         expected_delivery_date__isnull=False,
