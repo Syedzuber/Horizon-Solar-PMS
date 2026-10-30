@@ -13,16 +13,17 @@ WHAT IS PINNED HERE
                                                     PhotoScreenTests, OverviewCardTests
     same-day lock after midnight                    MidnightTests
     recorder rights after task removal              RecorderMovedOffTests
+    ATT-B1a: no time later than now + 15 minutes    FutureTimeTests
 
 "Today" is moved by patching django.utils.timezone.localdate, which every attendance
-check reads. Storage is mocked at qaqc_views._client (upload), attendance._client (discard)
+check reads. "Now" (ATT-B1a) is attendance.local_now(), pinned at 20:00 IST by the fixture. Storage is mocked at qaqc_views._client (upload), attendance._client (discard)
 and bill_storage's signer. No test asserts on a substring of a storage path: the path is a
 uuid, so a substring check would pass or fail by chance (SECONDARY_FINDINGS, ATT-B1).
 
 Run with:
     python manage.py test projects.tests_attendance --settings=solarpms.test_settings
 """
-from datetime import time, timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 from unittest import mock
 
@@ -85,6 +86,13 @@ def _vendor(name, kind='contractor', is_active=True):
 
 def _tomorrow():
     return timezone.localdate() + timedelta(days=1)
+
+
+def _at(hour, minute, second=0):
+    """Today at hour:minute:second IST, as an aware datetime — the value local_now()
+    returns."""
+    return timezone.make_aware(datetime.combine(timezone.localdate(),
+                                                time(hour, minute, second)))
 
 
 class AttendanceFixture(TestCase):
@@ -161,6 +169,13 @@ class AttendanceFixture(TestCase):
                                   return_value=SIGNED)
         self.signer = signer_patch.start()
         self.addCleanup(signer_patch.stop)
+        # ATT-B1a: the "not later than now" rule reads attendance.local_now(). Pinned at
+        # 20:00 IST today so the fixed times below (08:00 in, 17:30 out) never depend on
+        # when the suite runs; FutureTimeTests moves it.
+        clock_patch = mock.patch('projects.attendance.local_now',
+                                 return_value=_at(20, 0))
+        self.clock = clock_patch.start()
+        self.addCleanup(clock_patch.stop)
 
     # -- builders -------------------------------------------------------------
 
@@ -901,3 +916,102 @@ class OverviewCardTests(AttendanceFixture):
         self.assertContains(page, '1 crew · 7 people')
         self.assertContains(page, '1 open')
         self.assertContains(page, 'Not listed · waiting for SCM', count=0)
+
+
+class FutureTimeTests(AttendanceFixture):
+    """ATT-B1a: a time in or time out later than now + 15 minutes is refused by every
+    writer and by the form; exactly now + 15 minutes is allowed. The clock reads 10:00 IST
+    unless a test moves it."""
+
+    def setUp(self):
+        super().setUp()
+        self.clock.return_value = _at(10, 0)
+
+    def _update(self, entry, **overrides):
+        data = {'contractor': self.civil_co, 'trade': 'CIVIL', 'headcount': entry.headcount,
+                'time_in': entry.time_in, 'time_out': entry.time_out}
+        data.update(overrides)
+        return update_attendance(entry, data, self.se.user)
+
+    # -- create_attendance --------------------------------------------------------
+
+    def test_create_refuses_time_in_past_the_grace(self):
+        with self.assertRaisesMessage(AttendanceRefused, attendance.TIME_LATER_THAN_NOW):
+            self._entry(time_in=time(10, 16))
+        self.assertFalse(ContractorAttendance.objects.exists())
+
+    def test_create_allows_time_in_at_the_15_minute_boundary(self):
+        entry = self._entry(time_in=time(10, 15))
+        self.assertEqual(entry.time_in, time(10, 15))
+
+    def test_boundary_holds_when_now_has_seconds(self):
+        """10:00:30 -> latest 10:15:30: 10:15 is in, 10:16 is out."""
+        self.clock.return_value = _at(10, 0, 30)
+        self._entry(time_in=time(10, 15))
+        with self.assertRaisesMessage(AttendanceRefused, attendance.TIME_LATER_THAN_NOW):
+            self._entry(time_in=time(10, 16), trade='ELECTRICAL', n=2)
+
+    # -- update_attendance --------------------------------------------------------
+
+    def test_update_refuses_time_in_or_time_out_past_the_grace(self):
+        entry = self._entry(time_in=time(8, 0))
+        for overrides in ({'time_in': time(10, 16)}, {'time_out': time(10, 16)}):
+            with self.assertRaisesMessage(AttendanceRefused, attendance.TIME_LATER_THAN_NOW):
+                self._update(entry, **overrides)
+        entry.refresh_from_db()
+        self.assertEqual((entry.time_in, entry.time_out), (time(8, 0), None))
+        self.assertEqual(self._actions(entry), ['CREATED'])
+
+    def test_update_allows_the_boundary(self):
+        entry = self._entry(time_in=time(8, 0))
+        entry, changed = self._update(entry, time_in=time(10, 0), time_out=time(10, 15))
+        self.assertTrue(changed)
+        self.assertEqual((entry.time_in, entry.time_out), (time(10, 0), time(10, 15)))
+
+    # -- set_time_out -------------------------------------------------------------
+
+    def test_set_time_out_refuses_past_the_grace_and_allows_the_boundary(self):
+        entry = self._entry(time_in=time(8, 0))
+        with self.assertRaisesMessage(AttendanceRefused, attendance.TIME_LATER_THAN_NOW):
+            set_time_out(entry, time(10, 16), self.se.user)
+        entry.refresh_from_db()
+        self.assertIsNone(entry.time_out)
+        entry = set_time_out(entry, time(10, 15), self.se.user)
+        self.assertEqual(entry.time_out, time(10, 15))
+        self.assertEqual(self._actions(entry), ['CREATED', 'TIME_OUT'])
+
+    # -- near midnight ------------------------------------------------------------
+
+    def test_grace_crossing_midnight_refuses_nothing_left_today(self):
+        """23:50 + 15 min is 00:05 tomorrow: 23:59 today is not "later than now + 15"."""
+        self.clock.return_value = _at(23, 50)
+        entry = self._entry(time_in=time(23, 0))
+        set_time_out(entry, time(23, 59), self.se.user)
+        entry.refresh_from_db()
+        self.assertEqual(entry.time_out, time(23, 59))
+
+    # -- the screens --------------------------------------------------------------
+
+    def test_add_form_says_time_cant_be_later_than_now(self):
+        response = self._add_post(time_in='10:16')
+        self.assertContains(response, 'Time can&#x27;t be later than now.')
+        self.assertFalse(ContractorAttendance.objects.exists())
+        self.upload_client.return_value.storage.from_.return_value.upload.assert_not_called()
+        self.assertEqual(self._add_post(time_in='10:15').status_code, 302)
+
+    def test_edit_form_refuses_a_future_time_out(self):
+        entry = self._entry(time_in=time(8, 0))
+        response = _client_for(self.se).post(
+            reverse('attendance_edit', args=['ATT-A', entry.pk]),
+            self._edit_data(entry, time_out='10:30'))
+        self.assertContains(response, 'Time can&#x27;t be later than now.')
+        entry.refresh_from_db()
+        self.assertIsNone(entry.time_out)
+
+    def test_mark_time_out_screen_refuses_a_future_time(self):
+        entry = self._entry(time_in=time(8, 0))
+        response = _client_for(self.se).post(
+            reverse('attendance_time_out', args=['ATT-A', entry.pk]), {'time_out': '11:00'})
+        self.assertIn(attendance.TIME_LATER_THAN_NOW, _messages(response))
+        entry.refresh_from_db()
+        self.assertIsNone(entry.time_out)

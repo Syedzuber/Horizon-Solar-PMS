@@ -8,6 +8,7 @@ its type / size / content checks are qaqc_views.validate_visit_photo's, run by t
 """
 from django import forms
 
+from .attendance import TIME_LATER_THAN_NOW, time_is_too_late
 from .models import VENDOR_BILLABLE_KINDS, ContractorAttendance, Vendor
 from .qaqc_views import parse_photo_taken_at
 
@@ -90,6 +91,10 @@ class AttendanceForm(forms.Form):
             if not cleaned.get('photo'):
                 self.add_error('photo', 'Add a group photo of the crew.')
         time_in, time_out = cleaned.get('time_in'), cleaned.get('time_out')
+        # ATT-B1a: no time more than 15 minutes ahead of now; the writer asks again.
+        for name, value in (('time_in', time_in), ('time_out', time_out)):
+            if time_is_too_late(value):
+                self.add_error(name, TIME_LATER_THAN_NOW)
         if time_in is not None and time_out is not None and time_out <= time_in:
             self.add_error('time_out', 'Time out must be later than time in, on the same day.')
         return cleaned

@@ -20,6 +20,7 @@ records it.
 """
 import logging
 import re
+from datetime import timedelta
 
 from django.db import IntegrityError, transaction
 from django.db.models import Q
@@ -48,6 +49,12 @@ TIME_OUT_NOT_AFTER_IN = 'Time out must be later than time in, on the same day.'
 TIME_OUT_ALREADY = 'Time out is already recorded. Edit the entry to change it.'
 VOID_NOTE_REQUIRED = 'Say why this entry is being voided.'
 CONTRACTOR_NOT_ALLOWED = 'Pick an active contractor from the list, or choose "Contractor not listed".'
+TIME_LATER_THAN_NOW = "Time can't be later than now."
+
+#: How far past the current IST time a time in / time out may be (ATT-B1a). The slack
+#: covers a phone clock running a few minutes fast and a time typed as the crew walks in;
+#: anything later is a time that has not happened yet.
+FUTURE_TIME_GRACE = timedelta(minutes=15)
 
 SNAPSHOT_SCHEMA = 1
 
@@ -67,6 +74,30 @@ def normalise_unlisted_name(raw):
     space. Case is kept for display; the unique index compares it lower-cased, so
     "Raju  Civil" and " raju civil" are the same crew (edge case 8)."""
     return _WHITESPACE.sub(' ', (raw or '').strip())
+
+
+def local_now():
+    """The current IST datetime. One function, read by time_is_too_late() for the writers
+    and the form alike, so a test moves both clocks with one patch."""
+    return timezone.localtime()
+
+
+def time_is_too_late(value):
+    """True when `value` — a time on today's IST date — is later than now plus
+    FUTURE_TIME_GRACE (ATT-B1a). Exactly now + 15 minutes is allowed.
+
+    A bare time is read as today's because every writer acts on today's entries only (the
+    same-day rule). When now + 15 minutes has already crossed midnight, every time left
+    today is within the grace, so nothing is too late — comparing against the wrapped
+    00:05 would refuse every time of the day instead.
+    """
+    if value is None:
+        return False
+    now = local_now()
+    latest = now + FUTURE_TIME_GRACE
+    if latest.date() != now.date():
+        return False
+    return value > latest.time()
 
 
 def attendance_snapshot(entry):
@@ -117,6 +148,8 @@ def _check_values(contractor, unlisted_name, trade, trade_remark, headcount, tim
             f'{ContractorAttendance.HEADCOUNT_MAX}.')
     if time_in is None:
         raise AttendanceRefused('Enter the time in.')
+    if time_is_too_late(time_in) or time_is_too_late(time_out):
+        raise AttendanceRefused(TIME_LATER_THAN_NOW)
     if time_out is not None and time_out <= time_in:
         raise AttendanceRefused(TIME_OUT_NOT_AFTER_IN)
 
@@ -265,8 +298,9 @@ def set_time_out(entry, time_out, by):
     """Record the crew's time out on `entry` by `by` (a User), with a TIME_OUT revision.
 
     Refused when the entry is not changeable by `by`, a time out is already recorded (a
-    second tap, or a replay — the edit form changes one), or `time_out` is not later than
-    the time in (ruling 4: same day, no night shifts). Returns the entry.
+    second tap, or a replay — the edit form changes one), `time_out` is more than
+    FUTURE_TIME_GRACE past now (ATT-B1a), or it is not later than the time in (ruling 4:
+    same day, no night shifts). Returns the entry.
     """
     if time_out is None:
         raise AttendanceRefused('Enter the time out.')
@@ -276,6 +310,8 @@ def set_time_out(entry, time_out, by):
             raise AttendanceRefused(NOT_CHANGEABLE)
         if locked.time_out is not None:
             raise AttendanceRefused(TIME_OUT_ALREADY)
+        if time_is_too_late(time_out):
+            raise AttendanceRefused(TIME_LATER_THAN_NOW)
         if time_out <= locked.time_in:
             raise AttendanceRefused(TIME_OUT_NOT_AFTER_IN)
         before = attendance_snapshot(locked)
