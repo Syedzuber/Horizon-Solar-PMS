@@ -2620,6 +2620,26 @@ def user_can_manage_dc_documents(user, project):
     return profile.role in DC_DOCUMENT_ADMIN_ROLES
 
 
+def user_can_edit_dc(user, project):
+    """Return True if `user` may correct `project`'s delivery challans after creation —
+    the header, lines without a receipt, and new documents (DC-B3, ruling E1).
+
+    SCM and Admin, the roles that raise challans and correct GRNs. A PM, Coordinator or
+    Site Engineer reads the challan but never rewrites what was dispatched; the CEO
+    cannot open the challan page at all.
+
+    The audience is these roles PLUS user_can_view_project(), and visibility is NOT
+    asked here, as in user_can_manage_dc_documents(): both callers
+    (delivery_challan_edit, delivery_challan_detail) refuse anyone who cannot see the
+    site first, and asking again cost the detail page a second query per load
+    (user_can_manage_project inside it). A new caller must ask view first.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None or project is None:
+        return False
+    return profile.role in DC_DOCUMENT_ADMIN_ROLES
+
+
 def user_can_open_damage_photo(user, project, photo):
     """Return True if `user` may open `photo`, a GRN damage photo on `project` (DG-B).
 

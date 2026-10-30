@@ -1,0 +1,291 @@
+{% extends "base.html" %}
+{% block title %}Edit DC {{ challan.dc_number }} — {{ project.project_id }}{% endblock %}
+
+{% block content %}
+{% comment %}
+DC-B3: correcting a challan after creation. The header and line markup is COPIED from
+delivery_challan_create.html (SECONDARY_FINDINGS): a field added to one form must be
+added to the other. Lines with a receipt show description and unit as inputs and
+category and ordered quantity as text only — the view refuses a change to them anyway.
+{% endcomment %}
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <div>
+    <h4 class="mb-0">Edit Delivery Challan {{ challan.dc_number }}</h4>
+    <small class="text-muted">{{ project.project_id }} — {{ project.customer_name }} · Status {{ challan.status }} (recalculated, never edited)</small>
+  </div>
+  <a href="{% url 'delivery_challan_detail' project.project_id challan.pk %}" class="btn btn-outline-secondary btn-sm">← Back to DC</a>
+</div>
+
+{# Flash messages are rendered by base.html above this block. #}
+
+<form method="post" action="{% url 'delivery_challan_edit' project.project_id challan.pk %}" enctype="multipart/form-data" id="dcEditForm">
+  {% csrf_token %}
+  {# What this form was opened on. The server refuses the save if the challan changed since. #}
+  <input type="hidden" name="revision_count" value="{{ revision_count }}">
+  <input type="hidden" name="line_ids" value="{{ line_ids }}">
+  <input type="hidden" name="editable_line_ids" value="{{ editable_line_ids }}">
+
+  {# ── Challan header ──────────────────────────────────────────────────────── #}
+  <div class="card shadow-sm mb-4">
+    <div class="card-header fw-semibold">Challan Details</div>
+    <div class="card-body">
+      <div class="row g-3">
+
+        <div class="col-md-6">
+          <label class="form-label fw-semibold" for="dcEditVendor">Vendor</label>
+          <select name="vendor_id" id="dcEditVendor" class="form-select">
+            <option value="">— Select Vendor —</option>
+            {% for v in vendors %}
+            <option value="{{ v.pk }}"{% if form.vendor_id == v.pk|stringformat:"s" %} selected{% endif %}>{{ v.name }}{% if not v.is_active %} (inactive){% endif %}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="col-md-6">
+          <label class="form-label fw-semibold" for="dcEditPo">PO Number <span class="text-muted">(optional)</span></label>
+          <input type="text" name="po_number" id="dcEditPo" class="form-control" value="{{ form.po_number }}"
+                 placeholder="External PO reference (Excel / Zoho Inventory)" maxlength="100">
+        </div>
+
+        <div class="col-md-6">
+          <label class="form-label fw-semibold" for="dcEditWarehouse">Warehouse <span class="text-muted">(optional)</span></label>
+          <select name="issued_from_warehouse" id="dcEditWarehouse" class="form-select">
+            <option value="">— Select Warehouse —</option>
+            {% for w in warehouses %}
+            <option value="{{ w.pk }}"{% if form.issued_from_warehouse == w.pk|stringformat:"s" %} selected{% endif %}>{{ w }}{% if not w.is_active %} (inactive){% endif %}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="col-md-4">
+          <label class="form-label fw-semibold" for="dcEditNumber">DC Number <span class="text-danger">*</span></label>
+          <input type="text" name="dc_number" id="dcEditNumber" class="form-control" required
+                 value="{{ form.dc_number }}" maxlength="100">
+        </div>
+
+        <div class="col-md-4">
+          <label class="form-label fw-semibold" for="dcEditDate">DC Date <span class="text-danger">*</span></label>
+          <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="dc_date" id="dcEditDate"
+                 class="form-control" required value="{{ form.dc_date }}">
+        </div>
+
+        <div class="col-md-4">
+          <label class="form-label fw-semibold" for="dcEditExpected">Expected Delivery Date <span class="text-muted">(optional)</span></label>
+          <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="expected_delivery_date"
+                 id="dcEditExpected" class="form-control" value="{{ form.expected_delivery_date }}">
+        </div>
+
+        <div class="col-12">
+          <label class="form-label fw-semibold" for="dcEditNotes">Notes <span class="text-muted">(optional)</span></label>
+          <textarea name="notes" id="dcEditNotes" class="form-control" rows="2">{{ form.notes }}</textarea>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  {# ── Line items ──────────────────────────────────────────────────────────── #}
+  <div class="card shadow-sm mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span class="fw-semibold">Line Items <span class="text-danger">*</span></span>
+      <button type="button" class="btn btn-outline-primary btn-sm" id="addLineItemBtn">
+        + Add Another Item
+      </button>
+    </div>
+    <div class="card-body p-0">
+      <p class="small text-muted px-3 pt-2 mb-2">
+        Lines marked <span class="badge bg-success">Received</span> have a GRN: only their
+        description and unit can change, and they cannot be removed.
+      </p>
+      <div class="table-responsive">
+        <table class="table table-sm mb-0" id="lineItemsTable">
+          <thead class="table-light">
+            <tr>
+              <th style="width:18%;">BOQ Category</th>
+              <th>Item Description</th>
+              <th style="width:11%;">Quantity</th>
+              <th style="width:9%;">Unit</th>
+              <th style="width:9%;">Remove</th>
+            </tr>
+          </thead>
+          <tbody id="lineItemsBody">
+            {% for row in line_rows %}{% with line=row.line %}
+            <tr id="line-{{ line.pk }}">
+              {% if line.has_receipt %}
+              <td>
+                <span class="badge bg-light text-dark border">{{ line.boq_category }}</span>
+                <span class="badge bg-success">Received</span>
+              </td>
+              {% else %}
+              <td>
+                <select name="line_{{ line.pk }}_category" class="form-select form-select-sm" required aria-label="Category of {{ line.item_description }}">
+                  <option value="">— Category —</option>
+                  {% for val, label in category_choices %}
+                  <option value="{{ val }}"{% if row.category == val %} selected{% endif %}>{{ label }}</option>
+                  {% endfor %}
+                </select>
+              </td>
+              {% endif %}
+              <td>
+                <input type="text" name="line_{{ line.pk }}_description" class="form-control form-control-sm" required
+                       value="{{ row.description }}" maxlength="255" aria-label="Description of {{ line.item_description }}">
+              </td>
+              <td>
+                {% if line.has_receipt %}
+                <span class="small">{{ line.ordered_quantity }}</span>
+                {% else %}
+                <input type="number" name="line_{{ line.pk }}_qty" class="form-control form-control-sm" required
+                       step="any" min="0.01" value="{{ row.qty }}" aria-label="Quantity of {{ line.item_description }}">
+                {% endif %}
+              </td>
+              <td>
+                <input type="text" name="line_{{ line.pk }}_unit" class="form-control form-control-sm"
+                       value="{{ row.unit }}" maxlength="20" aria-label="Unit of {{ line.item_description }}">
+              </td>
+              <td class="text-center align-middle">
+                {% if line.has_receipt %}
+                <span class="text-muted small">—</span>
+                {% else %}
+                <input class="form-check-input" type="checkbox" name="line_{{ line.pk }}_remove" value="1"
+                       {% if row.remove %}checked{% endif %} aria-label="Remove {{ line.item_description }}">
+                {% endif %}
+              </td>
+            </tr>
+            {% endwith %}{% endfor %}
+            {% for row in new_rows %}
+            <tr class="new-line-row">
+              <td>
+                <select name="new_line_category_{{ forloop.counter0 }}" class="form-select form-select-sm" required>
+                  <option value="">— Category —</option>
+                  {% for val, label in category_choices %}
+                  <option value="{{ val }}"{% if row.category == val %} selected{% endif %}>{{ label }}</option>
+                  {% endfor %}
+                </select>
+              </td>
+              <td>
+                <input type="text" name="new_line_description_{{ forloop.counter0 }}" class="form-control form-control-sm" required
+                       value="{{ row.description }}" placeholder="Item description" maxlength="255">
+              </td>
+              <td>
+                <input type="number" name="new_line_qty_{{ forloop.counter0 }}" class="form-control form-control-sm" required
+                       step="any" min="0.01" value="{{ row.qty }}" placeholder="0">
+              </td>
+              <td>
+                <input type="text" name="new_line_unit_{{ forloop.counter0 }}" class="form-control form-control-sm"
+                       value="{{ row.unit }}" maxlength="20">
+              </td>
+              <td class="text-center align-middle">
+                <button type="button" class="btn btn-outline-danger btn-sm py-0 remove-row-btn" title="Remove">×</button>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  {% comment %}
+  DC-B2's documents card, for documents ADDED here. The confirmation is required whenever
+  a file is chosen and is NEVER pre-ticked, not even on a re-render. Withdrawing a
+  document stays on the challan page; nothing else about documents changes here.
+  {% endcomment %}
+  <div class="card shadow-sm mb-4" id="dc-documents">
+    <div class="card-header fw-semibold">Add Challan Documents <span class="text-muted fw-normal">(optional)</span></div>
+    <div class="card-body">
+      {% if documents_dropped %}
+      <div class="alert alert-warning py-2 small" role="alert">
+        The files you chose were not kept. Attach them again and tick the confirmation again.
+      </div>
+      {% endif %}
+      <p class="small text-muted mb-2">
+        Site Engineers will see these documents. Attach a price-free copy of the vendor's
+        challan, or mask the rates before scanning. This challan has {{ live_documents }}
+        of at most {{ documents_max }}.
+      </p>
+      <input type="file" name="challan_documents" class="form-control" multiple
+             accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" aria-label="Challan documents to add">
+      <div class="form-text">PDF, JPG or PNG; 20 MB each.</div>
+      <div class="form-check mt-2">
+        <input class="form-check-input" type="checkbox" name="no_prices_confirmed" value="1" id="noPricesConfirmed">
+        <label class="form-check-label" for="noPricesConfirmed">
+          These documents show no rates, values or amounts. Site Engineers will see them.
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-4">
+    <div class="card-body">
+      <label class="form-label fw-semibold" for="dcEditReason">Reason for this edit <span class="text-danger">*</span></label>
+      <textarea name="reason" id="dcEditReason" class="form-control" rows="2" required minlength="10"
+                placeholder="At least 10 characters. Shown in the challan's history to everyone who can open it.">{{ reason }}</textarea>
+    </div>
+  </div>
+
+  <div class="d-flex gap-2 justify-content-end mb-4">
+    <a href="{% url 'delivery_challan_detail' project.project_id challan.pk %}" class="btn btn-outline-secondary">Cancel</a>
+    <button type="submit" class="btn btn-primary" id="dcEditSubmit">Save Changes</button>
+  </div>
+
+</form>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  // New rows are numbered on from the ones already shown. The server reads every
+  // new_line_* index present, so a row removed here leaves a harmless gap.
+  var nextIndex = {{ new_rows|length }};
+  var body      = document.getElementById('lineItemsBody');
+
+  var categoryOptions = '<option value="">— Category —</option>';
+  {% for val, label in category_choices %}
+  categoryOptions += '<option value="{{ val|escapejs }}">{{ label|escapejs }}</option>';
+  {% endfor %}
+
+  document.getElementById('addLineItemBtn').addEventListener('click', function () {
+    var i   = nextIndex++;
+    var row = document.createElement('tr');
+    row.className = 'new-line-row';
+    row.innerHTML =
+      '<td><select name="new_line_category_' + i + '" class="form-select form-select-sm" required>' +
+        categoryOptions + '</select></td>' +
+      '<td><input type="text" name="new_line_description_' + i + '" class="form-control form-control-sm" ' +
+        'required placeholder="Item description" maxlength="255"></td>' +
+      '<td><input type="number" name="new_line_qty_' + i + '" class="form-control form-control-sm" ' +
+        'required step="any" min="0.01" placeholder="0"></td>' +
+      '<td><input type="text" name="new_line_unit_' + i + '" class="form-control form-control-sm" ' +
+        'value="Nos" maxlength="20"></td>' +
+      '<td class="text-center align-middle"><button type="button" ' +
+        'class="btn btn-outline-danger btn-sm py-0 remove-row-btn" title="Remove">×</button></td>';
+    body.appendChild(row);
+  });
+
+  body.addEventListener('click', function (e) {
+    if (e.target.classList.contains('remove-row-btn')) {
+      e.target.closest('tr').remove();
+    }
+  });
+
+  /* As on the create form: the submit event fires only after the browser's own checks
+     pass, so a refused field never leaves the button disabled. The server refuses a
+     stale form (revision count), so this only spares a second wait on a slow upload. */
+  document.getElementById('dcEditForm').addEventListener('submit', function () {
+    var btn = document.getElementById('dcEditSubmit');
+    btn.dataset.label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+  });
+
+  window.addEventListener('pageshow', function (e) {
+    if (!e.persisted) return;
+    var btn = document.getElementById('dcEditSubmit');
+    if (btn && btn.disabled) {
+      btn.disabled = false;
+      if (btn.dataset.label) btn.textContent = btn.dataset.label;
+    }
+  });
+});
+</script>
+
+{% endblock %}

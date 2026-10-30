@@ -119,6 +119,8 @@ from .decorators import (
 from .permissions import (
     user_can_manage_project, user_can_view_project, manageable_projects_q,
     user_can_open_dc_document, user_can_manage_dc_documents,
+    # DC-B3: who may correct a challan after creation (SCM/Admin + view).
+    user_can_edit_dc,
     # DG-B: a GRN damage photo — live to every project viewer, withdrawn to SCM/Admin.
     user_can_open_damage_photo,
     # G95: the QA/QC engineer's sites as a queryset, for the PM dashboard and drill-down.
@@ -262,6 +264,13 @@ from .grn_damage import (
     damage_issue_scm_recipients, damage_message, discard_stored, lock_challan,
     notify_delivery_issue_raised, plan_damage, pop_grn_draft, record_damage,
     stash_grn_draft, upload_planned_photos,
+)
+# DC-B3 — correcting a challan after creation. Every decision and write is in dc_edit;
+# delivery_challan_edit only checks access and calls it.
+from .dc_edit import (
+    CHANGED_ELSEWHERE, challan_revisions, edit_form_values, lines_for_edit,
+    live_document_count, pop_edit_draft, save_challan_edit, stash_edit_draft,
+    vendor_choices, warehouse_choices,
 )
 # DC-K — the create form's ?key= guard. Its already_submitted() answers a VendorOrder
 # only, so create_delivery_challan builds the challan's own answer from these.
@@ -14054,8 +14063,15 @@ def delivery_challan_detail(request, project_id, dc_id):
         dc_documents = dc_documents.filter(withdrawn_at__isnull=True)
     dc_documents = list(dc_documents)
 
+    # DC-B3: the challan's edit history, one query, shown to everyone who can read this
+    # page (E9). The Edit DC button is for SCM and Admin; the helper asks role only (view
+    # was asked at the top of this view), so it costs no query.
+    dc_revisions = challan_revisions(challan)
+
     return render(request, 'projects/delivery_challan_detail.html', {
         'project':           project,
+        'dc_revisions':      dc_revisions,
+        'can_edit_dc':       user_can_edit_dc(request.user, project),
         'dc_documents_live':      [d for d in dc_documents if d.is_live],
         'dc_documents_withdrawn': [d for d in dc_documents if not d.is_live],
         'manages_dc_documents':   manages_dc_documents,
@@ -14081,6 +14097,59 @@ def delivery_challan_detail(request, project_id, dc_id):
         'user_profile':      profile,
         'condition_choices': DCLineItem.CONDITION_CHOICES,
         'all_profiles':      UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
+    })
+
+
+@login_required
+def delivery_challan_edit(request, project_id, dc_id):
+    """Correct a delivery challan after creation (DC-B3): the header in any status, lines
+    without a receipt, new lines, new challan documents — with a reason, recorded as an
+    append-only DeliveryChallanRevision. A receipt is never rewritten and the status is
+    recalculated, never edited. Every decision and write is dc_edit's.
+
+    GET renders the form (with a refused POST's typed values, once). POST saves and goes
+    to the challan page, or, refused, keeps what was typed and comes back here.
+
+    Access: SCM and Admin who can see the site (user_can_edit_dc).
+    """
+    project = _active_project(project_id)
+    profile = request.user.profile
+    # Someone who cannot see the site gets the site pages' 404 (or an outgoing PM's
+    # handover redirect), as on the challan page.
+    if not user_can_view_project(request.user, project):
+        return refuse_site_view_404(request, project)
+    # SCM and Admin only, the roles that raise challans and correct GRNs. A PM,
+    # Coordinator or Site Engineer reads the challan but never rewrites what was
+    # dispatched. The helper asks role only; the view term is the check above.
+    if not user_can_edit_dc(request.user, project):
+        return HttpResponseForbidden()
+    # Cross-project guard in the query: another project's challan is a bare 404.
+    challan = get_object_or_404(DeliveryChallan, pk=dc_id, project=project)
+
+    if request.method == 'POST':
+        revision, errors = save_challan_edit(request, project, challan, profile)
+        if errors:
+            for error in errors:
+                messages.error(request, error)
+            # After CHANGED_ELSEWHERE the page must show the challan as it now is, so
+            # only the reason is kept; every other refusal keeps everything typed (E11).
+            stash_edit_draft(request, challan, keep_typed=CHANGED_ELSEWHERE not in errors)
+            return redirect('delivery_challan_edit', project_id=project_id, dc_id=dc_id)
+        messages.success(request, f'DC {revision.challan.dc_number} updated. The edit is '
+                                  f'in the challan history.')
+        return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
+
+    lines = lines_for_edit(challan)
+    return render(request, 'projects/delivery_challan_edit.html', {
+        'project':             project,
+        'challan':             challan,
+        'vendors':             vendor_choices(challan),
+        'warehouses':          warehouse_choices(challan),
+        'category_choices':    DCLineItem.CATEGORY_CHOICES,
+        'documents_max':       DC_DOCUMENTS_MAX_FILES,
+        'live_documents':      live_document_count(challan),
+        'revision_count':      challan.revisions.count(),
+        **edit_form_values(challan, lines, pop_edit_draft(request, challan)),
     })
 
 

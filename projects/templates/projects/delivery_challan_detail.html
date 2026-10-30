@@ -46,9 +46,14 @@
         <p class="text-muted mb-0">
           {{ project.project_id }} — {{ project.customer_name }}
         </p>
+        {% if dc_revisions %}<p class="small mb-0 mt-1"><a href="#dc-history" class="text-muted">Edited {{ dc_revisions|length }} time{{ dc_revisions|length|pluralize }}</a></p>{% endif %}
         <p class="small mb-0 mt-1"><a href="{% url 'project_overview' project.project_id %}#dc-card" class="text-muted">{{ dc_site_counts.total }} challan{{ dc_site_counts.total|pluralize }} for this site — {{ dc_site_counts.received }} received · {{ dc_site_counts.partially_received }} partially received · {{ dc_site_counts.expected }} expected{% if dc_site_counts.rejected %} · {{ dc_site_counts.rejected }} rejected{% endif %}</a></p>
       </div>
       <div class="d-flex gap-2 flex-wrap">
+        {# DC-B3: Edit DC — SCM and Admin (user_can_edit_dc), any status #}
+        {% if can_edit_dc %}
+          <a href="{% url 'delivery_challan_edit' project.project_id challan.pk %}" class="btn btn-outline-primary btn-sm">Edit DC</a>
+        {% endif %}
         {# Edit GRN — SCM only, no status restriction (SCM may correct mistakes) #}
         {% if role == 'SCM' %}
           <button type="button" class="btn btn-outline-warning btn-sm"
@@ -279,6 +284,31 @@ them out of the query for anyone else), and only they see the Withdraw control.
     </div>
   </div>
 </div>
+
+{% comment %}
+DC-B3: the challan's edit history (E9), newest first, to everyone who can read this page:
+who, when, the reason, and what changed. Document names are never listed (ruling Q-B).
+{% endcomment %}
+{% if dc_revisions %}
+<div class="card shadow-sm mb-4" id="dc-history">
+  <div class="card-header fw-semibold">Edit history <span class="text-muted fw-normal">— edited {{ dc_revisions|length }} time{{ dc_revisions|length|pluralize }}</span></div>
+  <div class="card-body">
+    <ul class="list-unstyled mb-0">
+      {% for revision in dc_revisions %}
+      <li class="dc-revision{% if not forloop.last %} border-bottom pb-2 mb-2{% endif %}">
+        <div class="small text-muted">Edit {{ revision.revision_no }} · {{ revision.revised_by.user.get_full_name|default:revision.revised_by.user.username }} · {{ revision.revised_at|date:"d M Y H:i" }}</div>
+        <div class="text-break">{{ revision.reason }}</div>
+        {% if revision.changes %}
+        <ul class="small mb-0 mt-1">
+          {% for change in revision.changes %}<li class="text-break">{{ change }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+</div>
+{% endif %}
 
 {% comment %}
 DG-B: photos of damaged material, taken at GRN, per line. Live ones are listed and open

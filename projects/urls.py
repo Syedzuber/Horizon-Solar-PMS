@@ -578,6 +578,9 @@ urlpatterns = [
     # DC detail — SCM, PM, SE, Admin
     path('projects/<str:project_id>/delivery-challans/<int:dc_id>/',
          views.delivery_challan_detail, name='delivery_challan_detail'),
+    # DC-B3 — correct a challan after creation (SCM/Admin)
+    path('projects/<str:project_id>/delivery-challans/<int:dc_id>/edit/',
+         views.delivery_challan_edit, name='delivery_challan_edit'),
     # SE GRN confirmation — SE only
     path('projects/<str:project_id>/delivery-challans/<int:dc_id>/grn/',
          views.confirm_grn, name='confirm_grn'),

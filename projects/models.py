@@ -1915,6 +1915,65 @@ class DCLineDamagePhoto(models.Model):
             'DCLineDamagePhoto is append-only — a withdrawn photo stays.')
 
 
+class DeliveryChallanRevision(models.Model):
+    """One correction of a delivery challan after creation, by SCM or Admin (DC-B3).
+    APPEND-ONLY.
+
+    Written by dc_edit.save_challan_edit() and nothing else, in the same transaction as
+    the edit it records, with the challan row locked. `before` and `after` are what the
+    challan said either side of the edit — header and lines, display names beside ids,
+    quantities as strings — so a later rename of a vendor or warehouse does not change
+    what a past edit shows. Schema: dc_edit.challan_snapshot(), "schema": 1.
+
+    A receipt is never rewritten here: lines with a GRN keep their category, quantity
+    and every receipt field (dc_edit.has_receipt()). The DC status is recalculated after
+    every edit, never edited.
+
+    PROTECT on the challan, as DeliveryChallanAttachment: an edited challan cannot be
+    deleted, so the teardown commands and a project hard-delete refuse it
+    (SECONDARY_FINDINGS). save() on an existing row and delete() both raise; a queryset
+    update()/delete() bypasses both, as for every append-only model here.
+    """
+    challan = models.ForeignKey(
+        DeliveryChallan, on_delete=models.PROTECT, related_name='revisions',
+    )
+    # 1 for the first edit. The edit form posts the count it was opened with; the unique
+    # pair below is the backstop if two edits ever got past the lock with one count.
+    revision_no = models.PositiveIntegerField()
+    revised_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='dc_revisions',
+    )
+    revised_at = models.DateTimeField(default=timezone.now)
+    reason = models.TextField()      # at least dc_edit.DC_EDIT_REASON_MIN characters, refused before any write
+    before = models.JSONField()      # challan_snapshot() under the lock, before the edit
+    after = models.JSONField()       # the same after it, plus documents_added (ids only)
+
+    class Meta:
+        ordering = ['challan', 'revision_no']
+        constraints = [
+            models.UniqueConstraint(fields=['challan', 'revision_no'],
+                                    name='uniq_dc_revision_no'),
+            # An edit with no stated reason records that the challan changed without
+            # saying why, which is what the reason exists to prevent.
+            models.CheckConstraint(condition=~models.Q(reason=''),
+                                   name='dc_revision_reason_required'),
+        ]
+
+    def __str__(self):
+        return f"{self.challan.dc_number} — edit {self.revision_no}"
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'DeliveryChallanRevision is append-only — a past edit of a challan '
+                'is never rewritten.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            "DeliveryChallanRevision is append-only — a challan's edit history stays.")
+
+
 # ---------------------------------------------------------------------------
 # The delivery-mirror join
 # ---------------------------------------------------------------------------
@@ -2229,6 +2288,7 @@ REASON_UNBLOCKED          = 'unblocked'
 REASON_MILESTONE_SYNC     = 'milestone_sync'      # task<->milestone auto-sync, not a direct act
 REASON_GRN_CONFIRMED      = 'grn_confirmed'
 REASON_GRN_OVERRIDDEN     = 'grn_overridden'
+REASON_DC_EDITED          = 'dc_edited'           # DC-B3: only when an edit's recalculation corrects a stale stored status
 REASON_REVISION_REQUESTED = 'revision_requested'
 REASON_RESUBMITTED        = 'resubmitted'
 REASON_ZOHO_WEBHOOK       = 'zoho_webhook'
