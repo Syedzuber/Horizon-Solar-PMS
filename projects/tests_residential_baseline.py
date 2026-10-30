@@ -70,7 +70,7 @@ from unittest.mock import MagicMock, patch
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.http import Http404
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
 from .design_views import _opex_site
@@ -722,13 +722,23 @@ class DeliveryGRNWorkflowTests(ResidentialBaselineBase):
 
     def test_a_shortfall_with_damage_rolls_up_to_rejected(self):
         """'Rejected' here means SEVERE DELIVERY FAILURE — two stacked problems — not
-        a refused consignment (models.py:1304)."""
+        a refused consignment (models.py:1304).
+
+        DG-B: a damaged line now needs a photo and, with no damage Issue open, a
+        description — without them the GRN is refused (R2). The bucket is a test name
+        and the storage client a mock, so nothing leaves the process."""
         challan = self._make_dc(self.project_a, 'DC-BAD', ordered=Decimal('10.00'))
         item = challan.line_items.first()
-        _client_for(self.se_a).post(
-            reverse('confirm_grn', args=[self.project_a.project_id, challan.pk]),
-            {f'received_qty_{item.pk}': '6', f'damaged_qty_{item.pk}': '2'},
-        )
+        photo = SimpleUploadedFile('crack.jpg', b'\xff\xd8\xff\xe0\x00\x10JFIF damage',
+                                   content_type='image/jpeg')
+        with override_settings(SUPABASE_DELIVERY_BUCKET='Horizon-PMS-Delivery-test'), \
+                patch('projects.delivery_storage._client'):
+            _client_for(self.se_a).post(
+                reverse('confirm_grn', args=[self.project_a.project_id, challan.pk]),
+                {f'received_qty_{item.pk}': '6', f'damaged_qty_{item.pk}': '2',
+                 f'damage_photos_{item.pk}': photo,
+                 'damage_description': 'Two panels cracked across the glass'},
+            )
         item.refresh_from_db(); challan.refresh_from_db()
         self.assertEqual(item.condition, DCLineItem.PARTIAL)
         self.assertEqual(challan.status, DeliveryChallan.REJECTED)
@@ -1642,21 +1652,34 @@ class NotificationTests(ResidentialBaselineBase):
             self.assertEqual(call.kwargs['channels'], ['in_app'])
 
     def test_grn_confirmation_notifies_nobody(self):
-        """Recorded as current behaviour, not endorsed: a delivery arriving damaged
-        tells no one. If 0.2's neighbourhood ever adds a send here, this fails and the
-        addition gets a decision rather than a surprise."""
+        """Recorded as current behaviour, not endorsed: a GRN with no damage tells no
+        one, even when it changes the DC's status. If 0.2's neighbourhood ever adds a
+        send here, this fails and the addition gets a decision rather than a surprise.
+
+        DG-B decided the damaged case: a damaged GRN raises a damage Issue and tells the
+        PM and every active SCM user — pinned in
+        tests_grn_damage.DamageIssueTests.test_new_issue_notifications. This test keeps
+        the undamaged path silent; grn_damage's senders are patched too because the
+        damage sends live there."""
         challan = self._make_dc(self.project_a, 'DC-SILENT')
         item = challan.line_items.first()
-        with patch('projects.views.send_notification') as sender:
-            _client_for(self.se_a).post(
-                reverse('confirm_grn',
-                        args=[self.project_a.project_id, challan.pk]),
-                {f'received_qty_{item.pk}': '4', f'damaged_qty_{item.pk}': '4'},
-            )
+        with patch('projects.views.send_notification') as sender, \
+                patch('projects.grn_damage.send_notification') as damage_sender, \
+                patch('projects.grn_damage.notify') as damage_notify:
+            with self.captureOnCommitCallbacks(execute=True):
+                _client_for(self.se_a).post(
+                    reverse('confirm_grn',
+                            args=[self.project_a.project_id, challan.pk]),
+                    {f'received_qty_{item.pk}': '4', f'damaged_qty_{item.pk}': '0'},
+                )
         sender.assert_not_called()
+        damage_sender.assert_not_called()
+        damage_notify.assert_not_called()
         challan.refresh_from_db()
-        # Shortfall AND damage — two stacked problems, so 'red' → Rejected.
-        self.assertEqual(challan.status, DeliveryChallan.REJECTED)
+        # A shortfall alone (damaged 0) — one problem, so Partially Received. Before
+        # DG-B this posted damage too and read Rejected.
+        self.assertEqual(challan.status, DeliveryChallan.PARTIALLY_RECEIVED)
+        self.assertFalse(Issue.objects.filter(delivery_challan=challan).exists())
 
     def test_activation_notifies_nobody(self):
         """assign_tasks_to() is silent by design (utils.py:181): twenty back-assigned

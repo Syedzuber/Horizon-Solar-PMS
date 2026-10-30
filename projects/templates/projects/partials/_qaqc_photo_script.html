@@ -4,7 +4,17 @@
    form that also holds <input name="photo_taken_at"> and a .qaqc-photo-status element.
    Moved here verbatim from qaqc_visit.html so both pages run one copy; the only change is
    that every submit button in the form is held while the photo is prepared (a re-verify
-   form has two).{% endcomment %}
+   form has two).
+
+   DG-B (GRN damage photos, delivery_challan_detail.html) widened it, with one file
+   picked behaving exactly as before:
+     * every file of a `multiple` input is prepared, each keeping its original if it
+       fails or does not come out smaller — before, only the first was kept;
+     * data-qaqc-photo-status / data-qaqc-photo-taken on the input name the id of its own
+       status element / photo_taken_at; without them the form-wide lookup is used, as
+       before. photo_taken_at is optional — a form without one no longer throws;
+     * the submit buttons are held by a per-form count of inputs still preparing, so
+       they come back only when the last one is done.{% endcomment %}
 <script>
 /* Closeout step 7 (go-ahead Q5): before a visit photo is uploaded, read its EXIF
    DateTimeOriginal into photo_taken_at and downscale it to a 1600 px long edge, JPEG
@@ -81,30 +91,59 @@
     });
   }
 
+  function target(input, attr, selector) {
+    /* The element the input names by id in `attr`, else the form-wide match. */
+    var id = input.getAttribute(attr);
+    if (id) return document.getElementById(id);
+    return input.form ? input.form.querySelector(selector) : null;
+  }
+
+  function hold(form, delta) {
+    /* Count the form's inputs still preparing; its submit buttons are disabled while
+       the count is above zero and re-enabled when it returns to zero. */
+    if (!form) return;
+    var count = Math.max(0, (form._qaqcPhotoPending || 0) + delta);
+    form._qaqcPhotoPending = count;
+    var saves = form.querySelectorAll('button[type="submit"]');
+    for (var k = 0; k < saves.length; k++) saves[k].disabled = count > 0;
+  }
+
   document.addEventListener('change', function (evt) {
     var input = evt.target;
     if (!input.matches || !input.matches('input[data-qaqc-photo]')) return;
-    var form = input.form, file = input.files && input.files[0];
-    var taken = form.querySelector('input[name="photo_taken_at"]');
-    var status = form.querySelector('.qaqc-photo-status');
-    var saves = form.querySelectorAll('button[type="submit"]');
-    var hold = function (on) { for (var k = 0; k < saves.length; k++) saves[k].disabled = on; };
-    taken.value = '';
-    if (!file) return;
-    hold(true);
-    status.textContent = 'Preparing photo…';
-    var finish = function () { hold(false); status.textContent = ''; };
+    var form = input.form;
+    var files = input.files ? Array.prototype.slice.call(input.files) : [];
+    var taken = target(input, 'data-qaqc-photo-taken', 'input[name="photo_taken_at"]');
+    var status = target(input, 'data-qaqc-photo-status', '.qaqc-photo-status');
+    if (taken) taken.value = '';
+    if (!files.length) return;
+    hold(form, 1);
+    if (status) status.textContent = files.length > 1 ? 'Preparing photos…' : 'Preparing photo…';
+    var done = false;
+    var finish = function () {
+      if (done) return;
+      done = true;
+      hold(form, -1);
+      if (status) status.textContent = '';
+    };
     Promise.resolve()
-      .then(function () { return readExifDate(file); })
-      .then(function (when) { if (when) taken.value = when; }, function () {})
-      .then(function () { return downscale(file); })
-      .then(function (small) {
-        if (!small) return;
+      .then(function () { return readExifDate(files[0]); })
+      .then(function (when) { if (when && taken) taken.value = when; }, function () {})
+      .then(function () {
+        return Promise.all(files.map(function (file) {
+          return downscale(file).then(function (small) { return small || file; },
+                                      function () { return file; });
+        }));
+      })
+      .then(function (prepared) {
+        var changed = false;
+        for (var i = 0; i < prepared.length; i++) if (prepared[i] !== files[i]) changed = true;
+        if (!changed) return;
         var transfer = new DataTransfer();
-        transfer.items.add(small);
+        for (var j = 0; j < prepared.length; j++) transfer.items.add(prepared[j]);
         input.files = transfer.files;   /* does not fire another change event */
       })
-      .catch(function () { /* keep the original file: never block the answer */ })
+      .catch(function () { /* keep the original files: never block the answer */ })
       .then(finish, finish);
   });
 })();

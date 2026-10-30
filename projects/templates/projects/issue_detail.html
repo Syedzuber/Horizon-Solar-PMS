@@ -95,6 +95,36 @@
 </div>
 {% endif %}
 
+{% comment %}
+DG-B: the damage photos recorded under this Issue at GRN, grouped by line. Live ones are
+listed and open for everyone who can read this page (ruling QH); withdrawn ones reach the
+template only for SCM and Admin (left out in the view's query for everyone else).
+Withdrawing is done on the challan page.
+{% endcomment %}
+{% if damage_photos %}
+<div class="card shadow-sm mb-4" id="damage-photos">
+  <div class="card-header fw-semibold">Damage photos</div>
+  <div class="card-body">
+    {% regroup damage_photos by line as photo_lines %}
+    {% for group in photo_lines %}
+    <div class="{% if not forloop.last %}border-bottom pb-2 mb-2{% endif %}">
+      <div class="small fw-semibold mb-1"><span class="badge bg-light text-dark border">{{ group.grouper.boq_category }}</span> {{ group.grouper.item_description }}</div>
+      <ul class="list-unstyled mb-0 small">
+        {% for photo in group.list %}
+        <li class="mb-1 text-break">
+          {% if not photo.is_live %}<span class="badge bg-secondary">Withdrawn</span>{% endif %}
+          <a href="{% url 'dc_damage_photo_open' project.project_id photo.line.challan_id photo.pk %}" target="_blank" rel="noopener">{{ photo.original_name }}</a>
+          <span class="text-muted">· {{ photo.uploaded_by.user.get_full_name|default:photo.uploaded_by.user.username }} · {{ photo.uploaded_at|date:"d M Y H:i" }}</span>
+          {% if not photo.is_live %}<span class="text-muted">— withdrawn by {{ photo.withdrawn_by.user.get_full_name|default:photo.withdrawn_by.user.username }}: {{ photo.withdrawn_reason }}</span>{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
 {# ── Resolution Note ──────────────────────────────────────────────────────── #}
 {% if issue.resolution_note %}
 <div class="card shadow-sm mb-4">

@@ -23,7 +23,13 @@
                                       font-size: .8rem; color: #6c757d; }
     .grn-lines .form-control { min-height: 44px; }
     .grn-submit { width: 100%; min-height: 44px; }
+    /* DG-B: a line with no damage drops its photo block altogether on a phone. */
+    .grn-lines td.grn-photo-off { display: none; }
   }
+  /* DG-B: the photo input is shown only while its line's Damaged box is above 0 — set
+     by the script at the end of the page, so without it every input stays visible and
+     the server decides. On a wide screen the cell stays, empty, to keep the columns. */
+  td.grn-photo-off .grn-photo-body { display: none; }
 </style>
 {% endblock %}
 
@@ -274,6 +280,54 @@ them out of the query for anyone else), and only they see the Withdraw control.
   </div>
 </div>
 
+{% comment %}
+DG-B: photos of damaged material, taken at GRN, per line. Live ones are listed and open
+for everyone who can read this page (ruling QH); withdrawn ones reach the template only
+for SCM and Admin (the view splits them off), and only they see the Withdraw control.
+{% endcomment %}
+{% if has_damage_photos %}
+<div class="card shadow-sm mb-4" id="damage-photos">
+  <div class="card-header fw-semibold">Damage photos</div>
+  <div class="card-body">
+    {% for item in line_items %}{% if item.damage_photos_live or item.damage_photos_withdrawn %}
+    <div class="{% if not forloop.last %}border-bottom pb-2 mb-2{% endif %}">
+      <div class="small fw-semibold mb-1"><span class="badge bg-light text-dark border">{{ item.boq_category }}</span> {{ item.item_description }}</div>
+      <ul class="list-unstyled mb-0 small">
+        {% for photo in item.damage_photos_live %}
+        <li class="mb-1">
+          <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+            <div class="text-break">
+              <a href="{% url 'dc_damage_photo_open' project.project_id challan.pk photo.pk %}" target="_blank" rel="noopener">{{ photo.original_name }}</a>
+              <span class="text-muted">({{ photo.size|filesizeformat }}) · {{ photo.uploaded_by.user.get_full_name|default:photo.uploaded_by.user.username }} · {{ photo.uploaded_at|date:"d M Y H:i" }}</span>
+            </div>
+            {% if manages_damage_photos %}
+            <form method="post" action="{% url 'dc_damage_photo_withdraw' project.project_id challan.pk photo.pk %}"
+                  class="d-flex gap-1 flex-wrap"
+                  onsubmit="return confirm('Withdraw {{ photo.original_name|escapejs }}? Only SCM and Admin will see it afterwards. The file is kept, not deleted.');">
+              {% csrf_token %}
+              <input type="text" name="withdrawn_reason" class="form-control form-control-sm" style="max-width:16rem;"
+                     minlength="10" required placeholder="Reason (at least 10 characters)" aria-label="Reason for withdrawing {{ photo.original_name }}">
+              <button type="submit" class="btn btn-outline-danger btn-sm">Withdraw</button>
+            </form>
+            {% endif %}
+          </div>
+        </li>
+        {% endfor %}
+        {% for photo in item.damage_photos_withdrawn %}
+        <li class="mb-1 text-break">
+          <span class="badge bg-secondary">Withdrawn</span>
+          <a href="{% url 'dc_damage_photo_open' project.project_id challan.pk photo.pk %}" target="_blank" rel="noopener">{{ photo.original_name }}</a>
+          — by {{ photo.withdrawn_by.user.get_full_name|default:photo.withdrawn_by.user.username }}, {{ photo.withdrawn_at|date:"d M Y H:i" }}:
+          {{ photo.withdrawn_reason }}
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}{% endfor %}
+  </div>
+</div>
+{% endif %}
+
 {# ── SE GRN confirmation form — an SE working on this site, not Received status. can_confirm_grn excludes the site's QA/QC engineer (closeout step 3) ── #}
 {% if can_confirm_grn and challan.status != 'Received' %}
 <div class="card shadow-sm mb-4">
@@ -285,9 +339,16 @@ them out of the query for anyone else), and only they see the Withdraw control.
     <p class="text-muted small mb-3">
       Enter received quantities below. In the <strong>Damaged</strong> column, enter how many
       of the received units arrived damaged (enter 0 if all are in good condition).
-      Leave a row blank to skip it.
+      Leave a row blank to skip it. A damaged line needs at least one photo of the damage.
     </p>
-    <form method="post" action="{% url 'confirm_grn' project.project_id challan.pk %}">
+    {% if grn_draft.which == 'confirm' %}
+    <div class="alert alert-warning small" role="alert">
+      Nothing was saved. What you typed is filled in below — photos cannot be kept from a
+      refused submission, so attach them again.
+    </div>
+    {% endif %}
+    <form method="post" action="{% url 'confirm_grn' project.project_id challan.pk %}"
+          enctype="multipart/form-data" data-grn-form>
       {% csrf_token %}
       <div class="table-responsive">
         <table class="table table-sm grn-lines">
@@ -299,6 +360,7 @@ them out of the query for anyone else), and only they see the Withdraw control.
               <th style="width:10rem;">Received Qty</th>
               <th style="width:9rem;">Damaged</th>
               <th style="width:14rem;">GRN Notes</th>
+              <th style="width:16rem;">Damage photos</th>
             </tr>
           </thead>
           <tbody>
@@ -311,28 +373,55 @@ them out of the query for anyone else), and only they see the Withdraw control.
                 <input type="number" name="received_qty_{{ item.pk }}"
                        class="form-control form-control-sm"
                        step="any" min="0" inputmode="decimal"
-                       value="{{ item.received_quantity|default:'' }}"
+                       value="{% if item.grn_draft %}{{ item.grn_draft.received }}{% else %}{{ item.received_quantity|default:'' }}{% endif %}"
                        placeholder="0" aria-label="Received quantity">
               </td>
               <td class="grn-field" data-label="Damaged">
                 <input type="number" name="damaged_qty_{{ item.pk }}"
                        class="form-control form-control-sm"
                        step="1" min="0" inputmode="numeric"
-                       value="{{ item.damaged_quantity }}"
+                       value="{% if item.grn_draft %}{{ item.grn_draft.damaged }}{% else %}{{ item.damaged_quantity }}{% endif %}"
                        placeholder="0" aria-label="Damaged quantity"
-                       title="How many of the received units are damaged">
+                       title="How many of the received units are damaged"
+                       data-grn-damaged="{{ item.pk }}" data-grn-initial="{{ item.damaged_quantity }}">
               </td>
               <td class="grn-field" data-label="GRN notes">
                 <input type="text" name="grn_notes_{{ item.pk }}"
                        class="form-control form-control-sm"
-                       value="{{ item.grn_notes|default:'' }}"
+                       value="{% if item.grn_draft %}{{ item.grn_draft.notes }}{% else %}{{ item.grn_notes|default:'' }}{% endif %}"
                        placeholder="Optional note" aria-label="GRN notes">
+              </td>
+              <td class="grn-field" data-label="Damage photos" data-grn-photo-cell="{{ item.pk }}">
+                <div class="grn-photo-body">
+                  <input type="file" name="damage_photos_{{ item.pk }}"
+                         class="form-control form-control-sm" multiple
+                         accept="image/jpeg,image/png,.jpg,.jpeg,.png"
+                         data-qaqc-photo data-qaqc-photo-status="grnPhotoStatusC{{ item.pk }}"
+                         aria-label="Photos of the damage">
+                  <div class="small text-muted" id="grnPhotoStatusC{{ item.pk }}"></div>
+                  {% if item.damage_photos_live %}<div class="small text-muted">{{ item.damage_photos_live|length }} photo{{ item.damage_photos_live|length|pluralize }} on record</div>{% endif %}
+                </div>
               </td>
             </tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
+      {% comment %}DG-B: the damage Issue. With one open, damage recorded now is added to it;
+      without, the description raises it. Shown by the script only when a line records
+      damage now — the server asks for it either way.{% endcomment %}
+      {% if open_damage_issue %}
+      <p class="small text-muted mb-0">Damage you record now is added to the open damage issue
+        <a href="{% url 'issue_detail' open_damage_issue.pk %}">{{ open_damage_issue.title }}</a>.</p>
+      {% else %}
+      <div class="mb-2" data-grn-damage-desc>
+        <label for="grnDamageDescC" class="form-label small fw-semibold mb-1">What is damaged? — needed when you record damage</label>
+        <textarea name="damage_description" id="grnDamageDescC" rows="2" maxlength="2000"
+                  class="form-control form-control-sm"
+                  placeholder="e.g. 2 panels cracked across the glass; one crate crushed at a corner">{{ grn_draft.description|default:'' }}</textarea>
+        <div class="form-text">At least 10 characters. It raises the damage issue for this challan (High, assigned to the site's PM).</div>
+      </div>
+      {% endif %}
       <div class="d-flex justify-content-end mt-2">
         <button type="submit" class="btn btn-success grn-submit">
           Confirm GRN
@@ -491,7 +580,8 @@ document.addEventListener('DOMContentLoaded', function () {
      aria-labelledby="editGrnModalLabel" aria-hidden="true">
   <div class="modal-dialog modal-xl">
     <div class="modal-content">
-      <form method="post" action="{% url 'override_grn' project.project_id challan.pk %}">
+      <form method="post" action="{% url 'override_grn' project.project_id challan.pk %}"
+            enctype="multipart/form-data" data-grn-form>
         {% csrf_token %}
         <div class="modal-header">
           <h5 class="modal-title" id="editGrnModalLabel">
@@ -504,7 +594,15 @@ document.addEventListener('DOMContentLoaded', function () {
             Override received quantities and damage counts.
             On a line an engineer has already confirmed, the original submitter is preserved.
             Enter how many of the received units are damaged in the <strong>Damaged</strong> column.
+            A damaged line needs at least one photo of the damage; a line that already has
+            one needs no new photo.
           </p>
+          {% if grn_draft.which == 'override' %}
+          <div class="alert alert-warning small" role="alert">
+            Nothing was saved. What you typed is filled in below — photos cannot be kept from
+            a refused submission, so attach them again.
+          </div>
+          {% endif %}
 
           {% comment %}
           ── On-behalf reason ──
@@ -525,7 +623,7 @@ document.addEventListener('DOMContentLoaded', function () {
             </label>
             <input type="text" name="grn_on_behalf_reason" id="grnOnBehalfReason"
                    class="form-control form-control-sm"
-                   maxlength="500"
+                   maxlength="500" value="{{ grn_draft.on_behalf_reason|default:'' }}"
                    placeholder="e.g. Site engineer unreachable; material verified by warehouse over call">
             <div class="form-text" style="font-size:.72rem;">
               Required for any line nobody has confirmed yet. That line will be recorded
@@ -543,6 +641,7 @@ document.addEventListener('DOMContentLoaded', function () {
                   <th style="width:10rem;">Received Qty</th>
                   <th style="width:9rem;">Damaged</th>
                   <th style="width:14rem;">GRN Notes</th>
+                  <th style="width:16rem;">Damage photos</th>
                 </tr>
               </thead>
               <tbody>
@@ -555,28 +654,53 @@ document.addEventListener('DOMContentLoaded', function () {
                     <input type="number" name="received_qty_{{ item.pk }}"
                            class="form-control form-control-sm"
                            step="any" min="0" inputmode="decimal"
-                           value="{{ item.received_quantity|default:'' }}"
+                           value="{% if item.grn_draft %}{{ item.grn_draft.received }}{% else %}{{ item.received_quantity|default:'' }}{% endif %}"
                            placeholder="0" aria-label="Received quantity">
                   </td>
                   <td class="grn-field" data-label="Damaged">
                     <input type="number" name="damaged_qty_{{ item.pk }}"
                            class="form-control form-control-sm"
                            step="1" min="0" inputmode="numeric"
-                           value="{{ item.damaged_quantity }}"
+                           value="{% if item.grn_draft %}{{ item.grn_draft.damaged }}{% else %}{{ item.damaged_quantity }}{% endif %}"
                            placeholder="0" aria-label="Damaged quantity"
-                           title="How many of the received units are damaged">
+                           title="How many of the received units are damaged"
+                           data-grn-damaged="{{ item.pk }}" data-grn-initial="{{ item.damaged_quantity }}">
                   </td>
                   <td class="grn-field" data-label="GRN notes">
                     <input type="text" name="grn_notes_{{ item.pk }}"
                            class="form-control form-control-sm"
-                           value="{{ item.grn_notes|default:'' }}"
+                           value="{% if item.grn_draft %}{{ item.grn_draft.notes }}{% else %}{{ item.grn_notes|default:'' }}{% endif %}"
                            placeholder="Optional note" aria-label="GRN notes">
+                  </td>
+                  <td class="grn-field" data-label="Damage photos" data-grn-photo-cell="{{ item.pk }}">
+                    <div class="grn-photo-body">
+                      <input type="file" name="damage_photos_{{ item.pk }}"
+                             class="form-control form-control-sm" multiple
+                             accept="image/jpeg,image/png,.jpg,.jpeg,.png"
+                             data-qaqc-photo data-qaqc-photo-status="grnPhotoStatusO{{ item.pk }}"
+                             aria-label="Photos of the damage">
+                      <div class="small text-muted" id="grnPhotoStatusO{{ item.pk }}"></div>
+                      {% if item.damage_photos_live %}<div class="small text-muted">{{ item.damage_photos_live|length }} photo{{ item.damage_photos_live|length|pluralize }} on record</div>{% endif %}
+                    </div>
                   </td>
                 </tr>
                 {% endfor %}
               </tbody>
             </table>
           </div>
+          {% comment %}DG-B: the damage Issue, as on the SE form.{% endcomment %}
+          {% if open_damage_issue %}
+          <p class="small text-muted mb-0">Damage you record now is added to the open damage issue
+            <a href="{% url 'issue_detail' open_damage_issue.pk %}">{{ open_damage_issue.title }}</a>.</p>
+          {% else %}
+          <div class="mb-2" data-grn-damage-desc>
+            <label for="grnDamageDescO" class="form-label small fw-semibold mb-1">What is damaged? — needed when you record damage</label>
+            <textarea name="damage_description" id="grnDamageDescO" rows="2" maxlength="2000"
+                      class="form-control form-control-sm"
+                      placeholder="e.g. 2 panels cracked across the glass; one crate crushed at a corner">{{ grn_draft.description|default:'' }}</textarea>
+            <div class="form-text">At least 10 characters. It raises the damage issue for this challan (High, assigned to the site's PM).</div>
+          </div>
+          {% endif %}
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
@@ -586,6 +710,75 @@ document.addEventListener('DOMContentLoaded', function () {
     </div>
   </div>
 </div>
+{% if grn_draft.which == 'override' %}
+{% comment %}A refused override comes back with what was typed (grn_damage.stash_grn_draft).
+Reopen the modal so the user fixes the refusal, not the whole form.{% endcomment %}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var el = document.getElementById('editGrnModal');
+  if (el) bootstrap.Modal.getOrCreateInstance(el).show();
+});
+</script>
+{% endif %}
+{% endif %}
+
+{% if can_confirm_grn and challan.status != 'Received' or role == 'SCM' %}
+{% include 'projects/partials/_qaqc_photo_script.html' %}
+<script>
+/* DG-B, on both GRN forms (data-grn-form). The SERVER decides every rule; this only keeps
+   the form readable. A line's photo input shows while its Damaged box is above 0 — set
+   back to 0, the input is hidden and its files cleared, since photos on an undamaged line
+   are refused. The description box shows while some line records damage NOW: Damaged
+   above 0 and either changed from what is stored or with photos attached. */
+document.addEventListener('DOMContentLoaded', function () {
+  var forms = document.querySelectorAll('form[data-grn-form]');
+  /* `clear` only on change (the box left), never while typing: retyping 2 as 3 passes
+     through an empty box, and must not drop the photos already picked. */
+  function refresh(form, clear) {
+    var recordsNow = false;
+    var boxes = form.querySelectorAll('input[data-grn-damaged]');
+    for (var i = 0; i < boxes.length; i++) {
+      var box = boxes[i], n = parseInt(box.value, 10) || 0;
+      var cell = form.querySelector('[data-grn-photo-cell="' + box.getAttribute('data-grn-damaged') + '"]');
+      var photo = cell ? cell.querySelector('input[type="file"]') : null;
+      var attached = !!(photo && photo.files && photo.files.length);
+      if (cell) cell.classList.toggle('grn-photo-off', n <= 0);
+      if (clear && n <= 0 && attached) { photo.value = ''; attached = false; }
+      if (n > 0 && (String(n) !== box.getAttribute('data-grn-initial') || attached)) recordsNow = true;
+    }
+    var desc = form.querySelector('[data-grn-damage-desc]');
+    if (desc) desc.classList.toggle('d-none', !recordsNow);
+  }
+  for (var f = 0; f < forms.length; f++) {
+    (function (form) {
+      form.addEventListener('input', function () { refresh(form, false); });
+      form.addEventListener('change', function () { refresh(form, true); });
+      refresh(form, false);
+      /* R10: one tap, one submission. No ?key= guard on these forms — a double POST
+         that gets through stores its photos twice (a known gap). */
+      form.addEventListener('submit', function () {
+        var btn = form.querySelector('.grn-submit');
+        if (!btn) return;
+        btn.dataset.label = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Saving…';
+      });
+    })(forms[f]);
+  }
+  /* Back to this page from the one it led to: the browser can restore it exactly as it
+     was left, button disabled. Re-enable it with its own label. */
+  window.addEventListener('pageshow', function (e) {
+    if (!e.persisted) return;
+    for (var g = 0; g < forms.length; g++) {
+      var btn = forms[g].querySelector('.grn-submit');
+      if (btn && btn.disabled) {
+        btn.disabled = false;
+        if (btn.dataset.label) btn.textContent = btn.dataset.label;
+      }
+    }
+  });
+});
+</script>
 {% endif %}
 
 {% endblock %}

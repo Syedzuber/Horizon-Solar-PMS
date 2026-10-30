@@ -1826,6 +1826,95 @@ class DeliveryChallanAttachment(models.Model):
             'DeliveryChallanAttachment is append-only — a withdrawn document stays.')
 
 
+class DCLineDamagePhoto(models.Model):
+    """A photo of damaged material on one challan line, taken at GRN (DG-B).
+
+    Written by confirm_grn and override_grn through grn_damage.record_damage(), never
+    anywhere else: a GRN that leaves a line with damaged_quantity > 0 must leave that line
+    with at least one LIVE photo (ruling R2), at most DC_DAMAGE_PHOTO_MAX_PER_LINE.
+
+    ON THE LINE, NOT ON THE ISSUE (R3). The photo is evidence about what arrived, which
+    stays true whatever happens to the Issue. `issue` is the damage Issue the photo was
+    recorded under; an Open or In Progress Issue on the challan that has at least one
+    photo linked IS the challan's damage Issue (R4) — Issue has no field for it.
+
+    Append-only like DeliveryChallanAttachment: no edit, no delete, no admin
+    registration. A photo is WITHDRAWN by SCM or Admin (views.dc_damage_photo_withdraw,
+    a guarded queryset update), and the stored object is kept.
+
+    PROTECT on the line: a line with damage evidence cannot be deleted, so a project
+    hard-delete is refused, as DC-B2's attachments already make it. PROTECT on the
+    issue too: no app path deletes an Issue on its own, and a shell delete must not
+    silently unhook the evidence from the Issue it was raised under.
+    """
+    line = models.ForeignKey(
+        DCLineItem, on_delete=models.PROTECT, related_name='damage_photos',
+    )
+    issue = models.ForeignKey(  # the damage Issue it was recorded under; set once, at create
+        Issue, on_delete=models.PROTECT, null=True, blank=True, related_name='damage_photos',
+    )
+    uploaded_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='dc_damage_photos_uploaded',
+    )
+    uploaded_at = models.DateTimeField(default=timezone.now)
+    original_name = models.CharField(max_length=255)   # as uploaded; never used in the path
+    bucket = models.CharField(max_length=100)          # SUPABASE_DELIVERY_BUCKET at write time
+    path = models.CharField(max_length=500, unique=True)  # within `bucket`; uuid filename
+    size = models.PositiveIntegerField()               # bytes
+    mime = models.CharField(max_length=100)            # canonical type stored on the object
+
+    withdrawn_at = models.DateTimeField(null=True, blank=True)  # NULL = live
+    withdrawn_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='dc_damage_photos_withdrawn',
+    )
+    withdrawn_reason = models.TextField(blank=True, default='')  # mandatory once withdrawn
+
+    class Meta:
+        # Not ['line', ...]: ordering by a relation follows DCLineItem's own ordering
+        # (boq_category), which interleaves two lines of one category. Readers that group
+        # by line order by line_id explicitly.
+        ordering = ['uploaded_at', 'pk']
+        constraints = [
+            # Photos only: the validator refuses anything else before upload, and this
+            # is the backstop (ruling QA, in place of DC-B2's no-prices CHECK).
+            models.CheckConstraint(
+                condition=models.Q(mime__in=['image/jpeg', 'image/png']),
+                name='dc_damage_photo_mime_image'),
+            # Withdrawal is when, who and why together, or none of them.
+            models.CheckConstraint(
+                condition=((models.Q(withdrawn_at__isnull=True)
+                            & models.Q(withdrawn_by__isnull=True)
+                            & models.Q(withdrawn_reason=''))
+                           | (models.Q(withdrawn_at__isnull=False)
+                              & models.Q(withdrawn_by__isnull=False)
+                              & ~models.Q(withdrawn_reason=''))),
+                name='dc_damage_photo_withdraw_fields'),
+            models.CheckConstraint(
+                condition=(models.Q(withdrawn_at__isnull=True)
+                           | models.Q(withdrawn_at__gte=models.F('uploaded_at'))),
+                name='dc_damage_photo_withdrawn_after_uploaded'),
+        ]
+
+    def __str__(self):
+        return f"{self.line} — {self.original_name}"
+
+    @property
+    def is_live(self):
+        return self.withdrawn_at is None
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'DCLineDamagePhoto is append-only — a photo is withdrawn through '
+                'dc_damage_photo_withdraw(), never edited.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            'DCLineDamagePhoto is append-only — a withdrawn photo stays.')
+
+
 # ---------------------------------------------------------------------------
 # The delivery-mirror join
 # ---------------------------------------------------------------------------

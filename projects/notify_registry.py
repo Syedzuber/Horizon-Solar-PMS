@@ -177,7 +177,9 @@ NOTIFICATION_EVENTS = _build_registry([
         ),
         button_label='View in Horizon Solar PMS',
         recipients_rule=('The person the issue is assigned to, unless they raised it. '
-                         'The project managers get a separate in-app note only.'),
+                         'The project managers get a separate in-app note only. On a '
+                         'damaged-delivery issue raised from a GRN, every active SCM '
+                         'user is also told (in-app and email), except whoever raised it.'),
         default_state='active',
         whatsapp_sent_separately=True,
     ),

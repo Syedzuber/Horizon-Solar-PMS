@@ -42,6 +42,8 @@ from .models import (
     PunchPoint,
     DeliveryChallan, DCLineItem, DeliveryChallanAttachment, recalculate_dc_status,
     get_material_status,
+    # DG-B - photos of damaged material taken at GRN. Written only through grn_damage.
+    DCLineDamagePhoto,
     # Labelled "Warehouse" on every screen; StockLocation is the model's name because
     # it is one physical place, not two concepts. See models.StockLocation.
     StockLocation,
@@ -117,6 +119,8 @@ from .decorators import (
 from .permissions import (
     user_can_manage_project, user_can_view_project, manageable_projects_q,
     user_can_open_dc_document, user_can_manage_dc_documents,
+    # DG-B: a GRN damage photo — live to every project viewer, withdrawn to SCM/Admin.
+    user_can_open_damage_photo,
     # G95: the QA/QC engineer's sites as a queryset, for the PM dashboard and drill-down.
     qaqc_engineer_projects_q,
     project_managers, user_can_manage_program,
@@ -249,6 +253,15 @@ from .delivery_storage import (
     DC_DOCUMENTS_MAX_FILES, DeliveryStorageError, delivery_bucket,
     discard_unrecorded_dc_document, dc_document_url, upload_dc_document,
     validate_dc_document, DELIVERY_STORAGE_OFF,
+    damage_photo_url,
+)
+# DG-B — damaged delivery at GRN. Every damage decision and write is in grn_damage; the
+# two GRN views only call it in its fixed order (see that module's docstring).
+from .grn_damage import (
+    DamageIssueClosed, GRN_DRAFT_CONFIRM, GRN_DRAFT_OVERRIDE, OPEN_DAMAGE_ISSUE_STATUSES,
+    damage_issue_scm_recipients, damage_message, discard_stored, lock_challan,
+    notify_delivery_issue_raised, plan_damage, pop_grn_draft, record_damage,
+    stash_grn_draft, upload_planned_photos,
 )
 # DC-K — the create form's ?key= guard. Its already_submitted() answers a VendorOrder
 # only, so create_delivery_challan builds the challan's own answer from these.
@@ -11330,7 +11343,8 @@ def project_overview(request, project_id):
     # the slice, so the card still shows 8 other events; the rows are still written and
     # the full trail still lists them. DC-B2: dc_document_opened likewise — a challan
     # document is opened by every crew member who checks a delivery. Withdrawals
-    # (dc_document_withdrawn) are rare and do show.
+    # (dc_document_withdrawn) are rare and do show. DG-B: dc_damage_photo_opened on the
+    # same grounds — a damaged delivery's photos are opened by everyone following it.
     #
     # AF-1: a viewer outside the project's money audience sees no money line either —
     # order totals, payment requests and their outcomes, contractor bill payments
@@ -11342,7 +11356,8 @@ def project_overview(request, project_id):
     from .activity_codes import MONEY_ACTIVITY_CODES
     from .permissions import user_can_see_project_money
     sees_money = user_can_see_project_money(request.user, project)
-    hidden_codes = {'task_unassigned', 'site_drawing_opened', 'dc_document_opened'}
+    hidden_codes = {'task_unassigned', 'site_drawing_opened', 'dc_document_opened',
+                    'dc_damage_photo_opened'}
     if not sees_money:
         hidden_codes |= MONEY_ACTIVITY_CODES
     recent_activity = list(
@@ -12929,53 +12944,9 @@ def create_delivery_issue(request, project_id, dc_id):
         f"Raised delivery issue: {title} ({severity}) on DC {challan.dc_number}",
         entity_type='Issue', entity_id=issue.pk, action_code='issue_created',
     )
-    if assigned_to and assigned_to != profile:
-        raiser_name = profile.user.get_full_name() or profile.user.username
-        _ic_link = f'/issues/{issue.pk}/'
-        # In-app and email through notify() (T3a): wording from the issue_raised event or
-        # Admin's active version, sent after commit, raiser and deactivated people dropped.
-        # log_label keeps the template_name these rows always carried.
-        notify(
-            'issue_raised', recipients=[assigned_to], actor=profile,
-            related_project=project, link=_ic_link, log_label='issue_created',
-            values={'customer_name': project.customer_name,
-                    'project_id': project.project_id,
-                    'issue_title': title, 'raised_by_name': raiser_name},
-        )
-        # WhatsApp is still sent here, template and params unchanged, until the WhatsApp
-        # phase. resolve_recipients() gives it exactly notify()'s recipients (ruling Q3)
-        # and on_commit gives it notify()'s timing, so a rolled-back issue sends nothing.
-        _ic_whatsapp = resolve_recipients([assigned_to], profile)
-
-        def _send_issue_whatsapp():
-            for _wa in _ic_whatsapp:
-                send_notification(
-                    recipient=_wa,
-                    message=(f'A new issue has been raised on project '
-                             f'{project.customer_name}: "{title}". Please login to '
-                             f'review and coordinate resolution.'),
-                    channels=['whatsapp'],
-                    link=_ic_link,
-                    template='issue_created',
-                    template_params=[project.customer_name,
-                                     _wa.user.get_full_name() or _wa.user.username,
-                                     project.customer_name, raiser_name],
-                    related_project=project,
-                    actor=profile,
-                )
-        transaction.on_commit(_send_issue_whatsapp, robust=True)
-    # Notify every project manager (PM + coordinators), skipping the raiser and the
-    # assignee (who are notified through other paths). project_managers() dedupes.
-    for _mgr in project_managers(project):
-        if _mgr != profile and _mgr != assigned_to:
-            send_notification(
-                recipient=_mgr,
-                message=f'Issue "{title}" raised on {project.project_id} — {project.customer_name}.',
-                channels=['in_app'],
-                link=f'/issues/{issue.pk}/',
-                related_project=project,
-                actor=profile,
-            )
+    # DG-B: the sends moved verbatim into grn_damage so the GRN damage path raises the
+    # same notices. Called with no `also_tell`, they are exactly what this view sent.
+    notify_delivery_issue_raised(issue, profile)
     messages.success(request, f'Issue "{title}" raised for DC {challan.dc_number}.')
     return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
 
@@ -13015,6 +12986,20 @@ def issue_detail(request, issue_id):
         )
     )
 
+    # DG-B — the damage photos recorded under this Issue, grouped by line in the
+    # template. Only a delivery issue can have any, so every other issue costs no query.
+    # Live photos go to everyone who can read this page (ruling QH: they show material,
+    # never prices); withdrawn ones to SCM and Admin only, left out in the query for
+    # everyone else so the template cannot show one, or that one exists.
+    damage_photos = []
+    if issue.delivery_challan_id:
+        photos = (DCLineDamagePhoto.objects.filter(issue=issue)
+                  .select_related('line', 'uploaded_by__user', 'withdrawn_by__user')
+                  .order_by('line_id', 'uploaded_at', 'pk'))
+        if not user_can_manage_dc_documents(request.user, project):
+            photos = photos.filter(withdrawn_at__isnull=True)
+        damage_photos = list(photos)
+
     return render(request, 'projects/issue_detail.html', {
         'issue':          issue,
         'project':        project,
@@ -13022,6 +13007,7 @@ def issue_detail(request, issue_id):
         'all_profiles':   all_profiles,
         'is_pm':          is_pm,
         'issue_comments': issue_comments,
+        'damage_photos':  damage_photos,
     })
 
 
@@ -14017,14 +14003,41 @@ def delivery_challan_detail(request, project_id, dc_id):
     if challan.project.project_id != project_id:
         raise Http404
 
-    line_items = challan.line_items.select_related('grn_confirmed_by__user').all()
+    line_items = list(challan.line_items.select_related('grn_confirmed_by__user').all())
 
-    # Issues raised against this specific DC — shown below line items for visibility
-    dc_issues = (
+    # Issues raised against this specific DC — shown below line items for visibility.
+    # A list, evaluated here rather than in the template, so the damage-Issue flag below
+    # reads the same rows at no extra query.
+    dc_issues = list(
         Issue.objects.filter(delivery_challan=challan)
         .select_related('raised_by__user', 'assigned_to__user')
         .order_by('-raised_at')
     )
+
+    # DG-B — the damage photos on this challan's lines, one query, and the GRN draft a
+    # refused submission left (R11). Every photo is fetched, withdrawn ones included,
+    # because a withdrawn photo still makes its Issue the damage Issue (ruling QG); only
+    # SCM and Admin are GIVEN the withdrawn ones (QH), split off here so the template
+    # cannot show one by mistake. Live photos go to everyone who can read this page.
+    manages_damage_photos = user_can_manage_dc_documents(request.user, project)
+    damage_photos = list(
+        DCLineDamagePhoto.objects.filter(line__challan=challan)
+        .select_related('uploaded_by__user', 'withdrawn_by__user')
+        .order_by('line_id', 'uploaded_at', 'pk')
+    )
+    linked_issue_ids = {photo.issue_id for photo in damage_photos}
+    open_damage_issue = next(
+        (issue for issue in sorted(dc_issues, key=lambda i: (i.raised_at, i.pk))
+         if issue.status in OPEN_DAMAGE_ISSUE_STATUSES and issue.pk in linked_issue_ids),
+        None)
+    grn_draft = pop_grn_draft(request, challan)
+    for item in line_items:
+        item.grn_draft = grn_draft['lines'].get(str(item.pk)) if grn_draft else None
+        item.damage_photos_live = [p for p in damage_photos
+                                   if p.line_id == item.pk and p.is_live]
+        item.damage_photos_withdrawn = ([p for p in damage_photos
+                                         if p.line_id == item.pk and not p.is_live]
+                                        if manages_damage_photos else [])
 
     # DC-B2: the vendor's challan documents, one query. Withdrawn rows are fetched only
     # for SCM and Admin (ruling Q1) — left out in the query for everyone else, so the
@@ -14048,6 +14061,11 @@ def delivery_challan_detail(request, project_id, dc_id):
         'can_confirm_grn':   (profile.role == 'Site Engineer'
                               and user_works_on_site(request.user, project)),
         'issue_draft':       _pop_issue_draft(request, f'dc:{challan.pk}'),
+        'grn_draft':         grn_draft,
+        'open_damage_issue': open_damage_issue,
+        'has_damage_photos': any(item.damage_photos_live or item.damage_photos_withdrawn
+                                 for item in line_items),
+        'manages_damage_photos': manages_damage_photos,
         'challan':           challan,
         # DC-B1: every challan on this site by status, for the header's count line. One
         # aggregate query — this page holds only the one challan it shows. `project`,
@@ -14165,6 +14183,104 @@ def delivery_challan_attachment_withdraw(request, project_id, dc_id, attachment_
     return redirect(back)
 
 
+def _damage_photo_or_404(project, dc_id, photo_id):
+    """The damage photo `photo_id` on a line of challan `dc_id` on `project`, or 404.
+    All three ids in one filter, so a photo of another challan or project is the same
+    bare 404 as one that does not exist."""
+    return get_object_or_404(
+        DCLineDamagePhoto.objects.select_related('line__challan'),
+        pk=photo_id, line__challan_id=dc_id, line__challan__project=project,
+    )
+
+
+@login_required
+def dc_damage_photo_open(request, project_id, dc_id, photo_id):
+    """Open one GRN damage photo (DG-B): a redirect to a link signed now, valid for
+    DC_DOCUMENT_LINK_SECONDS. One activity row per open, after the link is minted, so a
+    failed open logs nothing; dc_damage_photo_opened is hidden from the overview's
+    Recent activity, as dc_document_opened is.
+
+    Access: user_can_open_damage_photo — a live photo to anyone who can view the
+    project, a withdrawn one to SCM and Admin only.
+    """
+    project = _active_project(project_id)
+    photo = _damage_photo_or_404(project, dc_id, photo_id)
+    # Live photos: refused only for someone who cannot see the site, who gets the site
+    # pages' 404 (or an outgoing PM's handover redirect). Withdrawn photos: everyone but
+    # SCM and Admin gets the bare 404 a missing id gets, so nothing says one is there.
+    if not user_can_open_damage_photo(request.user, project, photo):
+        if photo.is_live:
+            return refuse_site_view_404(request, project)
+        raise Http404
+
+    url = damage_photo_url(photo)
+    if not url:
+        messages.error(request, 'This damage photo cannot be opened right now. Try again, '
+                                'or contact SCM if it keeps failing.')
+        if photo.issue_id:
+            return redirect('issue_detail', issue_id=photo.issue_id)
+        return redirect(reverse('delivery_challan_detail', args=[project_id, dc_id])
+                        + '#damage-photos')
+    # No file name in the line: the project timeline shows every row to everyone on the
+    # site, and an SCM/Admin open of a WITHDRAWN photo would otherwise name it.
+    log_activity(project, request.user.profile,
+                 f'Opened a damage photo on DC {photo.line.challan.dc_number}',
+                 entity_type='DCLineDamagePhoto', entity_id=photo.pk,
+                 action_code='dc_damage_photo_opened')
+    return redirect(url)
+
+
+@login_required
+@require_POST
+def dc_damage_photo_withdraw(request, project_id, dc_id, photo_id):
+    """Withdraw one live GRN damage photo (DG-B) — the wrong photo, or one showing
+    something it should not. The row is stamped (when, who, why) and the stored object
+    is NOT deleted. Afterwards only SCM and Admin can see or open it. A withdrawn photo
+    still counts as linked to its Issue (ruling QG), so the damage Issue stays the damage
+    Issue; it no longer counts towards the line's live photos (R2).
+
+    Access: SCM and Admin (user_can_manage_dc_documents). POST only.
+    """
+    project = _active_project(project_id)
+    profile = request.user.profile
+    # Someone who cannot see the site gets the site pages' 404, as on the detail page.
+    if not user_can_view_project(request.user, project):
+        return refuse_site_view_404(request, project)
+    # SCM and Admin only, the roles that correct GRNs and challan documents. Everyone
+    # else can see a live photo but never decide that it goes.
+    if not user_can_manage_dc_documents(request.user, project):
+        return HttpResponseForbidden()
+    photo = _damage_photo_or_404(project, dc_id, photo_id)
+    back = reverse('delivery_challan_detail', args=[project_id, dc_id]) + '#damage-photos'
+
+    reason = (request.POST.get('withdrawn_reason') or '').strip()
+    if len(reason) < DC_DOCUMENT_WITHDRAW_REASON_MIN:
+        messages.error(request, f'Give a reason of at least {DC_DOCUMENT_WITHDRAW_REASON_MIN}'
+                                f' characters to withdraw {photo.original_name}.')
+        return redirect(back)
+
+    # RACE: two withdrawals of the same photo at once. The withdrawn_at IS NULL term
+    # makes the update conditional in SQL, so exactly one of them stamps the row and the
+    # other updates nothing and is told so — never a second stamp over the first.
+    updated = (DCLineDamagePhoto.objects
+               .filter(pk=photo.pk, withdrawn_at__isnull=True)
+               .update(withdrawn_at=timezone.now(), withdrawn_by=profile,
+                       withdrawn_reason=reason))
+    if updated != 1:
+        messages.error(request, f'{photo.original_name} was already withdrawn.')
+        return redirect(back)
+
+    # Neither the file name nor the reason in the feed line, which every site viewer
+    # reads; both are on the challan page for SCM and Admin.
+    log_activity(project, profile,
+                 f'Withdrew a damage photo from DC {photo.line.challan.dc_number}',
+                 entity_type='DCLineDamagePhoto', entity_id=photo.pk,
+                 action_code='dc_damage_photo_withdrawn')
+    messages.success(request, f'{photo.original_name} was withdrawn. Only SCM and Admin '
+                              f'can see it now.')
+    return redirect(back)
+
+
 def _read_grn_lines(request, line_items):
     """Parse the received / damaged boxes of a GRN form. Returns (lines, errors).
 
@@ -14221,6 +14337,17 @@ def _read_grn_lines(request, line_items):
     return lines, errors
 
 
+def _refuse_grn(request, challan, which, line_items, errors, closing):
+    """Refuse a GRN submission: one error message per reason, then `closing`, with the
+    typed values parked for the next render (DG-B, R11). Writes nothing else; the caller
+    redirects to the challan page, as every GRN refusal always has."""
+    for error in errors:
+        messages.error(request, error)
+    if closing:
+        messages.error(request, closing)
+    stash_grn_draft(request, challan, which, line_items)
+
+
 @login_required
 @role_required(['Site Engineer'])
 def confirm_grn(request, project_id, dc_id):
@@ -14230,6 +14357,11 @@ def confirm_grn(request, project_id, dc_id):
     give precise information rather than a coarse condition dropdown.
     condition field is derived for backward compatibility with code that reads it.
     recalculate_dc_status() called ONCE after all line items saved — never inside the loop.
+
+    DG-B: a damaged line needs a photo, and damage recorded now needs the challan's
+    damage Issue (grn_damage). Every refusal comes before any upload; uploads come
+    before the one transaction that writes the lines, the Issue or Comment and the photo
+    rows; any exception in it discards the uploads. A refusal keeps the typed values.
     Access: Site Engineer only. POST only.
     """
     if request.method != 'POST':
@@ -14275,35 +14407,70 @@ def confirm_grn(request, project_id, dc_id):
 
     # Every line is read before any is saved: a refused box refuses the whole GRN, with
     # no line written and no status recalculated.
+    back = redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
     grn_lines, qty_errors = _read_grn_lines(request, line_items)
     if qty_errors:
-        for error in qty_errors:
-            messages.error(request, error)
-        messages.error(request, 'The GRN was not recorded.')
-        return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
+        _refuse_grn(request, challan, GRN_DRAFT_CONFIRM, line_items, qty_errors,
+                    'The GRN was not recorded.')
+        return back
 
-    for item, received_qty, damaged_qty, derived_condition, grn_notes in grn_lines:
-        item.received_quantity = received_qty
-        item.damaged_quantity  = damaged_qty
-        item.condition         = derived_condition
-        item.grn_date          = today
-        item.grn_confirmed_by  = profile
-        item.grn_notes         = grn_notes
-        item.save()
+    # DG-B: every damage refusal — missing or excess photos, photos on an undamaged or
+    # skipped line, missing description, then the files themselves — before any upload.
+    damage_plan, damage_errors = plan_damage(request, challan, line_items, grn_lines)
+    if damage_errors:
+        _refuse_grn(request, challan, GRN_DRAFT_CONFIRM, line_items, damage_errors,
+                    'The GRN was not recorded.')
+        return back
+    try:
+        stored_photos = upload_planned_photos(damage_plan, project)
+    except DeliveryStorageError as exc:
+        _refuse_grn(request, challan, GRN_DRAFT_CONFIRM, line_items, [str(exc)],
+                    'The GRN was not recorded.')
+        return back
 
-    # Recalculate DC status ONCE after all line items saved — never inside the loop
-    # (calling it inside the loop causes status to oscillate incorrectly).
-    # actor/reason feed the state ledger; recalculate_dc_status owns the row (R-2).
-    recalculate_dc_status(challan, actor=profile, reason_code=REASON_GRN_CONFIRMED)
-    challan.refresh_from_db()
+    # One transaction for every write (R8). Before DG-B the line saves ran in autocommit;
+    # they are now inside it so a failed Issue or photo row takes them back too.
+    try:
+        with transaction.atomic():
+            lock_challan(challan)
+            for item, received_qty, damaged_qty, derived_condition, grn_notes in grn_lines:
+                item.received_quantity = received_qty
+                item.damaged_quantity  = damaged_qty
+                item.condition         = derived_condition
+                item.grn_date          = today
+                item.grn_confirmed_by  = profile
+                item.grn_notes         = grn_notes
+                item.save()
 
-    log_activity(
-        project, profile,
-        f"SE confirmed GRN for DC {challan.dc_number} — {challan.status}",
-        entity_type='DeliveryChallan', entity_id=challan.pk,
-    )
-    messages.success(request, f'GRN confirmed. DC status: {challan.status}.')
-    return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
+            damage = record_damage(damage_plan, challan, project, profile, stored_photos)
+
+            # Recalculate DC status ONCE after all line items saved — never inside the loop
+            # (calling it inside the loop causes status to oscillate incorrectly).
+            # actor/reason feed the state ledger; recalculate_dc_status owns the row (R-2).
+            recalculate_dc_status(challan, actor=profile, reason_code=REASON_GRN_CONFIRMED)
+            challan.refresh_from_db()
+
+            log_activity(
+                project, profile,
+                f"SE confirmed GRN for DC {challan.dc_number} — {challan.status}",
+                entity_type='DeliveryChallan', entity_id=challan.pk,
+            )
+            if damage is not None and damage.created:
+                notify_delivery_issue_raised(damage.issue, profile,
+                                             also_tell=damage_issue_scm_recipients())
+    except DamageIssueClosed as exc:
+        discard_stored(stored_photos)
+        _refuse_grn(request, challan, GRN_DRAFT_CONFIRM, line_items, [str(exc)],
+                    'The GRN was not recorded.')
+        return back
+    except Exception:
+        # Rolled back, so no photo row records these uploads. Re-raised: a failure, not
+        # a refusal, and the error page and logs must still see it.
+        discard_stored(stored_photos)
+        raise
+    messages.success(request, f'GRN confirmed. DC status: {challan.status}.'
+                              f'{damage_message(damage)}')
+    return back
 
 
 @login_required
@@ -14338,6 +14505,10 @@ def override_grn(request, project_id, dc_id):
 
     No status restriction: an override may correct a Received or Rejected DC.
     recalculate_dc_status() called ONCE after all items saved.
+
+    DG-B: the same damage rule as confirm_grn, in the same order (grn_damage). A
+    correction that keeps damage on a line that already has a live photo needs no new
+    photo. Every refusal keeps the typed values, the on-behalf reason included.
     Access: SCM role, and project scope. POST only.
     """
     if request.method != 'POST':
@@ -14375,9 +14546,8 @@ def override_grn(request, project_id, dc_id):
     # A refused quantity refuses the whole submission before the reason check and
     # before any write, the same shape as the R3 refusal below.
     if qty_errors:
-        for error in qty_errors:
-            messages.error(request, error)
-        messages.error(request, 'The GRN was not changed.')
+        _refuse_grn(request, challan, GRN_DRAFT_OVERRIDE, line_items, qty_errors,
+                    'The GRN was not changed.')
         return back
 
     for item, received_qty, damaged_qty, derived_condition, grn_notes in grn_lines:
@@ -14391,47 +14561,79 @@ def override_grn(request, project_id, dc_id):
     # R3 refusal, before the first write. A pure correction submission needs no reason
     # and is unaffected -- `any_on_behalf` is False and this branch is not reached.
     if any_on_behalf and not on_behalf_reason:
-        messages.error(
-            request,
-            'Please state why you are recording this receipt on behalf of the site '
-            'team. A receipt recorded for someone else with no reason records that '
-            'the material arrived without recording why you signed for it.'
+        _refuse_grn(
+            request, challan, GRN_DRAFT_OVERRIDE, line_items,
+            ['Please state why you are recording this receipt on behalf of the site '
+             'team. A receipt recorded for someone else with no reason records that '
+             'the material arrived without recording why you signed for it.'],
+            '',
         )
         return back
 
+    # DG-B: every damage refusal before any upload, as in confirm_grn.
+    damage_plan, damage_errors = plan_damage(request, challan, line_items, grn_lines)
+    if damage_errors:
+        _refuse_grn(request, challan, GRN_DRAFT_OVERRIDE, line_items, damage_errors,
+                    'The GRN was not changed.')
+        return back
+    try:
+        stored_photos = upload_planned_photos(damage_plan, project)
+    except DeliveryStorageError as exc:
+        _refuse_grn(request, challan, GRN_DRAFT_OVERRIDE, line_items, [str(exc)],
+                    'The GRN was not changed.')
+        return back
+
     # ── Second pass: one transaction for every write this request makes. ───────
-    with transaction.atomic():
-        for item, received_qty, damaged_qty, derived_condition, grn_notes, first_time in pending:
-            item.received_quantity = received_qty
-            item.damaged_quantity  = damaged_qty
-            item.condition         = derived_condition
-            item.grn_date          = today
-            item.grn_notes         = grn_notes
-            if first_time:
-                # Nobody had confirmed this line. Name who recorded it, and say that
-                # they were not the receiver.
-                item.grn_confirmed_by        = profile
-                item.grn_on_behalf           = True
-                item.grn_on_behalf_reason    = on_behalf_reason
-            # Otherwise grn_confirmed_by is NOT overwritten, and the on-behalf pair is
-            # left exactly as it stands -- correcting a quantity does not change who
-            # received the material, nor how that receipt was captured.
-            item.save()
+    try:
+        with transaction.atomic():
+            lock_challan(challan)
+            for item, received_qty, damaged_qty, derived_condition, grn_notes, first_time in pending:
+                item.received_quantity = received_qty
+                item.damaged_quantity  = damaged_qty
+                item.condition         = derived_condition
+                item.grn_date          = today
+                item.grn_notes         = grn_notes
+                if first_time:
+                    # Nobody had confirmed this line. Name who recorded it, and say that
+                    # they were not the receiver.
+                    item.grn_confirmed_by        = profile
+                    item.grn_on_behalf           = True
+                    item.grn_on_behalf_reason    = on_behalf_reason
+                # Otherwise grn_confirmed_by is NOT overwritten, and the on-behalf pair is
+                # left exactly as it stands -- correcting a quantity does not change who
+                # received the material, nor how that receipt was captured.
+                item.save()
 
-        # Recalculate DC status ONCE after all line items saved.
-        # The ledger records the overriding actor here. On a correction that differs
-        # from grn_confirmed_by, which deliberately keeps the original submitter; the
-        # two answer different questions.
-        recalculate_dc_status(challan, actor=profile, reason_code=REASON_GRN_OVERRIDDEN)
-        challan.refresh_from_db()
+            damage = record_damage(damage_plan, challan, project, profile, stored_photos)
 
-        log_activity(
-            project, profile,
-            f"SCM overrode GRN for DC {challan.dc_number} — override by {profile.user.get_full_name() or profile.user.username}",
-            entity_type='DeliveryChallan', entity_id=challan.pk,
-        )
+            # Recalculate DC status ONCE after all line items saved.
+            # The ledger records the overriding actor here. On a correction that differs
+            # from grn_confirmed_by, which deliberately keeps the original submitter; the
+            # two answer different questions.
+            recalculate_dc_status(challan, actor=profile, reason_code=REASON_GRN_OVERRIDDEN)
+            challan.refresh_from_db()
 
-    messages.success(request, f'GRN overridden. DC status: {challan.status}.')
+            log_activity(
+                project, profile,
+                f"SCM overrode GRN for DC {challan.dc_number} — override by {profile.user.get_full_name() or profile.user.username}",
+                entity_type='DeliveryChallan', entity_id=challan.pk,
+            )
+            if damage is not None and damage.created:
+                notify_delivery_issue_raised(damage.issue, profile,
+                                             also_tell=damage_issue_scm_recipients())
+    except DamageIssueClosed as exc:
+        discard_stored(stored_photos)
+        _refuse_grn(request, challan, GRN_DRAFT_OVERRIDE, line_items, [str(exc)],
+                    'The GRN was not changed.')
+        return back
+    except Exception:
+        # Rolled back, so no photo row records these uploads. Re-raised: a failure, not
+        # a refusal, and the error page and logs must still see it.
+        discard_stored(stored_photos)
+        raise
+
+    messages.success(request, f'GRN overridden. DC status: {challan.status}.'
+                              f'{damage_message(damage)}')
     return back
 
 

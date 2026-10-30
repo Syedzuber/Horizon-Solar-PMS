@@ -2620,6 +2620,27 @@ def user_can_manage_dc_documents(user, project):
     return profile.role in DC_DOCUMENT_ADMIN_ROLES
 
 
+def user_can_open_damage_photo(user, project, photo):
+    """Return True if `user` may open `photo`, a GRN damage photo on `project` (DG-B).
+
+    A LIVE photo: anyone who can view the project (ruling QH). A damage photo shows the
+    material, never a price, so it needs no narrower audience than the Issue it is
+    listed on — the issue page admits every project viewer, and the DC page lists the
+    same photos to its own audience. NOT user_can_open_dc_document(): that one is the DC
+    page's role list, which would refuse Finance or the CEO a link the issue page shows.
+
+    A WITHDRAWN photo: SCM and Admin only (user_can_manage_dc_documents), the roles that
+    withdraw one; everyone else is blocked from it and is not told it exists.
+    """
+    if project is None or photo is None:
+        return False
+    if not user_can_view_project(user, project):
+        return False
+    if photo.withdrawn_at is None:
+        return True
+    return user_can_manage_dc_documents(user, project)
+
+
 def user_can_see_project_money(user, project):
     """Return True if `user` may see money on `project`'s own pages (AF-1).
 

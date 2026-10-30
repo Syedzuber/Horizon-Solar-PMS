@@ -17,6 +17,9 @@ without it. With it empty:
   * dc_document_url() returns None, and the open view says the file is unavailable.
 
 A challan created with no file never comes through here.
+
+DG-B adds the damage photos taken at GRN, in the same bucket under their own folder (the
+section at the end of this module).
 """
 import logging
 
@@ -25,7 +28,7 @@ from django.conf import settings
 from .design_storage import (
     DesignStorageError, _client, build_design_path, get_design_file_url,
 )
-from .models import DeliveryChallanAttachment
+from .models import DCLineDamagePhoto, DeliveryChallanAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -167,4 +170,100 @@ def dc_document_url(attachment, expires_in=DC_DOCUMENT_LINK_SECONDS):
         return get_design_file_url(attachment.bucket, attachment.path, expires_in)
     except DesignStorageError as exc:
         logger.error('Challan document link failed for %s — %s', attachment.pk, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# DG-B — photos of damaged material, taken at GRN
+# ---------------------------------------------------------------------------
+#
+# The same private bucket and signer as the challan documents, in their own folder.
+# Photos only (jpg / png): the validator narrows the extension first and then hands the
+# file to validate_dc_document() unchanged, so size, MIME claim and leading bytes are
+# checked by the one implementation. The browser re-encodes to JPEG before upload
+# (partials/_qaqc_photo_script.html); the server never relies on that.
+
+#: Storage path segment for damage photos, beside DC_DOCUMENT_PATH_KIND.
+DC_DAMAGE_PHOTO_PATH_KIND = 'grn-damage'
+
+#: At most this many LIVE photos on one line (ruling R2); more refuses the whole GRN.
+DC_DAMAGE_PHOTO_MAX_PER_LINE = 5
+
+#: The extensions a damage photo may carry: DC_DOCUMENT_TYPES without the PDF.
+DC_DAMAGE_PHOTO_EXTENSIONS = frozenset({'jpg', 'jpeg', 'png'})
+
+DAMAGE_PHOTO_STORAGE_OFF = ('Damage photos cannot be stored right now: the private '
+                            'delivery bucket is not configured. Nothing was saved.')
+
+
+def validate_damage_photo(file_obj):
+    """Refuse anything but a real JPEG or PNG within the 20 MB limit. Returns the
+    canonical MIME type. Raises DeliveryStorageError; touches no storage."""
+    name = getattr(file_obj, 'name', '') or ''
+    ext = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
+    if ext not in DC_DAMAGE_PHOTO_EXTENSIONS:
+        raise DeliveryStorageError(f'{name or "A file"}: a damage photo must be a JPG or PNG.')
+    return validate_dc_document(file_obj)
+
+
+def upload_damage_photo(file_obj, project):
+    """Store one damage photo in the private delivery bucket, under the project.
+
+    Returns {original_name, bucket, path, size, mime} — the photo row's fields. Raises
+    DeliveryStorageError when storage is off, the file is refused, or the upload fails.
+    """
+    bucket = delivery_bucket()
+    if not bucket:
+        raise DeliveryStorageError(DAMAGE_PHOTO_STORAGE_OFF)
+    mime = validate_damage_photo(file_obj)
+    path = build_design_path(project.project_id, DC_DAMAGE_PHOTO_PATH_KIND, file_obj.name)
+    try:
+        file_obj.seek(0)
+        payload = file_obj.read()
+    except Exception:
+        raise DeliveryStorageError(f'{file_obj.name}: the file could not be read.')
+    try:
+        _client().storage.from_(bucket).upload(
+            path=path, file=payload, file_options={'content-type': mime})
+    except DesignStorageError as exc:
+        raise DeliveryStorageError(str(exc))
+    except Exception as exc:
+        logger.error('Damage photo upload failed — %s', exc)
+        raise DeliveryStorageError(f'Upload to storage failed: {type(exc).__name__}. '
+                                   f'Nothing was saved.')
+    return {'original_name': file_obj.name, 'bucket': bucket, 'path': path,
+            'size': file_obj.size, 'mime': mime}
+
+
+def discard_unrecorded_damage_photo(stored):
+    """Remove a photo upload_damage_photo() stored for a GRN that then failed. Refuses
+    to remove anything a photo row records, or anything outside the delivery bucket.
+    Never raises; returns True when the object was removed."""
+    bucket, path = (stored or {}).get('bucket'), (stored or {}).get('path')
+    if not bucket or not path or bucket != delivery_bucket():
+        return False
+    if DCLineDamagePhoto.objects.filter(bucket=bucket, path=path).exists():
+        return False
+    try:
+        _client().storage.from_(bucket).remove([path])
+        return True
+    except Exception as exc:
+        logger.error('Damage photo cleanup failed for %s/%s — %s', bucket, path, exc)
+        return False
+
+
+def damage_photo_url(photo, expires_in=DC_DOCUMENT_LINK_SECONDS):
+    """A signed link to a stored damage photo, minted now, or None — on the same terms
+    as dc_document_url(): never signed into any bucket but the configured one."""
+    configured = delivery_bucket()
+    if not configured or not photo.bucket or not photo.path:
+        return None
+    if photo.bucket != configured:
+        logger.warning('Damage photo %s recorded in %r, not the delivery bucket %r '
+                       '— no link.', photo.pk, photo.bucket, configured)
+        return None
+    try:
+        return get_design_file_url(photo.bucket, photo.path, expires_in)
+    except DesignStorageError as exc:
+        logger.error('Damage photo link failed for %s — %s', photo.pk, exc)
         return None

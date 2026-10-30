@@ -594,6 +594,12 @@ urlpatterns = [
     path('projects/<str:project_id>/delivery-challans/<int:dc_id>/documents/<int:attachment_id>/withdraw/',
          views.delivery_challan_attachment_withdraw,
          name='delivery_challan_attachment_withdraw'),
+    # DG-B — open a GRN damage photo (project viewers; withdrawn: SCM/Admin)
+    path('projects/<str:project_id>/delivery-challans/<int:dc_id>/damage-photos/<int:photo_id>/',
+         views.dc_damage_photo_open, name='dc_damage_photo_open'),
+    # DG-B — withdraw a GRN damage photo (SCM/Admin, POST only)
+    path('projects/<str:project_id>/delivery-challans/<int:dc_id>/damage-photos/<int:photo_id>/withdraw/',
+         views.dc_damage_photo_withdraw, name='dc_damage_photo_withdraw'),
 
     # ---------------------------------------------------------------------------
     # Approvals S2a — material approval before an order (approval_views.py)
