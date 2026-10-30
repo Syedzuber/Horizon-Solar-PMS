@@ -3499,3 +3499,122 @@ def active_admins():
     """Active users with the Admin role. System Admin is deliberately left out (ruling
     T-1, confirmed at the T1 go-ahead)."""
     return _active_profiles().filter(role='Admin')
+
+
+# ---------------------------------------------------------------------------
+# Contractor attendance — ATT-B1
+# ---------------------------------------------------------------------------
+
+#: The roles that log attendance on a site they work on (ATT-B1 ruling A). Managers
+#: (PM / coordinators) log through user_can_manage_project() whatever their role.
+ATTENDANCE_LOGGER_ROLES = frozenset({'Site Engineer'})
+
+#: The roles that open any attendance photo (ATT-B1 ruling D). System Admin is
+#: deliberately excluded.
+ATTENDANCE_PHOTO_ROLES = frozenset({'SCM', 'Admin', 'CEO'})
+
+#: The Project.status values attendance may be written in — the site is live. A fourth
+#: copy of the pair (SE dashboard, COD_RECORDABLE_STATUSES, REPORT_PROJECT_STATUSES):
+#: there is no single "site is live" rule to call (SECONDARY_FINDINGS, ATT-B1).
+ATTENDANCE_SITE_STATUSES = ('Active', 'In Progress')
+
+
+def _attendance_site_open(project):
+    """True when `project` is a live, not soft-deleted site attendance may be written on."""
+    return (project is not None and not project.is_deleted
+            and project.status in ATTENDANCE_SITE_STATUSES)
+
+
+def user_can_log_attendance(user, project):
+    """Return True if `user` may log a new contractor attendance entry on `project` today
+    (ATT-B1 rulings 6, A).
+
+    The site must be live (ATTENDANCE_SITE_STATUSES, not soft-deleted). Then: a Site
+    Engineer who WORKS on the site (user_works_on_site — holding a task; never the site's
+    QA/QC engineer, whose grant is view only), or anyone with management authority
+    (user_can_manage_project — the PM and coordinators). Everyone else is refused,
+    portfolio roles included: user_works_on_site() is True for CEO, Finance, SCM, Admin,
+    BD and the Design Head on every site, which is why the role term is here and not left
+    to that helper alone. Visibility is implied by both branches, so it is not asked.
+    """
+    if not _attendance_site_open(project):
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    # Role first: it costs no query, and only a Site Engineer pays user_works_on_site's.
+    if profile.role in ATTENDANCE_LOGGER_ROLES and user_works_on_site(user, project):
+        return True
+    return user_can_manage_project(user, project)
+
+
+def user_is_todays_attendance_recorder(user, project):
+    """Return True if `user` recorded at least one non-voided attendance entry on
+    `project` today (ATT-B1 ruling F).
+
+    The one reason someone who can no longer see the site may still open its attendance
+    page: a Site Engineer whose tasks were moved off it during the day keeps their own
+    entries for the rest of that day. The page then shows them those entries and nothing
+    else, and they may act only on them (user_can_change_attendance_today). It never
+    admits anyone to the project overview. One query, asked only after
+    user_can_view_project() has said no.
+    """
+    # Imported here, not at module top, so this module keeps its single top-level import
+    # (see the head of the file); django.utils.timezone imports nothing from this app.
+    from django.utils import timezone
+    profile = getattr(user, 'profile', None)
+    if profile is None or not _attendance_site_open(project):
+        return False
+    # Reverse relation only, as everywhere in this module: no model import.
+    return project.contractor_attendance.filter(
+        date=timezone.localdate(), recorded_by=profile, is_voided=False).exists()
+
+
+def user_can_change_attendance_today(user, entry):
+    """Return True if `user` may edit, mark time out on, or void `entry` now (ATT-B1
+    rulings 6, F).
+
+    Only on the entry's own IST day (timezone.localdate(), never date.today()), only
+    while it is not voided, and only on a live site. Then: anyone who could log a new
+    entry on the site (user_can_log_attendance), or the entry's own recorder even if
+    their tasks were moved off the site today — their own entry, nobody else's. Nobody
+    changes a past day in B1; B2 adds the PM / coordinator / Admin correction.
+
+    The attendance writers ask this again under the row lock, so a view that skipped it,
+    or a POST replayed after midnight, is still refused.
+    """
+    # Imported here, not at module top, so this module keeps its single top-level import
+    # (see the head of the file); django.utils.timezone imports nothing from this app.
+    from django.utils import timezone
+    if entry is None or entry.is_voided:
+        return False
+    if entry.date != timezone.localdate():
+        return False
+    if not _attendance_site_open(entry.project):
+        return False
+    if user_can_log_attendance(user, entry.project):
+        return True
+    profile = getattr(user, 'profile', None)
+    return profile is not None and entry.recorded_by_id == profile.pk
+
+
+def user_can_view_attendance_photo(user, entry):
+    """Return True if `user` may open `entry`'s group photo (ATT-B1 ruling 8, D).
+
+    The recorder, the site's PM and coordinators (user_can_manage_project), and SCM,
+    Admin and CEO (ATTENDANCE_PHOTO_ROLES). Everyone else who can see the entry — another
+    Site Engineer on the site, Finance, BD, Design, the QA/QC engineer — sees it without
+    the photo (ruling 8 names the photo audience; it is narrower than the entry's).
+
+    Whether the user may see the entry at all is NOT asked here: the attendance page and
+    the photo view refuse anyone who cannot open the page first. Role and recorder terms
+    first, so only a remaining user pays the coordinator lookup.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None or entry is None:
+        return False
+    if entry.recorded_by_id == profile.pk:
+        return True
+    if profile.role in ATTENDANCE_PHOTO_ROLES:
+        return True
+    return user_can_manage_project(user, entry.project)

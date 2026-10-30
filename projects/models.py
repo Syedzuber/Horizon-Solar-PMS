@@ -2,7 +2,7 @@ import re
 
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
-from django.db.models.functions import Floor
+from django.db.models.functions import Floor, Lower
 from django.contrib.auth.models import User
 from django.utils import timezone
 
@@ -8164,3 +8164,216 @@ class NotificationEventSettingChange(models.Model):
     def delete(self, *args, **kwargs):
         raise AppendOnlyViolation(
             'NotificationEventSettingChange is append-only — rows are never deleted.')
+
+
+# ---------------------------------------------------------------------------
+# Contractor attendance — ATT-B1 (ATTENDANCE_AUDIT.md, rulings 1-11)
+# ---------------------------------------------------------------------------
+
+class ContractorAttendance(models.Model):
+    """One contractor crew on one site for one trade on one IST day: a headcount, a time
+    in, an optional time out and a group photo (ATT-B1). A contractor-billing input
+    (ruling 1): one person per entry is one man-day; hours are shown, never counted.
+
+    Written by projects/attendance.py and nothing else — create_attendance(),
+    update_attendance(), set_time_out(), void_attendance() — each in one transaction with
+    its ContractorAttendanceRevision row. `date` is set there from timezone.localdate(),
+    never from a form (ruling 10).
+
+    THE CONTRACTOR is a Vendor of kind contractor or both (the bill's rule), or — the
+    "Contractor not listed" path — no Vendor and a typed name. Such an entry is not
+    billable until SCM maps it (ATT-B3); B1 only stores the name, normalised by the writer
+    (stripped, inner whitespace collapsed) so the unique index below can compare it
+    case-blind.
+
+    VOIDED, NEVER DELETED (ruling 11): a voided entry stays on record with its note, stops
+    counting, and stops holding its contractor/trade/day slot — both unique indexes are
+    partial on is_voided=False.
+
+    THE PHOTO IS PRIVATE: the bills bucket, as QA/QC visit photos; no URL stored, a link is
+    signed at the click. A replaced photo is never deleted — its path stays in the
+    revision's `before` snapshot.
+    """
+
+    CIVIL              = 'CIVIL'
+    STRUCTURE_MOUNTING = 'STRUCTURE_MOUNTING'
+    ELECTRICAL         = 'ELECTRICAL'
+    OTHER              = 'OTHER'
+    TRADE_CHOICES = [
+        (CIVIL,              'Civil'),
+        (STRUCTURE_MOUNTING, 'Structure/Mounting'),
+        (ELECTRICAL,         'Electrical'),
+        (OTHER,              'Other'),
+    ]
+    HEADCOUNT_MIN = 1
+    HEADCOUNT_MAX = 500
+
+    project = models.ForeignKey(Project, on_delete=models.PROTECT,
+                                related_name='contractor_attendance')
+    date = models.DateField()  # IST day of the entry, set by the writer from timezone.localdate()
+    contractor = models.ForeignKey(  # NULL only on the "Contractor not listed" path
+        Vendor, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='attendance_entries',
+    )
+    unlisted_contractor_name = models.CharField(max_length=120, blank=True, default='')  # typed name when the contractor is not listed; '' otherwise
+    trade = models.CharField(max_length=20, choices=TRADE_CHOICES)
+    trade_remark = models.CharField(max_length=120, blank=True, default='')  # required for Other, '' for every other trade
+    headcount = models.PositiveSmallIntegerField()  # people in the crew; each one is one man-day
+    time_in = models.TimeField()
+    time_out = models.TimeField(null=True, blank=True)  # NULL = still open; same day, after time_in (no night shifts)
+    photo_file_name = models.CharField(max_length=255)  # original filename, as uploaded
+    photo_bucket = models.CharField(max_length=100)     # the private bills bucket at write time
+    photo_path = models.CharField(max_length=500)       # path within `photo_bucket`
+    photo_size_kb = models.PositiveIntegerField(default=0)
+    # EXIF DateTimeOriginal read in the browser, shown beside the photo as evidence only.
+    # NULL when the image carried none. recorded_at / updated_at are the authority.
+    photo_taken_at = models.DateTimeField(null=True, blank=True)
+    recorded_by = models.ForeignKey('UserProfile', on_delete=models.PROTECT,
+                                    related_name='attendance_recorded')
+    recorded_at = models.DateTimeField(default=timezone.now)  # server time of the create
+    updated_at = models.DateTimeField(default=timezone.now)   # server time of the latest write, set by the writer
+    is_voided = models.BooleanField(default=False)
+    void_note = models.TextField(blank=True, default='')  # why it was voided; set only by void_attendance()
+    voided_by = models.ForeignKey('UserProfile', on_delete=models.PROTECT, null=True,
+                                  blank=True, related_name='attendance_voided')
+    voided_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['project', 'date', 'is_voided', 'time_in', 'pk']
+        constraints = [
+            # Exactly one way of naming the contractor: the Vendor, or a typed name.
+            models.CheckConstraint(
+                condition=(
+                    (models.Q(contractor__isnull=False) & models.Q(unlisted_contractor_name=''))
+                    | (models.Q(contractor__isnull=True) & ~models.Q(unlisted_contractor_name=''))
+                ),
+                name='attendance_one_contractor_source'),
+            models.CheckConstraint(
+                condition=models.Q(headcount__gte=1) & models.Q(headcount__lte=500),
+                name='attendance_headcount_range'),
+            # No night shifts (ruling 4): a time out is later than the time in, same day.
+            models.CheckConstraint(
+                condition=models.Q(time_out__isnull=True) | models.Q(time_out__gt=models.F('time_in')),
+                name='attendance_time_out_after_in'),
+            models.CheckConstraint(
+                condition=models.Q(trade__in=['CIVIL', 'STRUCTURE_MOUNTING', 'ELECTRICAL', 'OTHER']),
+                name='attendance_trade_known'),
+            # Other says what the trade is (ruling 3).
+            models.CheckConstraint(
+                condition=~models.Q(trade='OTHER') | ~models.Q(trade_remark=''),
+                name='attendance_other_trade_remark'),
+            # A group photo on every entry (ruling 5).
+            models.CheckConstraint(
+                condition=(~models.Q(photo_file_name='') & ~models.Q(photo_bucket='')
+                           & ~models.Q(photo_path='')),
+                name='attendance_photo_required'),
+            # A void always says why (ruling 6).
+            models.CheckConstraint(
+                condition=models.Q(is_voided=False) | ~models.Q(void_note=''),
+                name='attendance_void_note_required'),
+            # Who and when travel with the flag, both ways.
+            models.CheckConstraint(
+                condition=(
+                    (models.Q(is_voided=False) & models.Q(voided_by__isnull=True)
+                     & models.Q(voided_at__isnull=True))
+                    | (models.Q(is_voided=True) & models.Q(voided_by__isnull=False)
+                       & models.Q(voided_at__isnull=False))
+                ),
+                name='attendance_void_fields_together'),
+            # One live entry per site + contractor + trade + day (ruling 2). Partial, so a
+            # voided entry frees its slot (ruling 11).
+            models.UniqueConstraint(
+                fields=['project', 'date', 'contractor', 'trade'],
+                condition=models.Q(is_voided=False, contractor__isnull=False),
+                name='uniq_attendance_contractor_trade_day'),
+            # The same for a not-listed name, compared case-blind. The writer has already
+            # stripped it and collapsed inner whitespace, so " raju  civil" meets
+            # "Raju Civil" here.
+            models.UniqueConstraint(
+                models.F('project'), models.F('date'), Lower('unlisted_contractor_name'),
+                models.F('trade'),
+                condition=models.Q(is_voided=False, contractor__isnull=True),
+                name='uniq_attendance_unlisted_trade_day'),
+        ]
+
+    def __str__(self):
+        return f"{self.project_id} {self.date} — {self.contractor_label} ({self.get_trade_display()})"
+
+    @property
+    def contractor_label(self):
+        """The name to show: the Vendor's (even when it has since been deactivated), or
+        the typed name."""
+        return self.contractor.name if self.contractor_id else self.unlisted_contractor_name
+
+    @property
+    def trade_label(self):
+        """The trade as shown: Other carries its remark."""
+        if self.trade == self.OTHER:
+            return f"Other — {self.trade_remark}"
+        return self.get_trade_display()
+
+
+class ContractorAttendanceRevision(models.Model):
+    """One write to a ContractorAttendance entry (ATT-B1). APPEND-ONLY.
+
+    Written by projects/attendance.py and nothing else, in the same transaction as the
+    write it records, with the entry row locked. `before` and `after` are
+    attendance.attendance_snapshot() either side of it ("schema": 1), photo path
+    included, so a replaced photo stays findable. `before` is NULL for CREATED only.
+
+    PROTECT on the entry: an entry with history cannot be deleted. save() on an existing
+    row and delete() both raise; a queryset update()/delete() bypasses both, as for
+    every append-only model here.
+    """
+
+    CREATED  = 'CREATED'
+    EDITED   = 'EDITED'
+    TIME_OUT = 'TIME_OUT'
+    VOIDED   = 'VOIDED'
+    ACTION_CHOICES = [
+        (CREATED,  'Created'),
+        (EDITED,   'Edited'),
+        (TIME_OUT, 'Time out marked'),
+        (VOIDED,   'Voided'),
+    ]
+
+    attendance = models.ForeignKey(ContractorAttendance, on_delete=models.PROTECT,
+                                   related_name='revisions')
+    action = models.CharField(max_length=10, choices=ACTION_CHOICES)
+    before = models.JSONField(null=True, blank=True)  # snapshot before the write; NULL for CREATED
+    after = models.JSONField()                        # snapshot after the write
+    note = models.TextField(blank=True, default='')   # the void note; '' for every other action in B1
+    changed_by = models.ForeignKey('UserProfile', on_delete=models.PROTECT,
+                                   related_name='attendance_revisions')
+    changed_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['attendance', 'changed_at', 'pk']
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(action__in=['CREATED', 'EDITED', 'TIME_OUT', 'VOIDED']),
+                name='attendance_revision_action_known'),
+            # Only a create has nothing before it.
+            models.CheckConstraint(
+                condition=(models.Q(action='CREATED', before__isnull=True)
+                           | (~models.Q(action='CREATED') & models.Q(before__isnull=False))),
+                name='attendance_revision_before_unless_created'),
+            models.CheckConstraint(
+                condition=~models.Q(action='VOIDED') | ~models.Q(note=''),
+                name='attendance_revision_void_note'),
+        ]
+
+    def __str__(self):
+        return f"{self.attendance_id} — {self.action} by {self.changed_by_id}"
+
+    # The deliberate exception to the no-save()-override rule (ATT-B1 ruling E): the house append-only guard, it only refuses.
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'ContractorAttendanceRevision is append-only — a past write to an '
+                'attendance entry is never rewritten.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            "ContractorAttendanceRevision is append-only — an entry's history stays.")

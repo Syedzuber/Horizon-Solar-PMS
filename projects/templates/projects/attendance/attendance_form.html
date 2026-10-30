@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}{% if entry %}Edit attendance{% else %}Add attendance{% endif %} — {{ project.project_id }}{% endblock %}
+
+{% block extra_head %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<style>
+  [x-cloak] { display: none !important; }
+  .att-picker { max-height: 260px; overflow-y: auto; }
+  .att-step { width: 3rem; }
+  .att-count { max-width: 6rem; text-align: center; }
+</style>
+{% endblock %}
+
+{% block content %}
+{% comment %}ATT-B1 — one form for add and edit (attendance_views.attendance_add / attendance_edit).
+   Field order: contractor, trade, headcount, time in, time out (edit only), photo.
+   The contractor list is rendered here from `vendors` (active contractor / both, plus an
+   edited entry's own contractor); Alpine only filters the rows already on the page and
+   shows the not-listed name / Other remark. Nothing is fetched. Date, project and
+   recorder are not fields: the writer sets them. The photo is prepared in the browser by
+   _qaqc_photo_script.html (EXIF time into photo_taken_at, a downscaled JPEG); the server
+   checks it whatever the browser did.{% endcomment %}
+<div class="mb-3">
+  <a href="{% url 'attendance_today' project.project_id %}" class="text-decoration-none text-muted">&larr; Attendance · {{ project.project_id }}</a>
+</div>
+
+<div class="card shadow-sm mb-4" style="max-width:720px;"
+     x-data="{ q: '', pick: '{{ picked|escapejs }}', trade: '{{ trade_value|escapejs }}', count: {{ headcount_value }}, voiding: false }">
+  <div class="card-header">
+    <h5 class="mb-0">{% if entry %}Edit entry{% else %}Add entry{% endif %}</h5>
+    <div class="text-muted small">{{ today|date:"D, d M Y" }}</div>
+  </div>
+  <div class="card-body">
+    {% if errors %}
+      <div class="alert alert-danger small" id="att-errors">
+        <ul class="mb-0">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+      </div>
+    {% endif %}
+    {% if not storage_ready %}
+      <div class="alert alert-warning small" id="att-storage-off">Attendance photos cannot be stored right now: the private store is not configured.</div>
+    {% endif %}
+
+    <form method="post" enctype="multipart/form-data" id="att-form">
+      {% csrf_token %}
+
+      {# ── Contractor ── #}
+      <div class="mb-3">
+        <label class="form-label small fw-semibold" for="att-search">Contractor <span class="text-danger">*</span></label>
+        <input type="search" id="att-search" class="form-control form-control-sm mb-2" placeholder="Search contractors" x-model="q" autocomplete="off">
+        <div class="list-group att-picker">
+          {% for v in vendors %}
+            <label class="list-group-item d-flex gap-2 align-items-center" data-name="{{ v.name|lower }}"
+                   x-show="!q || $el.dataset.name.includes(q.toLowerCase())">
+              <input class="form-check-input" type="radio" name="contractor" value="{{ v.pk }}" x-model="pick">
+              <span>{{ v.name }}{% if not v.is_active %} <span class="text-muted small">(inactive)</span>{% endif %}</span>
+            </label>
+          {% empty %}
+            <div class="list-group-item small text-muted">No contractors are listed yet.</div>
+          {% endfor %}
+          <label class="list-group-item d-flex gap-2 align-items-center">
+            <input class="form-check-input" type="radio" name="contractor" value="{{ unlisted_value }}" x-model="pick">
+            <span class="fw-semibold">Contractor not listed</span>
+          </label>
+        </div>
+        <div class="mt-2" x-show="pick === '{{ unlisted_value }}'" x-cloak>
+          <label class="form-label small" for="att-unlisted">Contractor name</label>
+          <input type="text" name="unlisted_contractor_name" id="att-unlisted" maxlength="120" class="form-control form-control-sm"
+                 value="{{ form.unlisted_contractor_name.value|default:'' }}">
+          <div class="form-text">Saved as not listed. SCM will match it to a contractor before billing.</div>
+        </div>
+      </div>
+
+      {# ── Trade ── #}
+      <div class="mb-3">
+        <div class="form-label small fw-semibold">Trade <span class="text-danger">*</span></div>
+        <div class="d-flex flex-wrap gap-2">
+          {% for value, label in trade_choices %}
+            <input type="radio" class="btn-check" name="trade" id="att-trade-{{ value }}" value="{{ value }}" x-model="trade" autocomplete="off">
+            <label class="btn btn-sm btn-outline-success" for="att-trade-{{ value }}">{{ label }}</label>
+          {% endfor %}
+        </div>
+        <div class="mt-2" x-show="trade === 'OTHER'" x-cloak>
+          <label class="form-label small" for="att-remark">What trade?</label>
+          <input type="text" name="trade_remark" id="att-remark" maxlength="120" class="form-control form-control-sm"
+                 value="{{ form.trade_remark.value|default:'' }}">
+        </div>
+      </div>
+
+      {# ── Headcount ── #}
+      <div class="mb-3">
+        <label class="form-label small fw-semibold" for="att-headcount">Headcount <span class="text-danger">*</span></label>
+        <div class="d-flex gap-2 align-items-center">
+          <button type="button" class="btn btn-outline-secondary att-step" @click="count = Math.max(1, (parseInt(count) || 1) - 1)" aria-label="One fewer">−</button>
+          <input type="number" name="headcount" id="att-headcount" class="form-control att-count" min="1" max="500" step="1" inputmode="numeric" x-model="count" required>
+          <button type="button" class="btn btn-outline-secondary att-step" @click="count = Math.min(500, (parseInt(count) || 0) + 1)" aria-label="One more">+</button>
+        </div>
+      </div>
+
+      {# ── Times ── #}
+      <div class="row g-3 mb-3">
+        <div class="col-6">
+          <label class="form-label small fw-semibold" for="att-time-in">Time in <span class="text-danger">*</span></label>
+          <input type="time" name="time_in" id="att-time-in" class="form-control form-control-sm" required
+                 value="{{ form.time_in.value|default:now_hhmm }}">
+        </div>
+        {% if entry %}
+        <div class="col-6">
+          <label class="form-label small fw-semibold" for="att-time-out">Time out</label>
+          <input type="time" name="time_out" id="att-time-out" class="form-control form-control-sm"
+                 value="{{ form.time_out.value|default:'' }}">
+        </div>
+        {% endif %}
+      </div>
+
+      {# ── Photo ── #}
+      <div class="mb-3">
+        <label class="form-label small fw-semibold" for="att-photo">Group photo {% if not entry %}<span class="text-danger">*</span>{% endif %}</label>
+        <input type="file" name="photo" id="att-photo" accept=".jpg,.jpeg,.png,image/jpeg,image/png" capture="environment"
+               class="form-control form-control-sm" data-qaqc-photo {% if not entry %}required{% endif %}>
+        {% if entry %}<div class="form-text">Leave the photo empty to keep the current one.</div>{% endif %}
+        <input type="hidden" name="photo_taken_at" value="">
+        <div class="text-muted small qaqc-photo-status"></div>
+      </div>
+
+      <div class="d-flex gap-2">
+        <button type="submit" class="btn btn-brand" {% if not storage_ready and not entry %}disabled{% endif %}>Save</button>
+        <a href="{% url 'attendance_today' project.project_id %}" class="btn btn-outline-secondary">Cancel</a>
+      </div>
+    </form>
+
+    {% if entry %}
+      <hr>
+      <button type="button" class="btn btn-sm btn-outline-danger" @click="voiding = !voiding" id="att-void-toggle">Void this entry</button>
+      <form method="post" action="{% url 'attendance_void' project.project_id entry.pk %}" class="mt-2" x-show="voiding" x-cloak id="att-void-form">
+        {% csrf_token %}
+        <label class="form-label small" for="att-void-note">Why is this entry being voided?</label>
+        <textarea name="void_note" id="att-void-note" rows="2" class="form-control form-control-sm mb-2" required></textarea>
+        <button type="submit" class="btn btn-sm btn-danger">Confirm void</button>
+      </form>
+    {% endif %}
+  </div>
+</div>
+
+{% include 'projects/partials/_qaqc_photo_script.html' %}
+{% endblock %}

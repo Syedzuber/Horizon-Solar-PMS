@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}Attendance — {{ project.project_id }}{% endblock %}
+
+{% block extra_head %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<style>
+  .att-card { cursor: pointer; }
+  .att-voided .att-main { text-decoration: line-through; opacity: .6; }
+  .att-photo { max-width: 100%; max-height: 320px; border-radius: .375rem; }
+  [x-cloak] { display: none !important; }
+</style>
+{% endblock %}
+
+{% block content %}
+{% comment %}ATT-B1 — the site's attendance page, today only. attendance_views.attendance_today
+   builds `cards` (entry, can_change, can_see_photo, history) and the header counts from
+   live entries only. `own_only` is the ruling-F view: a Site Engineer moved off the site
+   today, shown just the live entries they recorded. Alpine holds only which card is open
+   and whether its time-out form is shown; every action is a plain form POST or link.
+   The photo <img> is inserted only when its card opens (x-if), so a link is signed per
+   open, never for the whole list.{% endcomment %}
+<div class="mb-3">
+  {% if own_only %}
+    <span class="text-muted small">{{ project.project_id }}</span>
+  {% else %}
+    <a href="{% url 'project_overview' project.project_id %}" class="text-decoration-none text-muted">&larr; Back to {{ project.project_id }}</a>
+  {% endif %}
+</div>
+
+<div style="max-width:720px;">
+  <div class="d-flex flex-wrap align-items-start justify-content-between gap-2 mb-3">
+    <div>
+      <h5 class="mb-0">Attendance · {{ project.project_id }}</h5>
+      <div class="text-muted small">{{ today|date:"D, d M Y" }}</div>
+      <div class="fw-semibold mt-1" id="att-totals">{{ crews }} crew{{ crews|pluralize }} · {{ people }} {{ people|pluralize:"person,people" }}{% if open_count %} · <span class="text-warning-emphasis">{{ open_count }} open</span>{% endif %}</div>
+    </div>
+    {% if can_add %}
+      <a href="{% url 'attendance_add' project.project_id %}" class="btn btn-brand" id="att-add">+ Add entry</a>
+    {% endif %}
+  </div>
+
+  {% if own_only %}
+    <div class="alert alert-info small py-2">You are no longer on this site's tasks. You can still change the entries you recorded today.</div>
+  {% endif %}
+
+  <h6 class="text-uppercase text-muted small fw-semibold">Today</h6>
+  {% if not cards %}
+    <div class="card shadow-sm"><div class="card-body text-muted small" id="att-empty">No crews logged today.</div></div>
+  {% endif %}
+
+  {% for c in cards %}
+  {% with e=c.entry %}
+  <div class="card shadow-sm mb-2 {% if e.is_voided %}att-voided{% endif %}" x-data="{ open: false, timeOut: false }" id="att-entry-{{ e.pk }}">
+    <div class="card-body py-2 att-card" @click="open = !open">
+      <div class="att-main d-flex justify-content-between align-items-start gap-2">
+        <div>
+          <div class="fw-semibold">{{ e.contractor_label }}</div>
+          <div class="small text-muted">{{ e.trade_label }}</div>
+          {% if not e.contractor_id %}<span class="badge text-bg-warning mt-1">Not listed · waiting for SCM</span>{% endif %}
+        </div>
+        <div class="text-end">
+          <div class="fw-semibold">{{ e.headcount }} {{ e.headcount|pluralize:"person,people" }}</div>
+          <div class="small">{{ e.time_in|time:"H:i" }} → {% if e.time_out %}{{ e.time_out|time:"H:i" }}{% else %}—{% endif %}</div>
+          {% if not e.time_out and not e.is_voided %}<span class="badge text-bg-info">Open</span>{% endif %}
+        </div>
+      </div>
+      {% if e.is_voided %}
+        <div class="small text-danger mt-1">Voided by {{ e.voided_by.user.get_full_name|default:e.voided_by.user.username }} at {{ e.voided_at|date:"H:i" }}: {{ e.void_note }}</div>
+      {% endif %}
+    </div>
+
+    <div class="card-body border-top pt-2" x-show="open" x-cloak>
+      {% if c.can_see_photo %}
+        <template x-if="open">
+          <a href="{% url 'attendance_photo' project.project_id e.pk %}" target="_blank" rel="noopener">
+            <img src="{% url 'attendance_photo' project.project_id e.pk %}" alt="Group photo of the crew" class="att-photo mb-2">
+          </a>
+        </template>
+      {% endif %}
+      <div class="small text-muted">
+        Recorded by {{ e.recorded_by.user.get_full_name|default:e.recorded_by.user.username }} at {{ e.recorded_at|date:"H:i" }}{% if e.photo_taken_at %} · photo taken {{ e.photo_taken_at|date:"d M Y, H:i" }}{% endif %}
+      </div>
+
+      {% if c.history %}
+        <div class="small fw-semibold mt-2">History</div>
+        <ul class="small mb-2 ps-3 att-history">
+          {% for h in c.history %}
+            <li>{{ h.action }} by {{ h.by }} at {{ h.at|date:"H:i" }}{% if h.changes %}: {{ h.changes|join:"; " }}{% endif %}{% if h.note %} — “{{ h.note }}”{% endif %}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+
+      {% if c.can_change %}
+        <div class="d-flex flex-wrap gap-2 mt-2">
+          {% if not e.time_out %}
+            <button type="button" class="btn btn-sm btn-outline-secondary" @click="timeOut = !timeOut">Mark time out</button>
+          {% endif %}
+          <a href="{% url 'attendance_edit' project.project_id e.pk %}" class="btn btn-sm btn-outline-primary">Edit</a>
+        </div>
+        {% if not e.time_out %}
+          <form method="post" action="{% url 'attendance_time_out' project.project_id e.pk %}" class="d-flex gap-2 align-items-end mt-2" x-show="timeOut" x-cloak>
+            {% csrf_token %}
+            <div>
+              <label class="form-label small mb-0" for="to-{{ e.pk }}">Time out</label>
+              <input type="time" name="time_out" id="to-{{ e.pk }}" value="{{ now_hhmm }}" class="form-control form-control-sm" required>
+            </div>
+            <button type="submit" class="btn btn-sm btn-brand">Save</button>
+          </form>
+        {% endif %}
+      {% endif %}
+    </div>
+  </div>
+  {% endwith %}
+  {% endfor %}
+</div>
+{% endblock %}

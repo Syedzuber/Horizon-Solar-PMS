@@ -11,6 +11,7 @@ from . import qaqc_views     # Closeout step 3 site QA/QC engineer screen — se
 from . import cod_views      # Closeout step 4 COD record screens — separate module, same pattern
 from . import site_drawings_views  # DR-2 site drawings card and drawing open — separate module, same pattern
 from . import notify_views   # T2 notification template Admin screens — separate module, same pattern
+from . import attendance_views  # ATT-B1 contractor attendance screens — separate module, same pattern
 
 urlpatterns = [
     # ---------------------------------------------------------------------------
@@ -263,6 +264,16 @@ urlpatterns = [
     path('projects/<str:project_id>/cod/record/', cod_views.cod_record, name='cod_record'),
     path('projects/<str:project_id>/cod/<int:record_pk>/withdraw/', cod_views.cod_withdraw, name='cod_withdraw'),
     path('projects/<str:project_id>/cod/<int:record_pk>/pdf/', cod_views.cod_record_pdf, name='cod_record_pdf'),
+    # Contractor attendance (ATT-B1), same day only. The page: every viewer of the site, plus
+    # a Site Engineer moved off it today for their own entries. Add: a Site Engineer on the
+    # site, the PM and coordinators. Edit / time out / void: the same, plus the entry's
+    # recorder, today only. Photo: recorder, PM / coordinators, SCM, Admin, CEO.
+    path('projects/<str:project_id>/attendance/', attendance_views.attendance_today, name='attendance_today'),
+    path('projects/<str:project_id>/attendance/add/', attendance_views.attendance_add, name='attendance_add'),
+    path('projects/<str:project_id>/attendance/<int:entry_pk>/edit/', attendance_views.attendance_edit, name='attendance_edit'),
+    path('projects/<str:project_id>/attendance/<int:entry_pk>/time-out/', attendance_views.attendance_time_out, name='attendance_time_out'),
+    path('projects/<str:project_id>/attendance/<int:entry_pk>/void/', attendance_views.attendance_void, name='attendance_void'),
+    path('projects/<str:project_id>/attendance/<int:entry_pk>/photo/', attendance_views.attendance_photo, name='attendance_photo'),
     # site_drawing_open (DR-2) — every viewer of an OPEX site; one released drawing PDF as a redirect to a link signed at the click
     path('site-drawings/<int:pk>/open/', site_drawings_views.site_drawing_open, name='site_drawing_open'),
     path('projects/<str:project_id>/tasks/<int:task_id>/assign-design/', views.task_assign_design_head, name='task_assign_design_head'),  # Design Head only (is_design_head flag)

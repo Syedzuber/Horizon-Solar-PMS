@@ -11573,6 +11573,9 @@ def project_overview(request, project_id):
     # there is no circular import: site_drawings_views imports nothing from this module.
     from .site_drawings_views import site_drawings_context
     site_drawings = site_drawings_context(project)
+    # ATT-B1 "Attendance today" card. Lazy import: attendance_views imports this module (_active_project), so a top-level import would be circular.
+    from .attendance_views import attendance_card_context
+    attendance_card = attendance_card_context(project, request.user)
 
     # ── Gantt (Residential only; computed live from activated_at + duration_days) ──
     # Internal view: every role that can see this project. Client (buffered/friendly)
@@ -11641,6 +11644,7 @@ def project_overview(request, project_id):
         'show_order_list_link':        show_order_list_link,
         'show_payment_queue_link':     show_payment_queue_link,
         'site_drawings':               site_drawings,
+        'attendance_card':             attendance_card,
         'user_dashboard_url':          get_user_dashboard(request.user),
         'show_cascade_option':         show_cascade_option,
         'gantt_available':             gantt_available,

@@ -290,6 +290,8 @@
          style="background-color:#1a7a4a;">
         View Project
       </a>
+      {# ATT-B1: today's contractor attendance for this site #}
+      <a href="{% url 'attendance_today' p.project_id %}" class="btn btn-sm btn-outline-secondary">Attendance</a>
     </div>
   </div>
 

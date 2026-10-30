@@ -1,0 +1,26 @@
+{% comment %}ATT-B1 — the overview's "Attendance today" card, open by default. `attendance_card` is
+   attendance_views.attendance_card_context(): live crews / people / open / not-listed counts
+   for today and `can_add` (user_can_log_attendance). Every viewer of the site sees it; the
+   page behind Open attendance is the same audience.{% endcomment %}
+<div class="card shadow-sm mb-3" id="attendance-card">
+  <div class="card-header py-2 fw-semibold small d-flex justify-content-between align-items-center"
+       data-bs-toggle="collapse" data-bs-target="#attendanceCollapse" role="button" aria-expanded="true" aria-controls="attendanceCollapse">
+    <span>Attendance today</span>
+    <span class="text-muted">{{ attendance_card.crews }} crew{{ attendance_card.crews|pluralize }} · {{ attendance_card.people }} {{ attendance_card.people|pluralize:"person,people" }}</span>
+  </div>
+  <div class="collapse show" id="attendanceCollapse">
+    <div class="card-body py-2">
+      <div class="d-flex flex-wrap gap-2 mb-2">
+        {% if attendance_card.open %}<span class="badge text-bg-info">{{ attendance_card.open }} open</span>{% endif %}
+        {% if attendance_card.not_listed %}<span class="badge text-bg-warning">{{ attendance_card.not_listed }} not listed</span>{% endif %}
+        {% if not attendance_card.crews %}<span class="text-muted small">No crews logged today.</span>{% endif %}
+      </div>
+      <div class="d-flex flex-wrap gap-2">
+        {% if attendance_card.can_add %}
+          <a href="{% url 'attendance_add' project.project_id %}" class="btn btn-sm btn-brand">+ Add entry</a>
+        {% endif %}
+        <a href="{% url 'attendance_today' project.project_id %}" class="btn btn-sm btn-outline-secondary">Open attendance</a>
+      </div>
+    </div>
+  </div>
+</div>

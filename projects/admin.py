@@ -17,6 +17,7 @@ from .models import (
     CodRecord,
     QaqcVisit, QaqcVisitAnswer,
     NotificationTemplate, NotificationEventSetting, NotificationEventSettingChange,
+    ContractorAttendance, ContractorAttendanceRevision,
 )
 from .forms import check_typed_date
 from .permissions import qaqc_engineer_assignment_refusal
@@ -995,3 +996,20 @@ class NotificationEventSettingChangeAdmin(_ApprovalRecordAdmin):
                      'changed_at']
     list_filter   = ['channel', 'to_state']
     search_fields = ['event_code', 'reason']
+
+
+# ATT-B1 contractor attendance — view-only. projects/attendance.py is the only writer of
+# both models (each write with its revision row, same-day rule under a row lock); an admin
+# form would write past both, so add, change and delete are all refused here.
+@admin.register(ContractorAttendance)
+class ContractorAttendanceAdmin(_ApprovalRecordAdmin):
+    list_display  = ['pk', 'project', 'date', 'contractor', 'unlisted_contractor_name',
+                     'trade', 'headcount', 'time_in', 'time_out', 'recorded_by', 'is_voided']
+    list_filter   = ['trade', 'is_voided']
+    search_fields = ['project__project_id', 'unlisted_contractor_name', 'contractor__name']
+
+
+@admin.register(ContractorAttendanceRevision)
+class ContractorAttendanceRevisionAdmin(_ApprovalRecordAdmin):
+    list_display  = ['pk', 'attendance', 'action', 'changed_by', 'changed_at']
+    list_filter   = ['action']
