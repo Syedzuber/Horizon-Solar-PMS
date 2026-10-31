@@ -3618,3 +3618,95 @@ def user_can_view_attendance_photo(user, entry):
     if profile.role in ATTENDANCE_PHOTO_ROLES:
         return True
     return user_can_manage_project(user, entry.project)
+
+
+# ---------------------------------------------------------------------------
+# Contractor attendance after the day — ATT-B2
+# ---------------------------------------------------------------------------
+
+#: The roles that correct past-day attendance and add late entries on any site, beside
+#: the site's own PM and coordinators (ATT-B2 ruling 1). Admin only: SCM, Finance and the
+#: CEO read attendance but do not rewrite it, and System Admin is left out as for photos.
+ATTENDANCE_CORRECTOR_ROLES = frozenset({'Admin'})
+
+
+def user_is_attendance_corrector(user, project):
+    """Return True if `user` may correct `project`'s past attendance and add late entries
+    to it (ATT-B2 rulings 1, 4): the site's PM or a coordinator (user_can_manage_project),
+    or a role in ATTENDANCE_CORRECTOR_ROLES. Site Engineers never touch a past day; every
+    other role reads it only.
+
+    Any project status counts, only a soft-deleted site is refused (Zuber's ruling 4 at
+    the ATT-B2 go-ahead): a crew's day still has to be put right for billing after the
+    site has moved on to Completed or On Hold.
+
+    The site-level half of user_can_correct_attendance(). The attendance page asks it
+    once and pairs it with attendance_entry_correctable() per card, so a month of history
+    does not pay a coordinator lookup per entry.
+    """
+    if project is None or project.is_deleted:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    # Role first: it costs no query, and only a remaining user pays the coordinator lookup.
+    if profile.role in ATTENDANCE_CORRECTOR_ROLES:
+        return True
+    return user_can_manage_project(user, project)
+
+
+def attendance_entry_correctable(entry):
+    """True when `entry` is in a state a correction may touch: not voided (ruling 3, no
+    un-void) and dated before today's IST date (timezone.localdate(), never
+    date.today()). A today entry is changed through the same-day flow instead. Entry state
+    only — who may correct is user_is_attendance_corrector()."""
+    # Imported here, not at module top, so this module keeps its single top-level import
+    # (see the head of the file); django.utils.timezone imports nothing from this app.
+    from django.utils import timezone
+    return entry is not None and not entry.is_voided and entry.date < timezone.localdate()
+
+
+def user_can_correct_attendance(user, entry):
+    """Return True if `user` may correct or void `entry` after its day (ATT-B2 rulings
+    1-3): the entry is from before today and not voided, and `user` is a corrector on its
+    site — PM, coordinator or Admin. A coordinator taken off the site loses it at once
+    (edge case 4). The B2 writers ask this again under the entry's row lock."""
+    return (attendance_entry_correctable(entry)
+            and user_is_attendance_corrector(user, entry.project))
+
+
+def user_can_add_late_attendance(user, project):
+    """Return True if `user` may add an entry for a missed day on `project` (ATT-B2 ruling
+    4): the same correctors, on any not soft-deleted site. The 1-7 day window is the
+    writer's rule (attendance.late_entry_window), not a permission."""
+    return user_is_attendance_corrector(user, project)
+
+
+def user_can_view_attendance_history(user, project):
+    """Return True if `user` may see the Summary and History sections of `project`'s
+    attendance page (ATT-B2 rulings 10, 11, 13): anyone who can see the site. A Site
+    Engineer admitted only as today's recorder (ruling F) is not a viewer of the site, so
+    they get False here and see today only."""
+    return user_can_view_project(user, project)
+
+
+def attendance_photo_entry_ids(user, project, entries):
+    """Return the pks of `entries` (all on `project`) whose photo `user` may open — the
+    BULK form of user_can_view_attendance_photo(), for the History section.
+
+    WHY THIS EXISTS. The per-entry helper asks user_can_manage_project() for every card a
+    coordinator or a non-recording viewer looks at, which is one coordinator query per card;
+    90 days of history would run to hundreds. Here the manage question is asked once.
+
+    INVARIANT: an entry is in the result exactly when user_can_view_attendance_photo()
+    returns True for it — the recorder, ATTENDANCE_PHOTO_ROLES, or the site's managers.
+    If one changes, change the other in the same edit (tests_attendance_b2 pins the two
+    equal).
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return set()
+    if profile.role in ATTENDANCE_PHOTO_ROLES:
+        return {entry.pk for entry in entries}
+    manages = user_can_manage_project(user, project)
+    return {entry.pk for entry in entries if manages or entry.recorded_by_id == profile.pk}

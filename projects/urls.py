@@ -274,6 +274,10 @@ urlpatterns = [
     path('projects/<str:project_id>/attendance/<int:entry_pk>/time-out/', attendance_views.attendance_time_out, name='attendance_time_out'),
     path('projects/<str:project_id>/attendance/<int:entry_pk>/void/', attendance_views.attendance_void, name='attendance_void'),
     path('projects/<str:project_id>/attendance/<int:entry_pk>/photo/', attendance_views.attendance_photo, name='attendance_photo'),
+    # ATT-B2, after the day: the site's PM, coordinators and Admin correct a past entry (void
+    # goes through attendance_void above) and add a late entry 1-7 days back, with a reason.
+    path('projects/<str:project_id>/attendance/<int:entry_pk>/correct/', attendance_views.attendance_correct, name='attendance_correct'),
+    path('projects/<str:project_id>/attendance/late/', attendance_views.attendance_add_late, name='attendance_add_late'),
     # site_drawing_open (DR-2) — every viewer of an OPEX site; one released drawing PDF as a redirect to a link signed at the click
     path('site-drawings/<int:pk>/open/', site_drawings_views.site_drawing_open, name='site_drawing_open'),
     path('projects/<str:project_id>/tasks/<int:task_id>/assign-design/', views.task_assign_design_head, name='task_assign_design_head'),  # Design Head only (is_design_head flag)

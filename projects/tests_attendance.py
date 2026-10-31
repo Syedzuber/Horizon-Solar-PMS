@@ -749,8 +749,9 @@ class TimeOutAndVoidTests(AttendanceFixture):
 
 
 class MidnightTests(AttendanceFixture):
-    """Edge case 2: an entry from yesterday cannot be changed by anyone in B1, whether by
-    the page, a direct URL or a replayed POST."""
+    """Edge case 2: after midnight the same-day edit and time out refuse everyone, whether
+    by the page, a direct URL or a replayed POST, and the Site Engineer cannot void.
+    ATT-B2 ruling 1: the PM may now void a past-day entry with a note (a correction)."""
 
     def test_after_midnight_every_change_is_refused(self):
         entry = self._entry()
@@ -764,8 +765,8 @@ class MidnightTests(AttendanceFixture):
                             self._edit_data(entry, headcount='12'))
                 client.post(reverse('attendance_time_out', args=['ATT-A', entry.pk]),
                             {'time_out': '17:00'})
-                client.post(reverse('attendance_void', args=['ATT-A', entry.pk]),
-                            {'void_note': 'Late void'})
+            _client_for(self.se).post(reverse('attendance_void', args=['ATT-A', entry.pk]),
+                                      {'void_note': 'Late void'})
             # The writers refuse a replay that skipped the views altogether.
             with self.assertRaises(AttendanceRefused):
                 update_attendance(entry, {'contractor': self.civil_co, 'trade': 'CIVIL',
@@ -774,13 +775,15 @@ class MidnightTests(AttendanceFixture):
             with self.assertRaises(AttendanceRefused):
                 set_time_out(entry, time(17, 0), self.pm.user)
             with self.assertRaises(AttendanceRefused):
-                void_attendance(entry, 'Late void', self.pm.user)
+                void_attendance(entry, 'Late void', self.se.user)
             # Yesterday's entries are not on today's page.
             page = _client_for(self.pm).get(reverse('attendance_today', args=['ATT-A']))
             self.assertContains(page, 'No crews logged today.')
+            # ATT-B2 ruling 1: the PM's past-day void with a note succeeds.
+            void_attendance(entry, 'Late void', self.pm.user)
         entry.refresh_from_db()
-        self.assertEqual((entry.headcount, entry.time_out, entry.is_voided), (7, None, False))
-        self.assertEqual(self._actions(entry), ['CREATED'])
+        self.assertEqual((entry.headcount, entry.time_out, entry.is_voided), (7, None, True))
+        self.assertEqual(self._actions(entry), ['CREATED', 'VOIDED'])
 
 
 class RecorderMovedOffTests(AttendanceFixture):

@@ -5,7 +5,12 @@ ContractorAttendanceRevision (ATT-B1).
     create_attendance()   a new entry for today, with a CREATED revision
     update_attendance()   a same-day edit, with an EDITED revision (none if nothing changed)
     set_time_out()        the crew's time out, with a TIME_OUT revision
-    void_attendance()     a void with its note, with a VOIDED revision
+    void_attendance()     a void with its note, with a VOIDED revision — today's by the
+                          site's loggers or recorder, a past day's by a corrector (ATT-B2)
+
+ATT-B2, after the day (PM / coordinators / Admin, permissions.user_is_attendance_corrector):
+    correct_attendance()      a past-day correction with its note, an EDITED revision
+    create_late_attendance()  an entry for a day 1-7 days back, a CREATED revision with its note
 
 Each runs in one transaction and writes the entry change and its revision row together.
 Each re-asks the permission helper itself — under the entry's row lock for the three that
@@ -31,7 +36,10 @@ from .design_storage import _client
 from .models import (
     VENDOR_BILLABLE_KINDS, ContractorAttendance, ContractorAttendanceRevision,
 )
-from .permissions import user_can_change_attendance_today, user_can_log_attendance
+from .permissions import (
+    user_can_add_late_attendance, user_can_change_attendance_today, user_can_correct_attendance,
+    user_can_log_attendance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +58,20 @@ TIME_OUT_ALREADY = 'Time out is already recorded. Edit the entry to change it.'
 VOID_NOTE_REQUIRED = 'Say why this entry is being voided.'
 CONTRACTOR_NOT_ALLOWED = 'Pick an active contractor from the list, or choose "Contractor not listed".'
 TIME_LATER_THAN_NOW = "Time can't be later than now."
+
+# ATT-B2 — after the day.
+DUPLICATE_ENTRY_PAST_DAY = ('This contractor and trade is already logged on that day. '
+                            'Correct that entry instead.')
+CORRECTION_NOTE_REQUIRED = 'Say why this entry is being corrected.'
+LATE_NOTE_REQUIRED = 'Say why this entry is late.'
+NOT_CORRECTABLE = ("This entry cannot be corrected: only a live entry from before today can "
+                   "be corrected, by the site's PM, a coordinator or Admin.")
+NOT_ALLOWED_LATE = 'You cannot add a late entry on this site.'
+LATE_DATE_OUT_OF_WINDOW = 'A late entry must be dated 1 to 7 days before today.'
+
+#: How many days back a late entry may be dated (ATT-B2 ruling 4). Today is the normal
+#: add; anything older is refused.
+LATE_ENTRY_MAX_DAYS = 7
 
 #: How far past the current IST time a time in / time out may be (ATT-B1a). The slack
 #: covers a phone clock running a few minutes fast and a time typed as the crew walks in;
@@ -100,6 +122,20 @@ def time_is_too_late(value):
     return value > latest.time()
 
 
+def late_entry_window():
+    """(earliest, latest) dates a late entry may carry: 7 days back to yesterday, IST
+    (ruling 4). Read by the writer and the form's date picker alike; the picker's limits
+    are only a convenience, the writer asks again."""
+    today = timezone.localdate()
+    return today - timedelta(days=LATE_ENTRY_MAX_DAYS), today - timedelta(days=1)
+
+
+def is_late_entry(entry):
+    """True when `entry` was recorded after its day — the derived "late entry" (ruling 4):
+    its date is earlier than the IST date of its recorded_at. No field stores it."""
+    return entry.date < timezone.localtime(entry.recorded_at).date()
+
+
 def attendance_snapshot(entry):
     """The entry as a revision records it ("schema": 1): every field a write can change,
     the contractor's name beside its id (a later rename does not change a past revision),
@@ -127,10 +163,14 @@ def attendance_snapshot(entry):
 
 
 def _check_values(contractor, unlisted_name, trade, trade_remark, headcount, time_in,
-                  time_out, current_contractor_id=None):
+                  time_out, current_contractor_id=None, day=None):
     """The value rules the form already applied, asked again so no caller can write past
     them; the database CHECKs are the last line. `current_contractor_id` lets an edit keep
-    a contractor that has since been deactivated (edge case 9) — never pick one anew."""
+    a contractor that has since been deactivated (edge case 9) — never pick one anew.
+
+    `day` is the entry's date. The ATT-B1a "not later than now" rule applies only when it
+    is today (ATT-B2 ruling 6): every time on a past day has already happened. The
+    same-day writers pass no day, so for them the rule is asked exactly as in B1a."""
     if contractor is not None:
         keeping = current_contractor_id is not None and contractor.pk == current_contractor_id
         if not keeping and (contractor.kind not in VENDOR_BILLABLE_KINDS or not contractor.is_active):
@@ -148,8 +188,9 @@ def _check_values(contractor, unlisted_name, trade, trade_remark, headcount, tim
             f'{ContractorAttendance.HEADCOUNT_MAX}.')
     if time_in is None:
         raise AttendanceRefused('Enter the time in.')
-    if time_is_too_late(time_in) or time_is_too_late(time_out):
-        raise AttendanceRefused(TIME_LATER_THAN_NOW)
+    if day is None or day == timezone.localdate():
+        if time_is_too_late(time_in) or time_is_too_late(time_out):
+            raise AttendanceRefused(TIME_LATER_THAN_NOW)
     if time_out is not None and time_out <= time_in:
         raise AttendanceRefused(TIME_OUT_NOT_AFTER_IN)
 
@@ -169,11 +210,12 @@ def live_duplicate_exists(project, day, contractor, unlisted_name, trade, exclud
     return qs.exists()
 
 
-def _save_or_refuse_duplicate(entry, **save_kwargs):
+def _save_or_refuse_duplicate(entry, duplicate_message=DUPLICATE_ENTRY, **save_kwargs):
     """Save `entry` inside a savepoint. An IntegrityError from a lost race on the slot is
-    turned into DUPLICATE_ENTRY (edge case 1, double-tap Save); any other IntegrityError is
-    a broken rule upstream and is re-raised. The savepoint keeps the outer transaction
-    usable for the duplicate query after the failed INSERT/UPDATE on Postgres."""
+    turned into `duplicate_message` (edge case 1, double-tap Save; the past-day writers
+    pass DUPLICATE_ENTRY_PAST_DAY); any other IntegrityError is a broken rule upstream and
+    is re-raised. The savepoint keeps the outer transaction usable for the duplicate query
+    after the failed INSERT/UPDATE on Postgres."""
     try:
         with transaction.atomic():
             entry.save(**save_kwargs)
@@ -181,7 +223,7 @@ def _save_or_refuse_duplicate(entry, **save_kwargs):
         if live_duplicate_exists(entry.project, entry.date, entry.contractor,
                                   entry.unlisted_contractor_name, entry.trade,
                                   exclude_pk=entry.pk):
-            raise AttendanceRefused(DUPLICATE_ENTRY)
+            raise AttendanceRefused(duplicate_message)
         raise
 
 
@@ -327,16 +369,20 @@ def void_attendance(entry, note, by):
     """Void `entry` by `by` (a User) with `note`, with a VOIDED revision carrying it.
 
     A void always says why (ruling 6). The entry stays on record, stops counting, and
-    frees its contractor/trade/day slot (ruling 11). Refused when the note is blank or
-    the entry is not changeable by `by` — which includes an entry already voided.
-    Returns the entry.
+    frees its contractor/trade/day slot (ruling 11). Today's entry is voided by whoever
+    may change it today; a past day's by a corrector — the site's PM, a coordinator or
+    Admin (ATT-B2 ruling 1). Refused when the note is blank or neither applies, which
+    includes an entry already voided (no un-void, ATT-B2 ruling 3). Returns the entry.
     """
     note = (note or '').strip()
     if not note:
         raise AttendanceRefused(VOID_NOTE_REQUIRED)
     with transaction.atomic():
         locked = _lock(entry)
-        if not user_can_change_attendance_today(by, locked):
+        # Today's entry: the site's loggers or its recorder. A past day's: a corrector.
+        # Both helpers refuse a voided entry.
+        if not (user_can_change_attendance_today(by, locked)
+                or user_can_correct_attendance(by, locked)):
             raise AttendanceRefused(NOT_CHANGEABLE)
         before = attendance_snapshot(locked)
         now = timezone.now()
@@ -350,6 +396,123 @@ def void_attendance(entry, note, by):
         _revision(locked, ContractorAttendanceRevision.VOIDED, before, by.profile,
                   note=note, now=now)
     return locked
+
+
+def correct_attendance(entry, data, by, note):
+    """Correct a past day's `entry` by `by` (a User) with `note`, as an EDITED revision
+    carrying the note (ATT-B2 rulings 2, 5, 8).
+
+    `data` is update_attendance()'s: contractor, unlisted_name, trade, trade_remark,
+    headcount, time_in, time_out, and optionally stored_photo + photo_taken_at (a new
+    photo; the old path stays in the revision's `before`, nothing is deleted — ruling 7).
+    Date, project and recorder are never in `data` and never change. Times are free of
+    the B1a clock (the day is past) but time out is still after time in.
+
+    Returns (entry, changed). When the correction changes nothing, nothing is written
+    and changed is False. Raises AttendanceRefused for a blank note, an entry `by` may
+    not correct (today's, voided, not a corrector — re-asked under the row lock, so a
+    replayed POST or a coordinator just taken off the site is refused), a value rule, or
+    a slot already held that day (DUPLICATE_ENTRY_PAST_DAY).
+    """
+    note = (note or '').strip()
+    if not note:
+        raise AttendanceRefused(CORRECTION_NOTE_REQUIRED)
+    contractor = data.get('contractor')
+    unlisted_name = '' if contractor is not None else normalise_unlisted_name(
+        data.get('unlisted_name'))
+    trade = data.get('trade')
+    trade_remark = ((data.get('trade_remark') or '').strip()
+                    if trade == ContractorAttendance.OTHER else '')
+    stored_photo = data.get('stored_photo')
+    with transaction.atomic():
+        locked = _lock(entry)
+        if not user_can_correct_attendance(by, locked):
+            raise AttendanceRefused(NOT_CORRECTABLE)
+        _check_values(contractor, unlisted_name, trade, trade_remark, data.get('headcount'),
+                      data.get('time_in'), data.get('time_out'),
+                      current_contractor_id=locked.contractor_id, day=locked.date)
+        # The friendly answer for a correction that moves into a held slot (edge case 1);
+        # the partial unique indexes are the backstop for a race.
+        if live_duplicate_exists(locked.project, locked.date, contractor, unlisted_name,
+                                 trade, exclude_pk=locked.pk):
+            raise AttendanceRefused(DUPLICATE_ENTRY_PAST_DAY)
+        before = attendance_snapshot(locked)
+        locked.contractor = contractor
+        locked.unlisted_contractor_name = unlisted_name
+        locked.trade = trade
+        locked.trade_remark = trade_remark
+        locked.headcount = data.get('headcount')
+        locked.time_in = data.get('time_in')
+        locked.time_out = data.get('time_out')
+        if stored_photo:
+            locked.photo_file_name = stored_photo['file_name']
+            locked.photo_bucket = stored_photo['bucket']
+            locked.photo_path = stored_photo['path']
+            locked.photo_size_kb = stored_photo['file_size_kb']
+            locked.photo_taken_at = data.get('photo_taken_at')
+        if attendance_snapshot(locked) == before:
+            return locked, False
+        locked.updated_at = timezone.now()
+        _save_or_refuse_duplicate(locked, duplicate_message=DUPLICATE_ENTRY_PAST_DAY)
+        _revision(locked, ContractorAttendanceRevision.EDITED, before, by.profile,
+                  note=note, now=locked.updated_at)
+    return locked, True
+
+
+def create_late_attendance(project, day, data, by, note):
+    """Record an entry for a missed `day` on `project` by `by` (a User), with a CREATED
+    revision carrying `note` (ATT-B2 ruling 4).
+
+    `day` must fall 1-7 days before today (late_entry_window) — never today, which is the
+    normal add, and never the future. `data` holds contractor, unlisted_name, trade,
+    trade_remark, headcount, time_in, an optional time_out (after time in), stored_photo
+    (required; a gallery photo is expected) and photo_taken_at. `by` becomes the
+    recorder; "late" is derived from recorded_at (is_late_entry), no field marks it.
+
+    Raises AttendanceRefused for a blank note, a user who is not a corrector on the site,
+    a day outside the window, a value rule, or a slot already held that day
+    (DUPLICATE_ENTRY_PAST_DAY). Returns the entry.
+    """
+    note = (note or '').strip()
+    if not note:
+        raise AttendanceRefused(LATE_NOTE_REQUIRED)
+    contractor = data.get('contractor')
+    unlisted_name = '' if contractor is not None else normalise_unlisted_name(
+        data.get('unlisted_name'))
+    trade = data.get('trade')
+    trade_remark = ((data.get('trade_remark') or '').strip()
+                    if trade == ContractorAttendance.OTHER else '')
+    time_in, time_out = data.get('time_in'), data.get('time_out')
+    stored_photo = data.get('stored_photo')
+    if not stored_photo:
+        raise AttendanceRefused('Add a group photo of the crew.')
+    profile = by.profile
+    with transaction.atomic():
+        # Asked inside the transaction, as create_attendance does, so the window is read
+        # against the same "today" the row is written under.
+        if not user_can_add_late_attendance(by, project):
+            raise AttendanceRefused(NOT_ALLOWED_LATE)
+        earliest, latest = late_entry_window()
+        if day is None or not earliest <= day <= latest:
+            raise AttendanceRefused(LATE_DATE_OUT_OF_WINDOW)
+        _check_values(contractor, unlisted_name, trade, trade_remark, data.get('headcount'),
+                      time_in, time_out, day=day)
+        if live_duplicate_exists(project, day, contractor, unlisted_name, trade):
+            raise AttendanceRefused(DUPLICATE_ENTRY_PAST_DAY)
+        now = timezone.now()
+        entry = ContractorAttendance(
+            project=project, date=day, contractor=contractor,
+            unlisted_contractor_name=unlisted_name, trade=trade, trade_remark=trade_remark,
+            headcount=data.get('headcount'), time_in=time_in, time_out=time_out,
+            photo_file_name=stored_photo['file_name'], photo_bucket=stored_photo['bucket'],
+            photo_path=stored_photo['path'], photo_size_kb=stored_photo['file_size_kb'],
+            photo_taken_at=data.get('photo_taken_at'), recorded_by=profile, recorded_at=now,
+            updated_at=now,
+        )
+        _save_or_refuse_duplicate(entry, duplicate_message=DUPLICATE_ENTRY_PAST_DAY)
+        _revision(entry, ContractorAttendanceRevision.CREATED, None, profile, note=note,
+                  now=now)
+    return entry
 
 
 # ---------------------------------------------------------------------------

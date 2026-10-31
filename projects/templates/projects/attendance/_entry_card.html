@@ -1,0 +1,76 @@
+{% comment %}One attendance entry card (ATT-B1, moved here by ATT-B2 so Today and History share it).
+   Reads `c` (entry, can_change, can_see_photo, history; History cards add past, can_correct,
+   locked, is_late), `project` and `now_hhmm`. Alpine holds only whether the card is open and
+   whether its time-out form is shown. A past card shows "Left open" for a missing time out and
+   "Late entry" when it was recorded after its day — display only (ATT-B2 ruling 12).{% endcomment %}
+{% with e=c.entry %}
+<div class="card shadow-sm mb-2 {% if e.is_voided %}att-voided{% endif %}" x-data="{ open: false, timeOut: false }" id="att-entry-{{ e.pk }}">
+  <div class="card-body py-2 att-card" @click="open = !open">
+    <div class="att-main d-flex justify-content-between align-items-start gap-2">
+      <div>
+        <div class="fw-semibold">{{ e.contractor_label }}</div>
+        <div class="small text-muted">{{ e.trade_label }}</div>
+        {% if not e.contractor_id %}<span class="badge text-bg-warning mt-1">Not listed · waiting for SCM</span>{% endif %}
+        {% if c.is_late %}<span class="badge text-bg-secondary mt-1 att-late-chip">Late entry</span>{% endif %}
+      </div>
+      <div class="text-end">
+        <div class="fw-semibold">{{ e.headcount }} {{ e.headcount|pluralize:"person,people" }}</div>
+        <div class="small">{{ e.time_in|time:"H:i" }} → {% if e.time_out %}{{ e.time_out|time:"H:i" }}{% else %}—{% endif %}</div>
+        {% if not e.time_out and not e.is_voided %}
+          {% if c.past %}<span class="badge text-bg-warning att-left-open-chip">Left open</span>{% else %}<span class="badge text-bg-info">Open</span>{% endif %}
+        {% endif %}
+      </div>
+    </div>
+    {% if e.is_voided %}
+      <div class="small text-danger mt-1">Voided by {{ e.voided_by.user.get_full_name|default:e.voided_by.user.username }} at {% if c.past %}{{ e.voided_at|date:"d M, H:i" }}{% else %}{{ e.voided_at|date:"H:i" }}{% endif %}: {{ e.void_note }}</div>
+    {% endif %}
+  </div>
+
+  <div class="card-body border-top pt-2" x-show="open" x-cloak>
+    {% if c.can_see_photo %}
+      <template x-if="open">
+        <a href="{% url 'attendance_photo' project.project_id e.pk %}" target="_blank" rel="noopener">
+          <img src="{% url 'attendance_photo' project.project_id e.pk %}" alt="Group photo of the crew" class="att-photo mb-2">
+        </a>
+      </template>
+    {% endif %}
+    <div class="small text-muted">
+      Recorded by {{ e.recorded_by.user.get_full_name|default:e.recorded_by.user.username }} at {% if c.is_late %}{{ e.recorded_at|date:"d M, H:i" }}{% else %}{{ e.recorded_at|date:"H:i" }}{% endif %}{% if e.photo_taken_at %} · photo taken {{ e.photo_taken_at|date:"d M Y, H:i" }}{% endif %}
+    </div>
+
+    {% if c.history %}
+      <div class="small fw-semibold mt-2">History</div>
+      <ul class="small mb-2 ps-3 att-history">
+        {% for h in c.history %}
+          <li>{{ h.action }} by {{ h.by }} at {% if h.other_day %}{{ h.at|date:"d M, H:i" }}{% else %}{{ h.at|date:"H:i" }}{% endif %}{% if h.changes %}: {{ h.changes|join:"; " }}{% endif %}{% if h.note %} — “{{ h.note }}”{% endif %}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+    {% if c.can_change %}
+      <div class="d-flex flex-wrap gap-2 mt-2">
+        {% if not e.time_out %}
+          <button type="button" class="btn btn-sm btn-outline-secondary" @click="timeOut = !timeOut">Mark time out</button>
+        {% endif %}
+        <a href="{% url 'attendance_edit' project.project_id e.pk %}" class="btn btn-sm btn-outline-primary">Edit</a>
+      </div>
+      {% if not e.time_out %}
+        <form method="post" action="{% url 'attendance_time_out' project.project_id e.pk %}" class="d-flex gap-2 align-items-end mt-2" x-show="timeOut" x-cloak>
+          {% csrf_token %}
+          <div>
+            <label class="form-label small mb-0" for="to-{{ e.pk }}">Time out</label>
+            <input type="time" name="time_out" id="to-{{ e.pk }}" value="{{ now_hhmm }}" class="form-control form-control-sm" required>
+          </div>
+          <button type="submit" class="btn btn-sm btn-brand">Save</button>
+        </form>
+      {% endif %}
+    {% elif c.can_correct %}
+      <div class="d-flex flex-wrap gap-2 mt-2">
+        <a href="{% url 'attendance_correct' project.project_id e.pk %}" class="btn btn-sm btn-outline-primary att-correct-link">Correct</a>
+      </div>
+    {% elif c.locked %}
+      <div class="small text-muted mt-2 att-locked">Locked. Ask the PM to correct.</div>
+    {% endif %}
+  </div>
+</div>
+{% endwith %}

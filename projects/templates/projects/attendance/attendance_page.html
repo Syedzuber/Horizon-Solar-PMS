@@ -12,13 +12,16 @@
 {% endblock %}
 
 {% block content %}
-{% comment %}ATT-B1 — the site's attendance page, today only. attendance_views.attendance_today
-   builds `cards` (entry, can_change, can_see_photo, history) and the header counts from
-   live entries only. `own_only` is the ruling-F view: a Site Engineer moved off the site
-   today, shown just the live entries they recorded. Alpine holds only which card is open
-   and whether its time-out form is shown; every action is a plain form POST or link.
-   The photo <img> is inserted only when its card opens (x-if), so a link is signed per
-   open, never for the whole list.{% endcomment %}
+{% comment %}ATT-B1 / ATT-B2 — the site's attendance page: Today, then Summary and History.
+   attendance_views.attendance_today builds `cards` (entry, can_change, can_see_photo,
+   history) and the header counts from live entries only; each card is _entry_card.html.
+   `own_only` is the ruling-F view: a Site Engineer moved off the site today, shown just the
+   live entries they recorded and nothing else — `show_history` is False for them.
+   Summary (`summary`, `periods`, `period`) and History (`history`: days of cards) are
+   server-rendered; the period and "Show older" are GET links. Alpine holds only which card
+   or day is open, whether a time-out form is shown, and Show voided; every action is a
+   plain form POST or link. The photo <img> is inserted only when its card opens (x-if), so
+   a link is signed per open, never for the whole list.{% endcomment %}
 <div class="mb-3">
   {% if own_only %}
     <span class="text-muted small">{{ project.project_id }}</span>
@@ -49,68 +52,89 @@
   {% endif %}
 
   {% for c in cards %}
-  {% with e=c.entry %}
-  <div class="card shadow-sm mb-2 {% if e.is_voided %}att-voided{% endif %}" x-data="{ open: false, timeOut: false }" id="att-entry-{{ e.pk }}">
-    <div class="card-body py-2 att-card" @click="open = !open">
-      <div class="att-main d-flex justify-content-between align-items-start gap-2">
-        <div>
-          <div class="fw-semibold">{{ e.contractor_label }}</div>
-          <div class="small text-muted">{{ e.trade_label }}</div>
-          {% if not e.contractor_id %}<span class="badge text-bg-warning mt-1">Not listed · waiting for SCM</span>{% endif %}
-        </div>
-        <div class="text-end">
-          <div class="fw-semibold">{{ e.headcount }} {{ e.headcount|pluralize:"person,people" }}</div>
-          <div class="small">{{ e.time_in|time:"H:i" }} → {% if e.time_out %}{{ e.time_out|time:"H:i" }}{% else %}—{% endif %}</div>
-          {% if not e.time_out and not e.is_voided %}<span class="badge text-bg-info">Open</span>{% endif %}
-        </div>
-      </div>
-      {% if e.is_voided %}
-        <div class="small text-danger mt-1">Voided by {{ e.voided_by.user.get_full_name|default:e.voided_by.user.username }} at {{ e.voided_at|date:"H:i" }}: {{ e.void_note }}</div>
-      {% endif %}
-    </div>
+    {% include "projects/attendance/_entry_card.html" %}
+  {% endfor %}
 
-    <div class="card-body border-top pt-2" x-show="open" x-cloak>
-      {% if c.can_see_photo %}
-        <template x-if="open">
-          <a href="{% url 'attendance_photo' project.project_id e.pk %}" target="_blank" rel="noopener">
-            <img src="{% url 'attendance_photo' project.project_id e.pk %}" alt="Group photo of the crew" class="att-photo mb-2">
-          </a>
-        </template>
-      {% endif %}
-      <div class="small text-muted">
-        Recorded by {{ e.recorded_by.user.get_full_name|default:e.recorded_by.user.username }} at {{ e.recorded_at|date:"H:i" }}{% if e.photo_taken_at %} · photo taken {{ e.photo_taken_at|date:"d M Y, H:i" }}{% endif %}
-      </div>
-
-      {% if c.history %}
-        <div class="small fw-semibold mt-2">History</div>
-        <ul class="small mb-2 ps-3 att-history">
-          {% for h in c.history %}
-            <li>{{ h.action }} by {{ h.by }} at {{ h.at|date:"H:i" }}{% if h.changes %}: {{ h.changes|join:"; " }}{% endif %}{% if h.note %} — “{{ h.note }}”{% endif %}</li>
-          {% endfor %}
-        </ul>
-      {% endif %}
-
-      {% if c.can_change %}
-        <div class="d-flex flex-wrap gap-2 mt-2">
-          {% if not e.time_out %}
-            <button type="button" class="btn btn-sm btn-outline-secondary" @click="timeOut = !timeOut">Mark time out</button>
-          {% endif %}
-          <a href="{% url 'attendance_edit' project.project_id e.pk %}" class="btn btn-sm btn-outline-primary">Edit</a>
-        </div>
-        {% if not e.time_out %}
-          <form method="post" action="{% url 'attendance_time_out' project.project_id e.pk %}" class="d-flex gap-2 align-items-end mt-2" x-show="timeOut" x-cloak>
-            {% csrf_token %}
-            <div>
-              <label class="form-label small mb-0" for="to-{{ e.pk }}">Time out</label>
-              <input type="time" name="time_out" id="to-{{ e.pk }}" value="{{ now_hhmm }}" class="form-control form-control-sm" required>
-            </div>
-            <button type="submit" class="btn btn-sm btn-brand">Save</button>
-          </form>
-        {% endif %}
-      {% endif %}
+  {% if show_history %}
+  {# ── Summary (ATT-B2 ruling 10): no photos here; the period is a GET link, nothing fetched ── #}
+  <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-4 mb-2" id="att-summary">
+    <h6 class="text-uppercase text-muted small fw-semibold mb-0">Summary · {{ period_start|date:"d M" }}{% if period_end != period_start %} – {{ period_end|date:"d M" }}{% endif %}</h6>
+    <div class="btn-group btn-group-sm flex-wrap" role="group" aria-label="Summary period">
+      {% for value, label in periods %}
+        <a href="?period={{ value }}{% if older %}&amp;older=1{% endif %}#att-summary" class="btn {% if value == period %}btn-brand{% else %}btn-outline-secondary{% endif %}" id="att-period-{{ value }}">{{ label }}</a>
+      {% endfor %}
     </div>
   </div>
-  {% endwith %}
-  {% endfor %}
+  <div class="card shadow-sm">
+    {% if summary.rows %}
+      <div class="table-responsive">
+        <table class="table table-sm mb-0 align-middle" id="att-summary-table">
+          <thead><tr><th>Contractor</th><th>Trade</th><th class="text-end">Days</th><th class="text-end">Man-days</th></tr></thead>
+          <tbody>
+            {% for r in summary.rows %}
+              <tr>
+                <td class="text-nowrap">{{ r.name }}{% if not r.listed %} <span class="badge text-bg-warning">Not listed</span>{% endif %}</td>
+                <td class="text-nowrap">{{ r.trade }}</td>
+                <td class="text-end">{{ r.days }}</td>
+                <td class="text-end">{{ r.man_days }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+          <tfoot>
+            <tr class="fw-semibold"><td colspan="3">Billable man-days</td><td class="text-end" id="att-billable">{{ summary.billable }}</td></tr>
+            {% if summary.waiting %}
+              <tr class="text-warning-emphasis"><td colspan="3">Waiting for SCM mapping <span class="small fw-normal">(not billable)</span></td><td class="text-end" id="att-waiting">{{ summary.waiting }}</td></tr>
+            {% endif %}
+          </tfoot>
+        </table>
+      </div>
+    {% else %}
+      <div class="card-body text-muted small" id="att-summary-empty">No crews logged in this period.</div>
+    {% endif %}
+  </div>
+
+  {# ── History (ATT-B2 ruling 11): one block per past day, click to open; voided hidden behind a local toggle ── #}
+  <div x-data="{ showVoided: false }" id="att-history">
+    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-4 mb-2">
+      <h6 class="text-uppercase text-muted small fw-semibold mb-0">History · last {{ history_days }} days</h6>
+      <div class="d-flex flex-wrap gap-2 align-items-center">
+        <div class="form-check form-switch small mb-0">
+          <input class="form-check-input" type="checkbox" id="att-show-voided" x-model="showVoided">
+          <label class="form-check-label" for="att-show-voided">Show voided</label>
+        </div>
+        {% if can_add_late %}
+          <a href="{% url 'attendance_add_late' project.project_id %}" class="btn btn-sm btn-brand" id="att-add-late">+ Add late entry</a>
+        {% endif %}
+      </div>
+    </div>
+
+    {% for day in history %}
+      <div class="card shadow-sm mb-2" x-data="{ dayOpen: false }" id="att-day-{{ day.date|date:'Y-m-d' }}">
+        <div class="card-body py-2 att-card d-flex justify-content-between align-items-center gap-2" @click="dayOpen = !dayOpen">
+          <div class="fw-semibold">{{ day.date|date:"D, d M Y" }}</div>
+          <div class="small text-end">
+            {{ day.crews }} crew{{ day.crews|pluralize }} · {{ day.people }} {{ day.people|pluralize:"person,people" }}{% if day.left_open %} · <span class="text-warning-emphasis att-day-left-open">{{ day.left_open }} left open</span>{% endif %}
+          </div>
+        </div>
+        <div class="card-body border-top pt-2" x-show="dayOpen" x-cloak>
+          {% for c in day.cards %}
+            {% if c.entry.is_voided %}
+              <div x-show="showVoided" x-cloak>{% include "projects/attendance/_entry_card.html" %}</div>
+            {% else %}
+              {% include "projects/attendance/_entry_card.html" %}
+            {% endif %}
+          {% endfor %}
+          {% if day.voided and not day.crews %}<div class="small text-muted" x-show="!showVoided">Only voided entries on this day.</div>{% endif %}
+        </div>
+      </div>
+    {% empty %}
+      <div class="card shadow-sm"><div class="card-body text-muted small" id="att-history-empty">No crews logged in the last {{ history_days }} days.</div></div>
+    {% endfor %}
+
+    {% if not older %}
+      <div class="mt-2"><a href="?period={{ period }}&amp;older=1#att-history" class="small" id="att-show-older">Show older (up to 90 days)</a></div>
+    {% endif %}
+  </div>
+  {% endif %}
 </div>
 {% endblock %}

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{% if entry %}Edit attendance{% else %}Add attendance{% endif %} — {{ project.project_id }}{% endblock %}
+{% block title %}{% if mode == 'correct' %}Correct attendance{% elif mode == 'late' %}Late attendance entry{% elif entry %}Edit attendance{% else %}Add attendance{% endif %} — {{ project.project_id }}{% endblock %}
 
 {% block extra_head %}
 <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
@@ -12,8 +12,12 @@
 {% endblock %}
 
 {% block content %}
-{% comment %}ATT-B1 — one form for add and edit (attendance_views.attendance_add / attendance_edit).
-   Field order: contractor, trade, headcount, time in, time out (edit only), photo.
+{% comment %}ATT-B1 / ATT-B2 — one form for four modes (`mode`): add and edit (attendance_add /
+   attendance_edit, today), correct (attendance_correct: a past entry, date read-only, a
+   required reason, the edit history below) and late (attendance_add_late: a date picker
+   limited to the 7-day window, a required reason, no camera capture — a gallery photo is
+   expected). Field order: (late: date), contractor, trade, headcount, time in, time out
+   (not on add), photo, (correct / late: reason).
    The contractor list is rendered here from `vendors` (active contractor / both, plus an
    edited entry's own contractor); Alpine only filters the rows already on the page and
    shows the not-listed name / Other remark. Nothing is fetched. Date, project and
@@ -27,8 +31,12 @@
 <div class="card shadow-sm mb-4" style="max-width:720px;"
      x-data="{ q: '', pick: '{{ picked|escapejs }}', trade: '{{ trade_value|escapejs }}', count: {{ headcount_value }}, voiding: false }">
   <div class="card-header">
-    <h5 class="mb-0">{% if entry %}Edit entry{% else %}Add entry{% endif %}</h5>
-    <div class="text-muted small">{{ today|date:"D, d M Y" }}</div>
+    <h5 class="mb-0">{% if mode == 'correct' %}Correct entry{% elif mode == 'late' %}Add late entry{% elif entry %}Edit entry{% else %}Add entry{% endif %}</h5>
+    {% if mode == 'correct' %}
+      <div class="text-muted small" id="att-entry-date">{{ entry.date|date:"D, d M Y" }} · the date cannot be changed{% if is_late %} · <span class="badge text-bg-secondary">Late entry</span>{% endif %}</div>
+    {% elif mode != 'late' %}
+      <div class="text-muted small">{{ today|date:"D, d M Y" }}</div>
+    {% endif %}
   </div>
   <div class="card-body">
     {% if errors %}
@@ -42,6 +50,16 @@
 
     <form method="post" enctype="multipart/form-data" id="att-form">
       {% csrf_token %}
+
+      {% if mode == 'late' %}
+      {# ── Day (late entry only): the picker's limits are a convenience; the form and the writer check the window ── #}
+      <div class="mb-3">
+        <label class="form-label small fw-semibold" for="att-date">Day <span class="text-danger">*</span></label>
+        <input type="date" name="date" id="att-date" class="form-control form-control-sm" required
+               min="{{ late_min|date:'Y-m-d' }}" max="{{ late_max|date:'Y-m-d' }}" value="{{ date_value }}">
+        <div class="form-text">1 to 7 days before today. For today, use + Add entry.</div>
+      </div>
+      {% endif %}
 
       {# ── Contractor ── #}
       <div class="mb-3">
@@ -103,7 +121,7 @@
           <input type="time" name="time_in" id="att-time-in" class="form-control form-control-sm" required
                  value="{{ form.time_in.value|default:now_hhmm }}">
         </div>
-        {% if entry %}
+        {% if show_time_out %}
         <div class="col-6">
           <label class="form-label small fw-semibold" for="att-time-out">Time out</label>
           <input type="time" name="time_out" id="att-time-out" class="form-control form-control-sm"
@@ -114,16 +132,25 @@
 
       {# ── Photo ── #}
       <div class="mb-3">
-        <label class="form-label small fw-semibold" for="att-photo">Group photo {% if not entry %}<span class="text-danger">*</span>{% endif %}</label>
-        <input type="file" name="photo" id="att-photo" accept=".jpg,.jpeg,.png,image/jpeg,image/png" capture="environment"
-               class="form-control form-control-sm" data-qaqc-photo {% if not entry %}required{% endif %}>
+        <label class="form-label small fw-semibold" for="att-photo">Group photo {% if photo_required %}<span class="text-danger">*</span>{% endif %}</label>
+        <input type="file" name="photo" id="att-photo" accept=".jpg,.jpeg,.png,image/jpeg,image/png"{% if mode != 'late' %} capture="environment"{% endif %}
+               class="form-control form-control-sm" data-qaqc-photo {% if photo_required %}required{% endif %}>
         {% if entry %}<div class="form-text">Leave the photo empty to keep the current one.</div>{% endif %}
+        {% if mode == 'late' %}<div class="form-text">A photo from the gallery is fine.</div>{% endif %}
         <input type="hidden" name="photo_taken_at" value="">
         <div class="text-muted small qaqc-photo-status"></div>
       </div>
 
+      {% if mode == 'correct' or mode == 'late' %}
+      {# ── Reason (ATT-B2 ruling 2 / 4): required, stored on the revision ── #}
+      <div class="mb-3">
+        <label class="form-label small fw-semibold" for="att-reason">{% if mode == 'correct' %}Reason for correction{% else %}Why is this entry late?{% endif %} <span class="text-danger">*</span></label>
+        <textarea name="reason" id="att-reason" rows="2" maxlength="1000" class="form-control form-control-sm" required>{{ form.reason.value|default:'' }}</textarea>
+      </div>
+      {% endif %}
+
       <div class="d-flex gap-2">
-        <button type="submit" class="btn btn-brand" {% if not storage_ready and not entry %}disabled{% endif %}>Save</button>
+        <button type="submit" class="btn btn-brand" {% if not storage_ready and photo_required %}disabled{% endif %}>Save</button>
         <a href="{% url 'attendance_today' project.project_id %}" class="btn btn-outline-secondary">Cancel</a>
       </div>
     </form>
@@ -137,6 +164,16 @@
         <textarea name="void_note" id="att-void-note" rows="2" class="form-control form-control-sm mb-2" required></textarea>
         <button type="submit" class="btn btn-sm btn-danger">Confirm void</button>
       </form>
+    {% endif %}
+
+    {% if mode == 'correct' and history %}
+      <hr>
+      <div class="small fw-semibold">Edit history</div>
+      <ul class="small mb-0 ps-3 att-history" id="att-correct-history">
+        {% for h in history %}
+          <li>{{ h.action }} by {{ h.by }} at {% if h.other_day %}{{ h.at|date:"d M, H:i" }}{% else %}{{ h.at|date:"H:i" }}{% endif %}{% if h.changes %}: {{ h.changes|join:"; " }}{% endif %}{% if h.note %} — “{{ h.note }}”{% endif %}</li>
+        {% endfor %}
+      </ul>
     {% endif %}
   </div>
 </div>
