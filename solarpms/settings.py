@@ -190,6 +190,14 @@ HR_DIGEST_EMAIL    = config('HR_DIGEST_EMAIL',    default='REPLACE_WITH_ACTUAL_H
 # BD is handled by the open-work gating in send_eod_digest, not a hard exclusion.
 EOD_DIGEST_EXCLUDED_ROLES = ['CEO', 'Admin', 'System Admin']
 
+# Contractor attendance "not logged" alert (ATT-B4, send_attendance_alerts).
+ATTENDANCE_ALERT_SKIP_WEEKDAYS = [6]    # Python weekday numbers (Monday = 0); 6 = Sunday
+ATTENDANCE_ALERT_SITE_LIST_LIMIT = 15   # site codes named in one message, then "and N more"
+# The WhatsApp leg is sent by the command itself, outside notify(), so the event's Admin
+# switch cannot pause it; this does. Stays False until the Interakt template
+# 'contractor_attendance_missing' is approved and phone-tested.
+ATTENDANCE_ALERT_WHATSAPP_ENABLED = config('ATTENDANCE_ALERT_WHATSAPP_ENABLED', default=False, cast=bool)
+
 # SendGrid fallback — uncomment in notifications.py _send_email() if ZeptoMail stalls
 # SENDGRID_API_KEY = config('SENDGRID_API_KEY', default='')
 

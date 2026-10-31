@@ -103,7 +103,7 @@ class RegistryTests(TestCase):
             'approval_withdrawn', 'approval_withdrawn_work', 'cod_recorded', 'cod_withdrawn',
             'punch_point_raised_by_visit', 'punch_point_rectified',
             'punch_point_reverify_rejected', 'site_qaqc_assigned', 'site_qaqc_removed',
-            'qaqc_visit_submitted', 'pm_handover_incoming', 'pm_handover_outgoing'])
+            'qaqc_visit_submitted', 'pm_handover_incoming', 'pm_handover_outgoing', 'attendance_missing'])
         event = get_event(EVENT)
         self.assertEqual((event.tier, event.default_state, event.channels),
                          ('KNOW', 'active', ('email',)))

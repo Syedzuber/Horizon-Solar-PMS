@@ -866,7 +866,7 @@ class RegistryShapeTests(TestCase):
 
     def test_the_nineteen_events_are_registered_in_order_after_t3b(self):
         self.assertEqual(len(T3C_EVENTS), 19)
-        self.assertEqual(list(NOTIFICATION_EVENTS)[-len(T3C_EVENTS):], list(T3C_EVENTS))
+        self.assertEqual(list(NOTIFICATION_EVENTS)[-len(T3C_EVENTS) - 1:-1], list(T3C_EVENTS))  # ATT-B4's attendance_missing follows them
 
     def test_none_sends_whatsapp_or_says_it_does(self):
         """M8: email only, and no WhatsApp sent beside them."""

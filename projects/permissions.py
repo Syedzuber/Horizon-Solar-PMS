@@ -1553,6 +1553,21 @@ def project_managers(project):
     return managers
 
 
+def site_assigned_pm(project):
+    """
+    Return the site's assigned PM alone, or None when there is none or they are
+    deactivated (profile or login).
+
+    NOT project_managers(): the attendance alert (ATT-B4 ruling 4) is for the PM only, so
+    coordinators are left out on purpose. The caller select_related()s
+    'assigned_pm__user' so a list of sites costs no query per site.
+    """
+    pm = project.assigned_pm
+    if pm is None or not (pm.is_active and pm.user.is_active):
+        return None
+    return pm
+
+
 # ---------------------------------------------------------------------------
 # Site QA/QC engineer — closeout step 3 (CL-9, CL-A, CL-D)
 #

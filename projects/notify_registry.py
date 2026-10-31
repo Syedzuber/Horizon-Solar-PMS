@@ -1208,6 +1208,48 @@ NOTIFICATION_EVENTS = _build_registry([
         recipients_rule='The outgoing PM, once per handover (never once per site).',
         default_state='active',
     ),
+
+    # --- ATT-B4: contractor attendance not logged -------------------------------------
+    # Sent by send_attendance_alerts, not from a view. Starts PAUSED (ruling 5): Admin
+    # switches email on after a test send. Only 'email' is declared because the command
+    # sends the WhatsApp leg itself, gated by settings.ATTENDANCE_ALERT_WHATSAPP_ENABLED,
+    # as send_morning_task_report does; an Admin WhatsApp switch here would control
+    # nothing (SECONDARY_FINDINGS, ATT-B4).
+    NotificationEvent(
+        code='attendance_missing',
+        label='Contractor attendance not logged',
+        module='Attendance',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('date', 'The day checked, e.g. "31 Oct"', '31 Oct'),
+            Variable('cutoff', 'The time the check ran, e.g. "10:30 AM"', '10:30 AM'),
+            Variable('sites', 'The site codes, comma-separated: at most 15, then "and N more"',
+                     'MB0001, MB0002 and 3 more'),
+            Variable('site_lines', 'One line per site: its code and a link to its attendance '
+                     'page (at most 15, then "and N more")',
+                     'MB0001 – https://horizon-solar-pms-production.up.railway.app/projects/'
+                     'MB0001/attendance/\nMB0002 – https://horizon-solar-pms-production.up.'
+                     'railway.app/projects/MB0002/attendance/'),
+        ),
+        in_app_text=('By {{ cutoff }} today no contractor attendance has been logged on these '
+                     'sites with installation work in progress: {{ sites }}.'),
+        default_subject='Attendance not logged by {{ cutoff }} – {{ date }}',
+        default_body=(
+            'Hello {{ recipient_name }},\n\n'
+            'By {{ cutoff }} today no contractor attendance has been logged on these sites '
+            'with installation work in progress:\n\n'
+            '{{ site_lines }}\n\n'
+            'Please follow up with the site engineers and get the crews logged in Horizon PMS.'
+        ),
+        button_label='Open your dashboard',
+        recipients_rule=('Each site\'s assigned PM (coordinators are not included), one '
+                         'message listing all their sites; and every active SCM user, one '
+                         'message listing every site. Sent once a day by '
+                         'send_attendance_alerts. Its WhatsApp message is sent by that '
+                         'command and is not paused here.'),
+        default_state='paused',
+    ),
 ])
 
 
