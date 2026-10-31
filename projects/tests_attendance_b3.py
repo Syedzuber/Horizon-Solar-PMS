@@ -544,6 +544,17 @@ class PhotoFlagPageTests(B3Fixture):
         self.assertContains(self._page(self.pm), 'Photo time unknown')
         self.assertNotContains(self._page(self.se2), 'Photo time unknown')
 
+    def test_photo_time_shown_to_photo_audience_only(self):
+        """ATT-B3a ruling: "photo taken <time>" follows the photo's audience."""
+        self._flagged_today()
+        for profile in (self.pm, self.se, self.scm):
+            self.assertContains(self._page(profile), 'photo taken', msg_prefix=profile.role)
+        for profile in (self.se2, self.finance):
+            page = self._page(profile)
+            self.assertEqual(page.status_code, 200)
+            self.assertNotContains(page, 'photo taken', msg_prefix=profile.role)
+            self.assertNotContains(page, 'att-photo-time', msg_prefix=profile.role)
+
 
 # ---------------------------------------------------------------------------
 # Queue page and dashboard link

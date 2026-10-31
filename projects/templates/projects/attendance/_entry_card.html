@@ -40,9 +40,9 @@
         </a>
       </template>
     {% endif %}
-    {# TODO (ATT-B3 finding): "photo taken" below is shown to every viewer, outside the photo audience; gating it changes B1 behaviour, so left for a ruling. #}
+    {# ATT-B3a: the photo's time belongs to the photo audience, like the photo and its chips. #}
     <div class="small text-muted">
-      Recorded by {{ e.recorded_by.user.get_full_name|default:e.recorded_by.user.username }} at {% if c.is_late %}{{ e.recorded_at|date:"d M, H:i" }}{% else %}{{ e.recorded_at|date:"H:i" }}{% endif %}{% if e.photo_taken_at %} · photo taken {{ e.photo_taken_at|date:"d M Y, H:i" }}{% elif c.can_see_photo %} · <span class="att-photo-time-unknown">Photo time unknown</span>{% endif %}
+      Recorded by {{ e.recorded_by.user.get_full_name|default:e.recorded_by.user.username }} at {% if c.is_late %}{{ e.recorded_at|date:"d M, H:i" }}{% else %}{{ e.recorded_at|date:"H:i" }}{% endif %}{% if c.can_see_photo %}{% if e.photo_taken_at %} · <span class="att-photo-time">photo taken {{ e.photo_taken_at|date:"d M Y, H:i" }}</span>{% else %} · <span class="att-photo-time-unknown">Photo time unknown</span>{% endif %}{% endif %}
     </div>
 
     {% if c.history %}
