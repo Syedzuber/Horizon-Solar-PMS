@@ -35,6 +35,7 @@ AT_1318 = datetime(2026, 10, 31, 13, 18, 38, tzinfo=IST)   # the earlier, intend
 AT_1328 = datetime(2026, 10, 31, 13, 28, 41, 700000, tzinfo=IST)   # the event
 AT_1340 = datetime(2026, 10, 31, 13, 40, 0, tzinfo=IST)    # someone acts after it
 ALLOCATED_ON = date(2026, 10, 31)                           # gives the event's 2 Nov due date
+NOTE = "run by zuber on Praveen's confirmation"
 
 
 def _profile(username, role, is_design_head=False):
@@ -52,6 +53,7 @@ class RevertDesignAllocation31OctTests(TestCase):
 
     def setUp(self):
         self.head = _profile('head31', 'Design', is_design_head=True)
+        self.admin = _profile('admin31', 'Admin')
         self.anil = _profile('anil31', 'Design')
         self.sud = _profile('sud31', 'Design')
         self.program = Program.objects.create(
@@ -87,8 +89,10 @@ class RevertDesignAllocation31OctTests(TestCase):
             project=site, status=DESIGN_AWAITING_ALLOCATION,
             survey_file_bucket='b', survey_file_path=f'{code}/survey/x.pdf')
 
-    def _run(self, *args):
+    def _run(self, *args, note=NOTE):
         out = StringIO()
+        if note is not None:
+            args = (*args, '--on-behalf-note', note)
         call_command('revert_design_allocation_31oct', *args, stdout=out)
         return out.getvalue()
 
@@ -109,6 +113,8 @@ class RevertDesignAllocation31OctTests(TestCase):
         for code in ('S1', 'S2', 'S3'):
             self.assertIn(f'{code}: status {DESIGN_IN_DESIGN} -> {DESIGN_AWAITING_ALLOCATION}', out)
         self.assertNotIn('MB0003:', out)
+        self.assertIn(f'Remark on every transition row: '
+                      f'Revert erroneous bulk allocation 31-Oct - {NOTE}', out)
         self.assertIn('DRY RUN - 3 site(s) checked, nothing written.', out)
 
     def test_apply_restores_the_before_state_and_leaves_mb0003_alone(self):
@@ -127,7 +133,7 @@ class RevertDesignAllocation31OctTests(TestCase):
                 reason_code=cmd.REASON_CODE)
             self.assertEqual((st.from_status, st.to_status),
                              (DESIGN_IN_DESIGN, DESIGN_AWAITING_ALLOCATION))
-            self.assertEqual(st.remark, 'Revert erroneous bulk allocation 31-Oct')
+            self.assertEqual(st.remark, f'Revert erroneous bulk allocation 31-Oct - {NOTE}')
             self.assertEqual(st.actor_id, self.head.pk)
         self.assertEqual(ActivityLog.objects.filter(action_code=cmd.ACTION_CODE).count(), 3)
 
@@ -194,10 +200,41 @@ class RevertDesignAllocation31OctTests(TestCase):
         self.assertIn('MB0003 is protected', str(ctx.exception))
         self.assertEqual(self._snapshot(), before)
 
-    def test_apply_needs_a_design_head_actor(self):
+    def test_an_active_admin_may_apply_and_is_the_recorded_actor(self):
+        self._run('--apply', '--expect', '3', '--actor', 'admin31')
+        rows = StatusTransition.objects.filter(reason_code=cmd.REASON_CODE)
+        self.assertEqual(rows.count(), 3)
+        self.assertEqual(set(rows.values_list('actor_id', flat=True)), {self.admin.pk})
+        self.assertEqual(set(rows.values_list('remark', flat=True)),
+                         {f'Revert erroneous bulk allocation 31-Oct - {NOTE}'})
+
+    def test_apply_refuses_an_actor_who_is_neither_admin_nor_design_head(self):
+        before = self._snapshot()
         with self.assertRaises(CommandError) as ctx:
             self._run('--apply', '--expect', '3', '--actor', 'anil31')
-        self.assertIn('not an active Design Head', str(ctx.exception))
+        self.assertIn('not an active Admin or Design Head', str(ctx.exception))
+        self.assertEqual(self._snapshot(), before)
+
+    def test_apply_refuses_an_inactive_admin(self):
+        self.admin.is_active = False
+        self.admin.save()
+        with self.assertRaises(CommandError) as ctx:
+            self._run('--apply', '--expect', '3', '--actor', 'admin31')
+        self.assertIn('not an active Admin or Design Head', str(ctx.exception))
+
+    def test_a_dry_run_checks_the_actor_when_one_is_given(self):
+        with self.assertRaises(CommandError):
+            self._run('--dry-run', '--expect', '3', '--actor', 'anil31')
+        self.assertIn('DRY RUN', self._run('--dry-run', '--expect', '3', '--actor', 'admin31'))
+
+    def test_the_on_behalf_note_is_required_and_must_not_be_blank(self):
+        before = self._snapshot()
+        with self.assertRaises(CommandError):
+            self._run('--apply', '--expect', '3', '--actor', 'head31', note=None)
+        with self.assertRaises(CommandError) as ctx:
+            self._run('--apply', '--expect', '3', '--actor', 'head31', note='   ')
+        self.assertIn('--on-behalf-note must not be blank', str(ctx.exception))
+        self.assertEqual(self._snapshot(), before)
 
     def test_a_mode_is_required(self):
         with self.assertRaises(CommandError):

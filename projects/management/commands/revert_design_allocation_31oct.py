@@ -1,8 +1,11 @@
 """ONE-OFF, MPUVNL (program 2) ONLY, written 2026-10-31. Undo the bulk design allocation
 of 31 Oct 13:28:41 IST that handed 56 unassigned sites to Anil Gupta.
 
-    python manage.py revert_design_allocation_31oct --dry-run --expect 56
+    python manage.py revert_design_allocation_31oct --dry-run --expect 56 --actor <username>
+        --on-behalf-note "run by <who> on <whose> confirmation"
     python manage.py revert_design_allocation_31oct --apply   --expect 56 --actor <username>
+        --on-behalf-note "run by <who> on <whose> confirmation"
+    (one line each; wrapped here for width)
 
 WHAT HAPPENED
 -------------
@@ -18,9 +21,9 @@ WHAT THIS WRITES, PER SITE
 --------------------------
   * the status back to `awaiting_allocation` and the three allocation stamps back to NULL,
     through apply_design_status() — so the StatusTransition row (reason
-    `revert_erroneous_allocation`, remark REMARK), the ActivityLog row and the Design
-    mirror (In Progress -> Not Started) come from the one chokepoint, exactly as the
-    allocation's own rows did
+    `revert_erroneous_allocation`, remark "REMARK - <on-behalf note>"), the ActivityLog
+    row and the Design mirror (In Progress -> Not Started) come from the one chokepoint,
+    exactly as the allocation's own rows did
   * DELETES the auto-approved commitment the event created. Retiring it instead would
     leave a fabricated agreement in the history, inflating the "N revision(s)" count and
     the design analytics when the site is properly allocated later (ruled 31 Oct).
@@ -45,7 +48,16 @@ sites need a person to look at them, not this command. All problems are listed t
 so one dry run shows everything that needs attention.
 
 --dry-run IS READ-ONLY. It runs every check and prints the per-site diff, and writes
-nothing — not even a rolled-back write, so it holds no locks on production.
+nothing — not even a rolled-back write, so it holds no locks on production. It takes the
+same --actor and --on-behalf-note as --apply and checks them, and prints the remark the
+apply would write, so the dry run proves the exact apply command line.
+
+WHO MAY RUN IT
+--------------
+An active Admin or an active Design Head / deputy (ruled 31 Oct). The person at the
+terminal is usually an Admin acting on the Head's confirmation, so --on-behalf-note is
+required and is appended to every transition remark: the row names who ran it, and the
+note says whose decision it was.
 
 REVERSING IT BY HAND
 --------------------
@@ -131,7 +143,11 @@ class Command(BaseCommand):
                             help='How many sites you approved reverting. Must equal the '
                                  'number this command would revert.')
         parser.add_argument('--actor', metavar='USERNAME',
-                            help='The Design Head the rows name. Required with --apply.')
+                            help='The active Admin or Design Head the rows name. Required '
+                                 'with --apply; checked on --dry-run when given.')
+        parser.add_argument('--on-behalf-note', required=True, metavar='TEXT',
+                            help='Whose decision this is, appended to every transition '
+                                 'remark, e.g. "run by zuber on Praveen\'s confirmation".')
 
     def handle(self, *args, **options):
         if options['expect'] != len(SITES):
@@ -146,8 +162,13 @@ class Command(BaseCommand):
                 f'{", ".join(sorted(protected))} is protected and must never be reverted. '
                 f'Nothing was written.')
 
+        note = options['on_behalf_note'].strip()
+        if not note:
+            raise CommandError('--on-behalf-note must not be blank. Nothing was written.')
+        remark = f'{REMARK} - {note}'
+
         actor = None
-        if options['apply']:
+        if options['apply'] or options.get('actor'):
             actor = self._resolve_actor(options.get('actor'))
 
         with transaction.atomic():
@@ -161,29 +182,33 @@ class Command(BaseCommand):
             for plan in plans:
                 self._print_diff(plan)
 
+            self.stdout.write(f'Remark on every transition row: {remark}')
             if options['dry_run']:
                 self.stdout.write(self.style.WARNING(
                     f'DRY RUN - {len(plans)} site(s) checked, nothing written.'))
                 return
 
             for plan in plans:
-                self._revert(plan, actor)
+                self._revert(plan, actor, remark)
 
         self.stdout.write(self.style.SUCCESS(f'Reverted {len(plans)} site(s).'))
 
     def _resolve_actor(self, username):
-        # Only the Design Head (or his deputy) may run the write: allocation is a
-        # Head-only action, and every row this writes names the actor as the person who
-        # undid a Head decision. Anyone else would be recorded doing what they cannot do
-        # from the screen.
+        # An active Admin or Design Head / deputy only. Allocation is a Head action, so
+        # the Head may undo it; Admin may because it is Admin who runs one-offs on
+        # production, on the Head's confirmation, and --on-behalf-note puts that
+        # confirmation on every row. Anyone else would be recorded undoing a decision
+        # they have no authority over. 'System Admin' is not 'Admin' here, the same
+        # line active_admins() draws (ruling T-1).
         if not username:
             raise CommandError('--actor is required with --apply.')
         try:
             user = User.objects.select_related('profile').get(username=username)
         except User.DoesNotExist:
             raise CommandError(f'No user named {username!r}.')
-        if not user.profile.is_active or not user_has_design_head_authority(user):
-            raise CommandError(f'{username} is not an active Design Head or deputy.')
+        if not user.profile.is_active or not (
+                user.profile.role == 'Admin' or user_has_design_head_authority(user)):
+            raise CommandError(f'{username} is not an active Admin or Design Head.')
         return user.profile
 
     def _check(self, lock):
@@ -315,7 +340,7 @@ class Command(BaseCommand):
             f'Project.assigned_design {_name(a.project.assigned_design)} -> none | '
             f'mirror {mirror_diff} | QC {qc} (unchanged)')
 
-    def _revert(self, plan, actor):
+    def _revert(self, plan, actor, remark):
         a = plan['assignment']
         code = plan['code']
         designer = _name(a.assigned_to)
@@ -324,7 +349,7 @@ class Command(BaseCommand):
             f'{REMARK}: designer {designer} removed, back to awaiting allocation',
             ACTION_CODE,
             extra_fields={'assigned_to': None, 'assigned_by': None, 'assigned_at': None},
-            reason_code=REASON_CODE, remark=REMARK)
+            reason_code=REASON_CODE, remark=remark)
 
         # Race-condition: filtered on the assignment as well as the pk, and the row count
         # checked, so a commitment that changed hands between check and write aborts the
