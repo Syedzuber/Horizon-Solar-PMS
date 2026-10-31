@@ -10,9 +10,13 @@ Contractor attendance screens — ATT-B1 (the same day) and ATT-B2 (after the da
     attendance_photo     one entry's group photo, a link signed at the click
     attendance_correct   ATT-B2: correct a past day's entry with a reason, with Void
     attendance_add_late  ATT-B2: an entry for a day 1-7 days back, with a reason
+    attendance_to_map    ATT-B3: SCM's "Contractors to map" queue, Map all per group
+    attendance_map       ATT-B3: POST, map one not-listed entry from its card
+    attendance_remap     ATT-B3: POST, change a mapping from its card, with a note
 
-SCM mapping of not-listed names, the photo-time flag, open-entry reporting and
-notifications are ATT-B3 and are not here.
+ATT-B3 also adds the photo-time chips on the cards (attendance.photo_time_flags) and the
+CONFIRMED answer for a correction that changes nothing. Open-entry reporting and
+notifications are later sessions (ATT-B4, ATT-C) and are not here.
 
 Every write goes through projects/attendance.py. Photos are uploaded before the writer
 runs, with qaqc_views.upload_visit_photo (the private bills bucket, the QA/QC checks);
@@ -29,9 +33,10 @@ when an entry can no longer be changed (another day, voided).
 from datetime import datetime, timedelta
 from itertools import groupby
 from operator import attrgetter
+from urllib.parse import urlencode
 
 from django.contrib import messages
-from django.db.models import Count, Min, Prefetch, Q, Sum
+from django.db.models import Count, Max, Min, Prefetch, Q, Sum
 from django.db.models.functions import Lower
 from django.http import Http404, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
@@ -43,16 +48,21 @@ from .attendance import (
     ATTENDANCE_PHOTO_KIND, ATTENDANCE_STORAGE_OFF, DUPLICATE_ENTRY, DUPLICATE_ENTRY_PAST_DAY,
     NOT_CHANGEABLE, NOT_CORRECTABLE, AttendanceRefused, correct_attendance, create_attendance,
     create_late_attendance, discard_unrecorded_attendance_photo, is_late_entry,
-    late_entry_window, live_duplicate_exists, normalise_unlisted_name, set_time_out,
+    late_entry_window, live_duplicate_exists, map_attendance, map_attendance_group,
+    normalise_unlisted_name, photo_time_flags, remap_attendance, set_time_out,
     update_attendance, void_attendance,
 )
 from .bill_storage import bill_pdf_url, bills_bucket
 from .decorators import get_user_dashboard, login_required
-from .forms_attendance import UNLISTED, AttendanceForm, CorrectionForm, LateAttendanceForm
+from .forms_attendance import (
+    UNLISTED, AttendanceForm, CorrectionForm, LateAttendanceForm, MapForm, MapGroupForm,
+    RemapForm, contractor_choices,
+)
 from .models import ContractorAttendance, ContractorAttendanceRevision
 from .permissions import (
-    attendance_entry_correctable, attendance_photo_entry_ids, user_can_add_late_attendance,
-    user_can_change_attendance_today, user_can_correct_attendance, user_can_log_attendance,
+    attendance_entry_correctable, attendance_entry_mappable, attendance_entry_remappable,
+    attendance_photo_entry_ids, user_can_add_late_attendance, user_can_change_attendance_today,
+    user_can_correct_attendance, user_can_log_attendance, user_can_map_attendance,
     user_can_view_attendance_history, user_can_view_attendance_photo, user_can_view_project,
     user_is_attendance_corrector, user_is_todays_attendance_recorder,
 )
@@ -149,13 +159,15 @@ def _entry_or_404(project, entry_pk):
 
 
 def _history(entry):
-    """The entry's revisions as display rows, oldest first: who, when, what. An edit
-    names each field that changed, before → after; a photo change says so without the
-    path. Reads the prefetched revisions, so it costs no query."""
+    """The entry's revisions as display rows, oldest first: who, when, what. An edit or a
+    mapping (ATT-B3) names each field that changed, before → after; a photo change says so
+    without the path; a confirmation has no changes, only its note. Reads the prefetched
+    revisions, so it costs no query."""
     rows = []
     for rev in entry.revisions.all():
         changes = []
-        if rev.action == ContractorAttendanceRevision.EDITED and rev.before:
+        if rev.action in (ContractorAttendanceRevision.EDITED,
+                          ContractorAttendanceRevision.MAPPED) and rev.before:
             for key, label in CHANGE_LABELS:
                 old, new = rev.before.get(key), rev.after.get(key)
                 if old == new:
@@ -246,9 +258,10 @@ def attendance_history(user, project, today, span_days):
     Bounded by the date range, never the whole table.
 
     Who may correct is asked once for the site (user_is_attendance_corrector) and paired
-    per card with the entry's own state; photo rights come from the bulk helper. Every
-    entry is handed the page's one `project`, so the managers are looked up once — a
-    month of history costs a fixed handful of queries, not a few per card.
+    per card with the entry's own state; photo rights come from the bulk helper; who may
+    map (role only) and who could log on the site (for the Locked line) are asked once
+    too. Every entry is handed the page's one `project`, so the managers are looked up
+    once — a month of history costs a fixed handful of queries, not a few per card.
     """
     entries = list(ContractorAttendance.objects
                    .filter(project=project, date__gte=today - timedelta(days=span_days),
@@ -260,18 +273,27 @@ def attendance_history(user, project, today, span_days):
         entry.project = project
     corrector = user_is_attendance_corrector(user, project)
     photo_ids = attendance_photo_entry_ids(user, project, entries)
+    mapper = user_can_map_attendance(user)
+    # The "Locked. Ask the PM to correct." line is for the people who log crews here (Site
+    # Engineers) and might expect to change a past day; Finance, the CEO and other readers
+    # never could, so the line would only puzzle them (ATT-B3 ruling 14).
+    logger = user_can_log_attendance(user, project)
     days = []
     for day, group in groupby(entries, key=attrgetter('date')):
         cards = []
         for entry in group:
             can_correct = corrector and attendance_entry_correctable(entry)
+            can_see_photo = entry.pk in photo_ids
             cards.append({
                 'entry': entry,
                 'past': True,
                 'can_change': False,  # a past day is never in the same-day flow
                 'can_correct': can_correct,
-                'locked': not can_correct and not entry.is_voided,
-                'can_see_photo': entry.pk in photo_ids,
+                'locked': logger and not can_correct and not entry.is_voided,
+                'can_see_photo': can_see_photo,
+                'photo_flags': photo_time_flags(entry) if can_see_photo else [],
+                'can_map': mapper and attendance_entry_mappable(entry),
+                'can_remap': mapper and attendance_entry_remappable(entry),
                 'is_late': is_late_entry(entry),
                 'history': _history(entry),
             })
@@ -323,14 +345,22 @@ def attendance_today(request, project_id):
     if scope == 'own':
         entries_qs = entries_qs.filter(recorded_by=profile, is_voided=False)
 
+    # SCM / Admin map not-listed entries from their cards (ATT-B3 ruling 6). Role only, so
+    # asked once; the picker's vendor list is read only for a mapper.
+    mapper = user_can_map_attendance(request.user)
     cards = []
     for entry in entries_qs:
+        can_see_photo = user_can_view_attendance_photo(request.user, entry)
         cards.append({
             'entry': entry,
             # Per entry, because the recorder term differs card by card; a day has a
             # handful of crews, so the helper's queries stay small.
             'can_change': user_can_change_attendance_today(request.user, entry),
-            'can_see_photo': user_can_view_attendance_photo(request.user, entry),
+            'can_see_photo': can_see_photo,
+            # The chip would reveal the photo's time, so only the photo's audience gets it.
+            'photo_flags': photo_time_flags(entry) if can_see_photo else [],
+            'can_map': mapper and attendance_entry_mappable(entry),
+            'can_remap': mapper and attendance_entry_remappable(entry),
             'history': _history(entry),
         })
     live = [c['entry'] for c in cards if not c['entry'].is_voided]
@@ -345,6 +375,7 @@ def attendance_today(request, project_id):
         'own_only': scope == 'own',
         'now_hhmm': _now_hhmm(),
         'show_history': False,
+        'map_vendors': contractor_choices() if mapper else [],
     }
     # Summary and History: every viewer of the site, never the ruling-F recorder, whose
     # GET parameters are then never read (ruling 13).
@@ -718,7 +749,8 @@ def attendance_correct(request, project_id, entry_pk):
         messages.success(request, f"Entry corrected: {entry.contractor_label} — "
                                   f"{entry.trade_label}, {entry.date:%d %b}.")
     else:
-        messages.info(request, 'Nothing changed.')
+        # The writer recorded a CONFIRMED revision with the reason (ATT-B3 ruling 10).
+        messages.success(request, 'Entry confirmed — no changes, reason recorded.')
     return redirect('attendance_today', project_id=project.project_id)
 
 
@@ -780,3 +812,198 @@ def attendance_add_late(request, project_id):
                               f"{entry.headcount} "
                               f"{'person' if entry.headcount == 1 else 'people'}.")
     return redirect('attendance_today', project_id=project.project_id)
+
+
+# ---------------------------------------------------------------------------
+# SCM mapping — ATT-B3
+# ---------------------------------------------------------------------------
+
+def _unmapped_entries():
+    """Every entry waiting for SCM mapping: live, no contractor, on a site that is not
+    soft-deleted (edge case 11), with the group key the queue and the bulk writer share —
+    the typed name lower-cased, exactly the unique index's LOWER(...) on a name the writers
+    already stripped and whitespace-collapsed, so "Raju civil" and "RAJU  Civil" are one
+    crew (edge case 7)."""
+    return (ContractorAttendance.objects
+            .filter(is_voided=False, contractor__isnull=True, project__is_deleted=False)
+            .annotate(name_key=Lower('unlisted_contractor_name')))
+
+
+def unmapped_queue_queryset():
+    """The queue's ONE grouped query: a row per site + typed name + trade, with entries,
+    first and last date, man-days and one spelling of the name (Min). Split by trade
+    because a list of trades needs a Postgres-only aggregate and the tests run on SQLite;
+    unmapped_queue_groups() folds the trades back into one group per site + name."""
+    return (_unmapped_entries()
+            .values('project_id', 'project__project_id', 'name_key', 'trade')
+            .annotate(entries=Count('pk'), first_date=Min('date'), last_date=Max('date'),
+                      man_days=Sum('headcount'), display=Min('unlisted_contractor_name'))
+            .order_by('project__project_id', 'name_key', 'trade'))
+
+
+def unmapped_queue_groups():
+    """The "Contractors to map" groups, oldest first (by first date, then site and name):
+    site code, typed name (one spelling), trades, entries, first and last date, man-days.
+    One query (unmapped_queue_queryset); the fold is in Python."""
+    groups = {}
+    for row in unmapped_queue_queryset():
+        key = (row['project_id'], row['name_key'])
+        group = groups.get(key)
+        if group is None:
+            group = groups[key] = {
+                'site': row['project__project_id'], 'name_key': row['name_key'],
+                'name': row['display'], 'trades': [], 'entries': 0, 'man_days': 0,
+                'first': row['first_date'], 'last': row['last_date'],
+            }
+        group['trades'].append(TRADE_LABELS.get(row['trade'], row['trade']))
+        group['entries'] += row['entries']
+        group['man_days'] += row['man_days'] or 0
+        group['first'] = min(group['first'], row['first_date'])
+        group['last'] = max(group['last'], row['last_date'])
+        group['name'] = min(group['name'], row['display'])
+    return sorted(groups.values(), key=lambda g: (g['first'], g['site'], g['name_key']))
+
+
+def attendance_unmapped_group_count():
+    """How many site + typed-name groups wait for mapping — the SCM dashboard link's
+    count (ATT-B3 ruling 9). order_by() clears the model's default ordering, which would
+    otherwise join the DISTINCT and count entries instead of groups."""
+    return _unmapped_entries().values('project_id', 'name_key').order_by().distinct().count()
+
+
+def _first_form_error(form):
+    errors = _form_errors(form)
+    return errors[0] if errors else 'Check the form and try again.'
+
+
+def _skipped_line(entry, reason):
+    """One skipped entry of a bulk mapping, by date, trade and reason (ATT-B3 ruling 5)."""
+    return f"Not mapped — {entry.date.day} {entry.date:%b} · {entry.trade_label}: {reason}"
+
+
+@login_required
+def attendance_to_map(request):
+    """
+    ATT-B3: "Contractors to map" — every live "Contractor not listed" entry on a site that
+    is not soft-deleted, grouped by site + typed name (case and spacing ignored), oldest
+    first, with a searchable contractor picker and Map all per group. ?site=<site code>
+    narrows the list. POST maps one group (map_attendance_group: one transaction per
+    entry; a collision skips that entry and says why) and returns here.
+
+    Access: user_can_map_attendance — SCM and Admin, on every site. Everyone else 403.
+    """
+    # Only SCM / Admin map (ruling 1): the PM corrects through ATT-B2, other roles read.
+    if not user_can_map_attendance(request.user):
+        return HttpResponseForbidden()
+    site = (request.GET.get('site') or '').strip()
+
+    if request.method == 'POST':
+        form = MapGroupForm(request.POST)
+        back = reverse('attendance_to_map')
+        if site:
+            back += '?' + urlencode({'site': site})
+        if not form.is_valid():
+            messages.error(request, _first_form_error(form))
+            return redirect(back)
+        data = form.cleaned_data
+        project = _active_project(data['site'])
+        try:
+            mapped, skipped = map_attendance_group(project, data['name_key'],
+                                                   data['contractor'], request.user)
+        except AttendanceRefused as exc:
+            messages.error(request, str(exc))
+            return redirect(back)
+        if mapped:
+            messages.success(request, f"Mapped {len(mapped)} "
+                                      f"{'entry' if len(mapped) == 1 else 'entries'} on "
+                                      f"{project.project_id} to {data['contractor'].name}.")
+        for entry, reason in skipped:
+            messages.warning(request, _skipped_line(entry, reason))
+        if not mapped and not skipped:
+            messages.info(request, 'Nothing left to map in that group — it was already mapped.')
+        return redirect(back)
+
+    groups = unmapped_queue_groups()
+    sites = sorted({g['site'] for g in groups})
+    if site:
+        groups = [g for g in groups if g['site'] == site]
+    return render(request, 'projects/attendance/attendance_to_map.html', {
+        'groups': groups,
+        'sites': sites,
+        'site': site,
+        'vendors': contractor_choices(),
+    })
+
+
+def _card_url(project, entry):
+    return reverse('attendance_today', args=[project.project_id]) + f'#att-entry-{entry.pk}'
+
+
+@login_required
+@require_POST
+def attendance_map(request, project_id, entry_pk):
+    """
+    ATT-B3: map one "Contractor not listed" entry to a contractor, from its card on the
+    site's attendance page (ruling 6) — the same writer as the queue. POST only; back to
+    the attendance page with a message either way.
+
+    Access: a viewer of the site (both mapper roles see every site) who is a mapper —
+    SCM or Admin (user_can_map_attendance). Anyone else who can see the site gets 403;
+    the writer re-asks under the row lock.
+    """
+    project = _active_project(project_id)
+    entry = _entry_or_404(project, entry_pk)
+    # Visibility first, so a site the user cannot see stays indistinguishable from none.
+    if not user_can_view_project(request.user, project):
+        return refuse_site_view_404(request, project)
+    # Only SCM / Admin map (ruling 1); the PM, Site Engineers, Finance and the CEO do not.
+    if not user_can_map_attendance(request.user):
+        return HttpResponseForbidden()
+    form = MapForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, _first_form_error(form))
+        return redirect(_card_url(project, entry))
+    typed = entry.unlisted_contractor_name
+    try:
+        entry = map_attendance(entry, form.cleaned_data['contractor'], request.user)
+    except AttendanceRefused as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(request, f"Mapped ‘{typed}’ to {entry.contractor.name} — "
+                                  f"{entry.trade_label}, {entry.date:%d %b}.")
+    return redirect(_card_url(project, entry))
+
+
+@login_required
+@require_POST
+def attendance_remap(request, project_id, entry_pk):
+    """
+    ATT-B3: change the contractor a not-listed entry was mapped to, with a required note
+    (ruling 3). There is no un-map: a wrong mapping is fixed by mapping again (ruling 4).
+    POST only, from the entry's card; back to the attendance page with a message.
+
+    Access: as attendance_map — a viewer of the site who is SCM or Admin. Only an entry
+    that was logged as a typed name and is mapped can be changed
+    (attendance_entry_remappable, asked by the writer under the row lock).
+    """
+    project = _active_project(project_id)
+    entry = _entry_or_404(project, entry_pk)
+    # Visibility first, so a site the user cannot see stays indistinguishable from none.
+    if not user_can_view_project(request.user, project):
+        return refuse_site_view_404(request, project)
+    # Only SCM / Admin change a mapping (ruling 3); everyone else is refused.
+    if not user_can_map_attendance(request.user):
+        return HttpResponseForbidden()
+    form = RemapForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, _first_form_error(form))
+        return redirect(_card_url(project, entry))
+    try:
+        entry = remap_attendance(entry, form.cleaned_data['contractor'], request.user,
+                                 form.cleaned_data['note'])
+    except AttendanceRefused as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(request, f"Mapping changed to {entry.contractor.name} — "
+                                  f"{entry.trade_label}, {entry.date:%d %b}.")
+    return redirect(_card_url(project, entry))

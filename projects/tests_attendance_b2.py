@@ -224,11 +224,12 @@ class CorrectWriterTests(B2Fixture):
         self.assertEqual(entry.headcount, 7)
         self.assertEqual(self._actions(entry), ['CREATED'])
 
-    def test_nothing_changed_writes_nothing(self):
+    def test_nothing_changed_writes_a_confirmation_only(self):
+        """ATT-B3 ruling 10: a no-change correction is now a CONFIRMED revision."""
         entry = self._past_entry(2)
         entry, changed = correct_attendance(entry, self._data(entry), self.pm.user, 'Checked')
         self.assertFalse(changed)
-        self.assertEqual(self._actions(entry), ['CREATED'])
+        self.assertEqual(self._actions(entry), ['CREATED', 'CONFIRMED'])
 
     def test_site_engineer_is_refused(self):
         """Edge case 3 (the writer, whatever the view did)."""

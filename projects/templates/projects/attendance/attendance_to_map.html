@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Contractors to map{% endblock %}
+
+{% block extra_head %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<style>
+  [x-cloak] { display: none !important; }
+  .att-picker { max-height: 220px; overflow-y: auto; }
+</style>
+{% endblock %}
+
+{% block content %}
+{% comment %}ATT-B3 — SCM's "Contractors to map" queue (attendance_views.attendance_to_map).
+   `groups`: one per site + typed name (case and spacing ignored, as the unique index compares
+   it), oldest first — site, one spelling of the name, trades, entries, first/last date,
+   man-days. Each group posts its own form: the site code and lower-cased name as drawn here,
+   plus the picked contractor; the writer re-reads the group's entries and maps each in its own
+   transaction, so a collision skips one entry, never the group. `sites` feeds the ?site= filter
+   (a GET form). Alpine only filters each picker's rows; nothing is fetched.{% endcomment %}
+<div class="mb-3">
+  <a href="{% url 'dashboard_scm' %}" class="text-decoration-none text-muted">&larr; SCM dashboard</a>
+</div>
+
+<div style="max-width:720px;">
+  <div class="d-flex flex-wrap align-items-start justify-content-between gap-2 mb-3">
+    <div>
+      <h5 class="mb-0">Contractors to map</h5>
+      <div class="text-muted small">Crews logged as “Contractor not listed”. Map each name to a contractor so its man-days count for billing.</div>
+    </div>
+    <a href="{% url 'vendor_add' %}" class="btn btn-sm btn-outline-secondary" target="_blank" rel="noopener" id="att-vendor-add">Contractor not in the list? Add vendor</a>
+  </div>
+
+  {% if sites %}
+    <form method="get" class="d-flex flex-wrap gap-2 align-items-end mb-3" id="att-site-filter">
+      <div>
+        <label class="form-label small mb-0" for="att-site">Site</label>
+        <select name="site" id="att-site" class="form-select form-select-sm" x-data @change="$el.form.submit()">
+          <option value="">All sites</option>
+          {% for s in sites %}<option value="{{ s }}"{% if s == site %} selected{% endif %}>{{ s }}</option>{% endfor %}
+        </select>
+      </div>
+      <noscript><button type="submit" class="btn btn-sm btn-outline-secondary">Filter</button></noscript>
+    </form>
+  {% endif %}
+
+  {% for g in groups %}
+    <div class="card shadow-sm mb-3 att-map-group" x-data="{ open: false }">
+      <div class="card-body py-2">
+        <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+          <div class="text-break">
+            <div class="small text-muted">{{ g.site }}</div>
+            <div class="fw-semibold">‘{{ g.name }}’</div>
+            <div class="small text-muted">{{ g.trades|join:", " }}</div>
+          </div>
+          <div class="text-end small">
+            <div class="fw-semibold">{{ g.entries }} entr{{ g.entries|pluralize:"y,ies" }} · {{ g.man_days }} man-day{{ g.man_days|pluralize }}</div>
+            <div>{% if g.first == g.last %}{{ g.first|date:"d M" }}{% else %}{{ g.first|date:"d M" }} – {{ g.last|date:"d M" }}{% endif %}</div>
+          </div>
+        </div>
+        <button type="button" class="btn btn-sm btn-outline-primary mt-2" @click="open = !open">Map to contractor</button>
+        <form method="post" class="mt-2" x-show="open" x-cloak>
+          {% csrf_token %}
+          <input type="hidden" name="site" value="{{ g.site }}">
+          <input type="hidden" name="name_key" value="{{ g.name_key }}">
+          {% include "projects/attendance/_map_picker.html" %}
+          <button type="submit" class="btn btn-sm btn-brand mt-2">Map all</button>
+        </form>
+      </div>
+    </div>
+  {% empty %}
+    <div class="card shadow-sm"><div class="card-body text-muted small" id="att-map-empty">{% if site %}Nothing to map on {{ site }}.{% else %}Nothing to map. Every logged crew names a listed contractor.{% endif %}</div></div>
+  {% endfor %}
+</div>
+{% endblock %}

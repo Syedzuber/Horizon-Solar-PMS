@@ -278,6 +278,11 @@ urlpatterns = [
     # goes through attendance_void above) and add a late entry 1-7 days back, with a reason.
     path('projects/<str:project_id>/attendance/<int:entry_pk>/correct/', attendance_views.attendance_correct, name='attendance_correct'),
     path('projects/<str:project_id>/attendance/late/', attendance_views.attendance_add_late, name='attendance_add_late'),
+    # ATT-B3 — SCM / Admin map "Contractor not listed" entries: the queue (Map all per
+    # site + typed name), and map / change mapping from an entry's card. POST-only for the two.
+    path('scm/attendance/to-map/', attendance_views.attendance_to_map, name='attendance_to_map'),
+    path('projects/<str:project_id>/attendance/<int:entry_pk>/map/', attendance_views.attendance_map, name='attendance_map'),
+    path('projects/<str:project_id>/attendance/<int:entry_pk>/remap/', attendance_views.attendance_remap, name='attendance_remap'),
     # site_drawing_open (DR-2) — every viewer of an OPEX site; one released drawing PDF as a redirect to a link signed at the click
     path('site-drawings/<int:pk>/open/', site_drawings_views.site_drawing_open, name='site_drawing_open'),
     path('projects/<str:project_id>/tasks/<int:task_id>/assign-design/', views.task_assign_design_head, name='task_assign_design_head'),  # Design Head only (is_design_head flag)

@@ -2,7 +2,11 @@
    Reads `c` (entry, can_change, can_see_photo, history; History cards add past, can_correct,
    locked, is_late), `project` and `now_hhmm`. Alpine holds only whether the card is open and
    whether its time-out form is shown. A past card shows "Left open" for a missing time out and
-   "Late entry" when it was recorded after its day — display only (ATT-B2 ruling 12).{% endcomment %}
+   "Late entry" when it was recorded after its day — display only (ATT-B2 ruling 12).
+   ATT-B3: `c.photo_flags` (warning chips, already empty for anyone outside the photo's
+   audience), "Originally logged as" on a mapped entry, and — for SCM / Admin only, `c.can_map`
+   / `c.can_remap` — Map / Change mapping forms with the picker from `map_vendors`. `c.locked`
+   is set only for people who could log on the site (ruling 14).{% endcomment %}
 {% with e=c.entry %}
 <div class="card shadow-sm mb-2 {% if e.is_voided %}att-voided{% endif %}" x-data="{ open: false, timeOut: false }" id="att-entry-{{ e.pk }}">
   <div class="card-body py-2 att-card" @click="open = !open">
@@ -11,7 +15,9 @@
         <div class="fw-semibold">{{ e.contractor_label }}</div>
         <div class="small text-muted">{{ e.trade_label }}</div>
         {% if not e.contractor_id %}<span class="badge text-bg-warning mt-1">Not listed · waiting for SCM</span>{% endif %}
+        {% if e.contractor_id and e.original_unlisted_name %}<span class="badge text-bg-light border text-wrap text-start mt-1 att-original-chip">Originally logged as ‘{{ e.original_unlisted_name }}’</span>{% endif %}
         {% if c.is_late %}<span class="badge text-bg-secondary mt-1 att-late-chip">Late entry</span>{% endif %}
+        {% for flag in c.photo_flags %}<span class="badge text-bg-warning mt-1 att-photo-flag">{{ flag }}</span>{% endfor %}
       </div>
       <div class="text-end">
         <div class="fw-semibold">{{ e.headcount }} {{ e.headcount|pluralize:"person,people" }}</div>
@@ -34,8 +40,9 @@
         </a>
       </template>
     {% endif %}
+    {# TODO (ATT-B3 finding): "photo taken" below is shown to every viewer, outside the photo audience; gating it changes B1 behaviour, so left for a ruling. #}
     <div class="small text-muted">
-      Recorded by {{ e.recorded_by.user.get_full_name|default:e.recorded_by.user.username }} at {% if c.is_late %}{{ e.recorded_at|date:"d M, H:i" }}{% else %}{{ e.recorded_at|date:"H:i" }}{% endif %}{% if e.photo_taken_at %} · photo taken {{ e.photo_taken_at|date:"d M Y, H:i" }}{% endif %}
+      Recorded by {{ e.recorded_by.user.get_full_name|default:e.recorded_by.user.username }} at {% if c.is_late %}{{ e.recorded_at|date:"d M, H:i" }}{% else %}{{ e.recorded_at|date:"H:i" }}{% endif %}{% if e.photo_taken_at %} · photo taken {{ e.photo_taken_at|date:"d M Y, H:i" }}{% elif c.can_see_photo %} · <span class="att-photo-time-unknown">Photo time unknown</span>{% endif %}
     </div>
 
     {% if c.history %}
@@ -70,6 +77,29 @@
       </div>
     {% elif c.locked %}
       <div class="small text-muted mt-2 att-locked">Locked. Ask the PM to correct.</div>
+    {% endif %}
+
+    {% if c.can_map %}
+      <div class="mt-2" x-data="{ mapping: false }">
+        <button type="button" class="btn btn-sm btn-outline-primary att-map-btn" @click="mapping = !mapping">Map to contractor</button>
+        <form method="post" action="{% url 'attendance_map' project.project_id e.pk %}" class="mt-2 att-map-form" x-show="mapping" x-cloak>
+          {% csrf_token %}
+          <div class="small text-muted mb-1">Logged as ‘{{ e.unlisted_contractor_name }}’. Pick the contractor it is.</div>
+          {% include "projects/attendance/_map_picker.html" with vendors=map_vendors %}
+          <button type="submit" class="btn btn-sm btn-brand mt-2">Map</button>
+        </form>
+      </div>
+    {% elif c.can_remap %}
+      <div class="mt-2" x-data="{ mapping: false }">
+        <button type="button" class="btn btn-sm btn-outline-secondary att-remap-btn" @click="mapping = !mapping">Change mapping</button>
+        <form method="post" action="{% url 'attendance_remap' project.project_id e.pk %}" class="mt-2 att-remap-form" x-show="mapping" x-cloak>
+          {% csrf_token %}
+          {% include "projects/attendance/_map_picker.html" with vendors=map_vendors %}
+          <label class="form-label small fw-semibold mt-2 mb-0" for="att-remap-note-{{ e.pk }}">Why change it? <span class="text-danger">*</span></label>
+          <textarea name="note" id="att-remap-note-{{ e.pk }}" rows="2" maxlength="1000" class="form-control form-control-sm" required></textarea>
+          <button type="submit" class="btn btn-sm btn-brand mt-2">Change mapping</button>
+        </form>
+      </div>
     {% endif %}
   </div>
 </div>

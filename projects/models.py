@@ -8175,16 +8175,20 @@ class ContractorAttendance(models.Model):
     in, an optional time out and a group photo (ATT-B1). A contractor-billing input
     (ruling 1): one person per entry is one man-day; hours are shown, never counted.
 
-    Written by projects/attendance.py and nothing else — create_attendance(),
-    update_attendance(), set_time_out(), void_attendance() — each in one transaction with
-    its ContractorAttendanceRevision row. `date` is set there from timezone.localdate(),
-    never from a form (ruling 10).
+    Written by projects/attendance.py and nothing else, each write in one transaction with
+    its ContractorAttendanceRevision row: the same-day flow (create_attendance(),
+    update_attendance(), set_time_out(), void_attendance() — ATT-B1), the past-day flow
+    (correct_attendance(), create_late_attendance(), a corrector's void — ATT-B2) and SCM
+    mapping (map_attendance(), remap_attendance(), map_attendance_group() — ATT-B3).
+    `date` is timezone.localdate() for a same-day entry and a day 1-7 back for a late one,
+    set by the writer, never edited afterwards (ruling 10).
 
     THE CONTRACTOR is a Vendor of kind contractor or both (the bill's rule), or — the
-    "Contractor not listed" path — no Vendor and a typed name. Such an entry is not
-    billable until SCM maps it (ATT-B3); B1 only stores the name, normalised by the writer
+    "Contractor not listed" path — no Vendor and a typed name, normalised by the writer
     (stripped, inner whitespace collapsed) so the unique index below can compare it
-    case-blind.
+    case-blind. Such an entry is not billable until SCM or Admin maps it to a Vendor
+    (ATT-B3): the typed name then moves to `original_unlisted_name` and
+    `unlisted_contractor_name` is blanked, so "exactly one source" still holds.
 
     VOIDED, NEVER DELETED (ruling 11): a voided entry stays on record with its note, stops
     counting, and stops holding its contractor/trade/day slot — both unique indexes are
@@ -8216,6 +8220,7 @@ class ContractorAttendance(models.Model):
         related_name='attendance_entries',
     )
     unlisted_contractor_name = models.CharField(max_length=120, blank=True, default='')  # typed name when the contractor is not listed; '' otherwise
+    original_unlisted_name = models.CharField(max_length=120, blank=True, default='')  # ATT-B3: the typed name an SCM mapping replaced; '' if never mapped
     trade = models.CharField(max_length=20, choices=TRADE_CHOICES)
     trade_remark = models.CharField(max_length=120, blank=True, default='')  # required for Other, '' for every other trade
     headcount = models.PositiveSmallIntegerField()  # people in the crew; each one is one man-day
@@ -8318,8 +8323,13 @@ class ContractorAttendanceRevision(models.Model):
 
     Written by projects/attendance.py and nothing else, in the same transaction as the
     write it records, with the entry row locked. `before` and `after` are
-    attendance.attendance_snapshot() either side of it ("schema": 1), photo path
+    attendance.attendance_snapshot() either side of it ("schema": 1 up to ATT-B2, 2 from
+    ATT-B3, which adds original_unlisted_name — read old rows with .get()), photo path
     included, so a replaced photo stays findable. `before` is NULL for CREATED only.
+
+    CONFIRMED (ATT-B3) records a past-day correction that changed nothing: the entry is
+    not saved, `before` equals `after`, and the note says what was checked. MAPPED records
+    an SCM mapping of a not-listed name, or a change of that mapping.
 
     PROTECT on the entry: an entry with history cannot be deleted. save() on an existing
     row and delete() both raise; a queryset update()/delete() bypasses both, as for
@@ -8330,11 +8340,15 @@ class ContractorAttendanceRevision(models.Model):
     EDITED   = 'EDITED'
     TIME_OUT = 'TIME_OUT'
     VOIDED   = 'VOIDED'
+    MAPPED    = 'MAPPED'
+    CONFIRMED = 'CONFIRMED'
     ACTION_CHOICES = [
-        (CREATED,  'Created'),
-        (EDITED,   'Edited'),
-        (TIME_OUT, 'Time out marked'),
-        (VOIDED,   'Voided'),
+        (CREATED,   'Created'),
+        (EDITED,    'Edited'),
+        (TIME_OUT,  'Time out marked'),
+        (VOIDED,    'Voided'),
+        (MAPPED,    'Mapped'),
+        (CONFIRMED, 'Confirmed'),
     ]
 
     attendance = models.ForeignKey(ContractorAttendance, on_delete=models.PROTECT,
@@ -8342,7 +8356,7 @@ class ContractorAttendanceRevision(models.Model):
     action = models.CharField(max_length=10, choices=ACTION_CHOICES)
     before = models.JSONField(null=True, blank=True)  # snapshot before the write; NULL for CREATED
     after = models.JSONField()                        # snapshot after the write
-    note = models.TextField(blank=True, default='')   # the void note; '' for every other action in B1
+    note = models.TextField(blank=True, default='')   # why: required on VOIDED and CONFIRMED; set on a B2 correction, late CREATED and a re-mapping; '' otherwise
     changed_by = models.ForeignKey('UserProfile', on_delete=models.PROTECT,
                                    related_name='attendance_revisions')
     changed_at = models.DateTimeField(default=timezone.now)
@@ -8351,7 +8365,8 @@ class ContractorAttendanceRevision(models.Model):
         ordering = ['attendance', 'changed_at', 'pk']
         constraints = [
             models.CheckConstraint(
-                condition=models.Q(action__in=['CREATED', 'EDITED', 'TIME_OUT', 'VOIDED']),
+                condition=models.Q(action__in=['CREATED', 'EDITED', 'TIME_OUT', 'VOIDED',
+                                               'MAPPED', 'CONFIRMED']),
                 name='attendance_revision_action_known'),
             # Only a create has nothing before it.
             models.CheckConstraint(
@@ -8361,6 +8376,11 @@ class ContractorAttendanceRevision(models.Model):
             models.CheckConstraint(
                 condition=~models.Q(action='VOIDED') | ~models.Q(note=''),
                 name='attendance_revision_void_note'),
+            # A confirmation is only its reason (ATT-B3 ruling 10): nothing changed, so
+            # without the note the row would say nothing.
+            models.CheckConstraint(
+                condition=~models.Q(action='CONFIRMED') | ~models.Q(note=''),
+                name='attendance_revision_confirmed_note'),
         ]
 
     def __str__(self):

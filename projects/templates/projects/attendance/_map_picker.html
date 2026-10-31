@@ -1,0 +1,19 @@
+{% comment %}ATT-B3 — the contractor picker for mapping a not-listed entry, shared by the entry card
+   (Map / Change mapping) and the "Contractors to map" queue (Map all). Reads `vendors`: active
+   vendors of kind contractor / both, rendered here server-side; Alpine only filters the rows
+   already on the page by the typed search. Nothing is fetched. No "Contractor not listed"
+   row: a mapping always names a Vendor. The form and the writer re-check the pick.{% endcomment %}
+<div x-data="{ q: '' }">
+  <input type="search" class="form-control form-control-sm mb-2" placeholder="Search contractors" x-model="q" autocomplete="off" aria-label="Search contractors">
+  <div class="list-group att-picker">
+    {% for v in vendors %}
+      <label class="list-group-item d-flex gap-2 align-items-center" data-name="{{ v.name|lower }}"
+             x-show="!q || $el.dataset.name.includes(q.toLowerCase())">
+        <input class="form-check-input" type="radio" name="contractor" value="{{ v.pk }}" required>
+        <span>{{ v.name }}</span>
+      </label>
+    {% empty %}
+      <div class="list-group-item small text-muted">No active contractors are listed yet.</div>
+    {% endfor %}
+  </div>
+</div>

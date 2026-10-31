@@ -1,7 +1,7 @@
 """
 The contractor attendance entry forms: AttendanceForm (ATT-B1) for the same-day add and
 edit; CorrectionForm and LateAttendanceForm (ATT-B2) for a past day, each with a required
-reason.
+reason; MapForm, RemapForm and MapGroupForm (ATT-B3) for SCM mapping of not-listed names.
 
 It reads and checks what the page posts; projects/attendance.py writes. Date, project
 and recorder are not fields at all (they are set by the writer and never change), so no
@@ -11,8 +11,9 @@ its type / size / content checks are qaqc_views.validate_visit_photo's, run by t
 from django import forms
 
 from .attendance import (
-    CORRECTION_NOTE_REQUIRED, LATE_DATE_OUT_OF_WINDOW, LATE_NOTE_REQUIRED, TIME_LATER_THAN_NOW,
-    late_entry_window, time_is_too_late,
+    CORRECTION_NOTE_REQUIRED, LATE_DATE_OUT_OF_WINDOW, LATE_NOTE_REQUIRED,
+    MAP_CONTRACTOR_NOT_ALLOWED, REMAP_NOTE_REQUIRED, TIME_LATER_THAN_NOW, late_entry_window,
+    time_is_too_late,
 )
 from .models import VENDOR_BILLABLE_KINDS, ContractorAttendance, Vendor
 from .qaqc_views import parse_photo_taken_at
@@ -147,3 +148,39 @@ class LateAttendanceForm(AttendanceForm):
         if not earliest <= day <= latest:
             raise forms.ValidationError(LATE_DATE_OUT_OF_WINDOW)
         return day
+
+
+class MapForm(forms.Form):
+    """Map one not-listed entry to a contractor (ATT-B3 ruling 6). The pick must be one of
+    `vendors` — active vendors of kind contractor/both, contractor_choices() with no
+    current entry, so an inactive vendor or a supplier is refused here (edge case 3); the
+    writer asks again. No "Contractor not listed" choice: mapping always names a Vendor."""
+
+    contractor = forms.CharField(error_messages={'required': 'Pick a contractor.'})
+
+    def __init__(self, *args, vendors=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.vendors = vendors if vendors is not None else contractor_choices()
+
+    def clean_contractor(self):
+        value = self.cleaned_data['contractor'].strip()
+        for vendor in self.vendors:
+            if str(vendor.pk) == value:
+                return vendor
+        raise forms.ValidationError(MAP_CONTRACTOR_NOT_ALLOWED)
+
+
+class RemapForm(MapForm):
+    """Change a mapping (ATT-B3 ruling 3): a new contractor and a required note."""
+
+    note = forms.CharField(max_length=1000, error_messages={
+        'required': REMAP_NOTE_REQUIRED})  # strip=True (the default) makes spaces-only blank
+
+
+class MapGroupForm(MapForm):
+    """Map all of one queue group (ATT-B3 ruling 5): the contractor, plus the group's site
+    code and lower-cased typed name as the queue drew them. The view resolves the site
+    (soft-deleted → 404) and the writer re-reads the group's entries itself."""
+
+    site = forms.CharField(max_length=100)
+    name_key = forms.CharField(max_length=120)

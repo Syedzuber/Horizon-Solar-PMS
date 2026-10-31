@@ -9,8 +9,15 @@ ContractorAttendanceRevision (ATT-B1).
                           site's loggers or recorder, a past day's by a corrector (ATT-B2)
 
 ATT-B2, after the day (PM / coordinators / Admin, permissions.user_is_attendance_corrector):
-    correct_attendance()      a past-day correction with its note, an EDITED revision
+    correct_attendance()      a past-day correction with its note, an EDITED revision — or,
+                              when it changes nothing, a CONFIRMED revision (ATT-B3)
     create_late_attendance()  an entry for a day 1-7 days back, a CREATED revision with its note
+
+ATT-B3, SCM mapping of "Contractor not listed" entries (SCM / Admin,
+permissions.user_can_map_attendance):
+    map_attendance()          a not-listed entry to a Vendor, a MAPPED revision
+    remap_attendance()        a mapped entry to another Vendor, with its note, a MAPPED revision
+    map_attendance_group()    every unmapped entry of one site + name, one transaction each
 
 Each runs in one transaction and writes the entry change and its revision row together.
 Each re-asks the permission helper itself — under the entry's row lock for the three that
@@ -29,16 +36,18 @@ from datetime import timedelta
 
 from django.db import IntegrityError, transaction
 from django.db.models import Q
+from django.db.models.functions import Lower
 from django.utils import timezone
 
 from .bill_storage import bills_bucket
 from .design_storage import _client
 from .models import (
-    VENDOR_BILLABLE_KINDS, ContractorAttendance, ContractorAttendanceRevision,
+    VENDOR_BILLABLE_KINDS, ContractorAttendance, ContractorAttendanceRevision, Vendor,
 )
 from .permissions import (
-    user_can_add_late_attendance, user_can_change_attendance_today, user_can_correct_attendance,
-    user_can_log_attendance,
+    attendance_entry_mappable, attendance_entry_remappable, user_can_add_late_attendance,
+    user_can_change_attendance_today, user_can_correct_attendance, user_can_log_attendance,
+    user_can_map_attendance,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,6 +78,22 @@ NOT_CORRECTABLE = ("This entry cannot be corrected: only a live entry from befor
 NOT_ALLOWED_LATE = 'You cannot add a late entry on this site.'
 LATE_DATE_OUT_OF_WINDOW = 'A late entry must be dated 1 to 7 days before today.'
 
+# ATT-B3 — SCM mapping.
+NOT_ALLOWED_TO_MAP = 'Only SCM or Admin can map attendance to a contractor.'
+NOT_MAPPABLE = ('This entry cannot be mapped: only a live entry logged as "Contractor not '
+                'listed" can be.')
+ALREADY_MAPPED = 'Already mapped to {name} — someone mapped it first.'
+NOT_REMAPPABLE = ('This mapping cannot be changed: only a live entry that was mapped from a '
+                  'typed name can be. Ask the PM to correct it instead.')
+REMAP_NOTE_REQUIRED = 'Say why the mapping is being changed.'
+REMAP_SAME_CONTRACTOR = 'This entry is already mapped to that contractor.'
+MAP_CONTRACTOR_NOT_ALLOWED = 'Pick an active contractor from the list.'
+MAPPING_COLLISION = ('Already logged for {name} · {trade} on {day} — ask the PM to void one.')
+
+#: How long before its upload a same-day entry's photo may have been taken before the
+#: card flags it (ATT-B3 ruling 11). Longer suggests an old photo of another day's crew.
+PHOTO_UPLOAD_GAP_LIMIT = timedelta(hours=2)
+
 #: How many days back a late entry may be dated (ATT-B2 ruling 4). Today is the normal
 #: add; anything older is refused.
 LATE_ENTRY_MAX_DAYS = 7
@@ -78,7 +103,9 @@ LATE_ENTRY_MAX_DAYS = 7
 #: anything later is a time that has not happened yet.
 FUTURE_TIME_GRACE = timedelta(minutes=15)
 
-SNAPSHOT_SCHEMA = 1
+#: 1 up to ATT-B2; 2 adds original_unlisted_name (ATT-B3). Readers use .get(), so a
+#: schema-1 revision reads as having no original name.
+SNAPSHOT_SCHEMA = 2
 
 _WHITESPACE = re.compile(r'\s+')
 
@@ -136,8 +163,36 @@ def is_late_entry(entry):
     return entry.date < timezone.localtime(entry.recorded_at).date()
 
 
+def photo_time_flags(entry):
+    """The warning chips for a photo whose EXIF time does not fit the entry (ATT-B3
+    ruling 11), as display strings; [] when it fits or the time is unknown (NULL).
+
+        same-day entry  taken more than PHOTO_UPLOAD_GAP_LIMIT before recorded_at
+        any entry       taken on another IST date than the entry's `date`
+
+    A late entry (is_late_entry) gets the date rule only — a gallery photo uploaded days
+    later is expected there. Both times are converted to IST with timezone.localtime()
+    before a date is taken, so a photo at 00:30 IST is not read as the previous UTC day.
+    Never blocks anything, and computed from the entry's own fields, nothing stored.
+
+    The caller shows these only to users who may see the photo
+    (user_can_view_attendance_photo): the chip would otherwise reveal the photo's time.
+    """
+    if entry.photo_taken_at is None:
+        return []
+    flags = []
+    if not is_late_entry(entry):
+        gap = entry.recorded_at - entry.photo_taken_at
+        if gap > PHOTO_UPLOAD_GAP_LIMIT:
+            flags.append(f'Photo taken {int(gap.total_seconds() // 3600)}h before upload')
+    taken_day = timezone.localtime(entry.photo_taken_at).date()
+    if taken_day != entry.date:
+        flags.append(f'Photo dated {taken_day.day} {taken_day:%b}')
+    return flags
+
+
 def attendance_snapshot(entry):
-    """The entry as a revision records it ("schema": 1): every field a write can change,
+    """The entry as a revision records it ("schema": 2): every field a write can change,
     the contractor's name beside its id (a later rename does not change a past revision),
     times as HH:MM strings, the photo's bucket and path (a replaced photo stays
     findable)."""
@@ -148,6 +203,7 @@ def attendance_snapshot(entry):
         'contractor_id': entry.contractor_id,
         'contractor_name': entry.contractor.name if entry.contractor_id else None,
         'unlisted_contractor_name': entry.unlisted_contractor_name,
+        'original_unlisted_name': entry.original_unlisted_name,
         'trade': entry.trade,
         'trade_remark': entry.trade_remark,
         'headcount': entry.headcount,
@@ -400,7 +456,8 @@ def void_attendance(entry, note, by):
 
 def correct_attendance(entry, data, by, note):
     """Correct a past day's `entry` by `by` (a User) with `note`, as an EDITED revision
-    carrying the note (ATT-B2 rulings 2, 5, 8).
+    carrying the note (ATT-B2 rulings 2, 5, 8) — or, when the correction changes nothing,
+    a CONFIRMED revision carrying it (ATT-B3 ruling 10).
 
     `data` is update_attendance()'s: contractor, unlisted_name, trade, trade_remark,
     headcount, time_in, time_out, and optionally stored_photo + photo_taken_at (a new
@@ -408,8 +465,10 @@ def correct_attendance(entry, data, by, note):
     Date, project and recorder are never in `data` and never change. Times are free of
     the B1a clock (the day is past) but time out is still after time in.
 
-    Returns (entry, changed). When the correction changes nothing, nothing is written
-    and changed is False. Raises AttendanceRefused for a blank note, an entry `by` may
+    Returns (entry, changed). When the correction changes nothing, changed is False and
+    the entry itself is not saved (updated_at stays) — only a CONFIRMED revision with the
+    note is written, so "I checked this day and it is right" is on record for billing.
+    Raises AttendanceRefused for a blank note, an entry `by` may
     not correct (today's, voided, not a corrector — re-asked under the row lock, so a
     replayed POST or a coordinator just taken off the site is refused), a value rule, or
     a slot already held that day (DUPLICATE_ENTRY_PAST_DAY).
@@ -451,6 +510,10 @@ def correct_attendance(entry, data, by, note):
             locked.photo_size_kb = stored_photo['file_size_kb']
             locked.photo_taken_at = data.get('photo_taken_at')
         if attendance_snapshot(locked) == before:
+            # A confirmation: the values assigned above are the stored ones, so the entry
+            # is left unsaved and the revision's before and after are equal.
+            _revision(locked, ContractorAttendanceRevision.CONFIRMED, before, by.profile,
+                      note=note)
             return locked, False
         locked.updated_at = timezone.now()
         _save_or_refuse_duplicate(locked, duplicate_message=DUPLICATE_ENTRY_PAST_DAY)
@@ -513,6 +576,147 @@ def create_late_attendance(project, day, data, by, note):
         _revision(entry, ContractorAttendanceRevision.CREATED, None, profile, note=note,
                   now=now)
     return entry
+
+
+# ---------------------------------------------------------------------------
+# SCM mapping — ATT-B3
+# ---------------------------------------------------------------------------
+
+def mapping_collision_message(entry, contractor):
+    """The refusal when mapping `entry` to `contractor` would meet that contractor's own
+    live entry for the same trade and day (ATT-B3 ruling 5): the two are one crew logged
+    twice, and only the PM may say which to void."""
+    return MAPPING_COLLISION.format(name=contractor.name, trade=entry.trade_label,
+                                    day=f'{entry.date.day} {entry.date:%b}')
+
+
+def _current_mapping_contractor(contractor):
+    """`contractor` re-read inside the caller's transaction and checked: a Vendor of kind
+    contractor/both that is active now (ruling 2). The picker offered only those, but the
+    vendor may have been deactivated since the page was drawn. No "keep the current one"
+    exception as in _check_values: a mapping always picks anew."""
+    if contractor is None:
+        raise AttendanceRefused(MAP_CONTRACTOR_NOT_ALLOWED)
+    current = Vendor.objects.filter(pk=contractor.pk, kind__in=VENDOR_BILLABLE_KINDS,
+                                    is_active=True).first()
+    if current is None:
+        raise AttendanceRefused(MAP_CONTRACTOR_NOT_ALLOWED)
+    return current
+
+
+def _move_to_contractor(locked, contractor, by, note):
+    """The mapping write both writers share, under their row lock: the collision check,
+    the entry update and its MAPPED revision. The typed name is copied into
+    original_unlisted_name only on a first mapping — a re-mapping keeps the name the crew
+    was logged under."""
+    if live_duplicate_exists(locked.project, locked.date, contractor, '', locked.trade,
+                             exclude_pk=locked.pk):
+        raise AttendanceRefused(mapping_collision_message(locked, contractor))
+    before = attendance_snapshot(locked)
+    now = timezone.now()
+    if locked.contractor_id is None:
+        locked.original_unlisted_name = locked.unlisted_contractor_name
+    locked.contractor = contractor
+    locked.unlisted_contractor_name = ''
+    locked.updated_at = now
+    _save_or_refuse_duplicate(
+        locked, duplicate_message=mapping_collision_message(locked, contractor),
+        update_fields=['contractor', 'unlisted_contractor_name', 'original_unlisted_name',
+                       'updated_at'])
+    _revision(locked, ContractorAttendanceRevision.MAPPED, before, by.profile, note=note,
+              now=now)
+    return locked
+
+
+def map_attendance(entry, contractor, by):
+    """Map a "Contractor not listed" `entry` to `contractor` (a Vendor) by `by` (a User),
+    with a MAPPED revision whose `before` holds the typed name (ATT-B3 rulings 2, 6).
+
+    The typed name moves to original_unlisted_name and unlisted_contractor_name is blanked,
+    so the one-source CHECK still holds and the Summary counts the entry as billable.
+    Raises AttendanceRefused — nothing written — when `by` is not a mapper, the entry is
+    voided or already mapped (ALREADY_MAPPED: a second SCM user lost the race), the vendor
+    is not an active contractor, or the contractor already holds a live entry for that
+    trade and day (mapping_collision_message). Returns the entry.
+    """
+    with transaction.atomic():
+        # Race: the row lock serialises two mappers on one entry. The second waits, then
+        # reads the first's contractor here and is refused, never overwriting it.
+        locked = _lock(entry)
+        if not user_can_map_attendance(by):
+            raise AttendanceRefused(NOT_ALLOWED_TO_MAP)
+        if not attendance_entry_mappable(locked):
+            # Mapped while this request waited (or from an older page): say so plainly.
+            # A voided entry, or one logged with a listed contractor, is simply not mappable.
+            if (locked.contractor_id is not None and locked.original_unlisted_name
+                    and not locked.is_voided):
+                raise AttendanceRefused(ALREADY_MAPPED.format(name=locked.contractor.name))
+            raise AttendanceRefused(NOT_MAPPABLE)
+        contractor = _current_mapping_contractor(contractor)
+        return _move_to_contractor(locked, contractor, by, '')
+
+
+def remap_attendance(entry, contractor, by, note):
+    """Change a mapped `entry` to another `contractor` by `by` (a User), with a MAPPED
+    revision carrying `note` (ATT-B3 rulings 3, 4 — there is no un-map; a wrong mapping is
+    fixed by mapping again). original_unlisted_name is kept.
+
+    Raises AttendanceRefused for a blank note, a user who is not a mapper, an entry that
+    was never a typed name or is voided (attendance_entry_remappable — a listed-from-the-
+    start entry is the PM's to correct), the same contractor again, an inactive or
+    non-contractor vendor, or a collision with the new contractor's entry that day.
+    Returns the entry.
+    """
+    note = (note or '').strip()
+    if not note:
+        raise AttendanceRefused(REMAP_NOTE_REQUIRED)
+    with transaction.atomic():
+        locked = _lock(entry)
+        if not user_can_map_attendance(by):
+            raise AttendanceRefused(NOT_ALLOWED_TO_MAP)
+        if not attendance_entry_remappable(locked):
+            raise AttendanceRefused(NOT_REMAPPABLE)
+        contractor = _current_mapping_contractor(contractor)
+        if contractor.pk == locked.contractor_id:
+            raise AttendanceRefused(REMAP_SAME_CONTRACTOR)
+        return _move_to_contractor(locked, contractor, by, note)
+
+
+def unmapped_group_entries(project, name_key):
+    """The live, unmapped entries of one queue group — `project` and a typed name compared
+    as the unique index compares it, lower-cased (the writers already stored it stripped
+    and whitespace-collapsed) — oldest first. Read without a lock; each is locked when it
+    is mapped."""
+    return (ContractorAttendance.objects
+            .filter(project=project, contractor__isnull=True, is_voided=False)
+            .annotate(name_key=Lower('unlisted_contractor_name'))
+            .filter(name_key=normalise_unlisted_name(name_key).lower())
+            .select_related('project')
+            .order_by('date', 'trade', 'pk'))
+
+
+def map_attendance_group(project, name_key, contractor, by):
+    """Map every unmapped entry of one site + typed name to `contractor` by `by` (ATT-B3
+    ruling 5). Returns (mapped_entries, skipped) where skipped is a list of
+    (entry, reason) — reason the user-facing refusal.
+
+    Each entry goes through map_attendance() in its OWN transaction: one entry that
+    collides with the contractor's existing entry that day is skipped and stays unmapped,
+    the rest are mapped — never all-or-nothing. An entry another SCM user mapped first
+    is skipped the same way (edge case 6). Refused outright (AttendanceRefused, nothing
+    written) only when `by` is not a mapper or the vendor is not an active contractor;
+    the soft-deleted site cannot reach here (the view resolves it with _active_project).
+    """
+    if not user_can_map_attendance(by):
+        raise AttendanceRefused(NOT_ALLOWED_TO_MAP)
+    _current_mapping_contractor(contractor)
+    mapped, skipped = [], []
+    for entry in unmapped_group_entries(project, name_key):
+        try:
+            mapped.append(map_attendance(entry, contractor, by))
+        except AttendanceRefused as exc:
+            skipped.append((entry, str(exc)))
+    return mapped, skipped
 
 
 # ---------------------------------------------------------------------------

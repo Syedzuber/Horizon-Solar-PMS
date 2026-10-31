@@ -3710,3 +3710,41 @@ def attendance_photo_entry_ids(user, project, entries):
         return {entry.pk for entry in entries}
     manages = user_can_manage_project(user, project)
     return {entry.pk for entry in entries if manages or entry.recorded_by_id == profile.pk}
+
+
+# ---------------------------------------------------------------------------
+# Contractor attendance mapping — ATT-B3
+# ---------------------------------------------------------------------------
+
+#: The roles that map a "Contractor not listed" entry to a Vendor, and change a mapping
+#: (ATT-B3 ruling 1). SCM owns the vendor master; Admin backs it up. The PM, Site
+#: Engineers, Finance and the CEO never map — the PM corrects through ATT-B2 instead.
+ATTENDANCE_MAPPER_ROLES = frozenset({'SCM', 'Admin'})
+
+
+def user_can_map_attendance(user):
+    """Return True if `user` may map not-listed attendance entries, and change a mapping,
+    on any site (ATT-B3 rulings 1, 3): a role in ATTENDANCE_MAPPER_ROLES. Role only — not
+    limited by entry date, project assignment or site status. Both mapper roles are
+    portfolio-wide viewers, so a mapper sees every site anyway; the entry's own state is
+    attendance_entry_mappable() / attendance_entry_remappable()."""
+    profile = getattr(user, 'profile', None)
+    return profile is not None and profile.role in ATTENDANCE_MAPPER_ROLES
+
+
+def attendance_entry_mappable(entry):
+    """True when `entry` is waiting for SCM mapping (ATT-B3 ruling 2): not voided, no
+    contractor (the "Contractor not listed" path), and its site not soft-deleted. Entry
+    state only — who may map is user_can_map_attendance()."""
+    return (entry is not None and not entry.is_voided and entry.contractor_id is None
+            and not entry.project.is_deleted)
+
+
+def attendance_entry_remappable(entry):
+    """True when `entry`'s mapping may be changed (ATT-B3 ruling 3, Zuber's ruling C): not
+    voided, mapped (a contractor is set) and logged as a typed name to begin with
+    (original_unlisted_name). An entry logged with a listed contractor from the start is
+    corrected by the PM (ATT-B2), never re-mapped; one a correction put back to "not
+    listed" is mapped again, not re-mapped. Entry state only."""
+    return (entry is not None and not entry.is_voided and entry.contractor_id is not None
+            and entry.original_unlisted_name != '' and not entry.project.is_deleted)

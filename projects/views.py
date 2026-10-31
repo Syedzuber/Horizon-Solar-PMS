@@ -2053,6 +2053,8 @@ def dashboard_scm(request):
     # (tenders). Under residential, or with no context, it is not built at all and the
     # partial renders nothing (absent, not empty).
     opex_tender_rows = scm_opex_tender_rows() if _context_includes(ctx, 'OPEX') else []
+    # Lazy import: attendance_views imports _active_project from this module (circular at top level).
+    from .attendance_views import attendance_unmapped_group_count
 
     return render(request, 'dashboard/scm.html', {
         'summary': {
@@ -2073,6 +2075,7 @@ def dashboard_scm(request):
         'today':                today,
         'all_profiles':         UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
         'context_nav':          _context_nav(request, ctx),
+        'attendance_unmapped_groups': attendance_unmapped_group_count(),  # ATT-B3 queue link
     })
 
 
