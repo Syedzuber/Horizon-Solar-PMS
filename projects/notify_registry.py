@@ -1249,6 +1249,7 @@ NOTIFICATION_EVENTS = _build_registry([
                          'send_attendance_alerts. Its WhatsApp message is sent by that '
                          'command and is not paused here.'),
         default_state='paused',
+        whatsapp_sent_separately=True,
     ),
 ])
 

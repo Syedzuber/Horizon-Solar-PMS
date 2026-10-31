@@ -805,7 +805,7 @@ class WhatsAppSeparatelyTests(TestCase):
 
     TEXT = "This event's WhatsApp message is sent separately and is not paused here."
     FLAGGED = {'issue_raised', 'issue_resolved', 'project_pm_assigned', 'boq_acknowledged',
-               'payment_milestone_reached', 'task_assigned', 'tasks_assigned_bulk'}
+               'payment_milestone_reached', 'task_assigned', 'tasks_assigned_bulk', 'attendance_missing'}
 
     def setUp(self):
         self.client = Client(SERVER_NAME='localhost')
