@@ -762,7 +762,7 @@ class ResidentialIsUntouchedTests(TestCase):
         self.assertIsNone(self.task.submitted_at,
                           'a residential task was put into the approval workflow')
         joined = ' '.join(str(m) for m in get_messages(response.wsgi_request)).lower()
-        self.assertIn('opex sites only', joined)
+        self.assertIn('does not apply to residential sites', joined)
 
 
 # ---------------------------------------------------------------------------

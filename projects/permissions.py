@@ -1803,7 +1803,7 @@ def qaqc_engineer_manager_refusal(profile, project, seat):
 
 
 # ---------------------------------------------------------------------------
-# Two-step task completion (2.1) — OPEX only
+# Two-step task completion (2.1) — OPEX and CAPEX (uses_two_step_completion)
 #
 # TWO AUTHORITIES, TWO PREDICATES, AND THEY MUST NOT COLLAPSE INTO ONE. The whole
 # point of a two-step completion is that the hand that does the work is not the
@@ -1823,12 +1823,29 @@ def qaqc_engineer_manager_refusal(profile, project, seat):
 # is also what the screen asks to decide whether to offer a verdict at all, and it
 # is shared with REJECT, where withdrawing your own submission is legitimate.
 #
-# SCOPE IS NOT DECIDED HERE. Both helpers answer "does this person hold the
-# authority", not "is this an OPEX task" — the OPEX restriction is a property of
-# the RULE, lives with the rung in `_apply_task_status_change()` and with the view
-# gates, and is checked before either of these is called. Mixing it in would give
-# two places to read the scope from.
+# SCOPE IS NOT DECIDED BY THE AUTHORITY HELPERS. They answer "does this person hold
+# the authority", not "does this project use two-step" — that is a property of the
+# RULE, answered by uses_two_step_completion() alone and asked by the rung in
+# `_apply_task_status_change()` and the view gates before either is called. Mixing
+# it in would give two places to read the scope from.
 # ---------------------------------------------------------------------------
+
+def uses_two_step_completion(project):
+    """Return True if tasks on `project` finish by submit -> approve (2.1), not by a
+    direct Done: OPEX and CAPEX (CAPEX-2). Residential keeps one-step completion.
+
+    THE SINGLE AUTHORITY FOR THE SCOPE. Every two-step condition (the Done rung, the
+    approval endpoints' eligibility, the row and panel flags, the open-points badge)
+    reads this and none tests project_type itself, so widening or narrowing the rule
+    is one edit here. Before CAPEX-2 each of those sites wrote `== 'OPEX'` inline.
+
+    Says nothing about WHO may submit or approve (the helpers below) and nothing
+    about mirrors, which every caller still refuses on its own terms. The per-site
+    QA/QC engineer stays OPEX-only (site_qaqc_engineer_id): on CAPEX the approver
+    pool is the PM, the coordinators and legacy is_qaqc holders.
+    """
+    return project is not None and project.project_type in ('OPEX', 'CAPEX')
+
 
 def user_can_submit_task_for_approval(user, task, project):
     """

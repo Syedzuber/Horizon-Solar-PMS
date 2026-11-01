@@ -546,7 +546,7 @@ class ResidentialRaisesNoPunchPointsTests(TestCase):
             {'approval_remarks': 'no good'},
         )
         joined = ' '.join(str(m) for m in get_messages(response.wsgi_request)).lower()
-        self.assertIn('opex sites only', joined)
+        self.assertIn('does not apply to residential sites', joined)
         self.assertEqual(
             PunchPoint.objects.filter(task=self.task).count(), 0,
             'the residential path grew a punch point')

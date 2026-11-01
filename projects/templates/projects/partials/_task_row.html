@@ -51,7 +51,7 @@ Expected context:
     {% endif %}
     {% comment %}OPEN PUNCH POINTS (closeout 7b, PP-6): Open or Rectified, both sources, from
        views._attach_open_punch_points() - one grouped query per page or responder, and
-       absent (0) on every non-OPEX site. Links to the card at the top of the task page.{% endcomment %}
+       absent (0) wherever two-step completion does not apply (Residential). Links to the card at the top of the task page.{% endcomment %}
     {% if task.open_punch_points %}
       <a href="{% url 'task_detail' project.project_id task.pk %}#punchPointsBlock"
          class="badge rounded-pill bg-warning text-dark text-decoration-none ms-1 open-punch-badge"

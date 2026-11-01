@@ -8,6 +8,9 @@ there from the per-assignee answers `_phase_list_two_step()` computes.
 project_overview.html, which is rendered once per page and so cannot know which row
 opened it; its script shows the matching wording.
 
+The tooltip names the project type by its display label ("RESCO", "CAPEX"), never a
+hardcoded type: the button is drawn on every two-step project (CAPEX-2).
+
 Expected context:
   task, project, self_certify
 {% endcomment %}
@@ -19,7 +22,7 @@ Expected context:
         data-target-id="#task-approval-{{ task.pk }}"
         data-submit-url="{% url 'task_submit_for_approval' project.project_id task.pk %}"
         data-self-certify="{% if self_certify %}1{% else %}0{% endif %}"
-        {% if self_certify %}title="No other approver on this project — this completes the task under your name."{% else %}title="Submit this work for approval — a RESCO task is completed by its approver, not here."{% endif %}>
+        {% if self_certify %}title="No other approver on this project — this completes the task under your name."{% else %}title="Submit this work for approval — a {{ project.get_project_type_display }} task is completed by its approver, not here."{% endif %}>
   {% if self_certify %}Complete (self-certified){% else %}Submit for approval{% endif %}
 </button>
 {% if self_certify %}

@@ -143,7 +143,9 @@ from .permissions import (
     # Vendor master list. SCM / Admin; see VENDOR_LIST_ROLES.
     user_can_view_vendor_list,
     # 2.1 - two-step completion. Two authorities, kept separate on purpose; see the
-    # section header in permissions.py.
+    # section header in permissions.py. Which projects the rule covers at all is
+    # uses_two_step_completion() alone (CAPEX-2); nothing here tests project_type.
+    uses_two_step_completion,
     user_can_submit_task_for_approval, user_can_approve_task,
     # "would this person's submission complete the task under their own name" - the
     # question the self-approval guard in task_approve creates and does not answer.
@@ -5633,13 +5635,14 @@ def _phase_list_two_step(project, request, is_manager):
 
     THE SCOPE IS WRITTEN HERE AND NOT IN THE TEMPLATE, for the reason
     `_task_approval_context()` gives about `show_approval_panel`: a template that
-    tests `project.project_type == 'OPEX'` inline is one more place the scope of
-    this feature is recorded, and the places would drift.
+    tests the project type inline is one more place the scope of this feature is
+    recorded, and the places would drift. The scope itself is
+    permissions.uses_two_step_completion() (OPEX and CAPEX, CAPEX-2).
 
     THIS DECIDES NOTHING AND GUARDS NOTHING. The rule is rung 1 of
-    `_apply_task_status_change()`, which refuses a direct Done on an unapproved OPEX
-    task whatever the markup offered. This flag only stops the row offering a choice
-    that rung would refuse -- delete it and the refusal is unchanged, the user simply
+    `_apply_task_status_change()`, which refuses a direct Done on an unapproved
+    two-step task whatever the markup offered. This flag only stops the row offering
+    a choice that rung would refuse -- delete it and the refusal is unchanged, the user simply
     meets it after clicking instead of before.
 
     THE SELF-CERTIFY LABEL IS PER ASSIGNEE (G85, rule R-c). A task's assignee is out of
@@ -5654,7 +5657,7 @@ def _phase_list_two_step(project, request, is_manager):
     a constant cost per page, never one per row or per assignee
     (tests_phase_list_approval.CostPerRowTests). `self_certify_by_assignee` holds the
     answers; the row reads its own through the `self_certify_for` filter. It is scoped
-    to OPEX for the same reason as `two_step_completion`: on a Residential site nothing
+    like `two_step_completion`, for the same reason: on a Residential site nothing
     reads it.
 
     IT IS THE ENDPOINT'S OWN PREDICATE, not a restatement of it. Both this and
@@ -5668,7 +5671,7 @@ def _phase_list_two_step(project, request, is_manager):
     already asked; it narrows the rows read to the viewer's own when it is False,
     exactly as `_task_row_approval.html` draws the button.
     """
-    two_step = project.project_type == 'OPEX'
+    two_step = uses_two_step_completion(project)
     answers = {}
     if two_step:
         profile = getattr(request.user, 'profile', None)
@@ -5833,14 +5836,21 @@ def _attach_open_punch_points(tasks, project):
     both sources - the CL-2 membership, so the badges on a site add up to what COD
     would refuse on.
 
-    ONE grouped query for every task passed, never one per row. None at all on a
-    non-OPEX site: both ways a punch point is raised (a rejection, a QA/QC visit) are
-    OPEX-only, so a Residential page pays nothing and shows nothing.
+    ONE grouped query for every task passed, never one per row. None at all where
+    two-step completion does not apply: a punch point is raised by a rejection (the
+    two-step rule's, so OPEX and CAPEX) or by a QA/QC visit (OPEX only), so a
+    Residential page pays nothing and shows nothing.
+
+    WHY THE TWO-STEP HELPER AND NOT A SPLIT BY SOURCE (CAPEX-2). This badge counts both
+    sources, but the visit source cannot exist on CAPEX (the QA/QC engineer and visits
+    stay OPEX-only), so on CAPEX it counts rejection points alone. Keying it on
+    uses_two_step_completion() keeps the badge wherever a rejection can raise a point;
+    the OPEX-only visit gate stays where it is and needs no echo here.
 
     Called by project_overview and by the four responders that redraw a row, next to
     `_attach_due_health()`. A responder that skipped it would drop the badge from the
     row it had just redrawn."""
-    counts = ({} if project.project_type != 'OPEX'
+    counts = ({} if not uses_two_step_completion(project)
               else open_punch_point_counts_by_task([task.pk for task in tasks]))
     for task in tasks:
         task.open_punch_points = counts.get(task.pk, 0)
@@ -6035,12 +6045,12 @@ def _task_approval_context(request, project, task):
     views, a divergence between the two would show a person a button they are not
     allowed to press (or hide one they are) depending only on how they got there.
 
-    `show_approval_panel` carries the OPEX-and-not-a-mirror scope so the template
-    never asks it: a template that tests `project.project_type == 'OPEX'` inline is
-    a third place the scope of this feature is written down.
+    `show_approval_panel` carries the two-step-and-not-a-mirror scope so the template
+    never asks it: a template that tests the project type inline is a third place the
+    scope of this feature is written down. The scope is uses_two_step_completion().
     """
     profile = getattr(request.user, 'profile', None)
-    eligible = project.project_type == 'OPEX' and not task.is_mirror
+    eligible = uses_two_step_completion(project) and not task.is_mirror
     can_submit = (eligible and profile is not None
                   and user_can_submit_task_for_approval(request.user, task, project))
     # CL-A v2.5: the site's QA/QC engineer makes no approval or rejection decision on a
@@ -6622,9 +6632,9 @@ def _apply_task_status_change(task, new_status, profile, request, project):
         messages.error(request, 'Invalid status value.')
         return _TASK_STATUS_REFUSED
 
-    # AN OPEX TASK IS FINISHED BY TWO PEOPLE, NOT ONE. Rung 1 of the refusal ladder
-    # (2.1). A direct request to move an OPEX, non-mirror task to Done is refused
-    # unless somebody has already approved it — `approved_at` is the gate and the
+    # AN OPEX OR CAPEX TASK IS FINISHED BY TWO PEOPLE, NOT ONE. Rung 1 of the refusal
+    # ladder (2.1; CAPEX-2). A direct request to move such a non-mirror task to Done
+    # is refused unless somebody has already approved it — `approved_at` is the gate and the
     # only gate. The submit -> approve -> Done path reaches Done through this same
     # function, having set `approved_at` first, so it passes this rung rather than
     # going around it.
@@ -6642,22 +6652,25 @@ def _apply_task_status_change(task, new_status, profile, request, project):
     # and knows nothing about the project or the row's approval state. Encoding this
     # there would mean a second table for OPEX, and then two tables to keep in step.
     #
-    # RESIDENTIAL IS UNTOUCHED, BY THE FIRST CLAUSE. A residential task still goes
-    # to Done in one move by the person holding it, exactly as it did before this
-    # rung existed (2.1 §6). CAPEX likewise: the rule was scoped to OPEX and reads
-    # the project type rather than "not Residential", so a CAPEX site keeps today's
-    # behaviour until someone decides otherwise on purpose.
+    # RESIDENTIAL IS UNTOUCHED. A residential task still goes to Done in one move by
+    # the person holding it, exactly as it did before this rung existed (2.1 §6).
+    # Which project types the rung covers is uses_two_step_completion() alone; CAPEX
+    # joined OPEX on purpose in CAPEX-2. CAPEX tasks already Done before that stay
+    # Done: this rung refuses a MOVE to Done and never re-reads a finished row.
+    #
+    # The message names the type by its display label ("RESCO", "CAPEX"), never the
+    # stored code, so OPEX staff keep reading the word they know.
     #
     # NOTHING IS WRITTEN ON REFUSAL, same as rung 0 — this sits above the inline
     # due_date update below, so a refused completion leaves the row alone.
     if (new_status == Task.DONE
-            and project.project_type == 'OPEX'
+            and uses_two_step_completion(project)
             and task.approved_at is None):
         messages.error(
             request,
-            f"'{task.task_name}' cannot be marked Done directly — a RESCO task must "
-            f"be submitted for approval and approved by the project manager or QA/QC "
-            f"before it can be completed."
+            f"'{task.task_name}' cannot be marked Done directly — a "
+            f"{project.get_project_type_display()} task must be submitted for approval "
+            f"and approved by the project manager or QA/QC before it can be completed."
         )
         return _TASK_STATUS_REFUSED
 
@@ -7068,11 +7081,11 @@ def _approval_preconditions(request, task, project):
                  status) and would otherwise be an unguarded way to write approval
                  columns onto a row no human may touch.
 
-      not OPEX - the whole feature is scoped to OPEX (2.1 6). A residential or
-                 CAPEX task has no approval step, so these endpoints are not merely
-                 useless there, they are wrong: writing submitted_at onto a
-                 residential task would put a row into a state nothing reads and
-                 nothing can clear.
+      not two-step - the feature covers OPEX and CAPEX (2.1 6; CAPEX-2), as
+                 uses_two_step_completion() answers. A residential task has no
+                 approval step, so these endpoints are not merely useless there,
+                 they are wrong: writing submitted_at onto a residential task would
+                 put a row into a state nothing reads and nothing can clear.
     """
     if task.is_mirror:
         messages.error(
@@ -7081,11 +7094,13 @@ def _approval_preconditions(request, task, project):
             f"workspace that owns the work, so there is nothing to submit or approve."
         )
         return False
-    if project.project_type != 'OPEX':
+    if not uses_two_step_completion(project):
+        # The display label, never the stored code: the person reads "Residential",
+        # the word on every other screen, and no type outside the rule is named.
         messages.error(
             request,
-            'Two-step approval applies to OPEX sites only. This task is completed '
-            'directly by the person it is assigned to.'
+            f'Two-step approval does not apply to {project.get_project_type_display()} '
+            f'sites. This task is completed directly by the person it is assigned to.'
         )
         return False
     return True
@@ -7444,7 +7459,8 @@ def task_approve(request, project_id, task_id):
     if task.submitted_by is not None and task.submitted_by == profile:
         messages.error(
             request,
-            f"You submitted '{task.task_name}' yourself — a RESCO task must be "
+            f"You submitted '{task.task_name}' yourself — a "
+            f"{project.get_project_type_display()} task must be "
             f"approved by someone other than the person who submitted it. Ask "
             f"another project manager or a QA/QC reviewer to sign it off."
         )
