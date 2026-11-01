@@ -4021,6 +4021,19 @@ def opex_site_activate(request, project_id):
         messages.warning(request, 'Site is already active.')
         return redirect('project_overview', project_id=project.project_id)
 
+    # CAPEX-1. attach_opex_template() selects the template by project_type and RAISES
+    # when that type has none — uncaught here, that was a 500 for every Draft CAPEX site
+    # before 0128. Asked through the same resolver the attach uses, so the refusal and
+    # the attach cannot disagree on which template applies. The label, never the stored
+    # value: an OPEX site reads "RESCO" everywhere a user sees it.
+    if resolve_active_task_template(project.project_type) is None:
+        type_label = project.get_project_type_display()
+        messages.error(
+            request,
+            f'{type_label} projects cannot be activated yet: there is no active task '
+            f'template for {type_label}. Ask an Admin to set one up.')
+        return redirect('project_overview', project_id=project.project_id)
+
     with transaction.atomic():
         _prev_project_status = project.status   # 'Draft' — checked above
         project.status = 'Active'

@@ -382,14 +382,24 @@ class LedgerTests(OpexActivationBase):
             ActivityLog.objects.filter(
                 project=self.site, action__icontains='Activated project').exists())
 
-    def test_the_ledger_row_rolls_back_with_a_failed_attach(self):
+    def test_activation_without_a_template_is_refused_and_writes_nothing(self):
         """R-2: a transition row without its status change is a history of something
-        that never happened. Both are in one atomic block, so retiring the template
-        must leave neither."""
+        that never happened. With the template retired, CAPEX-1's pre-check refuses
+        before the atomic block, so neither is written — and the PM gets a message, not
+        a 500. The rollback of an attach that fails INSIDE the block is pinned by
+        tests_capex_template.AttachFailureRollbackTests."""
+        # Imported here rather than at module top: no circular import is involved; the
+        # CAPEX-1 edit to this file was limited to this one test.
+        from django.contrib.messages import get_messages
+
         TaskTemplate.objects.filter(project_type='OPEX').update(
             status=TaskTemplate.ARCHIVED)
-        with self.assertRaises(TaskTemplate.DoesNotExist):
-            self._activate()
+        response = self._activate()
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            [str(m) for m in get_messages(response.wsgi_request)],
+            ['RESCO projects cannot be activated yet: there is no active task template '
+             'for RESCO. Ask an Admin to set one up.'])
         self.site.refresh_from_db()
         self.assertEqual(self.site.status, 'Draft')
         self.assertIsNone(self.site.activated_at)
