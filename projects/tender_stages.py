@@ -354,7 +354,8 @@ def tender_cards(sites_qs, health_by_pk):
     Each card: programme pk, name, code, detail url; sites, kwp, kwp_sites; `buckets` (the
     five BUCKETS with sites and pct of the tender's sites); released, released_kwp,
     released_kwp_sites; `stages` (S0-S7 with sites, kwp, kwp_sites); `activated` (S7 sites
-    with pk, project_id, name, badge, status); `health` (the worst activated badge).
+    with pk, project_id, name, badge, status, capacity_kw, activated_on, target_date, in
+    project_id order); `health` (the worst activated badge).
 
     `health_by_pk` is {project pk: badge} from the dashboard's own project cards, passed
     in rather than recomputed: the badge rule lives in views, which imports this module,
@@ -373,7 +374,7 @@ def tender_cards(sites_qs, health_by_pk):
     stages = site_stages(sites_qs)
     rows = sites_qs.filter(program__isnull=False).order_by().values(
         'pk', 'program_id', 'project_id', 'site_name', 'customer_name', 'status',
-        'dc_capacity_kw',
+        'dc_capacity_kw', 'activated_at', 'target_commissioning_date',
         program_name=F('program__name'), program_code=F('program__short_tender_code'),
     )
     stage_number = {key: n for n, (key, _) in enumerate(STAGES)}
@@ -421,6 +422,17 @@ def tender_cards(sites_qs, health_by_pk):
                 'name': row['site_name'] or row['customer_name'],
                 'badge': health_by_pk.get(row['pk']),
                 'status': row['status'],
+                # Zero is unknown here exactly as in the card's kWp total above, so the row
+                # reads "Not set" rather than a capacity of 0.
+                'capacity_kw': kwp if kwp else None,
+                # The IST date, converted here: activated_at is stored in UTC, and a site
+                # activated between 00:00 and 05:30 IST would otherwise show the day before.
+                # The stage came from site_stages()' own read, so activated_at can be cleared
+                # between the two (only wipe_demo_2026_10_14 clears it); the row then reads
+                # "Not set" rather than raising.
+                'activated_on': (timezone.localtime(row['activated_at']).date()
+                                 if row['activated_at'] else None),
+                'target_date': row['target_commissioning_date'],
             })
 
     for card in cards.values():

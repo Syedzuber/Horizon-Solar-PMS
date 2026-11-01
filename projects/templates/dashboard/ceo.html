@@ -114,6 +114,38 @@
   .seg-released    { background: #45a874; }
   .seg-procurement { background: #1a7a4a; }
   .seg-execution   { background: #065f46; }
+  /* Activated-site rows (TC-B1): row number, site, capacity, activated, target, status. Each
+     row is its own grid with fixed tracks either side of the site, so the columns line up
+     down the list without a table, and the site name takes the slack and truncates. */
+  .tsite-list   { container-type: inline-size; }
+  .tsite-row    { display: grid; align-items: center; gap: .4rem; padding: .25rem 0;
+                  grid-template-columns: 1.4rem minmax(0,1fr) 4rem 4.3rem 4.3rem 6rem; }
+  .tsite-head   { font-size: .72rem; color: #6b7280; padding-top: 0; }
+  .tsite-num    { color: #9ca3af; font-size: .75rem; }
+  .tsite-num, .tsite-kwp, .tsite-date { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .tsite-kwp, .tsite-end { text-align: right; }
+  .tsite-status { justify-self: end; }
+  /* On one line the facts are three grid cells of the row; stacked they become one line. */
+  .tsite-facts  { display: contents; }
+  .tsite-unset  { color: #9ca3af; }
+  /* On one line the header row labels the facts, so these are for screen readers only;
+     stacked, the header is gone and they show. */
+  .tsite-lbl    { position: absolute; width: 1px; height: 1px; overflow: hidden;
+                  clip: rect(0 0 0 0); white-space: nowrap; }
+  /* 438px of list is a card of ~470px less card-body's 1rem padding each side. */
+  @container (max-width: 438px) {
+    .tsite-head   { display: none; }
+    .tsite-row    { grid-template-columns: 1.4rem minmax(0,1fr) auto; row-gap: .1rem;
+                    grid-template-areas: "num site status" ". facts facts"; }
+    .tsite-num    { grid-area: num; }
+    .tsite-site   { grid-area: site; }
+    .tsite-status { grid-area: status; }
+    .tsite-facts  { grid-area: facts; display: flex; flex-wrap: wrap; gap: .1rem .9rem;
+                    font-size: .75rem; color: #6b7280; }
+    .tsite-kwp    { text-align: left; }
+    .tsite-lbl    { position: static; width: auto; height: auto; overflow: visible;
+                    clip: auto; color: #9ca3af; }
+  }
 
   /* ── Section headers ── */
   .section-label {
@@ -305,21 +337,35 @@ default, opened by the button only. Residential and no-context set tender_cards 
 
           <div class="fw-semibold small mb-1">Activated sites</div>
           {% if card.activated %}
-          <ul class="list-unstyled mb-3">
-            {% for site in card.activated %}
-            <li class="d-flex align-items-center justify-content-between gap-2 py-1 small">
-              <a href="{% url 'project_overview' site.project_id %}" class="text-truncate">{{ site.project_id }} · {{ site.name }}</a>
-              {% if site.pill %}
-                <span class="proj-badge {{ site.pill.css }}">
-                  <i data-lucide="{{ site.pill.icon }}" style="width:11px;height:11px;"></i> {{ site.pill.label }}
+          {# TC-B1: # is the row's place in this list (project_id order), not a stored number. #}
+          <div class="tsite-list mb-3">
+            <div class="tsite-row tsite-head" aria-hidden="true">
+              <span>#</span><span>Site</span><span class="tsite-end">kWp</span><span>Activated</span><span>Target</span><span class="tsite-end">Status</span>
+            </div>
+            <ul class="list-unstyled mb-0">
+              {% for site in card.activated %}
+              <li class="tsite-row small">
+                <span class="tsite-num">{{ forloop.counter }}</span>
+                <a href="{% url 'project_overview' site.project_id %}" class="tsite-site text-truncate" title="{{ site.project_id }} · {{ site.name }}">{{ site.project_id }} · {{ site.name }}</a>
+                <span class="tsite-facts">
+                  <span class="tsite-kwp"><span class="tsite-lbl">kWp</span> {% if site.capacity_kw %}{{ site.capacity_kw|floatformat:"-2g" }}{% else %}<span class="tsite-unset">Not set</span>{% endif %}</span>
+                  <span class="tsite-date"><span class="tsite-lbl">Activated</span> {% if site.activated_on %}{{ site.activated_on|date:"d M y" }}{% else %}<span class="tsite-unset">Not set</span>{% endif %}</span>
+                  <span class="tsite-date"><span class="tsite-lbl">Target</span> {% if site.target_date %}{{ site.target_date|date:"d M y" }}{% else %}<span class="tsite-unset">Not set</span>{% endif %}</span>
                 </span>
-              {% else %}
-                {# Outside the dashboard's Active / In Progress cards, so no health badge: its status instead. #}
-                <span class="status-pill not-started">{{ site.status }}</span>
-              {% endif %}
-            </li>
-            {% endfor %}
-          </ul>
+                <span class="tsite-status">
+                {% if site.pill %}
+                  <span class="proj-badge {{ site.pill.css }}">
+                    <i data-lucide="{{ site.pill.icon }}" style="width:11px;height:11px;"></i> {{ site.pill.label }}
+                  </span>
+                {% else %}
+                  {# Outside the dashboard's Active / In Progress cards, so no health badge: its status instead. #}
+                  <span class="status-pill not-started">{{ site.status }}</span>
+                {% endif %}
+                </span>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
           {% else %}
           <p class="text-muted small mb-3">No site activated yet.</p>
           {% endif %}
