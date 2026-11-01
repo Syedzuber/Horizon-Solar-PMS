@@ -118,12 +118,14 @@
      row is its own grid with fixed tracks either side of the site, so the columns line up
      down the list without a table, and the site name takes the slack and truncates. */
   .tsite-list   { container-type: inline-size; }
-  .tsite-row    { display: grid; align-items: center; gap: .4rem; padding: .25rem 0;
-                  grid-template-columns: 1.4rem minmax(0,1fr) 4rem 4.3rem 4.3rem 6rem; }
+  .tsite-row    { display: grid; align-items: center; gap: .4rem .75rem; padding: .25rem 0;
+                  grid-template-columns: 1.4rem minmax(0,1fr) 3.6rem 5rem 5rem 5.8rem; }
   .tsite-head   { font-size: .72rem; color: #6b7280; padding-top: 0; }
   .tsite-num    { color: #9ca3af; font-size: .75rem; }
   .tsite-num, .tsite-kwp, .tsite-date { font-variant-numeric: tabular-nums; white-space: nowrap; }
   .tsite-kwp, .tsite-end { text-align: right; }
+  /* A right-aligned capacity would otherwise sit flush against the Activated date. */
+  .tsite-kwp    { padding-right: .35rem; }
   .tsite-status { justify-self: end; }
   /* On one line the facts are three grid cells of the row; stacked they become one line. */
   .tsite-facts  { display: contents; }
@@ -132,17 +134,20 @@
      stacked, the header is gone and they show. */
   .tsite-lbl    { position: absolute; width: 1px; height: 1px; overflow: hidden;
                   clip: rect(0 0 0 0); white-space: nowrap; }
-  /* 438px of list is a card of ~470px less card-body's 1rem padding each side. */
-  @container (max-width: 438px) {
+  /* The fixed tracks and gaps take ~393px, so below 480px of list the site name would get
+     under ~90px; the row stacks instead. Stacked keeps its own .4rem column gap and no
+     capacity padding. */
+  @container (max-width: 480px) {
     .tsite-head   { display: none; }
     .tsite-row    { grid-template-columns: 1.4rem minmax(0,1fr) auto; row-gap: .1rem;
+                    column-gap: .4rem;
                     grid-template-areas: "num site status" ". facts facts"; }
     .tsite-num    { grid-area: num; }
     .tsite-site   { grid-area: site; }
     .tsite-status { grid-area: status; }
     .tsite-facts  { grid-area: facts; display: flex; flex-wrap: wrap; gap: .1rem .9rem;
                     font-size: .75rem; color: #6b7280; }
-    .tsite-kwp    { text-align: left; }
+    .tsite-kwp    { text-align: left; padding-right: 0; }
     .tsite-lbl    { position: static; width: auto; height: auto; overflow: visible;
                     clip: auto; color: #9ca3af; }
   }
