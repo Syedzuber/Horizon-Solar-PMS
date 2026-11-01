@@ -1529,7 +1529,7 @@ at the top of this page unmodified, exactly as it does on task_detail.
                     placeholder="Describe the completed work"></textarea>
           <p class="text-muted mb-0 mt-2" style="font-size:.72rem;">
             {% if self_certify_any %}<span class="js-self-certify-yes{% if not self_certify_all %} d-none{% endif %}">No other approver on this project — this completes the task under your name.</span>{% endif %}
-            {% if not self_certify_all %}<span class="js-self-certify-no">The task stays In Progress until the project manager or QA/QC approves it.</span>{% endif %}
+            {% if not self_certify_all %}<span class="js-self-certify-no">The task stays In Progress until someone other than the submitter approves it.</span>{% endif %}
           </p>
           {% comment %}A SINK FOR AN OOB SWAP THAT BELONGS TO ANOTHER SCREEN.
              `_task_approval_response.html` also swaps `#taskStatusBlock`, which is

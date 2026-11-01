@@ -1399,6 +1399,18 @@ def _parse_group_submission(request):
 
     # 3. Recorded against
     sites, programs, site_type, unfrozen = _parse_group_sites(request, errors)
+    # RESCO SITES ONLY ON THIS PAGE (CAPEX-3). _parse_group_sites resolves any posted pk
+    # the caller can see, so a hand-posted CAPEX or Residential id used to become a
+    # CAPEX or Residential order here. The check sits in THIS parser and not in
+    # _parse_group_sites because the purchases workspace shares that helper and records
+    # Residential purchases on purpose. Refusing here writes nothing: this runs before
+    # the first upload and the first row.
+    for site in sites:
+        project = site['project']
+        if project.project_type != 'OPEX':
+            errors.append(f'{project.project_id} is a '
+                          f'{project.get_project_type_display()} project. Only RESCO '
+                          'sites can be recorded on a group payment request.')
     # Every tender this page offers is OPEX, so an order recorded against no site is an
     # OPEX order; one with sites takes their (single, checked) type.
     project_type = site_type or 'OPEX'

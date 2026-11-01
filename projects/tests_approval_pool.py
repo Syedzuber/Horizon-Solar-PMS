@@ -671,7 +671,7 @@ class ButtonLabelTests(PoolFixture):
         )
         self.assertNotIn('Submit for approval', body)
         # The body line the old wording contradicted outright.
-        self.assertNotIn('stays In Progress until the project manager', body)
+        self.assertNotIn('stays In Progress until someone other than the submitter', body)
         self.assertGreaterEqual(body.count(self.NOTE), 2, 'row note and modal body')
 
     def test_the_confirm_modal_keeps_the_ordinary_wording_otherwise(self):
@@ -679,7 +679,7 @@ class ButtonLabelTests(PoolFixture):
         self._in_progress()
         body = self._overview(self.pm).content.decode()
         self.assertIn('Submit for approval', body)
-        self.assertIn('stays In Progress until the project manager', body)
+        self.assertIn('stays In Progress until someone other than the submitter', body)
         self.assertNotIn(self.SELF, body)
         self.assertNotIn(self.NOTE, body)
 

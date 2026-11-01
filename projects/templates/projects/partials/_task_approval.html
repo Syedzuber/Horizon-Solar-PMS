@@ -169,7 +169,8 @@ Three states, and they are mutually exclusive:
           </p>
         {% else %}
           <p class="text-muted small mb-0">
-            Waiting on the project manager or QA/QC to approve this work.
+            {# Names no approver: the pool differs by type (QA/QC engineer is RESCO-only), CAPEX-3. #}
+            Waiting on someone other than the submitter to approve this work.
           </p>
         {% endif %}
 
@@ -222,8 +223,8 @@ Three states, and they are mutually exclusive:
           {% endif %}
         {% else %}
           <p class="text-muted small mb-0">
-            This task is completed in two steps: the assignee submits it, then the
-            project manager or QA/QC approves it.
+            This task is completed in two steps: the assignee submits it, then someone
+            other than the submitter approves it.
           </p>
         {% endif %}
       {% endif %}

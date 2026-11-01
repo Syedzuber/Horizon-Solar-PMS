@@ -97,17 +97,17 @@
             </label>
           </div>
 
-          <!-- QA/QC (2.3a) -- approves/rejects submitted OPEX work; a rejection
-               raises a punch point. Waiving one is PM-only and this flag does not
-               grant it. -->
+          <!-- QA/QC (2.3a) -- approves/rejects submitted RESCO and CAPEX work (the
+               is_qaqc approval arm has no type test); a rejection raises a punch
+               point. Waiving one is PM-only and this flag does not grant it. -->
           <div class="col-span-2 flex items-center gap-2 pt-1">
             <input type="checkbox" name="is_qaqc" id="id_is_qaqc"
                    {% if form.is_qaqc.value %}checked{% endif %}
                    class="form-check-input">
             <label for="id_is_qaqc" class="text-sm text-gray-700">
-              QA/QC — may approve or reject submitted RESCO work on sites this user can
-              already see; a rejection raises a punch point. Does not confer the
-              PM-only power to waive one.
+              QA/QC — may approve or reject submitted tasks on RESCO and CAPEX sites they
+              can view; a rejection raises a punch point. Does not confer the PM-only
+              power to waive one.
             </label>
           </div>
 

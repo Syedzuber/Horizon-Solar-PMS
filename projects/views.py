@@ -5064,6 +5064,16 @@ def program_edit(request, pk):
     if not _can_access_program(request, program):
         raise Http404
 
+    # A CAPEX PROGRAM IS REFUSED ON GET AND POST ALIKE, and nothing is written (CAPEX-3).
+    # ProgramForm no longer offers CAPEX, so its edit form would show RESCO and saving
+    # it would convert the Program — the one outcome ruled out for existing CAPEX
+    # Programs, which are kept exactly as they are pending a team decision. Every
+    # role that reaches this line is refused; Admin can still soft-delete the Program.
+    if program.program_type == 'CAPEX':
+        messages.error(request, 'This CAPEX Program can no longer be edited: CAPEX '
+                                'projects now stand alone. It is kept as it is.')
+        return redirect('program_detail', pk=program.pk)
+
     if request.method == 'POST':
         form = ProgramForm(request.POST, instance=program)
         if form.is_valid():
@@ -6659,7 +6669,9 @@ def _apply_task_status_change(task, new_status, profile, request, project):
     # Done: this rung refuses a MOVE to Done and never re-reads a finished row.
     #
     # The message names the type by its display label ("RESCO", "CAPEX"), never the
-    # stored code, so OPEX staff keep reading the word they know.
+    # stored code, so OPEX staff keep reading the word they know. It names no approver
+    # (CAPEX-3): who may approve differs by type — the per-site QA/QC engineer is
+    # OPEX-only — and the one rule true on both is "not the submitter".
     #
     # NOTHING IS WRITTEN ON REFUSAL, same as rung 0 — this sits above the inline
     # due_date update below, so a refused completion leaves the row alone.
@@ -6670,7 +6682,8 @@ def _apply_task_status_change(task, new_status, profile, request, project):
             request,
             f"'{task.task_name}' cannot be marked Done directly — a "
             f"{project.get_project_type_display()} task must be submitted for approval "
-            f"and approved by the project manager or QA/QC before it can be completed."
+            f"and approved by someone other than the submitter before it can be "
+            f"completed."
         )
         return _TASK_STATUS_REFUSED
 

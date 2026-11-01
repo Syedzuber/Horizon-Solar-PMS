@@ -40,8 +40,9 @@
         <td class="px-4 py-3 font-medium text-gray-900">{{ project.customer_name }}</td>
         <td class="px-4 py-3">
           <span class="px-2 py-0.5 rounded text-xs font-medium
-            {% if project.project_type == 'residential' %}bg-blue-50 text-blue-700
-            {% elif project.project_type == 'commercial_opex' %}bg-purple-50 text-purple-700
+            {% if project.project_type == 'Residential' %}bg-blue-50 text-blue-700
+            {% elif project.project_type == 'OPEX' %}bg-purple-50 text-purple-700
+            {% elif project.project_type == 'CAPEX' %}bg-green-50 text-green-700
             {% else %}bg-yellow-50 text-yellow-700{% endif %}">
             {{ project.get_project_type_display }}
           </span>
@@ -112,8 +113,9 @@
             <td class="px-4 py-3 font-medium text-gray-900">{{ project.customer_name }}</td>
             <td class="px-4 py-3">
               <span class="px-2 py-0.5 rounded text-xs font-medium
-                {% if project.project_type == 'residential' %}bg-blue-50 text-blue-700
-                {% elif project.project_type == 'commercial_opex' %}bg-purple-50 text-purple-700
+                {% if project.project_type == 'Residential' %}bg-blue-50 text-blue-700
+                {% elif project.project_type == 'OPEX' %}bg-purple-50 text-purple-700
+                {% elif project.project_type == 'CAPEX' %}bg-green-50 text-green-700
                 {% else %}bg-yellow-50 text-yellow-700{% endif %}">
                 {{ project.get_project_type_display }}
               </span>

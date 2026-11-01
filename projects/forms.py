@@ -175,10 +175,11 @@ class AdminUserEditForm(forms.Form):
     is_qaqc = forms.BooleanField(
         required=False,
         label='QA/QC',
-        help_text=('May approve or reject a submitted RESCO task on any site they can '
-                   'already see, and raises a punch point when they reject one. '
-                   'Independent of role, and does NOT confer the PM-only power to '
-                   'waive a punch point.'),
+        # RESCO AND CAPEX: user_can_approve_task's is_qaqc arm has no type test, so the
+        # flag reaches every two-step type (CAPEX-2), not RESCO alone.
+        help_text=('May approve or reject submitted tasks on RESCO and CAPEX sites they '
+                   'can view. A rejection raises a punch point. Independent of role, and '
+                   'does NOT confer the PM-only power to waive a punch point.'),
         widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
     )
     is_warehouse_keeper = forms.BooleanField(
@@ -1029,6 +1030,25 @@ class ProgramForm(forms.ModelForm):
             'planned_site_count':  'Planned site count',
         }
 
+    #: Shown for any program_type outside the offered choices — in practice a hand-
+    #: posted CAPEX. "New Project" is the button label on the PM dashboard and the
+    #: Admin projects list.
+    PROGRAM_TYPE_REFUSED = ('A Program can only be RESCO. CAPEX projects stand alone: '
+                            'create them from New Project, outside any Program.')
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # CAPEX STANDS ALONE (CAPEX-3). No CAPEX site can join a Program — every add-site
+        # path 404s on a non-OPEX Program — so a CAPEX Program is an empty shell. The
+        # limit lives HERE, on the form, and not on Program.PROGRAM_TYPE_CHOICES: the
+        # model keeps CAPEX so an existing CAPEX row stays valid and untouched. A
+        # posted CAPEX fails the choice check and gets the message above, never the
+        # stock "Select a valid choice", which would name the stored code.
+        field = self.fields['program_type']
+        field.choices = [(value, label) for value, label in field.choices
+                         if value != 'CAPEX']
+        field.error_messages['invalid_choice'] = self.PROGRAM_TYPE_REFUSED
+
     def clean_short_tender_code(self):
         # normalize_TENDER_code, not normalize_program_code — the tender-code rule keeps
         # hyphens and rejects everything else, where the site-code rule strips. See both
@@ -1084,6 +1104,8 @@ class ProgramForm(forms.ModelForm):
                                    f"Tender reference '{ref}' is already used by another Program.")
 
         elif program_type == 'CAPEX':
+            # Unreachable since CAPEX-3 (__init__ drops the choice). Kept so the rule
+            # holds if a CAPEX Program is ever allowed again.
             # CAPEX never carries a short_tender_code — clear any stray value so it
             # never participates in the OPEX uniqueness space.
             cleaned['short_tender_code'] = ''

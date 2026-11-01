@@ -6,7 +6,7 @@
 <div class="d-flex justify-content-between align-items-start gap-2 mb-3">
   <div>
     <h4 class="mb-0">PO / PI record</h4>
-    <small class="text-muted">{{ order.po_number|default:order.pi_number }} · {{ order.vendor.name }} · {{ order.project_type }}</small>
+    <small class="text-muted">{{ order.po_number|default:order.pi_number }} · {{ order.vendor.name }} · {{ order.get_project_type_display }}</small>
   </div>
   <div class="d-flex flex-wrap justify-content-end gap-2 flex-shrink-0">
     {% if can_request_payment %}
@@ -42,7 +42,7 @@
           <dt class="col-5 col-sm-4 text-muted fw-normal">PI number</dt>
           <dd class="col-7 col-sm-8">{{ order.pi_number|default:"—" }}</dd>
           <dt class="col-5 col-sm-4 text-muted fw-normal">Type</dt>
-          <dd class="col-7 col-sm-8">{{ order.project_type }}</dd>
+          <dd class="col-7 col-sm-8">{{ order.get_project_type_display }}</dd>
           <dt class="col-5 col-sm-4 text-muted fw-normal">Raised by</dt>
           <dd class="col-7 col-sm-8">{{ order.created_by.user.get_full_name|default:order.created_by.user.username }}</dd>
           <dt class="col-5 col-sm-4 text-muted fw-normal">Raised on</dt>

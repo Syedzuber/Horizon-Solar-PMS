@@ -74,7 +74,7 @@ Expected context:
          one nobody had touched, so the site engineer who had already sent it up
          re-opened it to check and the PM never learned it was waiting.{% endcomment %}
       <span class="badge bg-warning text-dark"
-            title="Submitted{% if task.submitted_by %} by {{ task.submitted_by.user.get_full_name|default:task.submitted_by.user.username }}{% endif %} — waiting on the project manager or QA/QC.">Awaiting approval</span>
+            title="Submitted{% if task.submitted_by %} by {{ task.submitted_by.user.get_full_name|default:task.submitted_by.user.username }}{% endif %} — waiting on approval by someone other than the submitter.">Awaiting approval</span>
     {% comment %}G103 (CL-L, F1): no Submit for this site's QA/QC engineer on a Site
        Engineer row — user_can_submit_task_for_approval refuses it first. On both arms
        because `and` binds tighter than `or`; see _task_row.html.{% endcomment %}
