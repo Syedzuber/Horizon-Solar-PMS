@@ -1,0 +1,72 @@
+{% extends "admin/base_site.html" %}
+{% load i18n l10n admin_urls static %}
+{% comment %}
+ATT-V: the confirmation page of ContractorAttendanceAdmin.void_selected. Lists the entries
+to void and those skipped as already voided, takes one required note, and posts back to
+the changelist with post=yes. Every selected pk is posted again, skipped ones included, so
+the result message can still count them.
+{% endcomment %}
+
+{% block extrahead %}
+    {{ block.super }}
+    <script src="{% static 'admin/js/cancel.js' %}" async></script>
+{% endblock %}
+
+{% block bodyclass %}{{ block.super }} app-{{ opts.app_label }} model-{{ opts.model_name }} delete-confirmation{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+<a href="{% url 'admin:index' %}">{% translate 'Home' %}</a>
+&rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+&rsaquo; <a href="{% url opts|admin_urlname:'changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+&rsaquo; Void selected attendance
+</div>
+{% endblock %}
+
+{% block content %}
+{% if entries %}
+  <p>These entries will be voided. Each stays on record, stops counting, and gets a VOIDED
+  history row carrying your note.</p>
+  <table>
+    <thead><tr><th>#</th><th>Project</th><th>Date</th><th>Contractor</th><th>Trade</th><th>Headcount</th></tr></thead>
+    <tbody>
+    {% for e in entries %}
+      <tr><td>{{ e.pk|unlocalize }}</td><td>{{ e.project.project_id }}</td><td>{{ e.date|date:"d M Y" }}</td>
+          <td>{{ e.contractor_label }}</td><td>{{ e.trade_label }}</td><td>{{ e.headcount }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <p>Nothing to void: every selected entry is already voided.</p>
+{% endif %}
+
+{% if skipped %}
+  <h2>Skipped — already voided</h2>
+  <table>
+    <thead><tr><th>#</th><th>Project</th><th>Date</th><th>Contractor</th><th>Trade</th><th>Headcount</th></tr></thead>
+    <tbody>
+    {% for e in skipped %}
+      <tr><td>{{ e.pk|unlocalize }}</td><td>{{ e.project.project_id }}</td><td>{{ e.date|date:"d M Y" }}</td>
+          <td>{{ e.contractor_label }}</td><td>{{ e.trade_label }}</td><td>{{ e.headcount }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% endif %}
+
+<form method="post">{% csrf_token %}
+<div>
+  {% for e in all_entries %}
+  <input type="hidden" name="{{ action_checkbox_name }}" value="{{ e.pk|unlocalize }}">
+  {% endfor %}
+  <input type="hidden" name="action" value="void_selected">
+  <input type="hidden" name="post" value="yes">
+  {% if entries %}
+    {% if note_error %}<p class="errornote">{{ note_error }}</p>{% endif %}
+    <p><label for="id_void_note"><strong>Why are these entries being voided?</strong> (required)</label></p>
+    <p><textarea name="void_note" id="id_void_note" rows="3" cols="60" required>{{ note }}</textarea></p>
+    <input type="submit" value="Confirm void">
+  {% endif %}
+  <a role="button" href="#" class="button cancel-link">Cancel</a>
+</div>
+</form>
+{% endblock %}

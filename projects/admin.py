@@ -1,5 +1,7 @@
 from django import forms
 from django.contrib import admin, messages
+from django.contrib.admin import helpers
+from django.template.response import TemplateResponse
 from django.utils import timezone
 from .models import (
     Project, Milestone, ProjectDocument, ProjectPhase, Task, UserProfile,
@@ -20,7 +22,8 @@ from .models import (
     ContractorAttendance, ContractorAttendanceRevision,
 )
 from .forms import check_typed_date
-from .permissions import qaqc_engineer_assignment_refusal
+from .attendance import VOID_NOTE_REQUIRED, AttendanceRefused, void_attendance
+from .permissions import qaqc_engineer_assignment_refusal, user_can_void_attendance_any_day
 from .utils import assign_task_to
 
 
@@ -1000,13 +1003,81 @@ class NotificationEventSettingChangeAdmin(_ApprovalRecordAdmin):
 
 # ATT-B1 contractor attendance — view-only. projects/attendance.py is the only writer of
 # both models (each write with its revision row, same-day rule under a row lock); an admin
-# form would write past both, so add, change and delete are all refused here.
+# form would write past both, so add, change and delete are all refused here. The one
+# write offered is ATT-V's bulk void, which goes through that writer (DEL-A §10: void,
+# never delete).
 @admin.register(ContractorAttendance)
 class ContractorAttendanceAdmin(_ApprovalRecordAdmin):
     list_display  = ['pk', 'project', 'date', 'contractor', 'unlisted_contractor_name',
                      'trade', 'headcount', 'time_in', 'time_out', 'recorded_by', 'is_voided']
     list_filter   = ['trade', 'is_voided']
     search_fields = ['project__project_id', 'unlisted_contractor_name', 'contractor__name']
+    # No allowed_permissions on the action: Django would then ask has_change_permission(),
+    # which _ApprovalRecordAdmin refuses. Who may void is the writer's question instead.
+    actions       = ['void_selected']
+
+    @admin.action(description='Void selected attendance')
+    def void_selected(self, request, queryset):
+        """Void the selected entries with one note (ATT-V). The first POST shows
+        void_selected_confirmation.html: the entries, the ones skipped as already voided,
+        a required note, Confirm / Cancel. The confirming POST (post=yes) calls
+        attendance.void_attendance() once per live entry.
+
+        Access: a role in ATTENDANCE_ANY_DAY_VOIDER_ROLES (Admin), through
+        user_can_void_attendance_any_day(). The writer asks it again per entry under the
+        row lock, so a row voided or its site soft-deleted between the two POSTs is
+        refused, not overwritten. A user the helper refuses for every live entry is turned
+        back before the page. Add, change and delete stay refused (_ApprovalRecordAdmin).
+        """
+        entries = list(queryset.select_related('project', 'contractor')
+                       .order_by('project__project_id', 'date', 'pk'))
+        live = [e for e in entries if not e.is_voided]
+        skipped = [e for e in entries if e.is_voided]
+        # Refused before the page, not after a typed note: role only, via the helper —
+        # no role string is compared outside permissions.py.
+        if live and not any(user_can_void_attendance_any_day(request.user, e) for e in live):
+            self.message_user(request, 'You cannot void attendance entries.', messages.ERROR)
+            return None
+        note = (request.POST.get('void_note') or '').strip()
+        if request.POST.get('post') == 'yes' and live and note:
+            return self._void_entries(request, live, skipped, note)
+        context = {
+            **self.admin_site.each_context(request),
+            'title': 'Void selected attendance',
+            'opts': self.model._meta,
+            'entries': live,
+            'skipped': skipped,
+            'all_entries': entries,
+            'note': note,
+            'note_error': VOID_NOTE_REQUIRED if request.POST.get('post') == 'yes' else '',
+            'action_checkbox_name': helpers.ACTION_CHECKBOX_NAME,
+        }
+        return TemplateResponse(
+            request, 'admin/projects/contractorattendance/void_selected_confirmation.html',
+            context)
+
+    def _void_entries(self, request, live, skipped, note):
+        """One void_attendance() call per entry, each its own transaction and row lock
+        (the writer's), so one refusal never rolls back the others. Reports what was
+        voided, refused with the writer's own message, and skipped."""
+        voided, refused = 0, []
+        for entry in live:
+            try:
+                void_attendance(entry, note, request.user)
+            except AttendanceRefused as exc:
+                refused.append(f'#{entry.pk} {entry.project.project_id} {entry.date} '
+                               f'{entry.contractor_label} — {exc}')
+            else:
+                voided += 1
+        self.message_user(request, f"Voided {voided} with note: '{note}'.",
+                          messages.SUCCESS if voided else messages.WARNING)
+        if refused:
+            self.message_user(request, f'Refused {len(refused)}: ' + '; '.join(refused),
+                              messages.ERROR)
+        if skipped:
+            self.message_user(request, f'Skipped {len(skipped)} already voided.',
+                              messages.INFO)
+        return None
 
 
 @admin.register(ContractorAttendanceRevision)

@@ -3707,6 +3707,31 @@ def user_can_correct_attendance(user, entry):
             and user_is_attendance_corrector(user, entry.project))
 
 
+#: The roles that void an attendance entry on ANY day, today's included, on any site not
+#: soft-deleted (ATT-V, DEL-A §10). Admin only; System Admin is left out as for
+#: correctors. Kept apart from ATTENDANCE_CORRECTOR_ROLES on purpose: a role added there
+#: must not also gain today's voids, and this set grants no same-day edit or time out.
+ATTENDANCE_ANY_DAY_VOIDER_ROLES = frozenset({'Admin'})
+
+
+def user_can_void_attendance_any_day(user, entry):
+    """Return True if `user` may void `entry` whatever its date, today's included (ATT-V
+    rulings Q1-Q3): the entry is not voided (no un-void), its site is not soft-deleted
+    (any other status, as for a correction), and `user` holds a role in
+    ATTENDANCE_ANY_DAY_VOIDER_ROLES. Role only, never the superuser flag.
+
+    Asked by attendance.void_attendance() only, beside user_can_change_attendance_today()
+    and user_can_correct_attendance(), so it widens the void and nothing else: an Admin
+    still cannot edit or time out today's entry. The writer asks it under the row lock.
+    """
+    if entry is None or entry.is_voided:
+        return False
+    if entry.project is None or entry.project.is_deleted:
+        return False
+    profile = getattr(user, 'profile', None)
+    return profile is not None and profile.role in ATTENDANCE_ANY_DAY_VOIDER_ROLES
+
+
 def user_can_add_late_attendance(user, project):
     """Return True if `user` may add an entry for a missed day on `project` (ATT-B2 ruling
     4): the same correctors, on any not soft-deleted site. The 1-7 day window is the

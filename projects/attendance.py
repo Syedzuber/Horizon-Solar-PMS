@@ -6,7 +6,8 @@ ContractorAttendanceRevision (ATT-B1).
     update_attendance()   a same-day edit, with an EDITED revision (none if nothing changed)
     set_time_out()        the crew's time out, with a TIME_OUT revision
     void_attendance()     a void with its note, with a VOIDED revision — today's by the
-                          site's loggers or recorder, a past day's by a corrector (ATT-B2)
+                          site's loggers or recorder, a past day's by a corrector (ATT-B2),
+                          any day's by an Admin (ATT-V: the admin bulk action calls it)
 
 ATT-B2, after the day (PM / coordinators / Admin, permissions.user_is_attendance_corrector):
     correct_attendance()      a past-day correction with its note, an EDITED revision — or,
@@ -47,7 +48,7 @@ from .models import (
 from .permissions import (
     attendance_entry_mappable, attendance_entry_remappable, user_can_add_late_attendance,
     user_can_change_attendance_today, user_can_correct_attendance, user_can_log_attendance,
-    user_can_map_attendance,
+    user_can_map_attendance, user_can_void_attendance_any_day,
 )
 
 logger = logging.getLogger(__name__)
@@ -437,8 +438,9 @@ def void_attendance(entry, note, by):
     A void always says why (ruling 6). The entry stays on record, stops counting, and
     frees its contractor/trade/day slot (ruling 11). Today's entry is voided by whoever
     may change it today; a past day's by a corrector — the site's PM, a coordinator or
-    Admin (ATT-B2 ruling 1). Refused when the note is blank or neither applies, which
-    includes an entry already voided (no un-void, ATT-B2 ruling 3). Returns the entry.
+    Admin (ATT-B2 ruling 1); any day's by an Admin (ATT-V). Refused when the note is
+    blank or none applies, which includes an entry already voided (no un-void, ATT-B2
+    ruling 3). Returns the entry.
     """
     note = (note or '').strip()
     if not note:
@@ -446,9 +448,12 @@ def void_attendance(entry, note, by):
     with transaction.atomic():
         locked = _lock(entry)
         # Today's entry: the site's loggers or its recorder. A past day's: a corrector.
-        # Both helpers refuse a voided entry.
+        # Any day's: an Admin (ATT-V). The Admin arm is its own helper, asked here and
+        # nowhere else, so Admin gains today's void without today's edit or time out —
+        # user_can_change_attendance_today stays as it was. All three refuse a voided entry.
         if not (user_can_change_attendance_today(by, locked)
-                or user_can_correct_attendance(by, locked)):
+                or user_can_correct_attendance(by, locked)
+                or user_can_void_attendance_any_day(by, locked)):
             raise AttendanceRefused(NOT_CHANGEABLE)
         before = attendance_snapshot(locked)
         now = timezone.now()

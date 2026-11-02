@@ -14,6 +14,8 @@ WHAT IS PINNED HERE
     same-day lock after midnight                    MidnightTests
     recorder rights after task removal              RecorderMovedOffTests
     ATT-B1a: no time later than now + 15 minutes    FutureTimeTests
+    ATT-V: Admin bulk void in the Django admin,
+      Admin's any-day void (portal included)        AdminBulkVoidTests
 
 "Today" is moved by patching django.utils.timezone.localdate, which every attendance
 check reads. "Now" (ATT-B1a) is attendance.local_now(), pinned at 20:00 IST by the fixture. Storage is mocked at qaqc_views._client (upload), attendance._client (discard)
@@ -27,6 +29,7 @@ from datetime import datetime, time, timedelta
 from decimal import Decimal
 from unittest import mock
 
+from django.contrib.admin import site as admin_site
 from django.contrib.auth.models import User
 from django.contrib.messages import get_messages
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -46,7 +49,7 @@ from .models import (
 )
 from .permissions import (
     user_can_change_attendance_today, user_can_log_attendance, user_can_view_attendance_photo,
-    user_is_todays_attendance_recorder,
+    user_can_void_attendance_any_day, user_is_todays_attendance_recorder,
 )
 
 BUCKET = 'attendance-test-private'
@@ -1016,3 +1019,217 @@ class FutureTimeTests(AttendanceFixture):
         self.assertIn(attendance.TIME_LATER_THAN_NOW, _messages(response))
         entry.refresh_from_db()
         self.assertIsNone(entry.time_out)
+
+
+# ---------------------------------------------------------------------------
+# ATT-V — Admin bulk void from the Django admin, and Admin's any-day void
+# ---------------------------------------------------------------------------
+
+class AdminBulkVoidTests(AttendanceFixture):
+    """ATT-V (DEL-A §10): the admin's "Void selected attendance" action calls
+    void_attendance() once per entry with one required note. Admin may void today's
+    entry through user_can_void_attendance_any_day(), inside the void path only:
+    user_can_change_attendance_today() is unchanged, so Admin still cannot edit or time
+    out today's entry. The portal's void view reaches the same writer (ruling Q1)."""
+
+    NOTE = 'Logged against the wrong site'
+
+    def setUp(self):
+        super().setUp()
+        # The production admin: a superuser whose profile role is Admin. The role, not
+        # the superuser flag, is what the helper reads (ruling Q3).
+        user = self.admin.user
+        user.is_staff = True
+        user.is_superuser = True
+        user.save(update_fields=['is_staff', 'is_superuser'])
+        self.url = reverse('admin:projects_contractorattendance_changelist')
+
+    def _yesterday_entry(self, **kwargs):
+        """An entry logged yesterday on its own day, through the same-day writer."""
+        with mock.patch('django.utils.timezone.localdate',
+                        return_value=timezone.localdate() - timedelta(days=1)):
+            return self._entry(**kwargs)
+
+    def _select(self, entries):
+        """The changelist's first POST: the action picked, the rows ticked."""
+        return _client_for(self.admin).post(self.url, {
+            'action': 'void_selected', 'index': '0',
+            '_selected_action': [str(e.pk) for e in entries]})
+
+    def _confirm(self, entries, note=NOTE):
+        """The confirmation page's POST, as its form sends it."""
+        return _client_for(self.admin).post(self.url, {
+            'action': 'void_selected', 'post': 'yes', 'void_note': note,
+            '_selected_action': [str(e.pk) for e in entries]})
+
+    def _voided_revisions(self, entry):
+        return entry.revisions.filter(action=ContractorAttendanceRevision.VOIDED).count()
+
+    # -- the action is offered; the admin still writes nothing else ------------------
+
+    def test_action_offered_while_add_change_delete_stay_refused(self):
+        self._entry()                                   # an empty list shows no actions
+        response = _client_for(self.admin).get(self.url)
+        self.assertContains(response, 'value="void_selected"')
+        self.assertContains(response, 'Void selected attendance')
+        self.assertNotContains(response, 'value="delete_selected"')
+        model_admin = admin_site._registry[ContractorAttendance]
+        request = response.wsgi_request
+        self.assertEqual(
+            (model_admin.has_add_permission(request), model_admin.has_change_permission(request),
+             model_admin.has_delete_permission(request)),
+            (False, False, False))
+
+    # -- Admin voids today's entry -----------------------------------------------------
+
+    def test_admin_voids_todays_entry_with_one_revision(self):
+        entry = self._entry()
+        page = self._select([entry])
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(page, 'ATT-A')
+        self.assertContains(page, 'Sharma Civil Works')
+        self.assertContains(page, 'name="void_note"')
+        entry.refresh_from_db()
+        self.assertFalse(entry.is_voided)          # the first POST only shows the page
+
+        response = self._confirm([entry])
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(f"Voided 1 with note: '{self.NOTE}'.", _messages(response))
+        entry.refresh_from_db()
+        self.assertTrue(entry.is_voided)
+        self.assertEqual((entry.void_note, entry.voided_by), (self.NOTE, self.admin))
+        self.assertEqual(self._actions(entry), ['CREATED', 'VOIDED'])
+        rev = entry.revisions.get(action=ContractorAttendanceRevision.VOIDED)
+        self.assertEqual((rev.note, rev.changed_by), (self.NOTE, self.admin))
+
+    def test_admin_voids_todays_entry_through_the_portal(self):
+        """Ruling Q1: the Admin arm lives in the writer, so the portal's void view honours
+        it too. No Void button is added for Admin; this is the POST alone."""
+        entry = self._entry()
+        response = _client_for(self.admin).post(
+            reverse('attendance_void', args=['ATT-A', entry.pk]), {'void_note': self.NOTE})
+        self.assertEqual(response.status_code, 302)
+        entry.refresh_from_db()
+        self.assertTrue(entry.is_voided)
+        self.assertEqual(self._voided_revisions(entry), 1)
+        self.assertEqual(self._actions(entry), ['CREATED', 'VOIDED'])
+
+    def test_admin_on_soft_deleted_site_is_refused_any_other_status_allowed(self):
+        """Ruling Q2: any site status except soft-deleted."""
+        held = self._entry()
+        Project.objects.filter(pk=self.site.pk).update(status='On Hold')
+        void_attendance(held, self.NOTE, self.admin.user)
+        other = self._entry(project=self.res, by=self.res_se, n=2)
+        Project.objects.filter(pk=self.res.pk).update(is_deleted=True)
+        with self.assertRaisesMessage(AttendanceRefused, attendance.NOT_CHANGEABLE):
+            void_attendance(other, self.NOTE, self.admin.user)
+        other.refresh_from_db()
+        self.assertFalse(other.is_voided)
+
+    # -- nothing else changes ----------------------------------------------------------
+
+    def test_same_day_rule_is_unchanged_for_everyone(self):
+        entry = self._entry()
+        # Admin gains the void through its own helper, never through the same-day one.
+        self.assertFalse(user_can_change_attendance_today(self.admin.user, entry))
+        self.assertTrue(user_can_void_attendance_any_day(self.admin.user, entry))
+        for profile in (self.se, self.pm, self.coord):
+            self.assertTrue(user_can_change_attendance_today(profile.user, entry))
+            self.assertFalse(user_can_void_attendance_any_day(profile.user, entry))
+        for profile in (self.scm, self.finance, self.ceo, self.sysadmin, self.stranger):
+            self.assertFalse(user_can_change_attendance_today(profile.user, entry))
+            self.assertFalse(user_can_void_attendance_any_day(profile.user, entry))
+            with self.assertRaisesMessage(AttendanceRefused, attendance.NOT_CHANGEABLE):
+                void_attendance(entry, self.NOTE, profile.user)
+        # The site's Site Engineer still voids today's entry through the portal.
+        _client_for(self.se).post(reverse('attendance_void', args=['ATT-A', entry.pk]),
+                                  {'void_note': 'Counted twice'})
+        entry.refresh_from_db()
+        self.assertEqual((entry.is_voided, entry.voided_by), (True, self.se))
+        self.assertFalse(user_can_void_attendance_any_day(self.admin.user, entry))
+
+    def test_admin_still_cannot_edit_or_time_out_todays_entry(self):
+        entry = self._entry()
+        with self.assertRaisesMessage(AttendanceRefused, attendance.NOT_CHANGEABLE):
+            update_attendance(entry, {'contractor': self.civil_co, 'trade': 'CIVIL',
+                                      'headcount': 12, 'time_in': time(8, 0),
+                                      'time_out': None}, self.admin.user)
+        with self.assertRaisesMessage(AttendanceRefused, attendance.NOT_CHANGEABLE):
+            set_time_out(entry, time(17, 0), self.admin.user)
+        client = _client_for(self.admin)
+        edit = client.get(reverse('attendance_edit', args=['ATT-A', entry.pk]))
+        self.assertEqual(edit.status_code, 302)
+        self.assertIn(attendance.NOT_CHANGEABLE, _messages(edit))
+        client.post(reverse('attendance_edit', args=['ATT-A', entry.pk]),
+                    self._edit_data(entry, headcount='12'))
+        client.post(reverse('attendance_time_out', args=['ATT-A', entry.pk]),
+                    {'time_out': '17:00'})
+        entry.refresh_from_db()
+        self.assertEqual((entry.headcount, entry.time_out, entry.is_voided), (7, None, False))
+        self.assertEqual(self._actions(entry), ['CREATED'])
+
+    # -- the confirmation page's rules --------------------------------------------------
+
+    def test_empty_note_is_refused(self):
+        entry = self._entry()
+        for note in ('', '   '):
+            response = self._confirm([entry], note=note)
+            self.assertEqual(response.status_code, 200)     # the page again, not a redirect
+            self.assertContains(response, attendance.VOID_NOTE_REQUIRED)
+        entry.refresh_from_db()
+        self.assertFalse(entry.is_voided)
+        self.assertEqual(self._actions(entry), ['CREATED'])
+
+    def test_already_voided_row_is_skipped(self):
+        done = self._entry()
+        void_attendance(done, 'Counted twice', self.se.user)
+        live = self._entry(trade='ELECTRICAL', n=2)
+        page = self._select([done, live])
+        self.assertContains(page, 'Skipped — already voided')
+        self.assertContains(page, 'Confirm void')
+        response = self._confirm([done, live])
+        msgs = _messages(response)
+        self.assertIn(f"Voided 1 with note: '{self.NOTE}'.", msgs)
+        self.assertIn('Skipped 1 already voided.', msgs)
+        done.refresh_from_db()
+        # The earlier void is untouched: its note, its voider, one VOIDED revision.
+        self.assertEqual((done.void_note, done.voided_by), ('Counted twice', self.se))
+        self.assertEqual(self._voided_revisions(done), 1)
+
+    def test_only_voided_rows_selected_offers_no_confirm(self):
+        done = self._entry()
+        void_attendance(done, 'Counted twice', self.se.user)
+        page = self._select([done])
+        self.assertContains(page, 'Nothing to void')
+        self.assertNotContains(page, 'Confirm void')
+
+    def test_mixed_selection_is_a_partial_success(self):
+        """Today's and yesterday's entries void; one on a soft-deleted site is refused with
+        the writer's own words, and its refusal rolls back nothing else."""
+        today = self._entry()
+        past = self._yesterday_entry(trade='ELECTRICAL', n=2)
+        gone = self._entry(project=self.res, by=self.res_se, n=3)
+        Project.objects.filter(pk=self.res.pk).update(is_deleted=True)
+        page = self._select([today, past, gone])
+        self.assertContains(page, 'ATT-R')               # listed; the writer decides
+        response = self._confirm([today, past, gone])
+        msgs = _messages(response)
+        self.assertIn(f"Voided 2 with note: '{self.NOTE}'.", msgs)
+        refusal = [m for m in msgs if m.startswith('Refused 1:')]
+        self.assertEqual(len(refusal), 1)
+        self.assertIn(f'#{gone.pk} ATT-R', refusal[0])
+        self.assertIn(attendance.NOT_CHANGEABLE, refusal[0])   # readable text ...
+        self.assertNotIn('NOT_CHANGEABLE', refusal[0])        # ... never the constant name
+        for entry, voided in ((today, True), (past, True), (gone, False)):
+            entry.refresh_from_db()
+            self.assertEqual(entry.is_voided, voided)
+            self.assertEqual(self._voided_revisions(entry), 1 if voided else 0)
+
+    def test_exactly_one_revision_per_void(self):
+        entries = [self._entry(trade=trade, n=n)
+                   for n, trade in enumerate(('CIVIL', 'ELECTRICAL', 'STRUCTURE_MOUNTING'), 1)]
+        before = ContractorAttendanceRevision.objects.count()
+        self._confirm(entries)
+        self.assertEqual(ContractorAttendanceRevision.objects.count(), before + len(entries))
+        for entry in entries:
+            self.assertEqual(self._actions(entry), ['CREATED', 'VOIDED'])
