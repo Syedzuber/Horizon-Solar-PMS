@@ -23,7 +23,8 @@
    shows the not-listed name / Other remark. Nothing is fetched. Date, project and
    recorder are not fields: the writer sets them. The photo is prepared in the browser by
    _qaqc_photo_script.html (EXIF time into photo_taken_at, a downscaled JPEG); the server
-   checks it whatever the browser did.{% endcomment %}
+   checks it whatever the browser did. ATT-B5: the photo is optional in every mode, so Save
+   stays enabled when the private store is off; an attached photo is then still refused.{% endcomment %}
 <div class="mb-3">
   <a href="{% url 'attendance_today' project.project_id %}" class="text-decoration-none text-muted">&larr; Attendance · {{ project.project_id }}</a>
 </div>
@@ -45,7 +46,7 @@
       </div>
     {% endif %}
     {% if not storage_ready %}
-      <div class="alert alert-warning small" id="att-storage-off">Attendance photos cannot be stored right now: the private store is not configured.</div>
+      <div class="alert alert-warning small" id="att-storage-off">Attendance photos cannot be stored right now: the private store is not configured. You can still save without a photo.</div>
     {% endif %}
 
     <form method="post" enctype="multipart/form-data" id="att-form">
@@ -132,10 +133,10 @@
 
       {# ── Photo ── #}
       <div class="mb-3">
-        <label class="form-label small fw-semibold" for="att-photo">Group photo {% if photo_required %}<span class="text-danger">*</span>{% endif %}</label>
+        <label class="form-label small fw-semibold" for="att-photo">Group photo <span class="small fw-normal text-muted">(optional)</span></label>
         <input type="file" name="photo" id="att-photo" accept=".jpg,.jpeg,.png,image/jpeg,image/png"{% if mode != 'late' %} capture="environment"{% endif %}
-               class="form-control form-control-sm" data-qaqc-photo {% if photo_required %}required{% endif %}>
-        {% if entry %}<div class="form-text">Leave the photo empty to keep the current one.</div>{% endif %}
+               class="form-control form-control-sm" data-qaqc-photo>
+        {% if entry and entry.photo_path %}<div class="form-text">Leave the photo empty to keep the current one.</div>{% elif entry %}<div class="form-text att-no-photo-yet">No photo yet — add one if you have it.</div>{% endif %}
         {% if mode == 'late' %}<div class="form-text">A photo from the gallery is fine.</div>{% endif %}
         <input type="hidden" name="photo_taken_at" value="">
         <div class="text-muted small qaqc-photo-status"></div>
@@ -150,7 +151,7 @@
       {% endif %}
 
       <div class="d-flex gap-2">
-        <button type="submit" class="btn btn-brand" {% if not storage_ready and photo_required %}disabled{% endif %}>Save</button>
+        <button type="submit" class="btn btn-brand">Save</button>
         <a href="{% url 'attendance_today' project.project_id %}" class="btn btn-outline-secondary">Cancel</a>
       </div>
     </form>

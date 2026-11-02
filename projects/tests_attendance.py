@@ -555,10 +555,8 @@ class AddScreenTests(AttendanceFixture):
             self.assertEqual(response.status_code, 200, value)
         self.assertFalse(ContractorAttendance.objects.exists())
 
-    def test_photo_missing_or_not_an_image_rejected(self):
-        """Edge case 7."""
-        response = self._add_post(photo=None)
-        self.assertContains(response, 'Add a group photo of the crew.')
+    def test_photo_not_an_image_rejected(self):
+        """Edge case 7. A missing photo is no longer refused (ATT-B5, tests_attendance_b5)."""
         response = self._add_post(photo=_photo('notes.txt', b'hello', 'text/plain'))
         self.assertContains(response, 'Photo rejected')
         self.assertFalse(ContractorAttendance.objects.exists())

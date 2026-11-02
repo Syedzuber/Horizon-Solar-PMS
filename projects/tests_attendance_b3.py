@@ -460,7 +460,9 @@ class PhotoFlagTests(B3Fixture):
     """Edge case 9 — photo_time_flags() reads only the entry's own fields."""
 
     def _shape(self, day, recorded, taken):
-        return ContractorAttendance(date=day, recorded_at=recorded, photo_taken_at=taken)
+        # A photo path, since ATT-B5: an entry without a photo gets no flags at all.
+        return ContractorAttendance(date=day, recorded_at=recorded, photo_taken_at=taken,
+                                    photo_path='p/attendance/x.jpg')
 
     def test_same_day_two_hours_one_minute_flags(self):
         day = self.today

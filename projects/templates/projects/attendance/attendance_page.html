@@ -83,6 +83,10 @@
           </tbody>
           <tfoot>
             <tr class="fw-semibold"><td colspan="3">Billable man-days</td><td class="text-end" id="att-billable">{{ summary.billable }}</td></tr>
+            {# ATT-B5: the billable man-days from entries without a photo, for the billing page. #}
+            {% if summary.billable_no_photo %}
+              <tr class="small text-muted"><td colspan="3" class="ps-3">of which without photo</td><td class="text-end" id="att-billable-no-photo">{{ summary.billable_no_photo }}</td></tr>
+            {% endif %}
             {% if summary.waiting %}
               <tr class="text-warning-emphasis"><td colspan="3">Waiting for SCM mapping <span class="small fw-normal">(not billable)</span></td><td class="text-end" id="att-waiting">{{ summary.waiting }}</td></tr>
             {% endif %}

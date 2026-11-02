@@ -177,7 +177,9 @@ def _history(entry):
                 changes.append(f"{label}: {old if old not in (None, '') else '—'} → "
                                f"{new if new not in (None, '') else '—'}")
             if rev.before.get('photo_path') != rev.after.get('photo_path'):
-                changes.append('Photo replaced')
+                # An entry saved without a photo (ATT-B5) gains one; a photo is never removed.
+                changes.append('Photo added' if not rev.before.get('photo_path')
+                               else 'Photo replaced')
         elif rev.action == ContractorAttendanceRevision.TIME_OUT:
             changes.append(f"Time out {rev.after.get('time_out')}")
         rows.append({'action': rev.get_action_display(), 'by': _person(rev.changed_by),
@@ -222,32 +224,38 @@ def summary_queryset(project, start, end):
     one live entry per slot per day makes it equal to the entry count today, but distinct
     keeps it right if that ever loosens. Man-days are the headcount sum (ruling 9: one
     person per entry is one man-day; hours are never counted). Voided entries are out.
-    No is_active filter on the contractor, so a deactivated one still appears by name."""
+    No is_active filter on the contractor, so a deactivated one still appears by name.
+    `no_photo_man_days` is the part of man_days from entries without a photo (ATT-B5),
+    summed in the same grouped query."""
     return (ContractorAttendance.objects
             .filter(project=project, is_voided=False, date__gte=start, date__lte=end)
             .annotate(unlisted_key=Lower('unlisted_contractor_name'))
             .values('contractor_id', 'contractor__name', 'unlisted_key', 'trade')
             .annotate(days=Count('date', distinct=True), man_days=Sum('headcount'),
+                      no_photo_man_days=Sum('headcount', filter=Q(photo_path='')),
                       unlisted_display=Min('unlisted_contractor_name'))
             .order_by('contractor__name', 'unlisted_key', 'trade'))
 
 
 def attendance_summary(project, start, end):
     """The Summary section: rows (listed contractors first, then not-listed names), the
-    billable man-days of listed contractors, and the man-days waiting for SCM mapping
-    (not-listed names, never billable). The totals add up the grouped rows the database
-    returned, not the entries."""
+    billable man-days of listed contractors, the part of those from entries without a
+    photo (ATT-B5 — what the billing page will read), and the man-days waiting for SCM
+    mapping (not-listed names, never billable, so never in the without-photo figure). The
+    totals add up the grouped rows the database returned, not the entries."""
     rows = [{
         'name': row['contractor__name'] if row['contractor_id'] else row['unlisted_display'],
         'listed': row['contractor_id'] is not None,
         'trade': TRADE_LABELS.get(row['trade'], row['trade']),
         'days': row['days'],
         'man_days': row['man_days'] or 0,
+        'no_photo_man_days': row['no_photo_man_days'] or 0,
     } for row in summary_queryset(project, start, end)]
     rows.sort(key=lambda r: not r['listed'])  # stable: keeps the query's name order inside each group
     return {
         'rows': rows,
         'billable': sum(r['man_days'] for r in rows if r['listed']),
+        'billable_no_photo': sum(r['no_photo_man_days'] for r in rows if r['listed']),
         'waiting': sum(r['man_days'] for r in rows if not r['listed']),
     }
 
@@ -464,8 +472,6 @@ def _form_context(project, form, entry, errors, mode=None):
         'today': timezone.localdate(),
         'now_hhmm': _now_hhmm(),
         'mode': mode,
-        # A new entry needs a photo; an edit or correction keeps the current one.
-        'photo_required': mode in ('add', 'late'),
         # The time-out field: never on the same-day add (the crew is arriving).
         'show_time_out': mode != 'add',
     }
@@ -521,7 +527,7 @@ def _after_write_url(request, project):
 def attendance_add(request, project_id):
     """
     Log a contractor crew on the site for today: contractor (or not listed), trade,
-    headcount, time in and a group photo. GET draws the form; POST records it and
+    headcount, time in and an optional group photo (ATT-B5). GET draws the form; POST records it and
     redirects to the attendance page.
 
     Access: user_can_log_attendance — a Site Engineer working on the site, the PM or a
@@ -757,8 +763,8 @@ def attendance_correct(request, project_id, entry_pk):
 @login_required
 def attendance_add_late(request, project_id):
     """
-    ATT-B2: add an entry for a missed day, 1 to 7 days before today, with a group photo
-    (a gallery photo is expected — the page does not force the camera), an optional time
+    ATT-B2: add an entry for a missed day, 1 to 7 days before today, with an optional group
+    photo (a gallery photo is expected — the page does not force the camera), an optional time
     out and a required reason, written on the CREATED revision. GET draws the form; POST
     records it and returns to the attendance page.
 

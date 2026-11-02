@@ -5,8 +5,9 @@ reason; MapForm, RemapForm and MapGroupForm (ATT-B3) for SCM mapping of not-list
 
 It reads and checks what the page posts; projects/attendance.py writes. Date, project
 and recorder are not fields at all (they are set by the writer and never change), so no
-posted value can reach them. The photo field is read here only for presence on create;
-its type / size / content checks are qaqc_views.validate_visit_photo's, run by the upload.
+posted value can reach them. The photo is optional on every form (ATT-B5); its type /
+size / content checks are qaqc_views.validate_visit_photo's, run by the upload whenever a
+photo is posted.
 """
 from django import forms
 
@@ -66,8 +67,8 @@ class AttendanceForm(forms.Form):
     time_out_on_create = False
 
     def __init__(self, *args, entry=None, **kwargs):
-        """`entry` is the entry being edited, or None on create. On create the photo is
-        required and time out is not offered (ruling 4: the crew is arriving)."""
+        """`entry` is the entry being edited, or None on create. On the same-day create
+        time out is not offered (ruling 4: the crew is arriving)."""
         super().__init__(*args, **kwargs)
         self.entry = entry
         self.vendors = contractor_choices(entry.contractor if entry is not None
@@ -98,13 +99,13 @@ class AttendanceForm(forms.Form):
         if cleaned.get('trade') == ContractorAttendance.OTHER \
                 and not (cleaned.get('trade_remark') or '').strip():
             self.add_error('trade_remark', 'Say what the trade is when you pick Other.')
-        if self.entry is None:
-            # Create: no time out yet (a late entry may carry one), and a group photo is
-            # mandatory (ruling 5).
-            if not self.time_out_on_create:
-                cleaned['time_out'] = None
-            if not cleaned.get('photo'):
-                self.add_error('photo', 'Add a group photo of the crew.')
+        if self.entry is None and not self.time_out_on_create:
+            # Same-day create: no time out yet (a late entry may carry one).
+            cleaned['time_out'] = None
+        if not cleaned.get('photo'):
+            # No photo is allowed (ATT-B5); a taken-at time without one describes nothing,
+            # so it is dropped rather than stored for photo_time_flags() to judge.
+            cleaned['photo_taken_at'] = None
         time_in, time_out = cleaned.get('time_in'), cleaned.get('time_out')
         # ATT-B1a: no time more than 15 minutes ahead of now; the writer asks again. The
         # past-day forms switch it off (ATT-B2 ruling 6).

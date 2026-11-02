@@ -174,11 +174,12 @@ def photo_time_flags(entry):
     later is expected there. Both times are converted to IST with timezone.localtime()
     before a date is taken, so a photo at 00:30 IST is not read as the previous UTC day.
     Never blocks anything, and computed from the entry's own fields, nothing stored.
+    An entry without a photo (ATT-B5) has no photo time to judge, so it gets none.
 
     The caller shows these only to users who may see the photo
     (user_can_view_attendance_photo): the chip would otherwise reveal the photo's time.
     """
-    if entry.photo_taken_at is None:
+    if not entry.photo_path or entry.photo_taken_at is None:
         return []
     flags = []
     if not is_late_entry(entry):
@@ -292,6 +293,18 @@ def _lock(entry):
             .get(pk=entry.pk))
 
 
+def _photo_columns(stored_photo, photo_taken_at):
+    """A new entry's photo fields from upload_visit_photo()'s dict — or, with no photo
+    (ATT-B5), all blank with photo_taken_at NULL: a taken-at time posted without a photo
+    describes nothing, and would otherwise reach photo_time_flags()."""
+    if not stored_photo:
+        return {'photo_file_name': '', 'photo_bucket': '', 'photo_path': '',
+                'photo_size_kb': 0, 'photo_taken_at': None}
+    return {'photo_file_name': stored_photo['file_name'], 'photo_bucket': stored_photo['bucket'],
+            'photo_path': stored_photo['path'], 'photo_size_kb': stored_photo['file_size_kb'],
+            'photo_taken_at': photo_taken_at}
+
+
 def _revision(entry, action, before, by_profile, note='', now=None):
     return ContractorAttendanceRevision.objects.create(
         attendance=entry, action=action, before=before,
@@ -309,15 +322,15 @@ def create_attendance(project, user, *, contractor, unlisted_name, trade, trade_
     """Record a new entry for today on `project`, by `user`, with its CREATED revision.
 
     `date` is timezone.localdate() here, never a form value (ruling 10). `stored_photo` is
-    upload_visit_photo()'s dict and is required (ruling 5). Raises AttendanceRefused when
+    upload_visit_photo()'s dict, or None for an entry without a photo (ATT-B5) — its
+    photo columns are then blank and photo_taken_at is NULL. Raises AttendanceRefused when
     `user` may not log on the site, a value rule fails, or the slot is taken
     (DUPLICATE_ENTRY). Returns the entry.
     """
     unlisted_name = '' if contractor is not None else normalise_unlisted_name(unlisted_name)
     trade_remark = (trade_remark or '').strip() if trade == ContractorAttendance.OTHER else ''
     _check_values(contractor, unlisted_name, trade, trade_remark, headcount, time_in, None)
-    if not stored_photo:
-        raise AttendanceRefused('Add a group photo of the crew.')
+    photo = _photo_columns(stored_photo, photo_taken_at)
     profile = user.profile
     with transaction.atomic():
         # Asked inside the transaction so the date it compares against is the one stored.
@@ -330,11 +343,8 @@ def create_attendance(project, user, *, contractor, unlisted_name, trade, trade_
         entry = ContractorAttendance(
             project=project, date=today, contractor=contractor,
             unlisted_contractor_name=unlisted_name, trade=trade, trade_remark=trade_remark,
-            headcount=headcount, time_in=time_in, time_out=None,
-            photo_file_name=stored_photo['file_name'], photo_bucket=stored_photo['bucket'],
-            photo_path=stored_photo['path'], photo_size_kb=stored_photo['file_size_kb'],
-            photo_taken_at=photo_taken_at, recorded_by=profile, recorded_at=now,
-            updated_at=now,
+            headcount=headcount, time_in=time_in, time_out=None, **photo,
+            recorded_by=profile, recorded_at=now, updated_at=now,
         )
         _save_or_refuse_duplicate(entry)
         _revision(entry, ContractorAttendanceRevision.CREATED, None, profile, now=now)
@@ -529,7 +539,8 @@ def create_late_attendance(project, day, data, by, note):
     `day` must fall 1-7 days before today (late_entry_window) — never today, which is the
     normal add, and never the future. `data` holds contractor, unlisted_name, trade,
     trade_remark, headcount, time_in, an optional time_out (after time in), stored_photo
-    (required; a gallery photo is expected) and photo_taken_at. `by` becomes the
+    (optional since ATT-B5; a gallery photo is expected when there is one) and
+    photo_taken_at. `by` becomes the
     recorder; "late" is derived from recorded_at (is_late_entry), no field marks it.
 
     Raises AttendanceRefused for a blank note, a user who is not a corrector on the site,
@@ -546,9 +557,7 @@ def create_late_attendance(project, day, data, by, note):
     trade_remark = ((data.get('trade_remark') or '').strip()
                     if trade == ContractorAttendance.OTHER else '')
     time_in, time_out = data.get('time_in'), data.get('time_out')
-    stored_photo = data.get('stored_photo')
-    if not stored_photo:
-        raise AttendanceRefused('Add a group photo of the crew.')
+    photo = _photo_columns(data.get('stored_photo'), data.get('photo_taken_at'))
     profile = by.profile
     with transaction.atomic():
         # Asked inside the transaction, as create_attendance does, so the window is read
@@ -566,11 +575,8 @@ def create_late_attendance(project, day, data, by, note):
         entry = ContractorAttendance(
             project=project, date=day, contractor=contractor,
             unlisted_contractor_name=unlisted_name, trade=trade, trade_remark=trade_remark,
-            headcount=data.get('headcount'), time_in=time_in, time_out=time_out,
-            photo_file_name=stored_photo['file_name'], photo_bucket=stored_photo['bucket'],
-            photo_path=stored_photo['path'], photo_size_kb=stored_photo['file_size_kb'],
-            photo_taken_at=data.get('photo_taken_at'), recorded_by=profile, recorded_at=now,
-            updated_at=now,
+            headcount=data.get('headcount'), time_in=time_in, time_out=time_out, **photo,
+            recorded_by=profile, recorded_at=now, updated_at=now,
         )
         _save_or_refuse_duplicate(entry, duplicate_message=DUPLICATE_ENTRY_PAST_DAY)
         _revision(entry, ContractorAttendanceRevision.CREATED, None, profile, note=note,

@@ -8197,6 +8197,11 @@ class ContractorAttendance(models.Model):
     THE PHOTO IS PRIVATE: the bills bucket, as QA/QC visit photos; no URL stored, a link is
     signed at the click. A replaced photo is never deleted — its path stays in the
     revision's `before` snapshot.
+
+    THE PHOTO IS OPTIONAL (ATT-B5): an entry may carry none — the three photo columns are
+    then all blank, and the page shows a "No photo" chip so billing can tell such entries
+    apart (the Summary's "of which without photo" line). One can be added later by a
+    same-day edit or a correction; an uploaded photo can be replaced, never removed.
     """
 
     CIVIL              = 'CIVIL'
@@ -8226,12 +8231,13 @@ class ContractorAttendance(models.Model):
     headcount = models.PositiveSmallIntegerField()  # people in the crew; each one is one man-day
     time_in = models.TimeField()
     time_out = models.TimeField(null=True, blank=True)  # NULL = still open; same day, after time_in (no night shifts)
-    photo_file_name = models.CharField(max_length=255)  # original filename, as uploaded
-    photo_bucket = models.CharField(max_length=100)     # the private bills bucket at write time
-    photo_path = models.CharField(max_length=500)       # path within `photo_bucket`
+    photo_file_name = models.CharField(max_length=255, blank=True, default='')  # original filename, as uploaded; '' = no photo (ATT-B5)
+    photo_bucket = models.CharField(max_length=100, blank=True, default='')     # the private bills bucket at write time; '' = no photo
+    photo_path = models.CharField(max_length=500, blank=True, default='')       # path within `photo_bucket`; '' = no photo
     photo_size_kb = models.PositiveIntegerField(default=0)
     # EXIF DateTimeOriginal read in the browser, shown beside the photo as evidence only.
-    # NULL when the image carried none. recorded_at / updated_at are the authority.
+    # NULL when the image carried none, or there is no photo. recorded_at / updated_at are
+    # the authority.
     photo_taken_at = models.DateTimeField(null=True, blank=True)
     recorded_by = models.ForeignKey('UserProfile', on_delete=models.PROTECT,
                                     related_name='attendance_recorded')
@@ -8267,11 +8273,13 @@ class ContractorAttendance(models.Model):
             models.CheckConstraint(
                 condition=~models.Q(trade='OTHER') | ~models.Q(trade_remark=''),
                 name='attendance_other_trade_remark'),
-            # A group photo on every entry (ruling 5).
+            # The photo is optional (ATT-B5), but its three columns are one fact: all set
+            # or all blank, as on PunchPointEvent.
             models.CheckConstraint(
-                condition=(~models.Q(photo_file_name='') & ~models.Q(photo_bucket='')
-                           & ~models.Q(photo_path='')),
-                name='attendance_photo_required'),
+                condition=(models.Q(photo_file_name='', photo_bucket='', photo_path='')
+                           | (~models.Q(photo_file_name='') & ~models.Q(photo_bucket='')
+                              & ~models.Q(photo_path=''))),
+                name='attendance_photo_all_or_none'),
             # A void always says why (ruling 6).
             models.CheckConstraint(
                 condition=models.Q(is_voided=False) | ~models.Q(void_note=''),

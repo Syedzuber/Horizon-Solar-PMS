@@ -393,8 +393,6 @@ class LateWriterTests(B2Fixture):
                 self._late(note=note)
         with self.assertRaisesMessage(AttendanceRefused, NOT_ALLOWED_LATE):
             self._late(by=self.se)
-        with self.assertRaisesMessage(AttendanceRefused, 'Add a group photo'):
-            self._late(stored_photo=None)
         with self.assertRaisesMessage(AttendanceRefused, attendance.TIME_OUT_NOT_AFTER_IN):
             self._late(time_out=time(7, 0))
         self.assertFalse(ContractorAttendance.objects.exists())
