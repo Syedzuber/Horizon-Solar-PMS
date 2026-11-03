@@ -1901,11 +1901,20 @@ the two fields ever named different people, the person in `assigned_design` coul
 both correction authority and delete rights on the same site.
 
 `design_views._allocate_one()` sets both in step. `project_overview`'s `assign_design`
-action refuses OPEX sites. `project_activate`, however, is not limited to Residential: it
-writes `assigned_design` from the PM's form on any Draft site it activates, without
-touching `DesignAssignment.assigned_to`. BC-1 did not check whether an OPEX site can reach
-it after allocation. The 2 Nov production restore has no site where the two differ. Not fixed: no code change was ruled (BC-1 R5). A fix would be one
-reader for both questions, or a check that refuses a mismatch.
+action refuses OPEX sites. Two routes wrote one field only:
+
+- (a) `project_activate` wrote `assigned_design` on any Draft project and never read the
+  DesignAssignment. An OPEX site reached it only by a hand-built POST; three Draft OPEX
+  sites on the 2 Nov restore were exposed (1906, 2112, 2113).
+- (b) The Django admin let `DesignAssignment.assigned_to` be edited at any status, with
+  nothing updating `assigned_design`.
+
+**Routes (a) and (b) were CLOSED by BC-3 (3 Nov 2026).** `project_activate` refuses every
+non-Residential project before any write. `assigned_to` is read-only in the
+DesignAssignment admin, on the add form too. The Project admin never edited
+`assigned_design`, so it needed no change. The two fields can still be read as two
+sources; the long-term fix is V4. Other one-sided writers are in V5. The 2 Nov production
+restore has no site where the two differ.
 
 **Location:** `projects/permissions.py` — `user_can_edit_project_boq`,
 `user_is_assigned_designer`; `projects/design_views.py` — `_allocate_one`
@@ -1934,3 +1943,40 @@ ruled.
 
 **Location:** `projects/permissions.py` — `boq_correction_closed_reason`;
 `projects/design_views.py` — `design_change_request_correct`
+
+### V4 — one source of truth for "who designs this OPEX site" (BC-3, ruling I3)
+
+BC-3 closed the routes that split the two fields (V1). It did not remove the second field.
+Long term, `user_can_edit_project_boq()` should read `DesignAssignment.assigned_to` for an
+OPEX site, the field `user_can_correct_boq()` already excludes on. Then the BOQ author and
+the excluded designer are one value by construction rather than by every writer keeping
+two in step. `Project.assigned_design` would stay the Residential answer, where no
+DesignAssignment exists. Not built: BC-3 was integrity only, and the permission helpers
+were out of its scope.
+
+**Location:** `projects/permissions.py` — `user_can_edit_project_boq`,
+`user_is_assigned_designer`
+
+### V5 — writers that still set only one of the two fields (found by BC-3)
+
+BC-3's pre-flight listed every writer of either field. Apart from the two it closed, these
+set one field and not the other. None is a product path on a live OPEX site, so none was
+fixed.
+
+- **Seed commands.** `seed_order_demo`, `seed_scm_handoff_data` and `seed_scm_pilot`
+  create DesignAssignments with `assigned_to` set. They never set `assigned_design`, so a
+  seeded designer cannot author their site's BOQ. `seed_opex_test_data` does the same on
+  its two OPEX sites, and sets `assigned_design` only on its Residential project. All are
+  local demo data that must not reach production.
+- **The overview Design selector on CAPEX.** `show_design_selector` is
+  `project_type != 'OPEX'`, so CAPEX gets the selector, and its `assign_design` action
+  writes `assigned_design` only. A CAPEX site has no DesignAssignment through the product
+  (the design module 404s for any type but OPEX), so nothing diverges today.
+- **The DesignAssignment admin add form.** An admin can still create a DesignAssignment
+  on any project, CAPEX and Residential included. Since BC-3 it starts with `assigned_to`
+  empty. Joined with the CAPEX selector above, it is the one remaining way to put two
+  different values on one site. Removing the add permission would close it. Not decided.
+
+**Location:** `projects/management/commands/` — the four seeds above; `projects/views.py`
+— `project_overview` (`show_design_selector`); `projects/admin.py` —
+`DesignAssignmentAdmin`

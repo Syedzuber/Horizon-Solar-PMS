@@ -3890,7 +3890,7 @@ def project_activate(request, project_id):
     A designer must be selected before activation — this is what makes the
     project visible on the Design dashboard once Design tasks are seeded.
     All DB writes are wrapped in transaction.atomic() — a failure rolls back everything.
-    Access: assigned PM only. POST only.
+    Access: assigned PM only, Residential projects only. POST only.
     """
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
@@ -3899,6 +3899,19 @@ def project_activate(request, project_id):
 
     if not _pm_owns_project(request, project):
         raise Http404
+
+    # BC-3 (I1) — RESIDENTIAL ONLY, refused before any write and before assigned_design_id
+    # is read. A RESCO or CAPEX site is activated by opex_site_activate, and no screen posts
+    # one here; only a hand-built POST could. It would write Project.assigned_design without
+    # touching DesignAssignment.assigned_to, so the BOQ author (user_can_edit_project_boq)
+    # and the excluded designer (user_can_correct_boq) could become two people. It would
+    # also mint Residential M1/M2/M3 milestones and leave the site Active with no phases.
+    # Tested FOR Residential rather than against the two known types, so a future type is
+    # refused until someone decides otherwise. Not forwarded: the caller is told where to go.
+    if project.project_type != 'Residential':
+        messages.error(request, 'RESCO and CAPEX sites are activated from the site '
+                                'activation screen.')
+        return redirect('project_overview', project_id=project.project_id)
 
     # Status check before any DB write — avoids partial state if already active
     if project.status != 'Draft':

@@ -666,9 +666,19 @@ class DesignAssignmentAdmin(admin.ModelAdmin):
     # pins `released`'s writer set by parse, and an admin form edit has no line of code
     # for that parse to find. Same mechanism as B9, B10 and B26 — closed, not
     # instrumented.
+    #
+    # BC-3 (I2) — `assigned_to` IS READ-ONLY TOO, on the add form as well as the change
+    # form (a static list, not get_readonly_fields keyed on obj). _allocate_one() is its
+    # one writer, and it sets Project.assigned_design in the same step. A form save here
+    # moved assigned_to alone, which splits the BOQ author (user_can_edit_project_boq
+    # reads assigned_design) from the excluded designer (user_can_correct_boq reads
+    # assigned_to). Reallocate through the Design Head's allocation instead (design_allocate
+    # or design_bulk_allocate, both via _allocate_one). On the add form
+    # Django omits the field, so an admin-created row starts unallocated.
     readonly_fields = ['status', 'released_at', 'released_by',
                        'pm_approved_at', 'pm_approved_by',
                        'current_attempt_number', 'survey_link_added_at',
+                       'assigned_to',
                        'created_at', 'updated_at']
 
 
