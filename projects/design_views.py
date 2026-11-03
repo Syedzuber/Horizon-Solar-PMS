@@ -39,7 +39,7 @@ from .design_analytics import (
 )
 from .design_metrics import (
     STAGE_LABELS, change_request_noun, effective_commitment, head_change_request_list,
-    pending_extension, tender_metrics,
+    pending_extension, reviewer_correction_drill, reviewer_correction_panel, tender_metrics,
 )
 from .utils import design_due_date, record_transition
 # Prompt 3.1b-3 — the PM gate's four in-app notifications. See the block above
@@ -7306,6 +7306,11 @@ def design_tender_dashboard(request, pk):
 
     DRILL-DOWN, NOT A LANDING TABLE. `?stage=` and `?designer=` filter a compact list
     rendered beneath the panels, from the rows already in memory — neither adds a query.
+
+    BC-2 — the "Reviewer BOQ corrections" panel: one more query on every render, and
+    `?corrections=<designer pk>` adds one for that designer's correction rows. Head and
+    deputy only, by the same gate as the rest of the page; the Design QC dashboard does
+    not call it.
     """
     has_head_authority = user_has_design_head_authority(request.user)
     if not has_head_authority:
@@ -7339,6 +7344,18 @@ def design_tender_dashboard(request, pk):
         drill_label = (drill[0]['designer'].user.get_full_name()
                        or drill[0]['designer'].user.username) if drill else 'designer'
 
+    # BC-2 — reviewer BOQ corrections per designer, beside the rework rate, never in it.
+    # Its drill-down is its own parameter, so it opens without disturbing `?designer=`. A
+    # pk that is not a row on this tender's panel opens nothing rather than an empty list.
+    corrections = reviewer_correction_panel(metrics['sites'])
+    corrections_param = (request.GET.get('corrections') or '').strip()
+    corrections_designer, corrections_drill = None, None
+    if (corrections_param.isdigit()
+            and int(corrections_param) in corrections['reviewed_projects']):
+        corrections_designer = next(r['designer'] for r in corrections['rows']
+                                    if r['designer'].pk == int(corrections_param))
+        corrections_drill = reviewer_correction_drill(corrections, corrections_designer.pk)
+
     return render(request, 'projects/design/tender_dashboard.html', {
         'program':      program,
         'm':            metrics,
@@ -7349,6 +7366,9 @@ def design_tender_dashboard(request, pk):
         'is_deputy':    user_is_design_head_deputy(request.user)
                         and not user_is_design_head(request.user),
         'has_head_authority': has_head_authority,
+        'corrections':          corrections,
+        'corrections_designer': corrections_designer,
+        'corrections_drill':    corrections_drill,
     })
 
 

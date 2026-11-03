@@ -31,11 +31,16 @@ and every figure that leaves here is named `*_kw` so a caller cannot lose track.
 """
 from decimal import Decimal
 
+from django.db.models import Case, Count, Exists, F, OuterRef, Q, Subquery, When
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from .models import (
-    ArkaSubmission, DesignAssignment, DesignAttempt, DesignChangeRequest,
-    DueDateCommitment, CHANGE_REQUEST_PENDING, CHANGE_REQUEST_ORIGIN_SCM,
+    ArkaSubmission, BOQCorrection, DesignAssignment, DesignAttempt, DesignChangeRequest,
+    DueDateCommitment, StatusTransition, SUBJECT_DESIGN_ASSIGNMENT,
+    BOQ_CORRECTION_LINE_ADDED, BOQ_CORRECTION_QUANTITY_CHANGED,
+    CHANGE_REQUEST_OPEN_VERDICTS, CHANGE_REQUEST_PM_REJECTED,
+    CHANGE_REQUEST_PENDING, CHANGE_REQUEST_ORIGIN_SCM,
     DESIGN_AWAITING_SURVEY, DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED,
     DESIGN_DUE_DATE_PROPOSED, DESIGN_IN_DESIGN, DESIGN_ARKA_SUBMITTED,
     DESIGN_ARKA_REJECTED, DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_QC_FAILED,
@@ -1034,3 +1039,202 @@ def attention_list(sites, today=None, limit=ATTENTION_LIMIT,
 
     rows.sort(key=lambda r: (r['severity'], -r['magnitude']))
     return rows[:limit]
+
+
+# ---------------------------------------------------------------------------
+# 5. Reviewer BOQ corrections per designer (BC-2)
+#
+# A COUNT OVER BOQCorrection, BESIDE THE REWORK RATE AND NEVER INSIDE IT. A reviewer fixing a
+# quantity in place is the alternative to failing the attempt (BOQCorrection's docstring), so
+# none of this touches attempt_cause_split() or rework_contribution(), and nothing here is a
+# DesignAttempt. It is the designer's own slips caught at package review, as its own figure.
+#
+# That docstring also says the table is "read by Admin/CEO". This panel is a second reader:
+# a per-designer count for the Head and deputy on the tender dashboard, which already shows
+# them every designer's rework. Nothing branches on it, so the docstring's real rule — no
+# gate reads this table — still holds.
+#
+# ATTRIBUTED TO THE CURRENT DESIGNER. BOQCorrection has no designer field; the path is
+# correction -> boq -> project -> DesignAssignment.assigned_to. _allocate_one() refuses to
+# reallocate once Arka work starts (REALLOCATABLE_STATUSES), so a correction, which needs
+# package review, normally lands on the designer who did the work. The admin form can still
+# change assigned_to at any status (it is not in readonly_fields), and after such an edit
+# the site's corrections move to the new designer. TODO(BC-2): pin the designer onto the
+# attempt if that is ever done in practice — deferred because the 2 Nov restore has one
+# reallocation (MB0003, still in_design, no corrections) and no admin edit to undo.
+# ---------------------------------------------------------------------------
+
+#: Statuses a site can only hold after its package went to review. One of three signals —
+#: see _reached_review() — because the ledger alone undercounts: design StatusTransition
+#: rows start on 16 Sep 2026 (0079), and four sites in the 2 Nov restore (MB0014, MB0141,
+#: MB0164, MB0191) reached review before that with no ledger row at all.
+PACKAGE_REVIEW_REACHED_STATUSES = (
+    DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_QC_FAILED, DESIGN_AWAITING_HEAD_QC,
+    DESIGN_AWAITING_PM_APPROVAL, DESIGN_PM_REJECTED, DESIGN_RELEASED,
+)
+
+
+def _change_request_closed_at():
+    """When a change request stopped being open, as one expression across verdicts.
+
+    `pm_decided_at` closes ONLY a pm_rejected request: a forwarded one carries the same
+    stamp and is still `pending`. The resulting attempt's opened_at is the fallback for
+    Part 4 rows migrated as accepted with no decided_at. A closed request with none of
+    these yields NULL, and NULL > x is not true, so a request whose close time is unknown
+    excludes nothing by time — only its cited rows, through the M2M.
+    """
+    return Case(
+        When(verdict=CHANGE_REQUEST_PM_REJECTED, then=F('pm_decided_at')),
+        default=Coalesce('decided_at', 'corrected_at', 'withdrawn_at',
+                         'resulting_attempt__opened_at'),
+    )
+
+
+def reviewer_corrections():
+    """BOQCorrection rows that count against the designer: corrections made in review.
+
+    BOTH B-06 EXCLUSIONS, IN SQL, so the panel stays at one query:
+
+      cited       any row a change request's `boq_corrections` links — the evidence of a
+                  `corrected` verdict. The same through-table read that
+                  design_views._uncited_corrections_since() excludes on.
+      while open  any row made while a change request on this site was open (with_pm or
+                  pending), cited or not: requested_at <= corrected_at and the request was
+                  still open at corrected_at. This is the BC-1 Head exception
+                  (DESIGN_MODULE_DEFERRED V3). with_pm is included although BC-1 closes the
+                  screen then, because a row made in that window before BC-1 is still not
+                  the designer's.
+
+    Site-level rather than attempt-level, and the two agree: BOQCorrection has no attempt,
+    an open request keeps its attempt current, and accepting it opens the next attempt at
+    decided_at, which is also when this window closes.
+
+    A correction made in review BEFORE a later request was raised still counts — that
+    request's window starts at its own requested_at.
+    """
+    cited = DesignChangeRequest.boq_corrections.through.objects.values('boqcorrection_id')
+    # Correlated on boq_id: the request reaches the BOQ through Project's reverse
+    # one-to-one, so the outer reference stays a plain column of BOQCorrection.
+    open_then = (DesignChangeRequest.objects
+                 .filter(attempt__assignment__project__boq=OuterRef('boq_id'),
+                         requested_at__lte=OuterRef('corrected_at'))
+                 .annotate(closed_at=_change_request_closed_at())
+                 .filter(Q(verdict__in=CHANGE_REQUEST_OPEN_VERDICTS)
+                         | Q(closed_at__gt=OuterRef('corrected_at'))))
+    return BOQCorrection.objects.exclude(pk__in=cited).filter(~Exists(open_then))
+
+
+def _correction_count(action):
+    """Correlated count of reviewer_corrections() of one action on the outer
+    DesignAssignment's site. Coalesced to 0: a site with none has no group row."""
+    return Coalesce(Subquery(
+        reviewer_corrections()
+        .filter(boq__project_id=OuterRef('project_id'), action=action)
+        .order_by().values('boq__project_id').annotate(n=Count('pk')).values('n')[:1]), 0)
+
+
+def _reached_review(status, in_ledger, qc_started):
+    """Whether a site's package has been to review — the denominator's test.
+
+    Any of three, because no single source covers every site:
+      in_ledger   a StatusTransition into artifacts_uploaded — the record since 16 Sep 2026;
+      qc_started  an attempt with qc_started_at — Design QC opened it, ledger or not;
+      status      the site is at or past artifacts_uploaded now.
+    NOT boq_submitted_at: a stamped BOQ can sit unreviewed in the Arka review (BC-1 rulings
+    A and B). Missed: a pre-ledger site put on Design Hold from artifacts_uploaded before
+    QC started, which no surviving field records.
+    """
+    return in_ledger or qc_started or status in PACKAGE_REVIEW_REACHED_STATUSES
+
+
+def reviewer_correction_panel(sites):
+    """One row per designer with a site that reached package review, in ONE query.
+
+    `sites` is tender_metrics()['sites'], already in memory; designer and status come from
+    there. The query adds, per assignment, the two review signals the rows do not carry and
+    the two correction counts. No query at all for a tender with no assignments.
+
+    Per designer:
+      reviewed         sites that reached package review — the denominator.
+      sites_corrected  of those, sites with at least one counted correction. Several edits
+                       on one BOQ are one site.
+      rate             sites_corrected / reviewed, as a whole percent.
+      quantity_edits   counted quantity_changed rows; lines_added likewise for line_added.
+
+    A correction on a site that never reached review is not counted: BC-1 makes such a row
+    impossible, and counting one made before BC-1 could push the rate past 100%.
+    """
+    assignment_ids = [s['assignment'].pk for s in sites]
+    if not assignment_ids:
+        return {'rows': [], 'total_edits': 0, 'reviewed_projects': {}}
+
+    # Every assignment on the tender, with whether it has a ledger entry into
+    # artifacts_uploaded, whether Design QC ever started an attempt, and its counted
+    # corrections by action. Correlated subqueries, so it is one statement however many
+    # sites the tender has.
+    facts = {
+        pk: (in_ledger, qc_started, quantity_edits, lines_added)
+        for pk, in_ledger, qc_started, quantity_edits, lines_added in
+        DesignAssignment.objects.filter(pk__in=assignment_ids).annotate(
+            in_ledger=Exists(StatusTransition.objects.filter(
+                subject_type=SUBJECT_DESIGN_ASSIGNMENT, subject_id=OuterRef('pk'),
+                to_status=DESIGN_ARTIFACTS_UPLOADED)),
+            qc_started=Exists(DesignAttempt.objects.filter(
+                assignment_id=OuterRef('pk'), qc_started_at__isnull=False)),
+            quantity_edits=_correction_count(BOQ_CORRECTION_QUANTITY_CHANGED),
+            lines_added=_correction_count(BOQ_CORRECTION_LINE_ADDED),
+        ).values_list('pk', 'in_ledger', 'qc_started', 'quantity_edits', 'lines_added')
+    }
+
+    by_designer = {}
+    for s in sites:
+        designer = s['designer']
+        if designer is None:
+            continue
+        in_ledger, qc_started, quantity_edits, lines_added = facts[s['assignment'].pk]
+        if not _reached_review(s['assignment'].status, in_ledger, qc_started):
+            continue
+        row = by_designer.setdefault(designer.pk, {
+            'designer': designer, 'reviewed': 0, 'sites_corrected': 0,
+            'quantity_edits': 0, 'lines_added': 0, 'projects': [],
+        })
+        row['reviewed'] += 1
+        row['projects'].append(s['project'])
+        if quantity_edits or lines_added:
+            row['sites_corrected'] += 1
+        row['quantity_edits'] += quantity_edits
+        row['lines_added']    += lines_added
+
+    rows = sorted(by_designer.values(),
+                  key=lambda r: (r['designer'].user.get_full_name()
+                                 or r['designer'].user.username).lower())
+    for row in rows:
+        # Every row has reviewed >= 1, so there is no "nothing to divide by" case here.
+        row['rate'] = round(100 * row['sites_corrected'] / row['reviewed'])
+    return {
+        'rows': rows,
+        'total_edits': sum(r['quantity_edits'] + r['lines_added'] for r in rows),
+        # designer pk -> that designer's reviewed sites, for the drill-down.
+        'reviewed_projects': {r['designer'].pk: r['projects'] for r in rows},
+    }
+
+
+def reviewer_correction_drill(panel, designer_pk):
+    """The counted correction rows behind one designer's figures, per site. ONE query.
+
+    Only on request (?corrections=<pk>), so the dashboard's own render stays at one. Reads
+    the same reviewer_corrections() the counts read, over the same reviewed sites, so the
+    rows listed always add up to the row's figures. Returns
+    [{'project': p, 'corrections': [...]}] for sites with at least one row, by site code.
+    """
+    projects = panel['reviewed_projects'].get(designer_pk, [])
+    by_project = {p.pk: {'project': p, 'corrections': []} for p in projects}
+    # Every counted row on this designer's reviewed sites, oldest first; the corrector's
+    # user is joined for the "by" column.
+    for correction in (reviewer_corrections()
+                       .filter(boq__project_id__in=list(by_project))
+                       .select_related('boq', 'corrected_by__user')
+                       .order_by('corrected_at', 'pk')):
+        by_project[correction.boq.project_id]['corrections'].append(correction)
+    return sorted((g for g in by_project.values() if g['corrections']),
+                  key=lambda g: g['project'].project_id)
