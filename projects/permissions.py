@@ -3805,3 +3805,18 @@ def attendance_entry_remappable(entry):
     listed" is mapped again, not re-mapped. Entry state only."""
     return (entry is not None and not entry.is_voided and entry.contractor_id is not None
             and entry.original_unlisted_name != '' and not entry.project.is_deleted)
+
+
+# ---------------------------------------------------------------------------
+# Vendor attendance, all sites — ATT-B6
+# ---------------------------------------------------------------------------
+
+def user_can_view_vendor_attendance(user):
+    """Return True if `user` may open "Vendor attendance", every site's contractor
+    attendance for one day (ATT-B6 ruling 1): a role in ATTENDANCE_MAPPER_ROLES (SCM,
+    Admin). The same set as the "Contractors to map" queue, on purpose: this page is where
+    the unmapped crews it links to are found, and both roles already see every site
+    (PORTFOLIO_VIEW_ROLES). Finance and the CEO get the billing page later, not this one;
+    the PM and Site Engineers read their own sites' attendance pages. Role only."""
+    profile = getattr(user, 'profile', None)
+    return profile is not None and profile.role in ATTENDANCE_MAPPER_ROLES

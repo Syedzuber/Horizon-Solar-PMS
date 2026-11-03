@@ -2056,7 +2056,7 @@ def dashboard_scm(request):
     # partial renders nothing (absent, not empty).
     opex_tender_rows = scm_opex_tender_rows() if _context_includes(ctx, 'OPEX') else []
     # Lazy import: attendance_views imports _active_project from this module (circular at top level).
-    from .attendance_views import attendance_unmapped_group_count
+    from .attendance_views import attendance_unmapped_group_count, vendor_attendance_today_counts
 
     return render(request, 'dashboard/scm.html', {
         'summary': {
@@ -2078,6 +2078,7 @@ def dashboard_scm(request):
         'all_profiles':         UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
         'context_nav':          _context_nav(request, ctx),
         'attendance_unmapped_groups': attendance_unmapped_group_count(),  # ATT-B3 queue link
+        'vendor_attendance_today': vendor_attendance_today_counts(),  # ATT-B6 link hint
     })
 
 

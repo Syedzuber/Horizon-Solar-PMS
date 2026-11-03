@@ -283,6 +283,8 @@ urlpatterns = [
     path('scm/attendance/to-map/', attendance_views.attendance_to_map, name='attendance_to_map'),
     path('projects/<str:project_id>/attendance/<int:entry_pk>/map/', attendance_views.attendance_map, name='attendance_map'),
     path('projects/<str:project_id>/attendance/<int:entry_pk>/remap/', attendance_views.attendance_remap, name='attendance_remap'),
+    # ATT-B6 — SCM / Admin "Vendor attendance": every site's crews for one day (?date=), read only.
+    path('scm/attendance/vendors/', attendance_views.vendor_attendance, name='vendor_attendance'),
     # site_drawing_open (DR-2) — every viewer of an OPEX site; one released drawing PDF as a redirect to a link signed at the click
     path('site-drawings/<int:pk>/open/', site_drawings_views.site_drawing_open, name='site_drawing_open'),
     path('projects/<str:project_id>/tasks/<int:task_id>/assign-design/', views.task_assign_design_head, name='task_assign_design_head'),  # Design Head only (is_design_head flag)

@@ -13,6 +13,7 @@ Contractor attendance screens — ATT-B1 (the same day) and ATT-B2 (after the da
     attendance_to_map    ATT-B3: SCM's "Contractors to map" queue, Map all per group
     attendance_map       ATT-B3: POST, map one not-listed entry from its card
     attendance_remap     ATT-B3: POST, change a mapping from its card, with a note
+    vendor_attendance    ATT-B6: SCM's "Vendor attendance", every site for one day, read only
 
 ATT-B3 also adds the photo-time chips on the cards (attendance.photo_time_flags) and the
 CONFIRMED answer for a correction that changes nothing. Open-entry reporting and
@@ -52,19 +53,21 @@ from .attendance import (
     normalise_unlisted_name, photo_time_flags, remap_attendance, set_time_out,
     update_attendance, void_attendance,
 )
+from .attendance_alerts import sites_missing_attendance
 from .bill_storage import bill_pdf_url, bills_bucket
 from .decorators import get_user_dashboard, login_required
 from .forms_attendance import (
     UNLISTED, AttendanceForm, CorrectionForm, LateAttendanceForm, MapForm, MapGroupForm,
     RemapForm, contractor_choices,
 )
-from .models import ContractorAttendance, ContractorAttendanceRevision
+from .models import ContractorAttendance, ContractorAttendanceRevision, Program, Vendor
 from .permissions import (
     attendance_entry_correctable, attendance_entry_mappable, attendance_entry_remappable,
-    attendance_photo_entry_ids, user_can_add_late_attendance, user_can_change_attendance_today,
-    user_can_correct_attendance, user_can_log_attendance, user_can_map_attendance,
-    user_can_view_attendance_history, user_can_view_attendance_photo, user_can_view_project,
-    user_is_attendance_corrector, user_is_todays_attendance_recorder,
+    attendance_photo_entry_ids, site_assigned_pm, user_can_add_late_attendance,
+    user_can_change_attendance_today, user_can_correct_attendance, user_can_log_attendance,
+    user_can_map_attendance, user_can_view_attendance_history, user_can_view_attendance_photo,
+    user_can_view_project, user_can_view_vendor_attendance, user_is_attendance_corrector,
+    user_is_todays_attendance_recorder,
 )
 from .qaqc_views import QaqcVisitRefused, upload_visit_photo
 from .site_pm import refuse_site_view_404
@@ -1013,3 +1016,214 @@ def attendance_remap(request, project_id, entry_pk):
         messages.success(request, f"Mapping changed to {entry.contractor.name} — "
                                   f"{entry.trade_label}, {entry.date:%d %b}.")
     return redirect(_card_url(project, entry))
+
+
+# ---------------------------------------------------------------------------
+# Vendor attendance, all sites — ATT-B6
+# ---------------------------------------------------------------------------
+
+#: More sites than this and every site's block opens collapsed (ruling 6); up to it,
+#: every block is open.
+VENDOR_ATTENDANCE_OPEN_SITES = 10
+
+FUTURE_DAY = "Attendance can't be shown for a future date — showing today."
+BAD_DAY = "That date couldn't be read — showing today."
+NOT_LOGGED_CONTRACTOR_FILTER = "Not logged isn't shown when filtering by contractor."
+
+
+def vendor_attendance_day(raw, today):
+    """(day, message): the ?date= day to show, or `today` with the reason when the value
+    is unreadable or in the future (ruling 3, edge cases 2-3); no message when it is
+    missing. `today` is timezone.localdate(), so "future" is judged in IST."""
+    raw = (raw or '').strip()
+    if not raw:
+        return today, None
+    try:
+        day = datetime.strptime(raw, '%Y-%m-%d').date()
+    except ValueError:
+        return today, BAD_DAY
+    if day > today:
+        return today, FUTURE_DAY
+    return day, None
+
+
+def _int_param(raw):
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def vendor_attendance_entries(day, program_id=None, contractor_id=None, site_q=''):
+    """The day's entries on sites not soft-deleted, narrowed by the page's filters — the
+    ONE query both the site list and the summary strip are built from, so their totals
+    cannot disagree. Voided entries stay in so the footnote counts them under the same
+    filters; the view splits them off. Ordered by site code, so the list groups by site in
+    one pass. Each row brings what its card shows: the site with its assigned PM (the
+    block header, site_assigned_pm), the contractor's name and the recorder ("Recorded
+    by")."""
+    qs = ContractorAttendance.objects.filter(date=day, project__is_deleted=False)
+    if program_id is not None:
+        qs = qs.filter(project__program_id=program_id)
+    if contractor_id is not None:
+        qs = qs.filter(contractor_id=contractor_id)
+    if site_q:
+        qs = qs.filter(project__project_id__icontains=site_q)
+    return (qs.select_related('project__assigned_pm__user', 'contractor', 'recorded_by__user')
+            .order_by('project__project_id', 'time_in', 'pk'))
+
+
+def vendor_attendance_not_logged(day, program_id=None, site_q=''):
+    """The sites missing attendance on `day` — ATT-B4's sites_missing_attendance(), reused
+    unchanged (ruling 7) — narrowed by the tender and site-code filters in Python, since
+    that query takes no filter. Its task status and site status are today's whatever `day`
+    is: neither is stored per day, which is why the page labels a past day so."""
+    sites = sites_missing_attendance(day)
+    if program_id is not None:
+        sites = [site for site in sites if site.program_id == program_id]
+    if site_q:
+        needle = site_q.lower()
+        sites = [site for site in sites if needle in site.project_id.lower()]
+    return sites
+
+
+def _vendor_attendance_card(user, entry, today):
+    """One crew as _entry_card.html reads it, every action off and no history (ATT-B6
+    ruling B: this page reads; changes are made on the site's own page). The chips come
+    from the same helpers the site page calls."""
+    can_see_photo = user_can_view_attendance_photo(user, entry)
+    return {
+        'entry': entry,
+        'past': entry.date != today,
+        'can_change': False,
+        'can_correct': False,
+        'locked': False,
+        'can_map': False,
+        'can_remap': False,
+        'can_see_photo': can_see_photo,
+        'photo_flags': photo_time_flags(entry) if can_see_photo else [],
+        'is_late': is_late_entry(entry),
+        'history': [],
+    }
+
+
+def vendor_attendance_blocks(user, live_entries, today):
+    """The live entries as one block per site, in the order given (site code): the site,
+    its assigned PM (None shows "No PM"), crews, people and the cards. No query: every
+    entry carries its site and PM, and for the page's roles the photo audience is a role
+    term (user_can_view_attendance_photo asks nothing of the database for SCM / Admin)."""
+    blocks = []
+    for _, group in groupby(live_entries, key=attrgetter('project_id')):
+        group = list(group)
+        project = group[0].project
+        blocks.append({
+            'project': project,
+            'pm': site_assigned_pm(project),
+            'crews': len(group),
+            'people': sum(entry.headcount for entry in group),
+            'cards': [_vendor_attendance_card(user, entry, today) for entry in group],
+        })
+    return blocks
+
+
+def vendor_attendance_today_counts():
+    """Today's sites with attendance and the people on them, for the SCM dashboard's
+    "Vendor attendance" link (ATT-B6 ruling 10): live entries on sites not soft-deleted,
+    the page's own unfiltered figures. One aggregate query."""
+    totals = (ContractorAttendance.objects
+              .filter(date=timezone.localdate(), is_voided=False, project__is_deleted=False)
+              .aggregate(sites=Count('project', distinct=True), people=Sum('headcount')))
+    return {'sites': totals['sites'] or 0, 'people': totals['people'] or 0}
+
+
+def _vendor_attendance_url(day, filters):
+    """The page for `day` with the same filters — the Previous / Next day links."""
+    query = {key: value for key, value in filters.items() if value not in (None, '')}
+    query['date'] = day.isoformat()
+    return reverse('vendor_attendance') + '?' + urlencode(query)
+
+
+@login_required
+@require_GET
+def vendor_attendance(request):
+    """
+    ATT-B6: "Vendor attendance" — every site's contractor attendance for one day, read
+    only. ?date=YYYY-MM-DD picks the day (today, IST, by default; a future or unreadable
+    date shows today with a message); ?program= (tender), ?contractor= (a listed
+    contractor) and ?q= (site code contains) narrow it, together. A summary strip, one
+    block per site holding its crews as the site page's cards with every action off, plus
+    View photo and Map links; a footnote counting the voided entries left out; and "Not
+    logged" — the sites ATT-B4 alerts for on that day, hidden under a contractor filter.
+
+    Access: user_can_view_vendor_attendance — SCM and Admin. Everyone else gets 403.
+    """
+    # SCM / Admin only (ruling 1): Finance and the CEO get the billing page later; the PM
+    # and Site Engineers read their own sites' attendance pages instead.
+    if not user_can_view_vendor_attendance(request.user):
+        return HttpResponseForbidden()
+    today = timezone.localdate()
+    day, day_message = vendor_attendance_day(request.GET.get('date'), today)
+    if day_message:
+        messages.warning(request, day_message)
+
+    # Every live tender by name, as the PM handover screen lists them; an unknown or
+    # deleted ?program= is ignored rather than refused.
+    programs = list(Program.objects.filter(is_deleted=False).order_by('name'))
+    program_pk = _int_param(request.GET.get('program'))
+    program = next((p for p in programs if p.pk == program_pk), None)
+    contractor_pk = _int_param(request.GET.get('contractor'))
+    contractor = (Vendor.objects.filter(pk=contractor_pk).first()
+                  if contractor_pk is not None else None)
+    site_q = (request.GET.get('q') or '').strip()[:30]
+    program_id = program.pk if program else None
+    contractor_id = contractor.pk if contractor else None
+
+    entries = list(vendor_attendance_entries(day, program_id, contractor_id, site_q))
+    live = [entry for entry in entries if not entry.is_voided]
+    blocks = vendor_attendance_blocks(request.user, live, today)
+    # A site with nothing logged has no contractor, so a contractor filter cannot narrow
+    # it: the section and its figure are left out instead (ruling C).
+    not_logged = (None if contractor else
+                  vendor_attendance_not_logged(day, program_id, site_q))
+
+    filter_parts = []
+    if program:
+        filter_parts.append(f'tender {program.name}')
+    if contractor:
+        filter_parts.append(f'contractor {contractor.name}')
+    if site_q:
+        filter_parts.append(f'site code containing ‘{site_q}’')
+    filters = {'program': program_id, 'contractor': contractor_id, 'q': site_q}
+    return render(request, 'projects/attendance/vendor_attendance.html', {
+        'day': day,
+        'today': today,
+        'is_today': day == today,
+        'prev_url': _vendor_attendance_url(day - timedelta(days=1), filters),
+        'next_url': (None if day >= today
+                     else _vendor_attendance_url(day + timedelta(days=1), filters)),
+        'clear_url': _vendor_attendance_url(day, {}),
+        'programs': programs,
+        'program': program,
+        # contractor_choices(current) adds a deactivated contractor named in the URL, so
+        # the choice still shows (ruling D).
+        'vendors': contractor_choices(contractor),
+        'contractor': contractor,
+        'q': site_q,
+        'filter_label': ' · '.join(filter_parts),
+        'blocks': blocks,
+        'blocks_open': len(blocks) <= VENDOR_ATTENDANCE_OPEN_SITES,
+        'summary': {
+            'sites': len(blocks),
+            'crews': len(live),
+            'people': sum(entry.headcount for entry in live),
+            'not_logged': None if not_logged is None else len(not_logged),
+            'unmapped': sum(1 for entry in live if entry.contractor_id is None),
+        },
+        'voided': len(entries) - len(live),
+        # The B4 query brings each site's PM with the row, so this costs no query.
+        'not_logged': (None if not_logged is None else
+                       [{'project': site, 'pm': site_assigned_pm(site)} for site in not_logged]),
+        'not_logged_note': NOT_LOGGED_CONTRACTOR_FILTER if contractor else '',
+        # Role only, asked once: the Map link goes to the B3 queue, which re-checks it.
+        'can_map': user_can_map_attendance(request.user),
+    })

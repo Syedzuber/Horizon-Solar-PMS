@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% block title %}Vendor attendance{% endblock %}
+
+{% block extra_head %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<style>
+  .att-card { cursor: pointer; }
+  .att-photo { max-width: 100%; max-height: 320px; border-radius: .375rem; }
+  .va-tile { min-width: 0; }
+  [x-cloak] { display: none !important; }
+</style>
+{% endblock %}
+
+{% block content %}
+{% comment %}ATT-B6 — SCM's "Vendor attendance" (attendance_views.vendor_attendance): every site's
+   contractor attendance for one day, read only. `summary` and `blocks` come from ONE list of the
+   day's live entries, so the strip and the blocks always agree. Each crew is the site page's own
+   _entry_card.html with every action flag off and no history, so the chips are the site page's;
+   "View photo" goes through the per-click signed attendance_photo view, "Map" to the B3 queue for
+   that site. `not_logged` is ATT-B4's rule for the day — None under a contractor filter, when the
+   section is replaced by `not_logged_note`. Filters and the date are a plain GET form; Alpine
+   holds only which site blocks and cards are open (all open up to 10 sites, else collapsed).{% endcomment %}
+<div class="mb-3">
+  <a href="{% url 'dashboard_scm' %}" class="text-decoration-none text-muted">&larr; SCM dashboard</a>
+</div>
+
+<div style="max-width:720px;">
+  <div class="d-flex flex-wrap align-items-start justify-content-between gap-2 mb-3">
+    <div>
+      <h5 class="mb-0">Vendor attendance</h5>
+      <div class="text-muted small" id="va-day">{{ day|date:"D, d M Y" }}{% if is_today %} · today{% endif %}</div>
+    </div>
+    <div class="d-flex gap-2">
+      <a href="{{ prev_url }}" class="btn btn-sm btn-outline-secondary" id="va-prev">&larr; Previous day</a>
+      {% if next_url %}
+        <a href="{{ next_url }}" class="btn btn-sm btn-outline-secondary" id="va-next">Next day &rarr;</a>
+      {% else %}
+        <span class="btn btn-sm btn-outline-secondary disabled" aria-disabled="true" id="va-next-disabled">Next day &rarr;</span>
+      {% endif %}
+    </div>
+  </div>
+
+  <form method="get" class="row g-2 align-items-end mb-3" id="va-filters">
+    <div class="col-6 col-sm-4">
+      <label class="form-label small mb-0" for="va-date">Date</label>
+      <input type="date" name="date" id="va-date" value="{{ day|date:'Y-m-d' }}" max="{{ today|date:'Y-m-d' }}" class="form-control form-control-sm">
+    </div>
+    <div class="col-6 col-sm-4">
+      <label class="form-label small mb-0" for="va-q">Site code</label>
+      <input type="search" name="q" id="va-q" value="{{ q }}" maxlength="30" class="form-control form-control-sm" placeholder="Search">
+    </div>
+    <div class="col-12 col-sm-4">
+      <label class="form-label small mb-0" for="va-program">Tender</label>
+      <select name="program" id="va-program" class="form-select form-select-sm">
+        <option value="">All tenders</option>
+        {% for p in programs %}<option value="{{ p.pk }}"{% if program and p.pk == program.pk %} selected{% endif %}>{{ p.name }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-12 col-sm-8">
+      <label class="form-label small mb-0" for="va-contractor">Contractor</label>
+      <select name="contractor" id="va-contractor" class="form-select form-select-sm">
+        <option value="">All contractors</option>
+        {% for v in vendors %}<option value="{{ v.pk }}"{% if contractor and v.pk == contractor.pk %} selected{% endif %}>{{ v.name }}{% if not v.is_active %} (inactive){% endif %}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-12 col-sm-4 d-flex gap-2 align-items-center">
+      <button type="submit" class="btn btn-sm btn-brand">Show</button>
+      {% if filter_label %}<a href="{{ clear_url }}" class="small" id="va-clear">Clear filters</a>{% endif %}
+    </div>
+  </form>
+
+  <div class="row g-2 mb-3" id="va-summary">
+    <div class="col-6 col-sm-4"><div class="border rounded p-2 h-100 va-tile"><div class="fw-semibold fs-5" id="va-sum-sites">{{ summary.sites }}</div><div class="small text-muted">site{{ summary.sites|pluralize }} with attendance</div></div></div>
+    <div class="col-6 col-sm-4"><div class="border rounded p-2 h-100 va-tile"><div class="fw-semibold fs-5" id="va-sum-crews">{{ summary.crews }}</div><div class="small text-muted">crew{{ summary.crews|pluralize }}</div></div></div>
+    <div class="col-6 col-sm-4"><div class="border rounded p-2 h-100 va-tile"><div class="fw-semibold fs-5" id="va-sum-people">{{ summary.people }}</div><div class="small text-muted">{{ summary.people|pluralize:"person,people" }}</div></div></div>
+    {% if summary.not_logged is not None %}
+      <div class="col-6 col-sm-4"><div class="border rounded p-2 h-100 va-tile"><div class="fw-semibold fs-5{% if summary.not_logged %} text-danger{% endif %}" id="va-sum-not-logged">{{ summary.not_logged }}</div><div class="small text-muted">site{{ summary.not_logged|pluralize }} not logged</div></div></div>
+    {% endif %}
+    <div class="col-6 col-sm-4"><div class="border rounded p-2 h-100 va-tile"><div class="fw-semibold fs-5{% if summary.unmapped %} text-warning-emphasis{% endif %}" id="va-sum-unmapped">{{ summary.unmapped }}</div><div class="small text-muted">crew{{ summary.unmapped|pluralize }} waiting for SCM mapping</div></div></div>
+  </div>
+
+  {% for b in blocks %}
+    <div class="card shadow-sm mb-3 va-site" x-data="{ open: {{ blocks_open|yesno:'true,false' }} }" id="va-site-{{ b.project.pk }}">
+      <div class="card-header bg-body d-flex justify-content-between align-items-start gap-2">
+        <div class="text-break">
+          <a href="{% url 'attendance_today' b.project.project_id %}" class="fw-semibold va-site-link">{{ b.project.project_id }}</a>
+          <div class="small text-muted">{{ b.project.get_project_type_display }} · {% if b.pm %}PM {{ b.pm.user.get_full_name|default:b.pm.user.username }}{% else %}<span class="va-no-pm">No PM</span>{% endif %}</div>
+        </div>
+        <button type="button" class="btn btn-sm btn-link text-decoration-none text-end p-0" @click="open = !open" :aria-expanded="open">
+          <span class="fw-semibold d-block va-site-totals">{{ b.crews }} crew{{ b.crews|pluralize }} · {{ b.people }} {{ b.people|pluralize:"person,people" }}</span>
+          <span class="small" x-text="open ? 'Hide' : 'Show'">{% if blocks_open %}Hide{% else %}Show{% endif %}</span>
+        </button>
+      </div>
+      <div class="card-body pb-1" x-show="open"{% if not blocks_open %} x-cloak{% endif %}>
+        {% for c in b.cards %}
+          {% include "projects/attendance/_entry_card.html" with project=b.project %}
+          {% if c.can_see_photo and c.entry.photo_path or can_map and not c.entry.contractor_id %}
+            <div class="d-flex flex-wrap gap-3 small mb-3 ms-1">
+              {% if c.can_see_photo and c.entry.photo_path %}<a href="{% url 'attendance_photo' b.project.project_id c.entry.pk %}" target="_blank" rel="noopener" class="va-photo-link">View photo</a>{% endif %}
+              {% if can_map and not c.entry.contractor_id %}<a href="{% url 'attendance_to_map' %}?site={{ b.project.project_id|urlencode }}" class="va-map-link">Map</a>{% endif %}
+            </div>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </div>
+  {% empty %}
+    <div class="card shadow-sm mb-3"><div class="card-body text-muted small" id="va-empty">{% if filter_label %}No attendance on {{ day|date:"d M Y" }} for {{ filter_label }}.{% else %}No attendance logged on any site on {{ day|date:"d M Y" }}.{% endif %}</div></div>
+  {% endfor %}
+
+  {% if voided %}
+    <div class="small text-muted mb-3" id="va-voided">{{ voided }} voided entr{{ voided|pluralize:"y,ies" }} hidden</div>
+  {% endif %}
+
+  {% if not_logged is None %}
+    <div class="small text-muted mb-3" id="va-not-logged-note">{{ not_logged_note }}</div>
+  {% else %}
+    <h6 class="mt-4 mb-2" id="va-not-logged-title">{% if is_today %}Not logged{% else %}Not logged (based on today's task status){% endif %}</h6>
+    {% for row in not_logged %}
+      <div class="card shadow-sm mb-2 va-not-logged">
+        <div class="card-body py-2 d-flex justify-content-between align-items-center gap-2">
+          <div class="text-break">
+            <div class="fw-semibold">{{ row.project.project_id }}</div>
+            <div class="small text-muted">{% if row.pm %}PM {{ row.pm.user.get_full_name|default:row.pm.user.username }}{% else %}No PM{% endif %}</div>
+          </div>
+          <a href="{% url 'attendance_today' row.project.project_id %}" class="btn btn-sm btn-outline-secondary">Attendance</a>
+        </div>
+      </div>
+    {% empty %}
+      <div class="small text-muted mb-3" id="va-not-logged-empty">Every site with installation work in progress has attendance{% if filter_label %} for these filters{% endif %}.</div>
+    {% endfor %}
+  {% endif %}
+</div>
+{% endblock %}
