@@ -374,6 +374,10 @@ which excludes every row a change request cites or that was made while one was o
 
 The drill-down link is `?corrections=`, not `?designer=`: the workload table's drill and the
 zero-display tests both key on the first `?designer=` link for a designer.
+
+BC-4: the rate is a dash below corrections.rate_min reached-review sites (r.rate_shown);
+the counts always show. Sites with counted corrections and no designer to credit are a
+footnote, not a row, and the zero state shows only when they are zero too.
 {% endcomment %}
 <div class="card shadow-sm border-0 mt-3" id="reviewerCorrections">
   <div class="card-header bg-white py-2 d-flex justify-content-between align-items-baseline">
@@ -382,9 +386,10 @@ zero-display tests both key on the first `?designer=` link for a designer.
       All time, this tender. Shown beside Rework, never added to it.
     </span>
   </div>
-  {% if not corrections.total_edits %}
+  {% if not corrections.total_edits and not corrections.unassigned_sites %}
     <div class="card-body text-center text-muted small py-4">No reviewer corrections yet.</div>
   {% else %}
+  {% if corrections.rows %}
   <div class="table-responsive">
     <table class="table table-sm align-middle mb-0">
       <thead class="table-light">
@@ -407,7 +412,9 @@ zero-display tests both key on the first `?designer=` link for a designer.
           </td>
           <td class="text-end">{{ r.reviewed }}</td>
           <td class="text-end">{{ r.sites_corrected }}</td>
-          <td class="text-end">{{ r.rate }}%</td>
+          <td class="text-end">
+            {% if r.rate_shown %}{{ r.rate }}%{% else %}<span class="text-muted">—</span>{% endif %}
+          </td>
           <td class="text-end">{{ r.quantity_edits }}</td>
           <td class="text-end">{{ r.lines_added }}</td>
         </tr>
@@ -415,6 +422,12 @@ zero-display tests both key on the first `?designer=` link for a designer.
       </tbody>
     </table>
   </div>
+  {% endif %}
+  {% if corrections.unassigned_sites %}
+    <div class="px-3 py-2 small text-muted border-top">
+      {{ corrections.unassigned_sites }} site(s) with reviewer corrections have no designer assigned.
+    </div>
+  {% endif %}
   {% endif %}
 
   {% if corrections_drill is not None %}
@@ -475,10 +488,14 @@ zero-display tests both key on the first `?designer=` link for a designer.
   <div class="card-footer bg-white small text-muted py-2">
     <strong>Sites corrected</strong> = sites where a reviewer corrected the BOQ at least once
     during package review; several edits on one BOQ count as one site.
-    <strong>Rate</strong> = sites corrected &divide; sites that reached package review.
+    <strong>Rate</strong> = sites corrected &divide; sites that reached package review,
+    shown once a designer has {{ corrections.rate_min }} sites that reached review; a dash
+    means fewer.
     Corrections a change request cites, or made while a change request was open on the site,
-    are not counted: those are not the designer's. Counted against the site's current
-    designer. This is not rework and is never added to it.
+    are not counted: those are not the designer's. Each correction is counted against the
+    designer who held the site when it was made; an older correction that did not record
+    this counts against the site's current designer. This is not rework and is never added
+    to it.
   </div>
 </div>
 

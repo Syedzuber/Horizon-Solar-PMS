@@ -22,6 +22,7 @@ forwards and `corrected` verdicts go through the product views. The rows that th
 can no longer make at that point (an in-review correction on a released site, a row after
 a request closed) are written directly and say so.
 """
+import re
 from datetime import timedelta
 from decimal import Decimal
 
@@ -29,14 +30,15 @@ from django.urls import reverse
 from django.utils import timezone
 
 from .design_metrics import (
-    reviewer_correction_drill, reviewer_correction_panel, reviewer_corrections,
-    tender_metrics,
+    REVIEWED_MIN_FOR_RATE, reviewer_correction_drill, reviewer_correction_panel,
+    reviewer_corrections, tender_metrics,
 )
+from .design_views import _allocate_one
 from .models import (
     BOQCorrection, BOQItemMaster, DesignAttempt, DesignAssignment, StatusTransition,
     ATTEMPT_REASON_QC_FAILED, BOQ_CORRECTION_QUANTITY_CHANGED, CHANGE_REQUEST_CORRECTED,
     CHANGE_REQUEST_REJECTED, DESIGN_ARKA_SUBMITTED, DESIGN_ARTIFACTS_UPLOADED,
-    DESIGN_IN_DESIGN, ERR_LAYOUT, QC_FAILED, SUBJECT_DESIGN_ASSIGNMENT,
+    DESIGN_IN_DESIGN, DESIGN_IN_QC, ERR_LAYOUT, QC_FAILED, SUBJECT_DESIGN_ASSIGNMENT,
 )
 from .tests_change_request_routing import RoutingBase
 from .tests_design_change_window import _profile
@@ -104,7 +106,9 @@ class CountTests(ReviewerCorrectionBase):
 
         html = self._dashboard().content.decode()
         self.assertIn('Reviewer BOQ corrections', html)
-        self.assertIn('67%', html)
+        # BC-4 (M1): 3 reached-review sites is under REVIEWED_MIN_FOR_RATE, so the page
+        # shows a dash; the computed rate above is unchanged.
+        self.assertNotIn('67%', html)
         self.assertNotIn('No reviewer corrections yet.', html)
 
     def test_02_several_edits_on_one_boq_are_one_site(self):
@@ -349,3 +353,171 @@ class DrillAndQueryTests(ReviewerCorrectionBase):
             reviewer_correction_drill(seven, self.designer.pk)
         with self.assertNumQueries(0):
             reviewer_correction_panel([])
+
+
+# ===========================================================================
+# 7. BC-4 — designer at correction time, the rate threshold, unassigned sites
+# ===========================================================================
+
+def _panel_row_html(html, profile):
+    """The panel's <tr> for one designer, found by its ?corrections= link."""
+    match = re.search(r'<tr[^>]*>\s*<td>\s*<a href="\?corrections=%d#reviewerCorrections">'
+                      r'.*?</tr>' % profile.pk, html, re.S)
+    return match.group(0) if match else None
+
+
+UNASSIGNED_NOTE = 'site(s) with reviewer corrections have no designer assigned.'
+
+
+class DesignerAtCorrectionTests(ReviewerCorrectionBase):
+
+    def _reassign(self, assignment, designer):
+        """Reassign through _allocate_one, the product writer. It refuses once Arka work
+        starts, so the status is stepped back to in_design first and restored after
+        (setup writes); qc_started_at keeps the site counted as reached review."""
+        DesignAssignment.objects.filter(pk=assignment.pk).update(status=DESIGN_IN_DESIGN)
+        assignment.refresh_from_db()
+        _allocate_one(assignment, designer, self.head)
+        DesignAssignment.objects.filter(pk=assignment.pk).update(status=DESIGN_IN_QC)
+        assignment.refresh_from_db()
+        self.assertEqual(assignment.assigned_to, designer)       # setup: it moved
+
+    def test_16_the_correction_stores_the_designer_at_write_time(self):
+        site, _ = self._pre_release('BC4-S')
+        self._set_quantity(site, 12)
+        self._add_line(site, 2)
+        self.assertEqual(
+            set(BOQCorrection.objects.values_list('designer_at_correction', flat=True)),
+            {self.designer.pk})
+
+    def test_17_a_reassignment_afterwards_leaves_the_credit_with_the_original(self):
+        other = _profile('bc4_other', 'Design')
+        site, assignment = self._pre_release('BC4-R')
+        self._set_quantity(site, 12)
+        self._reassign(assignment, other)
+
+        mine = self._row()
+        self.assertEqual((mine['sites_corrected'], mine['quantity_edits']), (1, 1))
+        # The denominator stays with the current designer (TODO(BC-4) in design_metrics).
+        self.assertEqual((mine['reviewed'], mine['rate'], mine['rate_shown']),
+                         (0, None, False))
+        theirs = self._row(other)
+        self.assertEqual((theirs['reviewed'], theirs['sites_corrected'],
+                          theirs['quantity_edits']), (1, 0, 0))
+
+        # The original designer holds no site here now, so the row's profile is built from
+        # the panel query; the page names them and the drill-down opens for them.
+        response = self._dashboard(query=f'?corrections={self.designer.pk}')
+        html = response.content.decode()
+        self.assertIn(self.designer.user.username, _panel_row_html(html, self.designer))
+        self.assertEqual([g['project'] for g in response.context['corrections_drill']],
+                         [site])
+        self.assertEqual(reviewer_correction_drill(self._panel(), other.pk), [])
+
+    def test_18_a_null_stamp_falls_back_to_the_current_designer(self):
+        other = _profile('bc4_null', 'Design')
+        site, assignment = self._pre_release('BC4-N')
+        legacy = self._in_review_correction(site, 12)            # direct write: no stamp
+        self.assertIsNone(legacy.designer_at_correction_id)
+        self.assertEqual(self._row()['quantity_edits'], 1)
+        DesignAssignment.objects.filter(pk=assignment.pk).update(assigned_to=other)
+        self.assertIsNone(self._row())
+        self.assertEqual(self._row(other)['quantity_edits'], 1)
+        drill = reviewer_correction_drill(self._panel(), other.pk)
+        self.assertEqual([c for g in drill for c in g['corrections']], [legacy])
+
+    def test_19_a_stamp_outlives_the_designer_leaving_the_site(self):
+        """Stamped, then the assignment loses its designer: still credited, not a
+        footnote."""
+        site, assignment = self._pre_release('BC4-L')
+        self._set_quantity(site, 12)
+        DesignAssignment.objects.filter(pk=assignment.pk).update(assigned_to=None)
+        self.assertEqual(self._panel()['unassigned_sites'], 0)
+        self.assertEqual(self._row()['quantity_edits'], 1)
+
+
+class RateThresholdTests(ReviewerCorrectionBase):
+
+    def test_20_the_rate_shows_from_five_reached_review_sites(self):
+        self.assertEqual(REVIEWED_MIN_FOR_RATE, 5)
+        first, _ = self._pre_release('BC4-T1')
+        self._set_quantity(first, 12)
+        for n in range(2, 5):
+            self._pre_release(f'BC4-T{n}')
+
+        row = self._row()
+        self.assertEqual((row['reviewed'], row['sites_corrected'], row['rate']), (4, 1, 25))
+        self.assertFalse(row['rate_shown'])
+        cells = _panel_row_html(self._dashboard().content.decode(), self.designer)
+        self.assertIn('—', cells)
+        self.assertNotIn('25%', cells)
+        self.assertIn('<td class="text-end">4</td>', cells)       # counts still shown
+        self.assertIn('<td class="text-end">1</td>', cells)
+
+        self._pre_release('BC4-T5')
+        row = self._row()
+        self.assertEqual((row['reviewed'], row['rate'], row['rate_shown']), (5, 20, True))
+        cells = _panel_row_html(self._dashboard().content.decode(), self.designer)
+        self.assertIn('20%', cells)
+        self.assertNotIn('—', cells)
+
+
+class UnassignedSiteTests(ReviewerCorrectionBase):
+
+    def test_21_corrections_only_on_an_unassigned_site_are_a_footnote(self):
+        site, assignment = self._pre_release('BC4-U')
+        DesignAssignment.objects.filter(pk=assignment.pk).update(assigned_to=None)
+        self._set_quantity(site, 12)
+        correction = BOQCorrection.objects.get()                  # setup: it went through
+        self.assertIsNone(correction.designer_at_correction_id)
+
+        panel = self._panel()
+        self.assertEqual((panel['rows'], panel['total_edits'], panel['unassigned_sites']),
+                         ([], 0, 1))
+        html = self._dashboard().content.decode()
+        self.assertIn(f'1 {UNASSIGNED_NOTE}', html)
+        self.assertNotIn('No reviewer corrections yet.', html)
+        # No "Unassigned" row in the panel (other panels on the page use the word).
+        panel_html = html.split('id="reviewerCorrections"', 1)[1].split('card-footer', 1)[0]
+        self.assertNotIn('Unassigned', panel_html)
+        self.assertNotIn('<tbody>', panel_html)
+
+    def test_22_the_footnote_is_absent_without_unassigned_corrections(self):
+        site, _ = self._pre_release('BC4-A')
+        self._set_quantity(site, 12)
+        self.assertEqual(self._panel()['unassigned_sites'], 0)
+        self.assertNotIn(UNASSIGNED_NOTE, self._dashboard().content.decode())
+
+
+class SnapshotQueryTests(DesignerAtCorrectionTests):
+
+    def test_23_the_panel_stays_one_query_with_every_credit_path(self):
+        """Stamped, NULL-stamped, stamped to a designer with no site left here, and
+        unassigned — together, still one query; the drill-down still one."""
+        other = _profile('bc4_q', 'Design')
+        stamped, _ = self._pre_release('BC4-Q1')
+        self._set_quantity(stamped, 12)
+        legacy, _ = self._pre_release('BC4-Q2')
+        self._in_review_correction(legacy, 12)
+        moved, _ = self._pre_release('BC4-Q3')
+        self._set_quantity(moved, 12)
+        orphan, orphan_assignment = self._pre_release('BC4-Q4')
+        DesignAssignment.objects.filter(pk=orphan_assignment.pk).update(assigned_to=None)
+        self._set_quantity(orphan, 12)
+        # Every site but the orphan moves to `other`, so self.designer holds none here.
+        for assignment in DesignAssignment.objects.filter(
+                project__in=[stamped, legacy, moved]):
+            self._reassign(assignment, other)
+
+        sites = tender_metrics(self.program)['sites']
+        with self.assertNumQueries(1):
+            panel = reviewer_correction_panel(sites)
+        mine = next(r for r in panel['rows'] if r['designer'].pk == self.designer.pk)
+        theirs = next(r for r in panel['rows'] if r['designer'].pk == other.pk)
+        # Stamped Q1 and Q3 stay with self.designer; the unstamped Q2 follows the site.
+        self.assertEqual((mine['reviewed'], mine['sites_corrected']), (0, 2))
+        self.assertEqual((theirs['reviewed'], theirs['sites_corrected']), (3, 1))
+        self.assertEqual(panel['unassigned_sites'], 1)
+        with self.assertNumQueries(1):
+            drill = reviewer_correction_drill(panel, self.designer.pk)
+        self.assertEqual([g['project'] for g in drill], [stamped, moved])

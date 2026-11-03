@@ -724,7 +724,9 @@ class NotReworkTests(CorrectionBase):
         names = {f.name for f in BOQCorrection._meta.get_fields()}
         self.assertEqual(names, {
             'id', 'boq', 'item', 'item_code', 'item_description', 'action',
-            'quantity_before', 'quantity_after', 'corrected_by', 'corrected_at'})
+            'quantity_before', 'quantity_after', 'corrected_by', 'corrected_at',
+            # BC-4: who held the site at the edit — a fact, not a doneness signal.
+            'designer_at_correction'})
         for forbidden in ('status', 'state', 'is_applied', 'is_valid', 'is_complete',
                           'approved', 'superseded_by', 'locked'):
             self.assertNotIn(forbidden, names)
@@ -848,6 +850,50 @@ class RecordDurabilityTests(CorrectionBase):
         self._set_quantity(self.row, '18')
         self.boq.delete()
         self.assertEqual(BOQCorrection.objects.count(), 0)
+
+
+# ===========================================================================
+# BC-4 — the designer is stamped on the correction when it is written
+# ===========================================================================
+
+class DesignerSnapshotTests(CorrectionBase):
+
+    def test_both_actions_stamp_the_assignments_designer(self):
+        self._login(self.qc)
+        self._set_quantity(self.row, '18')
+        self._add_line('OPX-002', '3')
+        records = list(BOQCorrection.objects.filter(boq=self.boq))
+        self.assertEqual({r.action for r in records},
+                         {BOQ_CORRECTION_QUANTITY_CHANGED, BOQ_CORRECTION_LINE_ADDED})
+        self.assertEqual({r.designer_at_correction_id for r in records}, {self.designer.pk})
+
+    def test_the_stamp_reads_the_assignment_not_project_assigned_design(self):
+        """The two fields can disagree on a one-side writer (BC-3, V5). The panel credits
+        the assignment's designer, so the stamp must too."""
+        DesignAssignment.objects.filter(pk=self.assignment.pk).update(
+            assigned_to=self.other_des)
+        self._login(self.qc)
+        self._set_quantity(self.row, '18')
+        record = BOQCorrection.objects.get(boq=self.boq)
+        self.assertEqual(record.designer_at_correction_id, self.other_des.pk)
+        self.assertEqual(self.site.assigned_design_id, self.designer.pk)   # unchanged
+
+    def test_a_later_reassignment_leaves_the_stamp(self):
+        self._login(self.qc)
+        self._set_quantity(self.row, '18')
+        DesignAssignment.objects.filter(pk=self.assignment.pk).update(
+            assigned_to=self.other_des)
+        record = BOQCorrection.objects.get(boq=self.boq)
+        self.assertEqual(record.designer_at_correction_id, self.designer.pk)
+
+    def test_deleting_the_designer_nulls_the_stamp_and_keeps_the_record(self):
+        """SET_NULL, as corrected_by: an audit row must not block a profile delete."""
+        self._login(self.qc)
+        self._set_quantity(self.row, '18')
+        self.designer.delete()
+        record = BOQCorrection.objects.get(boq=self.boq)
+        self.assertIsNone(record.designer_at_correction_id)
+        self.assertEqual(record.quantity_after, Decimal('18'))
 
 
 # ===========================================================================

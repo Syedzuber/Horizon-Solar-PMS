@@ -31,13 +31,14 @@ and every figure that leaves here is named `*_kw` so a caller cannot lose track.
 """
 from decimal import Decimal
 
-from django.db.models import Case, Count, Exists, F, OuterRef, Q, Subquery, When
+from django.contrib.auth.models import User
+from django.db.models import Case, Count, Exists, F, OuterRef, Q, When
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from .models import (
     ArkaSubmission, BOQCorrection, DesignAssignment, DesignAttempt, DesignChangeRequest,
-    DueDateCommitment, StatusTransition, SUBJECT_DESIGN_ASSIGNMENT,
+    DueDateCommitment, StatusTransition, UserProfile, SUBJECT_DESIGN_ASSIGNMENT,
     BOQ_CORRECTION_LINE_ADDED, BOQ_CORRECTION_QUANTITY_CHANGED,
     CHANGE_REQUEST_OPEN_VERDICTS, CHANGE_REQUEST_PM_REJECTED,
     CHANGE_REQUEST_PENDING, CHANGE_REQUEST_ORIGIN_SCM,
@@ -1049,20 +1050,30 @@ def attention_list(sites, today=None, limit=ATTENTION_LIMIT,
 # none of this touches attempt_cause_split() or rework_contribution(), and nothing here is a
 # DesignAttempt. It is the designer's own slips caught at package review, as its own figure.
 #
-# That docstring also says the table is "read by Admin/CEO". This panel is a second reader:
-# a per-designer count for the Head and deputy on the tender dashboard, which already shows
-# them every designer's rework. Nothing branches on it, so the docstring's real rule — no
-# gate reads this table — still holds.
+# A per-designer count for the Head and deputy on the tender dashboard, which already shows
+# them every designer's rework. Nothing branches on it.
 #
-# ATTRIBUTED TO THE CURRENT DESIGNER. BOQCorrection has no designer field; the path is
-# correction -> boq -> project -> DesignAssignment.assigned_to. _allocate_one() refuses to
-# reallocate once Arka work starts (REALLOCATABLE_STATUSES), so a correction, which needs
-# package review, normally lands on the designer who did the work. The admin form can still
-# change assigned_to at any status (it is not in readonly_fields), and after such an edit
-# the site's corrections move to the new designer. TODO(BC-2): pin the designer onto the
-# attempt if that is ever done in practice — deferred because the 2 Nov restore has one
-# reallocation (MB0003, still in_design, no corrections) and no admin edit to undo.
+# EACH CORRECTION IS CREDITED TO THE DESIGNER AT CORRECTION TIME (BC-4).
+# BOQCorrection.designer_at_correction is stamped by boq_correct from the site's
+# assigned_to, so a later reassignment leaves the credit where it was. A NULL stamp (a row
+# from before BC-4, or a site with no designer then) falls back to the CURRENT
+# assigned_to, which is what BC-2 credited every row to. A counted correction with neither
+# is not dropped: its site is counted in `unassigned_sites` for the footnote.
+#
+# TODO(BC-4): "reached review" (the denominator) is still credited to the CURRENT
+# assigned_to, so after a reassignment the old designer keeps the site's corrections but
+# loses the site from "reached review", and the new designer gains it with no
+# corrections. Nothing records who worked the attempt that reached review: the
+# nearest fields are DesignAttempt.boq_submitted_by, which is carried forward to the next
+# attempt, and ArkaSubmission.submitted_by, which is per Arka version. Deferred because
+# _allocate_one() refuses to reallocate once Arka work starts and BC-3 made the admin
+# assigned_to read-only, so this needs a reallocation the product no longer makes.
 # ---------------------------------------------------------------------------
+
+#: Fewest reached-review sites a designer needs before the panel shows a rate. Below this
+#: the rate column shows a dash and only the counts are shown: 1 of 2 reads as 50% and
+#: says nothing about the designer.
+REVIEWED_MIN_FOR_RATE = 5
 
 #: Statuses a site can only hold after its package went to review. One of three signals —
 #: see _reached_review() — because the ledger alone undercounts: design StatusTransition
@@ -1124,13 +1135,27 @@ def reviewer_corrections():
     return BOQCorrection.objects.exclude(pk__in=cited).filter(~Exists(open_then))
 
 
-def _correction_count(action):
-    """Correlated count of reviewer_corrections() of one action on the outer
-    DesignAssignment's site. Coalesced to 0: a site with none has no group row."""
-    return Coalesce(Subquery(
-        reviewer_corrections()
-        .filter(boq__project_id=OuterRef('project_id'), action=action)
-        .order_by().values('boq__project_id').annotate(n=Count('pk')).values('n')[:1]), 0)
+#: DesignAssignment -> its site's BOQ corrections, and the designer each was stamped with.
+_CORRECTIONS = 'project__boq__corrections'
+_STAMPED     = f'{_CORRECTIONS}__designer_at_correction'
+
+
+def _correction_count(counted, action):
+    """Count of the joined corrections that are in `counted` (reviewer_corrections()) and
+    of one action. A filtered aggregate, so the uncounted rows still join (and still form
+    their own stamped-designer groups, with 0 here) but add nothing."""
+    return Count(_CORRECTIONS, filter=Q(**{f'{_CORRECTIONS}__in': counted,
+                                           f'{_CORRECTIONS}__action': action}))
+
+
+def _stamped_designer(fact):
+    """The designer a correction group was stamped with, built from the panel query's own
+    columns. Only for a designer who holds no site on this tender now, so `sites` has no
+    profile for them; fetching one would be a second query. Unsaved and display-only:
+    the panel and template read .pk and .user's names, nothing else."""
+    return UserProfile(pk=fact['stamped_id'], user=User(
+        username=fact['stamped_username'], first_name=fact['stamped_first_name'],
+        last_name=fact['stamped_last_name']))
 
 
 def _reached_review(status, in_ledger, qc_started):
@@ -1148,74 +1173,127 @@ def _reached_review(status, in_ledger, qc_started):
 
 
 def reviewer_correction_panel(sites):
-    """One row per designer with a site that reached package review, in ONE query.
+    """One row per designer with a site that reached package review or a counted
+    correction credited to them, in ONE query.
 
-    `sites` is tender_metrics()['sites'], already in memory; designer and status come from
-    there. The query adds, per assignment, the two review signals the rows do not carry and
-    the two correction counts. No query at all for a tender with no assignments.
+    `sites` is tender_metrics()['sites'], already in memory; the current designer and
+    status come from there. The query adds, per assignment, the two review signals the
+    rows do not carry, and the counted corrections grouped by the designer each was
+    stamped with. No query at all for a tender with no assignments.
 
     Per designer:
-      reviewed         sites that reached package review — the denominator.
-      sites_corrected  of those, sites with at least one counted correction. Several edits
-                       on one BOQ are one site.
-      rate             sites_corrected / reviewed, as a whole percent.
+      reviewed         sites that reached package review — the denominator, credited to
+                       the CURRENT designer (see the TODO(BC-4) above).
+      sites_corrected  sites with at least one counted correction credited to this
+                       designer. Several edits on one BOQ are one site.
+      rate             sites_corrected / reviewed, as a whole percent; None when reviewed
+                       is 0 (a designer credited only with corrections on sites since
+                       reassigned). `rate_shown` is False below REVIEWED_MIN_FOR_RATE and
+                       the template shows a dash: kept as a number rather than None so
+                       the threshold is a display rule only.
       quantity_edits   counted quantity_changed rows; lines_added likewise for line_added.
+
+    `unassigned_sites` counts reached-review sites with a counted correction credited to
+    nobody (no stamp and no current designer) — a footnote, never a row.
 
     A correction on a site that never reached review is not counted: BC-1 makes such a row
     impossible, and counting one made before BC-1 could push the rate past 100%.
     """
     assignment_ids = [s['assignment'].pk for s in sites]
     if not assignment_ids:
-        return {'rows': [], 'total_edits': 0, 'reviewed_projects': {}}
+        return {'rows': [], 'total_edits': 0, 'unassigned_sites': 0,
+                'rate_min': REVIEWED_MIN_FOR_RATE,
+                'reviewed_projects': {}, 'corrected_projects': {}}
 
-    # Every assignment on the tender, with whether it has a ledger entry into
-    # artifacts_uploaded, whether Design QC ever started an attempt, and its counted
-    # corrections by action. Correlated subqueries, so it is one statement however many
-    # sites the tender has.
-    facts = {
-        pk: (in_ledger, qc_started, quantity_edits, lines_added)
-        for pk, in_ledger, qc_started, quantity_edits, lines_added in
-        DesignAssignment.objects.filter(pk__in=assignment_ids).annotate(
+    # Every assignment on the tender LEFT JOINed to its site's corrections and grouped by
+    # (assignment, stamped designer): one result row per assignment with no corrections,
+    # one per stamped designer otherwise (NULL is one group). Each row carries the
+    # assignment's two review signals and that group's counted corrections by action, plus
+    # the stamped designer's names for _stamped_designer(). One statement however many
+    # sites or designers; BOQ is one-to-one with Project, so the join fans out only by
+    # correction and the counts are not multiplied.
+    counted = reviewer_corrections().values('pk')
+    facts = list(
+        DesignAssignment.objects.filter(pk__in=assignment_ids)
+        .values('pk',
+                stamped_id=F(f'{_STAMPED}_id'),
+                stamped_username=F(f'{_STAMPED}__user__username'),
+                stamped_first_name=F(f'{_STAMPED}__user__first_name'),
+                stamped_last_name=F(f'{_STAMPED}__user__last_name'))
+        .annotate(
             in_ledger=Exists(StatusTransition.objects.filter(
                 subject_type=SUBJECT_DESIGN_ASSIGNMENT, subject_id=OuterRef('pk'),
                 to_status=DESIGN_ARTIFACTS_UPLOADED)),
             qc_started=Exists(DesignAttempt.objects.filter(
                 assignment_id=OuterRef('pk'), qc_started_at__isnull=False)),
-            quantity_edits=_correction_count(BOQ_CORRECTION_QUANTITY_CHANGED),
-            lines_added=_correction_count(BOQ_CORRECTION_LINE_ADDED),
-        ).values_list('pk', 'in_ledger', 'qc_started', 'quantity_edits', 'lines_added')
-    }
+            quantity_edits=_correction_count(counted, BOQ_CORRECTION_QUANTITY_CHANGED),
+            lines_added=_correction_count(counted, BOQ_CORRECTION_LINE_ADDED),
+        )
+        .order_by())
+
+    site_by_assignment = {s['assignment'].pk: s for s in sites}
+    reached = {fact['pk'] for fact in facts
+               if _reached_review(site_by_assignment[fact['pk']]['assignment'].status,
+                                  fact['in_ledger'], fact['qc_started'])}
+    # The profiles already in hand, so a stamp naming a designer who still holds a site
+    # here reuses that object rather than a built one.
+    known = {s['designer'].pk: s['designer'] for s in sites if s['designer'] is not None}
 
     by_designer = {}
-    for s in sites:
-        designer = s['designer']
-        if designer is None:
-            continue
-        in_ledger, qc_started, quantity_edits, lines_added = facts[s['assignment'].pk]
-        if not _reached_review(s['assignment'].status, in_ledger, qc_started):
-            continue
-        row = by_designer.setdefault(designer.pk, {
-            'designer': designer, 'reviewed': 0, 'sites_corrected': 0,
-            'quantity_edits': 0, 'lines_added': 0, 'projects': [],
+
+    def _row(designer):
+        return by_designer.setdefault(designer.pk, {
+            'designer': designer, 'reviewed': 0, 'quantity_edits': 0, 'lines_added': 0,
+            'projects': [], 'corrected': {},
         })
-        row['reviewed'] += 1
-        row['projects'].append(s['project'])
-        if quantity_edits or lines_added:
-            row['sites_corrected'] += 1
-        row['quantity_edits'] += quantity_edits
-        row['lines_added']    += lines_added
+
+    # The denominator, by current designer, exactly as BC-2.
+    for s in sites:
+        if s['designer'] is not None and s['assignment'].pk in reached:
+            row = _row(s['designer'])
+            row['reviewed'] += 1
+            row['projects'].append(s['project'])
+
+    # The numerator, by stamped designer, falling back to the current one.
+    unassigned = set()
+    for fact in facts:
+        if fact['pk'] not in reached or not (fact['quantity_edits'] or fact['lines_added']):
+            continue
+        site = site_by_assignment[fact['pk']]
+        if fact['stamped_id'] is not None:
+            designer = known.get(fact['stamped_id']) or _stamped_designer(fact)
+        else:
+            designer = site['designer']
+        if designer is None:
+            unassigned.add(fact['pk'])
+            continue
+        row = _row(designer)
+        # Keyed by project: a site can reach here twice for one designer, as a NULL-stamp
+        # group and a group stamped with that same (current) designer.
+        row['corrected'][site['project'].pk] = site['project']
+        row['quantity_edits'] += fact['quantity_edits']
+        row['lines_added']    += fact['lines_added']
 
     rows = sorted(by_designer.values(),
                   key=lambda r: (r['designer'].user.get_full_name()
                                  or r['designer'].user.username).lower())
     for row in rows:
-        # Every row has reviewed >= 1, so there is no "nothing to divide by" case here.
-        row['rate'] = round(100 * row['sites_corrected'] / row['reviewed'])
+        row['sites_corrected'] = len(row['corrected'])
+        row['rate'] = (round(100 * row['sites_corrected'] / row['reviewed'])
+                       if row['reviewed'] else None)
+        row['rate_shown'] = row['reviewed'] >= REVIEWED_MIN_FOR_RATE
     return {
         'rows': rows,
         'total_edits': sum(r['quantity_edits'] + r['lines_added'] for r in rows),
-        # designer pk -> that designer's reviewed sites, for the drill-down.
+        'unassigned_sites': len(unassigned),
+        'rate_min': REVIEWED_MIN_FOR_RATE,
+        # designer pk -> that designer's reviewed sites. Every row's designer is a key,
+        # with an empty list for one credited only with corrections: the dashboard view
+        # opens the drill-down only for a pk found here.
         'reviewed_projects': {r['designer'].pk: r['projects'] for r in rows},
+        # designer pk -> the sites with corrections credited to them, for the drill-down.
+        'corrected_projects': {r['designer'].pk: list(r['corrected'].values())
+                               for r in rows},
     }
 
 
@@ -1223,16 +1301,21 @@ def reviewer_correction_drill(panel, designer_pk):
     """The counted correction rows behind one designer's figures, per site. ONE query.
 
     Only on request (?corrections=<pk>), so the dashboard's own render stays at one. Reads
-    the same reviewer_corrections() the counts read, over the same reviewed sites, so the
-    rows listed always add up to the row's figures. Returns
+    the same reviewer_corrections() the counts read, over the sites the panel credited to
+    this designer, credited the same way (stamp, else current assigned_to), so the rows
+    listed always add up to the row's figures. Returns
     [{'project': p, 'corrections': [...]}] for sites with at least one row, by site code.
     """
-    projects = panel['reviewed_projects'].get(designer_pk, [])
+    projects = panel['corrected_projects'].get(designer_pk, [])
     by_project = {p.pk: {'project': p, 'corrections': []} for p in projects}
-    # Every counted row on this designer's reviewed sites, oldest first; the corrector's
-    # user is joined for the "by" column.
+    # Every counted row on those sites credited to this designer, oldest first; the
+    # corrector's user is joined for the "by" column.
     for correction in (reviewer_corrections()
                        .filter(boq__project_id__in=list(by_project))
+                       .annotate(credited_id=Coalesce(
+                           'designer_at_correction_id',
+                           'boq__project__design_assignment__assigned_to_id'))
+                       .filter(credited_id=designer_pk)
                        .select_related('boq', 'corrected_by__user')
                        .order_by('corrected_at', 'pk')):
         by_project[correction.boq.project_id]['corrections'].append(correction)

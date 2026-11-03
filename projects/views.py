@@ -10289,6 +10289,10 @@ def boq_correct(request, project_id):
                     action=BOQ_CORRECTION_LINE_ADDED,
                     quantity_before=None, quantity_after=quantity,
                     corrected_by=profile,
+                    # BC-4: the designer this correction is credited to, frozen now so a
+                    # later reassignment does not move it. user_can_correct_boq() above
+                    # needs the assignment, so it exists here.
+                    designer_at_correction_id=project.design_assignment.assigned_to_id,
                 )
             messages.success(request, f'Added {master.code} {master.description}. The '
                                       f'correction is recorded against your name.')
@@ -10332,6 +10336,8 @@ def boq_correct(request, project_id):
                     action=BOQ_CORRECTION_QUANTITY_CHANGED,
                     quantity_before=before, quantity_after=quantity,
                     corrected_by=profile,
+                    # BC-4: frozen designer credit, as on add_line above.
+                    designer_at_correction_id=project.design_assignment.assigned_to_id,
                 )
             messages.success(
                 request,

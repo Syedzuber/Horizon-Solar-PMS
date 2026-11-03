@@ -1325,10 +1325,18 @@ class BOQCorrection(models.Model):
     the SiteGroup procurement lock (DESIGN_MODULE_DEFERRED J8) — and a fourth would be
     worse than the three. So there is no status field here, no `is_applied`, no
     `superseded_by` and no flag any gate could ever read. Every field below is a fact about
-    an edit that already happened. NOTHING IN THE PRODUCT BRANCHES ON THIS TABLE: it is
-    written by the correction view and read by Admin/CEO. If a future part finds itself
-    wanting to gate on a row here, that is the signal to reconcile the three, not to add
-    a fourth.
+    an edit that already happened. NO BOQ OR DESIGN STATUS BRANCHES ON THIS TABLE. It is
+    written by the correction view (boq_correct) and read by:
+      * the correction screen itself and boq_history (the Admin/CEO trail);
+      * the change-request citation code in design_views — the Head's `corrected` verdict
+        cites the uncited rows made since the raise and refuses with none, which is the
+        one read that decides anything, and it decides a change-request verdict only —
+        and the change-request pages that show the cited rows;
+      * the site drawings view (latest correction after release, DR-3);
+      * the Head/deputy reviewer-corrections panel on the tender dashboard (BC-2,
+        design_metrics §5).
+    If a future part finds itself wanting to gate a BOQ or design status on a row here,
+    that is the signal to reconcile the three, not to add a fourth.
 
     NOT DESIGNER REWORK, BY PRIOR DECISION. Rework accounting runs on DesignReview error
     categories through `category_counts_as_designer_rework()`, and rework loops are
@@ -1369,6 +1377,17 @@ class BOQCorrection(models.Model):
         related_name='boq_corrections',
     )
     corrected_at = models.DateTimeField(auto_now_add=True)
+
+    #: The site's DesignAssignment.assigned_to when the correction was written (BC-4), so
+    #: the reviewer-corrections panel keeps crediting it to the designer who did the work
+    #: if the site is reassigned later. Stamped by boq_correct in the same create() call;
+    #: NULL on rows written before BC-4 (no backfill), which the panel credits to the
+    #: current assigned_to. SET_NULL like corrected_by: profiles are deactivated, not
+    #: deleted, and a delete must not be blocked by an audit row.
+    designer_at_correction = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='boq_corrections_as_designer',
+    )
 
     class Meta:
         ordering = ['-corrected_at', '-pk']
