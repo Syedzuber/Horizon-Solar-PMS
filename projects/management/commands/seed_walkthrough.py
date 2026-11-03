@@ -1095,7 +1095,9 @@ class Command(BaseCommand):
         with self.clock.at(7, history='WALKC07'):
             item = m.BOQItem.objects.filter(boq__project=s['WALKC07']).order_by('pk').first()
             before = m.BOQCorrection.objects.count()
-            self._post('walk.designqc', 'boq_correct', {'project_id': 'WALKC07'},
+            # The Head, not Design QC: on a released site boq_correct is open only to Head
+            # authority while a change request is pending on him (BC-1).
+            self._post('walk.designhead', 'boq_correct', {'project_id': 'WALKC07'},
                        {'action': 'set_quantity', 'item_id': item.pk,
                         'quantity': str(item.boq_quantity + 2)},
                        check=lambda: m.BOQCorrection.objects.count() == before + 1,

@@ -6516,7 +6516,10 @@ def design_change_request_correct(request, pk):
     BOQCorrection rows made on this site's BOQ since the request was raised and not already
     cited by another request; every one of them is linked through `boq_corrections`, and
     with none the verdict is refused and nothing is written. The Head makes the correction
-    first, on boq_correct, which is unchanged and has no change-request awareness.
+    first, on boq_correct. That screen is window-gated (BC-1,
+    permissions.boq_correction_closed_reason): outside the package review it is closed,
+    except to Head authority while a `pending` change request sits on the current attempt —
+    the exception that exists so this verdict can be evidenced on a released site.
 
     It opens NO attempt, does NOT clear released_at / released_by, and does NOT take the
     site out of its group: the design was not reopened, the BOQ was fixed. Head authority,

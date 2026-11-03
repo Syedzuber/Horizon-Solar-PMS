@@ -343,7 +343,7 @@ class DashboardCorrectedTests(ListsBase):
         self._boq_correct(site1, 12)
         self._boq_correct(site1, 13)
         site2, a2 = self._released('CL-C3B')
-        early = self._boq_correct(site2, 11)
+        early = self._in_review_correction(site2, 11)   # predates the raise (BC-1 fixture)
         self._raise(self.pm, site2)
         self._boq_correct(site2, 14)
         # The early correction is before site2's raise: excluded by time on both screens.

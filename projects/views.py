@@ -135,6 +135,11 @@ from .permissions import (
     # second: user_can_edit_project_boq() is unchanged and still refuses a reviewer.
     # can_view_boq_corrections is the READ side of the trail it writes - Admin/CEO.
     user_can_correct_boq, can_view_boq_corrections,
+    # BC-1 - the two halves of user_can_correct_boq(), read by boq_correct() only after
+    # the predicate refuses, to word the refusal.
+    user_has_boq_correction_authority, boq_correction_closed_reason,
+    BOQ_CORRECTION_CLOSED_PAST_REVIEW, BOQ_CORRECTION_CLOSED_NOT_SUBMITTED,
+    BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW, BOQ_CORRECTION_CLOSED_CHANGE_REQUEST,
     # Part 12 — the narrow helper, deputy excluded. Used on the design dashboard only, to
     # decide whether the OPEX catalogue link renders. No gate in this module reads it.
     user_is_design_head,
@@ -10095,9 +10100,21 @@ def _boq_upload_apply(project, clean):
 # mapping and the same `serial_no = master.sort_order` rule the picker and
 # `_boq_upload_apply()` use, so a corrected row is indistinguishable from an authored one
 # — it carries `item_master`, so Part 6 aggregation sums it, and `is_standard_item=True`,
-# so `delete_item` will not remove it later either. THERE IS NO BRANCH IN THIS VIEW THAT
-# CAN DELETE A BOQItem, which is the same sentence `_boq_upload_apply()` already carries
-# and the same reason: absence of a delete is a property to state, not to infer.
+# so boq_detail's `delete_item` will not remove it. THE DESIGNER'S PICKER CAN, and that is
+# accepted (BC-1 R4): once the BOQ returns to the designer on a new attempt, a save in
+# `opex_boq_entry` reconciles the whole sheet and deletes any row absent from the POST,
+# reviewer-added rows included. The BOQCorrection record survives that through its
+# denormalised item_code / item_description — see that model's docstring. THERE IS NO
+# BRANCH IN THIS VIEW THAT CAN DELETE A BOQItem, which is the same sentence
+# `_boq_upload_apply()` already carries and the same reason: absence of a delete is a
+# property to state, not to infer.
+#
+# BC-1 — THE WINDOW. Until BC-1 this endpoint took verdict authority alone, so correction
+# was open from the survey to the procurement lock. It now takes user_can_correct_boq(),
+# which adds the review window: the package with Design QC or the Head and the BOQ
+# stamped, or the Head while a change request is pending on him. Outside it a reviewer is
+# turned back to the read-only sheet with the reason, on GET and on POST alike — a tab
+# opened in the window and saved after the design moved on is refused at the save.
 #
 # THE THREE LOCKS, ANSWERED SEPARATELY:
 #   design lock (boq_submitted_at)  — BYPASSED, and only here. This is the window the
@@ -10126,9 +10143,28 @@ def _boq_correction_identity(row):
     return ((row.item_master.code if row.item_master_id else ''), row.description)
 
 
+#: BC-1 — what a reviewer is told when the correction window is closed, keyed by
+#: permissions.boq_correction_closed_reason().
+BOQ_CORRECTION_CLOSED_MESSAGES = {
+    BOQ_CORRECTION_CLOSED_PAST_REVIEW:
+        'This design has moved past review. Raise a change request instead.',
+    BOQ_CORRECTION_CLOSED_NOT_SUBMITTED:
+        'The designer has not submitted this BOQ yet.',
+    BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW:
+        'This BOQ is not under review right now, so it cannot be corrected.',
+    BOQ_CORRECTION_CLOSED_CHANGE_REQUEST:
+        'A change request is open on this design. The BOQ cannot be corrected until it '
+        'is decided.',
+}
+
+
 @login_required
 def boq_correct(request, project_id):
     """The reviewer's correction screen — change a quantity, or add a line that was missed.
+
+    Access: user_can_correct_boq() — Design QC or Design Head verdict authority on this
+    site (never its own designer), and only inside the BC-1 window: the package under
+    review with the BOQ stamped, or the Head while a change request is pending on him.
 
     GET renders this site's sheet with a quantity box per row and the catalogue rows that
     are not on it yet. POST takes one of exactly two actions, ONE ROW AT A TIME:
@@ -10164,8 +10200,19 @@ def boq_correct(request, project_id):
     if not user_can_view_project_boq(request.user, project):
         return HttpResponseForbidden()
 
+    # Who: verdict authority at either design gate, which excludes the site's own
+    # designer. When: the BC-1 review window. One predicate answers both, the same one the
+    # two "Correct BOQ" links read. Checked on every request, POST included, so a stale
+    # tab cannot save after the design has moved past review.
     if not user_can_correct_boq(request.user, project):
-        return HttpResponseForbidden()
+        # Not a reviewer at all: a bare 403, as before. A reviewer outside the window is
+        # told why and sent back to the sheet they can still read.
+        if not user_has_boq_correction_authority(request.user, project):
+            return HttpResponseForbidden()
+        reason = boq_correction_closed_reason(request.user, project)
+        messages.error(request, BOQ_CORRECTION_CLOSED_MESSAGES.get(
+            reason, BOQ_CORRECTION_CLOSED_MESSAGES[BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW]))
+        return redirect('boq_detail', project_id=project_id)
 
     profile      = request.user.profile
     group_locked = project_boq_is_group_locked(project)

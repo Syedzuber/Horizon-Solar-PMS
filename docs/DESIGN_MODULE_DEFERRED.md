@@ -1882,3 +1882,55 @@ permissions.py and the template only, so it was not built.
 
 **Location:** `projects/order_views.py` — `vendor_order_detail`;
 `projects/templates/projects/vendor_order_detail.html` — the back link
+
+---
+
+## V. Found while building BC-1 (reviewer BOQ correction window)
+
+BC-1 limited `boq_correct` to the review window: `artifacts_uploaded`, `in_qc` or
+`awaiting_head_qc`, with `boq_submitted_at` stamped on the current attempt and no open
+change request. Head authority may also correct while a `pending` change request sits on
+the current attempt, in any status. These are what it leaves open.
+
+### V1 — the delete gate and the reviewer exclusion read two different "designer" fields
+
+`user_can_edit_project_boq()` lets the site's author write the BOQ, `delete_item` included.
+It reads `Project.assigned_design`. The reviewer exclusion in `user_can_correct_boq()`
+works through `user_is_assigned_designer()`, which reads `DesignAssignment.assigned_to`. If
+the two fields ever named different people, the person in `assigned_design` could hold
+both correction authority and delete rights on the same site.
+
+`design_views._allocate_one()` sets both in step. `project_overview`'s `assign_design`
+action refuses OPEX sites. `project_activate`, however, is not limited to Residential: it
+writes `assigned_design` from the PM's form on any Draft site it activates, without
+touching `DesignAssignment.assigned_to`. BC-1 did not check whether an OPEX site can reach
+it after allocation. The 2 Nov production restore has no site where the two differ. Not fixed: no code change was ruled (BC-1 R5). A fix would be one
+reader for both questions, or a check that refuses a mismatch.
+
+**Location:** `projects/permissions.py` — `user_can_edit_project_boq`,
+`user_is_assigned_designer`; `projects/design_views.py` — `_allocate_one`
+
+### V2 — `arka_submitted` carries two opposite meanings
+
+`arka_submitted` means either "Design QC owes the Arka verdict" or "the Arka is approved
+at both gates and the designer owes CAD and BOQ". The status alone cannot tell them apart.
+`design_pending_at()` settles it from the current Arka's `head_verdict`, through
+`design_metrics._classify()`. Any gate written on status alone gets one of the two readings
+wrong. BC-1 sidestepped it by keeping `arka_submitted` out of the correction window under
+both readings (ruling A). The next status-based gate has to choose again. Not fixed.
+
+**Location:** `projects/models.py` — `DESIGN_ARKA_SUBMITTED`, `design_pending_at`;
+`projects/design_metrics.py` — `_classify`
+
+### V3 — a Head correction under the exception need not be cited by a verdict
+
+BC-1 opens `boq_correct` to Head authority while a `pending` change request sits on the
+current attempt, in any status, `released` included. It exists so the Head can evidence a
+`corrected` verdict (D-7). Nothing ties the correction to that verdict. The Head can
+correct a released BOQ and then accept or reject the request, or leave it pending. The
+BOQ has then changed after release with no verdict that explains it. The `BOQCorrection`
+row records who, when and what, but not why. Not fixed: BC-1 accepted the exception as
+ruled.
+
+**Location:** `projects/permissions.py` — `boq_correction_closed_reason`;
+`projects/design_views.py` — `design_change_request_correct`

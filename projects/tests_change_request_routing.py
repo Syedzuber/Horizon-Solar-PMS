@@ -21,6 +21,7 @@ locked through SCM's own views, corrections made through boq_correct. The delibe
 bypasses — the lock race, and a with_pm row on an in-QC attempt that no product path can
 reach (A1) — say so where they happen.
 """
+from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -29,7 +30,7 @@ from django.utils import timezone
 
 from .design_views import NO_PM_FALLBACK_TEXT, CHANGE_REQUEST_NO_PM_ACTION_CODE
 from .models import (
-    ActivityLog, BOQCorrection, DesignAttempt, DesignChangeRequest, SiteGroup,
+    ActivityLog, BOQCorrection, BOQ_CORRECTION_QUANTITY_CHANGED, DesignAttempt, DesignChangeRequest, SiteGroup,
     CHANGE_REQUEST_PENDING, CHANGE_REQUEST_ACCEPTED, CHANGE_REQUEST_REJECTED,
     CHANGE_REQUEST_WITH_PM, CHANGE_REQUEST_PM_REJECTED, CHANGE_REQUEST_WITHDRAWN,
     CHANGE_REQUEST_CORRECTED, CHANGE_REQUEST_ORIGIN_PM, CHANGE_REQUEST_ORIGIN_SCM,
@@ -69,6 +70,32 @@ class RoutingBase(ChangeWindowBase):
                           'quantity': str(quantity)})
         self.client.logout()
         return BOQCorrection.objects.filter(boq__project=site).order_by('-pk').first()
+
+    def _in_review_correction(self, site, quantity, minutes_ago=5):
+        """A correction a reviewer made while the package was under review, BEFORE release.
+
+        Written directly, not through boq_correct: since BC-1 that screen is closed on a
+        released site with no pending change request, so the product cannot make this row
+        at this point in the fixture. The row and the quantity change it records are what an
+        in-review correction would have left behind, so tests that need a correction
+        predating every request still have one.
+        """
+        item = site.boq.items.get()
+        correction = BOQCorrection.objects.create(
+            boq=site.boq, item=item,
+            item_code=item.item_master.code if item.item_master_id else '',
+            item_description=item.description,
+            action=BOQ_CORRECTION_QUANTITY_CHANGED,
+            quantity_before=item.boq_quantity, quantity_after=Decimal(quantity),
+            corrected_by=self.head)
+        item.boq_quantity = Decimal(quantity)
+        item.save(update_fields=['boq_quantity'])
+        # corrected_at is auto_now_add, which ignores a value passed to create(), so the
+        # earlier time is set by an update afterwards.
+        BOQCorrection.objects.filter(pk=correction.pk).update(
+            corrected_at=timezone.now() - timedelta(minutes=minutes_ago))
+        correction.refresh_from_db()
+        return correction
 
     def _form_page(self, site, profile):
         self._login(profile)
@@ -411,9 +438,11 @@ class CorrectedTests(RoutingBase):
     def test_20_corrected_links_the_corrections_and_moves_nothing_else(self):
         site, assignment = self._released('CR-C1')
         group = self._group('Batch C1', [site])
-        before = self._boq_correct(site, 11)          # before the raise: not evidence
+        before = self._in_review_correction(site, 11)  # before the raise: not evidence
         self._raise(self.scm, site)
         change = self._one(assignment)
+        # Setup check: the fixture correction really does predate the raise.
+        self.assertLess(before.corrected_at, change.requested_at)
         self._forward(change)
         released_at, released_by = assignment.released_at, assignment.released_by_id
         correction = self._boq_correct(site, 12)

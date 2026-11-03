@@ -33,9 +33,14 @@ from django.utils import timezone
 from .models import (
     Program, Project, UserProfile, BOQ, BOQItem, BOQItemMaster, BOQRevision,
     BOQCorrection, BOQ_CORRECTION_LINE_ADDED, BOQ_CORRECTION_QUANTITY_CHANGED,
-    DesignAssignment, DesignAttempt,
+    DesignAssignment, DesignAttempt, DesignChangeRequest,
     DESIGN_IN_DESIGN, DESIGN_IN_QC,
-    ATTEMPT_REASON_INITIAL,
+    DESIGN_ARKA_SUBMITTED, DESIGN_AWAITING_HEAD_ARKA, DESIGN_ARTIFACTS_UPLOADED,
+    DESIGN_AWAITING_HEAD_QC, DESIGN_PM_REJECTED, DESIGN_AWAITING_PM_APPROVAL,
+    DESIGN_RELEASED, DESIGN_SURVEY_RETURNED,
+    CHANGE_REQUEST_PENDING, CHANGE_REQUEST_WITH_PM, CHANGE_REQUEST_OPEN_VERDICTS,
+    CHANGE_REQUEST_ORIGIN_PM, CHANGE_REQUEST_ORIGIN_SCM,
+    ATTEMPT_REASON_INITIAL, ATTEMPT_REASON_QC_FAILED,
     SiteGroup, SiteGroupMembership, SITE_GROUP_DRAFT, SITE_GROUP_LOCKED,
     category_counts_as_designer_rework,
 )
@@ -43,6 +48,11 @@ from .permissions import (
     user_can_correct_boq, user_can_edit_project_boq,
     project_boq_is_design_locked, project_boq_is_group_locked,
     can_view_boq_corrections,
+    boq_correction_closed_reason,
+    BOQ_CORRECTION_WINDOW_STATUSES, BOQ_CORRECTION_PAST_REVIEW_STATUSES,
+    BOQ_CORRECTION_CR_PENDING, BOQ_CORRECTION_CR_OPEN_VERDICTS,
+    BOQ_CORRECTION_CLOSED_PAST_REVIEW, BOQ_CORRECTION_CLOSED_NOT_SUBMITTED,
+    BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW, BOQ_CORRECTION_CLOSED_CHANGE_REQUEST,
 )
 
 
@@ -183,6 +193,7 @@ class PredicateTests(CorrectionBase):
 
     def test_the_named_qc_reviewer_may_correct(self):
         site, assignment = self._opex_site('SB-NAMED', qc_assigned_to=self.qc)
+        self._lock_the_boq(assignment)          # BC-1: the window needs the stamp
         self.assertTrue(user_can_correct_boq(self.qc.user, site))
 
     def test_an_unnamed_site_admits_the_open_qc_pool(self):
@@ -213,6 +224,7 @@ class PredicateTests(CorrectionBase):
     def test_a_plain_designer_named_on_the_site_may_correct_it_and_no_other(self):
         """A named reviewer needs no flag — and gains nothing portfolio-wide."""
         site, assignment = self._opex_site('SB-B', qc_assigned_to=self.other_des)
+        self._lock_the_boq(assignment)          # BC-1: the window needs the stamp
         self.assertTrue(user_can_correct_boq(self.other_des.user, site))
         self.assertFalse(user_can_correct_boq(self.other_des.user, self.site))
 
@@ -244,13 +256,19 @@ class PredicateTests(CorrectionBase):
         self.assertFalse(user_can_edit_project_boq(self.head.user, self.site))
         self.assertTrue(user_can_edit_project_boq(self.designer.user, self.site))
 
-    def test_the_predicate_does_not_consult_the_design_lock(self):
-        """True on both sides of the lock — the caller decides, not the predicate."""
+    def test_the_window_follows_the_stamp_on_the_current_attempt(self):
+        """BC-1 R3 — rewritten from "does not consult the design lock". The window now
+        requires the very stamp the design lock reads, so the two move together: open with
+        it, closed without it, at the same status and for the same reviewer."""
         self.assertTrue(project_boq_is_design_locked(self.site))
         self.assertTrue(user_can_correct_boq(self.qc.user, self.site))
+        self.assertTrue(user_can_correct_boq(self.head.user, self.site))
         DesignAttempt.objects.filter(pk=self.attempt.pk).update(boq_submitted_at=None)
         self.assertFalse(project_boq_is_design_locked(self.site))
-        self.assertTrue(user_can_correct_boq(self.qc.user, self.site))
+        self.assertFalse(user_can_correct_boq(self.qc.user, self.site))
+        self.assertFalse(user_can_correct_boq(self.head.user, self.site))
+        self.assertEqual(boq_correction_closed_reason(self.qc.user, self.site),
+                         BOQ_CORRECTION_CLOSED_NOT_SUBMITTED)
 
 
 # ===========================================================================
@@ -830,3 +848,310 @@ class RecordDurabilityTests(CorrectionBase):
         self._set_quantity(self.row, '18')
         self.boq.delete()
         self.assertEqual(BOQCorrection.objects.count(), 0)
+
+
+# ===========================================================================
+# BC-1 — the correction window
+#
+# Correction is open only (1) while the package is under review — artifacts_uploaded,
+# in_qc or awaiting_head_qc, the BOQ stamped on the current attempt, no open change
+# request — or (2) to Head authority while a `pending` change request sits on the current
+# attempt, in any status. Statuses are written here by queryset update: these tests pin
+# the gate's answer for a state, not the transition into it.
+# ===========================================================================
+
+MSG_PAST_REVIEW = 'This design has moved past review. Raise a change request instead.'
+MSG_NOT_SUBMITTED = 'The designer has not submitted this BOQ yet.'
+MSG_NOT_IN_REVIEW = 'This BOQ is not under review right now, so it cannot be corrected.'
+MSG_CHANGE_REQUEST = ('A change request is open on this design. The BOQ cannot be '
+                      'corrected until it is decided.')
+
+
+class WindowBase(CorrectionBase):
+
+    def _at(self, status, assignment=None):
+        DesignAssignment.objects.filter(
+            pk=(assignment or self.assignment).pk).update(status=status)
+
+    def _fresh(self, site=None):
+        """A fresh Project, so the predicate reads the status just written rather than a
+        design_assignment cached on an earlier instance."""
+        return Project.objects.get(pk=(site or self.site).pk)
+
+    def _can(self, profile, site=None):
+        return user_can_correct_boq(profile.user, self._fresh(site))
+
+    def _reason(self, profile, site=None):
+        return boq_correction_closed_reason(profile.user, self._fresh(site))
+
+    def _change_request(self, verdict, attempt=None):
+        """An undecided request on the current attempt. `with_pm` is SCM-only by CHECK."""
+        scm = verdict == CHANGE_REQUEST_WITH_PM
+        return DesignChangeRequest.objects.create(
+            attempt=attempt or self.attempt,
+            requested_by=self.scm if scm else self.pm,
+            reason='Earthing pits look one short.', verdict=verdict,
+            origin=CHANGE_REQUEST_ORIGIN_SCM if scm else CHANGE_REQUEST_ORIGIN_PM)
+
+
+class WindowTests(WindowBase):
+
+    def test_the_permissions_literals_match_the_model_constants(self):
+        """permissions.py imports no models, so the window is spelled in literals. If a
+        status or verdict is ever renamed in models.py this fails, instead of the window
+        silently never opening."""
+        self.assertEqual(BOQ_CORRECTION_WINDOW_STATUSES, {
+            DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC})
+        self.assertEqual(BOQ_CORRECTION_PAST_REVIEW_STATUSES, {
+            DESIGN_AWAITING_PM_APPROVAL, DESIGN_RELEASED})
+        self.assertEqual(BOQ_CORRECTION_CR_PENDING, CHANGE_REQUEST_PENDING)
+        self.assertEqual(set(BOQ_CORRECTION_CR_OPEN_VERDICTS),
+                         set(CHANGE_REQUEST_OPEN_VERDICTS))
+
+    def test_refused_before_submission_while_the_designer_is_editing(self):
+        self._at(DESIGN_IN_DESIGN)
+        DesignAttempt.objects.filter(pk=self.attempt.pk).update(boq_submitted_at=None)
+        for profile in (self.qc, self.head):
+            with self.subTest(user=profile.user.username):
+                self.assertFalse(self._can(profile))
+                self.assertEqual(self._reason(profile), BOQ_CORRECTION_CLOSED_NOT_SUBMITTED)
+
+        self._login(self.qc)
+        response = self.client.get(self._url(), follow=True)
+        self.assertRedirects(response, reverse(
+            'boq_detail', kwargs={'project_id': self.site.project_id}))
+        self.assertIn(MSG_NOT_SUBMITTED, self._messages(response))
+        response = self._set_quantity(self.row, '18')
+        self.assertIn(MSG_NOT_SUBMITTED, self._messages(response))
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.boq_quantity, Decimal('12'))
+        self.assertFalse(BOQCorrection.objects.exists())
+
+    def test_allowed_awaiting_the_qc_verdict_for_the_pool_on_an_unnamed_site(self):
+        self.assertIsNone(self.assignment.qc_assigned_to_id)
+        for status in (DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC):
+            with self.subTest(status=status):
+                self._at(status)
+                self.assertTrue(self._can(self.qc))
+        self._login(self.qc)
+        self._set_quantity(self.row, '18')
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.boq_quantity, Decimal('18'))
+
+    def test_allowed_awaiting_the_qc_verdict_for_the_named_reviewer_only(self):
+        site, assignment = self._opex_site('SB-W-NAMED', qc_assigned_to=self.other_des)
+        self._lock_the_boq(assignment)
+        for status in (DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC):
+            with self.subTest(status=status):
+                self._at(status, assignment)
+                self.assertTrue(self._can(self.other_des, site))
+                # Naming a reviewer takes the site out of the pool.
+                self.assertFalse(self._can(self.qc, site))
+
+    def test_allowed_awaiting_the_head_verdict(self):
+        self._at(DESIGN_AWAITING_HEAD_QC)
+        self.assertTrue(self._can(self.head))
+        self._login(self.head)
+        self._set_quantity(self.row, '18')
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.boq_quantity, Decimal('18'))
+        self.assertEqual(BOQCorrection.objects.get().corrected_by, self.head)
+
+    def test_refused_past_review(self):
+        for status in (DESIGN_AWAITING_PM_APPROVAL, DESIGN_RELEASED):
+            self._at(status)
+            for profile in (self.qc, self.head):
+                with self.subTest(status=status, user=profile.user.username):
+                    self.assertFalse(self._can(profile))
+                    self.assertEqual(self._reason(profile),
+                                     BOQ_CORRECTION_CLOSED_PAST_REVIEW)
+        self._login(self.head)
+        response = self._set_quantity(self.row, '18')
+        self.assertIn(MSG_PAST_REVIEW, self._messages(response))
+        self.assertFalse(BOQCorrection.objects.exists())
+
+    def test_refused_once_failed_and_returned_to_the_designer(self):
+        """A QC fail opens attempt 2 at in_design. With BOQ not in the redo set the stamp is
+        carried to attempt 2 — still closed, the package is not under review. With BOQ in
+        the redo set attempt 2 is unstamped — closed as not submitted. Attempt 1's stamp
+        counts for nothing either way: the window reads the CURRENT attempt."""
+        DesignAttempt.objects.filter(pk=self.attempt.pk).update(closed_at=timezone.now())
+        attempt2 = DesignAttempt.objects.create(
+            assignment=self.assignment, attempt_number=2,
+            opened_reason=ATTEMPT_REASON_QC_FAILED,
+            boq_submitted_at=self.attempt.boq_submitted_at,
+            boq_submitted_by=self.designer)
+        DesignAssignment.objects.filter(pk=self.assignment.pk).update(
+            status=DESIGN_IN_DESIGN, current_attempt_number=2)
+        self.assertFalse(self._can(self.qc))
+        self.assertEqual(self._reason(self.qc), BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW)
+
+        DesignAttempt.objects.filter(pk=attempt2.pk).update(boq_submitted_at=None)
+        self.assertFalse(self._can(self.qc))
+        self.assertEqual(self._reason(self.qc), BOQ_CORRECTION_CLOSED_NOT_SUBMITTED)
+        # Even back at a review status, attempt 1's stamp does not open it.
+        self._at(DESIGN_IN_QC)
+        self.assertFalse(self._can(self.qc))
+
+    def test_a_stale_tab_is_refused_at_the_save(self):
+        """Rendered inside the window, saved after the design moved on."""
+        self._login(self.qc)
+        self.assertEqual(self.client.get(self._url()).status_code, 200)
+        self._at(DESIGN_RELEASED)
+        response = self._set_quantity(self.row, '18')
+        self.assertIn(MSG_PAST_REVIEW, self._messages(response))
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.boq_quantity, Decimal('12'))
+        self.assertFalse(BOQCorrection.objects.exists())
+
+        # And an add_line from the same stale tab.
+        response = self._add_line('OPX-010', '2')
+        self.assertIn(MSG_PAST_REVIEW, self._messages(response))
+        self.assertFalse(self.boq.items.filter(item_master__code='OPX-010').exists())
+
+    def test_the_sites_designer_is_still_refused_in_the_window(self):
+        for status in BOQ_CORRECTION_WINDOW_STATUSES:
+            with self.subTest(status=status):
+                self._at(status)
+                self.assertFalse(self._can(self.designer))
+        # Not a reviewer at all: a bare 403, not a window message.
+        self._login(self.designer)
+        self.assertEqual(self.client.get(self._url()).status_code, 403)
+
+    def test_the_procurement_lock_still_refuses_inside_the_window(self):
+        group = SiteGroup.objects.create(
+            program=self.program, name='Batch W', status=SITE_GROUP_LOCKED,
+            created_by=self.pm, locked_by=self.pm, locked_at=timezone.now())
+        SiteGroupMembership.objects.create(group=group, project=self.site, added_by=self.pm)
+        self.assertTrue(self._can(self.qc))         # the window says yes...
+        self._login(self.qc)
+        self._set_quantity(self.row, '18')
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.boq_quantity, Decimal('12'))   # ...the lock says no
+
+
+class WindowRulingTests(WindowBase):
+    """One test per BC-1 pre-flight ruling, A to F. C is open; the rest are refused."""
+
+    def test_a_arka_submitted_with_the_boq_stamped_is_refused(self):
+        self._at(DESIGN_ARKA_SUBMITTED)
+        for profile in (self.qc, self.head):
+            with self.subTest(user=profile.user.username):
+                self.assertFalse(self._can(profile))
+                self.assertEqual(self._reason(profile), BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW)
+        self._login(self.qc)
+        response = self._set_quantity(self.row, '18')
+        self.assertIn(MSG_NOT_IN_REVIEW, self._messages(response))
+
+    def test_b_awaiting_head_arka_with_the_boq_stamped_is_refused(self):
+        self._at(DESIGN_AWAITING_HEAD_ARKA)
+        for profile in (self.qc, self.head):
+            with self.subTest(user=profile.user.username):
+                self.assertFalse(self._can(profile))
+                self.assertEqual(self._reason(profile), BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW)
+
+    def test_c_artifacts_uploaded_is_open(self):
+        self._at(DESIGN_ARTIFACTS_UPLOADED)
+        self.assertTrue(self._can(self.qc))
+        self.assertTrue(self._can(self.head))
+        self.assertIsNone(self._reason(self.qc))
+
+    def test_d_pm_rejected_is_refused(self):
+        self._at(DESIGN_PM_REJECTED)
+        for profile in (self.qc, self.head):
+            with self.subTest(user=profile.user.username):
+                self.assertFalse(self._can(profile))
+                self.assertEqual(self._reason(profile), BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW)
+
+    def test_e_an_open_change_request_closes_the_review_window_for_qc(self):
+        for verdict in (CHANGE_REQUEST_PENDING, CHANGE_REQUEST_WITH_PM):
+            with self.subTest(verdict=verdict):
+                change = self._change_request(verdict)
+                self.assertFalse(self._can(self.qc))
+                self.assertEqual(self._reason(self.qc), BOQ_CORRECTION_CLOSED_CHANGE_REQUEST)
+                change.delete()
+        self._change_request(CHANGE_REQUEST_PENDING)
+        self._login(self.qc)
+        response = self._set_quantity(self.row, '18')
+        self.assertIn(MSG_CHANGE_REQUEST, self._messages(response))
+        self.assertFalse(BOQCorrection.objects.exists())
+
+    def test_f_a_design_hold_is_refused(self):
+        self._at(DESIGN_SURVEY_RETURNED)
+        for profile in (self.qc, self.head):
+            with self.subTest(user=profile.user.username):
+                self.assertFalse(self._can(profile))
+                self.assertEqual(self._reason(profile), BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW)
+
+
+class HeadExceptionTests(WindowBase):
+    """Branch (2): the Head's `corrected` outcome (D-7) needs a BOQCorrection made after
+    the raise, and SCM raises only on a released site."""
+
+    def setUp(self):
+        super().setUp()
+        self._at(DESIGN_RELEASED)
+
+    def test_the_head_may_correct_a_released_site_with_a_pending_request(self):
+        self._change_request(CHANGE_REQUEST_PENDING)
+        self.assertTrue(self._can(self.head))
+        self._login(self.head)
+        self._set_quantity(self.row, '18')
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.boq_quantity, Decimal('18'))
+
+    def test_qc_may_not_in_the_same_state(self):
+        self._change_request(CHANGE_REQUEST_PENDING)
+        self.assertFalse(self._can(self.qc))
+        self.assertEqual(self._reason(self.qc), BOQ_CORRECTION_CLOSED_PAST_REVIEW)
+
+    def test_the_head_may_not_correct_a_released_site_with_no_request(self):
+        self.assertFalse(self._can(self.head))
+        self.assertEqual(self._reason(self.head), BOQ_CORRECTION_CLOSED_PAST_REVIEW)
+
+    def test_the_head_may_not_while_the_request_is_still_with_the_pm(self):
+        self._change_request(CHANGE_REQUEST_WITH_PM)
+        self.assertFalse(self._can(self.head))
+
+    def test_the_sites_designer_gets_no_exception_even_with_head_authority(self):
+        """Head authority via user_can_head_gate_design(), which refuses the designer."""
+        self.designer.is_design_head = True
+        self.designer.save(update_fields=['is_design_head'])
+        self._change_request(CHANGE_REQUEST_PENDING)
+        self.assertFalse(self._can(self.designer))
+
+    def test_the_procurement_lock_refuses_the_exception_too(self):
+        self._change_request(CHANGE_REQUEST_PENDING)
+        group = SiteGroup.objects.create(
+            program=self.program, name='Batch H', status=SITE_GROUP_LOCKED,
+            created_by=self.pm, locked_by=self.pm, locked_at=timezone.now())
+        SiteGroupMembership.objects.create(group=group, project=self.site, added_by=self.pm)
+        self._login(self.head)
+        self._set_quantity(self.row, '18')
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.boq_quantity, Decimal('12'))
+
+
+class WindowLinkTests(WindowBase):
+    """R2: the "Correct BOQ" links read the same predicate as the save."""
+
+    def _detail(self, profile):
+        self.client.logout()
+        self._login(profile)
+        return self.client.get(reverse(
+            'boq_detail', kwargs={'project_id': self.site.project_id})).content.decode()
+
+    def test_boq_detail_offers_the_link_only_inside_the_window(self):
+        correct_url = self._url()
+        self.assertIn(correct_url, self._detail(self.qc))
+        for status in (DESIGN_RELEASED, DESIGN_AWAITING_PM_APPROVAL, DESIGN_IN_DESIGN):
+            with self.subTest(status=status):
+                self._at(status)
+                self.assertNotIn(correct_url, self._detail(self.qc))
+                self.assertNotIn(correct_url, self._detail(self.head))
+
+    def test_boq_detail_offers_the_head_the_link_under_the_exception(self):
+        self._at(DESIGN_RELEASED)
+        self._change_request(CHANGE_REQUEST_PENDING)
+        self.assertIn(self._url(), self._detail(self.head))
+        self.assertNotIn(self._url(), self._detail(self.qc))

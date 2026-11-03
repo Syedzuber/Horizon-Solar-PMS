@@ -129,8 +129,8 @@ file and `seed_walkthrough.py` are the only places it appears.
 | `walk.se` | Site Engineer | — | `/dashboard/site-engineer/` | Holds the SE tasks on WALKE01 and two on WALKL01; confirmed the GRNs; submits tasks for approval. Area `approvals`: holds every SE task on WALKB01 and is the Site Engineer on every contractor bill (WALK-15 … WALK-22); three wait on their "Work to confirm" card |
 | `walk.qaqc` | Site Engineer | `is_qaqc` | `/dashboard/site-engineer/` | Approves / rejects submitted OPEX tasks (raises punch points). Holds Net Meter Installation so it can see WALKE01 |
 | `walk.design` | Design | — | `/dashboard/design/` | The designer on every design site and the Residential BOQs |
-| `walk.designqc` | Design | `is_design_qc` | `/dashboard/design/` | Gate 1: Arka review and package QC; recorded the BOQ correction on WALKC07; named QC reviewer on WALKD03 |
-| `walk.designhead` | Design | `is_design_head` | `/dashboard/design/` | Gate 2, allocation, survey links, change-request verdicts, send-back / return-to-PM |
+| `walk.designqc` | Design | `is_design_qc` | `/dashboard/design/` | Gate 1: Arka review and package QC; named QC reviewer on WALKD03 |
+| `walk.designhead` | Design | `is_design_head` | `/dashboard/design/` | Gate 2, allocation, survey links, change-request verdicts, send-back / return-to-PM; recorded the BOQ correction on WALKC07 |
 | `walk.designdeputy` | Design | named as the Head's deputy | `/dashboard/design/` | Has Head authority as deputy; decided WALK-10's design step as deputy, and sees WALK-02 and WALK-07 on its approvals card "as deputy for Walk Designhead" (area `approvals`) |
 | `walk.scm` | SCM | `is_warehouse_keeper` | `/landing/` → `/dashboard/scm/` | Groups, locks, orders, payments raised, holds answered, challans, GRN on-behalf, SCM change requests; keeper of two warehouses |
 | `walk.finance` | Finance | `is_payment_approver` | `/landing/` → `/dashboard/finance/` | Approved / partly approved / held / rejected the payments |
@@ -205,7 +205,7 @@ review page), `walk.pm` (PM approval queue lists SCM requests awaiting the PM), 
 | WALKC04 | with_pm | raised by SCM, waiting for the PM |
 | WALKC05 | pm_rejected | raised by SCM, rejected by the PM |
 | WALKC06 | withdrawn | raised by SCM, withdrawn by SCM |
-| WALKC07 | corrected | raised by SCM, forwarded by the PM, BOQ corrected by Design QC, marked corrected by the Head |
+| WALKC07 | corrected | raised by SCM, forwarded by the PM, BOQ corrected by the Head, marked corrected by the Head |
 | WALKC08 | (none) | released and in a LOCKED group — a change request is refused here |
 
 ### Tender WALKPRC — procurement and payments (area `procurement`)

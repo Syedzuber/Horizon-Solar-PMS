@@ -885,14 +885,20 @@ def user_can_correct_boq(user, project):
     makes `project_boq_is_design_locked()` safe to AND into the shared write gate. A
     Residential BOQ has no reviewer to correct it and nothing here changes that.
 
-    INDEPENDENT OF project_boq_is_design_locked() BY DESIGN, and that is the whole point of
-    it being a separate predicate. The correction window IS the locked window: the designer
-    marked the BOQ complete, the stamp went on, and their own path closed. A reviewer
-    reading it then finds the wrong quantity and has nowhere to put the fix. So this
-    function does not consult that lock, and the LOCK IS NOT LOOSENED EITHER — it is still
-    ANDed against `user_can_edit_project_boq()` at every author path exactly as before
-    (boq_detail, opex_boq_entry, opex_boq_upload are unchanged). The designer stays locked
-    out of their own BOQ once they submit it; only this separate path is exempt.
+    BC-1: AUTHORITY AND A WINDOW, AND BOTH ARE REQUIRED. Verdict authority says WHO may
+    correct; boq_correction_closed_reason() says WHEN. The window is the review itself —
+    the BOQ stamped and the package with Design QC or the Head — plus one exception for
+    the Head while a change request waits on him. It was authority alone until BC-1, which
+    left correction open from the survey to the procurement lock, alongside the
+    designer's picker before submission and alongside the change request after release.
+    Both questions are answered here so that the two "Correct BOQ" links and the save in
+    boq_correct() read one predicate and cannot disagree.
+
+    THE DESIGN LOCK IS STILL NOT LOOSENED. Inside the window the BOQ is design-locked by
+    construction (the window requires the same stamp), and the lock is still ANDed against
+    `user_can_edit_project_boq()` at every author path exactly as before (boq_detail,
+    opex_boq_entry, opex_boq_upload are unchanged). The designer stays locked out of their
+    own BOQ once they submit it; only this separate path is exempt.
 
     NOT INDEPENDENT OF THE PROCUREMENT LOCK, which is a different thing and is ANDed at the
     caller the way Part 6 requires. `project_boq_is_group_locked()` is final — the
@@ -905,6 +911,19 @@ def user_can_correct_boq(user, project):
     `user_can_edit_project_boq()`, which this does not touch, and both refuse a reviewer
     today for the same reason they always did.
     """
+    if not user_has_boq_correction_authority(user, project):
+        return False
+    return boq_correction_closed_reason(user, project) is None
+
+
+def user_has_boq_correction_authority(user, project):
+    """Return True if `user` holds verdict authority at either design gate on `project` —
+    the WHO half of user_can_correct_boq(), with no window applied.
+
+    Views do not gate on this. boq_correct() asks it only AFTER user_can_correct_boq() has
+    refused, to choose between a bare 403 (not a reviewer) and a message naming the closed
+    window (a reviewer, at the wrong moment).
+    """
     if project is None:
         return False
     assignment = getattr(project, 'design_assignment', None)
@@ -912,6 +931,110 @@ def user_can_correct_boq(user, project):
         return False
     return (user_can_qc_gate_design(user, assignment)
             or user_can_head_gate_design(user, assignment))
+
+
+# ---------------------------------------------------------------------------
+# BC-1 — the reviewer correction window
+#
+# Literals rather than model constants, for the reason 'released' and 'locked' are
+# literals elsewhere in this module: it imports no models. tests_boq_correction pins each
+# literal equal to its models.py constant, so a renamed status fails a test rather than
+# silently closing the window.
+# ---------------------------------------------------------------------------
+
+#: The package review: handed in (`artifacts_uploaded`), with Design QC (`in_qc`), passed
+#: QC and with the Head (`awaiting_head_qc`). The BOQ is judged here and nowhere else.
+#: The Arka gate's two statuses (`arka_submitted`, `awaiting_head_arka`) are NOT members
+#: although a stamped BOQ can sit in them: that review is of the Arka, not the bill
+#: (BC-1 rulings A and B).
+BOQ_CORRECTION_WINDOW_STATUSES = frozenset({
+    'artifacts_uploaded', 'in_qc', 'awaiting_head_qc',
+})
+
+#: Both gates have passed. From here a BOQ change is a change request (R2).
+BOQ_CORRECTION_PAST_REVIEW_STATUSES = frozenset({'awaiting_pm_approval', 'released'})
+
+#: DesignChangeRequest verdicts. Open = still undecided, with the PM or with the Head
+#: (models.CHANGE_REQUEST_OPEN_VERDICTS); only `pending` is with the Head.
+BOQ_CORRECTION_CR_PENDING = 'pending'
+BOQ_CORRECTION_CR_OPEN_VERDICTS = ('pending', 'with_pm')
+
+#: Why the window is closed — returned by boq_correction_closed_reason(), turned into a
+#: message by views.boq_correct().
+BOQ_CORRECTION_CLOSED_PAST_REVIEW    = 'past_review'
+BOQ_CORRECTION_CLOSED_NOT_SUBMITTED  = 'not_submitted'
+BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW  = 'not_in_review'
+BOQ_CORRECTION_CLOSED_CHANGE_REQUEST = 'change_request'
+
+
+def boq_correction_closed_reason(user, project):
+    """Return None if the correction window is open for `user` on `project`, otherwise
+    the reason it is closed (one of the BOQ_CORRECTION_CLOSED_* codes).
+
+    The WHEN half of user_can_correct_boq(). It does NOT check authority — call the
+    predicate, not this, to decide anything.
+
+        OPEN (1)  status in BOQ_CORRECTION_WINDOW_STATUSES
+                  AND boq_submitted_at stamped on the CURRENT attempt
+                  AND no open change request (pending or with_pm) on that attempt
+        OPEN (2)  Head authority (Head or deputy, not the site's designer)
+                  AND a `pending` change request on the current attempt — any status,
+                  `released` included
+
+    STATUS AND STAMP, BOTH. Status alone would be enough today — nothing reaches
+    `artifacts_uploaded` without the stamp (design_views._maybe_advance_to_artifacts_uploaded)
+    — but the stamp is the fact this window is about, and reading it keeps the rule true if
+    a status is ever reached some other way.
+
+    AN OPEN CHANGE REQUEST CLOSES (1). It suspends both review gates
+    (design_views._open_change_requests), and a reviewer correcting a BOQ that may be about
+    to be reworked is the same waste as recording a verdict on it.
+
+    (2) EXISTS FOR THE HEAD'S `corrected` OUTCOME (D-7). design_change_request_correct()
+    settles a pending request only when a BOQCorrection was made after the raise, and
+    boq_correct() is the only writer of one. SCM raises only on a released site, so without
+    this the Head could never record `corrected`. `with_pm` does not open it: the Head
+    cannot decide a request the PM has not forwarded (design_views._triage_guard).
+    A correction made under (2) is not forced to be cited by a verdict
+    (DESIGN_MODULE_DEFERRED V3).
+
+    The procurement group lock is NOT read here. boq_correct() refuses on it before any
+    save, unchanged, and it still applies to both branches.
+
+    Queries: the assignment (cached after the first read), the current attempt, and its
+    open change requests — two at most once the assignment is loaded.
+    """
+    if project is None:
+        return BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW
+    assignment = getattr(project, 'design_assignment', None)
+    if assignment is None:
+        return BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW
+
+    attempt = None
+    if assignment.current_attempt_number:
+        attempt = assignment.attempts.filter(
+            attempt_number=assignment.current_attempt_number).first()
+    open_verdicts = set()
+    if attempt is not None:
+        # Fetches only this attempt's undecided requests — at most one exists, by the
+        # partial unique constraint on open verdicts.
+        open_verdicts = set(attempt.change_requests.filter(
+            verdict__in=BOQ_CORRECTION_CR_OPEN_VERDICTS).values_list('verdict', flat=True))
+
+    # (2) first: it is the one branch that opens a status the rest would close.
+    if (BOQ_CORRECTION_CR_PENDING in open_verdicts
+            and user_can_head_gate_design(user, assignment)):
+        return None
+
+    if assignment.status in BOQ_CORRECTION_PAST_REVIEW_STATUSES:
+        return BOQ_CORRECTION_CLOSED_PAST_REVIEW
+    if attempt is None or attempt.boq_submitted_at is None:
+        return BOQ_CORRECTION_CLOSED_NOT_SUBMITTED
+    if assignment.status not in BOQ_CORRECTION_WINDOW_STATUSES:
+        return BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW
+    if open_verdicts:
+        return BOQ_CORRECTION_CLOSED_CHANGE_REQUEST
+    return None
 
 
 def user_can_view_design_qc_dashboard(user):
