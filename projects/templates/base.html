@@ -201,14 +201,14 @@ and otherwise renders straight onto the page.
 
 <div class="container mt-4">
 
-  {% if messages %}
+  {% block messages %}{# DA-1: a block so design/head_sites.html can move per-site messages onto their rows. Tags stay on these lines: output is byte-identical. #}{% if messages %}
     {% for message in messages %}
       <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show" role="alert">
         {{ message }}
         <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
       </div>
     {% endfor %}
-  {% endif %}
+  {% endif %}{% endblock %}
 
   {# HTMX-driven flash messages land here (out-of-band swap target) — see partials/_hx_messages.html #}
   <div id="hxMessages"></div>

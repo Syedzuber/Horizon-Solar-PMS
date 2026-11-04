@@ -3,14 +3,91 @@
 Design Head — site list for one OPEX tender.
 
 Bootstrap, extending base.html, because that is what every comparable user-facing screen
-does (program_list, program_detail, opex_site_form). Tailwind + Alpine are loaded ONLY by
-projects/admin/admin_base.html, which is the portal-admin chrome and wrong for this
-screen; using Tailwind here would mean adding a CDN to base.html, which is out of scope.
+does (program_list, program_detail, opex_site_form). Tailwind is loaded ONLY by the
+portal-admin chrome and is not used here.
+
+DA-1 — Alpine (3.14.8, the version every other base.html page pins) drives the search box
+and the Pending-at chips. It filters the server-rendered rows in place: no request, no
+fetch. Each site's rows sit in their own <tbody id="site-<code>"> so one x-show hides the
+main row and all its panels together, and so the redirect after every action can land on
+`#site-<code>`.
 
 Functional workflow screen only — not the Design Head dashboard. Metrics, workload and
 capacity are Part 5.
 {% endcomment %}
+
+{% block extra_head %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<script>
+/*
+ * DA-1 — the site list's in-browser filter. Registered on alpine:init, which fires when the
+ * deferred Alpine script starts, after the page (and the JSON below) has been parsed.
+ *
+ * visible(): a site whose row carries a message is ALWAYS shown (data-pinned), whatever the
+ * chip or search, so the outcome of the Head's last action can never be filtered out from
+ * under him. Otherwise the chip must match and the search must appear in the site code or
+ * city.
+ *
+ * The URL is kept in step with replaceState so a reload or a shared link reopens the same
+ * filter; the server, not this script, is what reads it back.
+ */
+document.addEventListener('alpine:init', function () {
+  Alpine.data('headSites', function () {
+    var initial = JSON.parse(document.getElementById('headSitesFilter').textContent);
+    return {
+      q: initial.q,
+      status: initial.status,
+      init: function () {
+        var self = this;
+        this.$watch('q', function () { self.syncUrl(); });
+        this.$watch('status', function () { self.syncUrl(); });
+        // The browser jumps to #site-<code> before Alpine has hidden the filtered-out rows,
+        // so the target moves once they go. Scroll again after the first filter pass.
+        this.$nextTick(function () {
+          var id = window.location.hash ? decodeURIComponent(window.location.hash.slice(1)) : '';
+          var target = id && document.getElementById(id);
+          if (target) { target.scrollIntoView({block: 'center'}); }
+        });
+      },
+      visible: function (el) {
+        if (el.dataset.pinned === '1') { return true; }
+        if (this.status && el.dataset.chip !== this.status) { return false; }
+        var needle = this.q.trim().toLowerCase();
+        return !needle || el.dataset.search.indexOf(needle) !== -1;
+      },
+      noMatches: function () {
+        var self = this;
+        return Array.prototype.every.call(
+          this.$root.querySelectorAll('tbody[data-chip]'),
+          function (el) { return !self.visible(el); });
+      },
+      syncUrl: function () {
+        var params = new URLSearchParams({q: this.q.trim().slice(0, 50), status: this.status});
+        window.history.replaceState(null, '', window.location.pathname + '?' + params.toString());
+      }
+    };
+  });
+});
+</script>
+{% endblock %}
+
+{% comment %}
+DA-1 — overrides base.html's message block. Only PAGE-level messages render up here; a
+message tagged for one site renders on that site's row instead (design_head_sites splits
+them, and reading them there is what consumes them). `level_tag`, not `tags`: a tagged
+message's `tags` would be "site:MB0001 page success", which is no CSS class. For an
+untagged message the two are the same string, so this renders exactly as base.html does.
+{% endcomment %}
+{% block messages %}{% for message in page_messages %}
+      <div class="alert alert-{{ message.level_tag|default:'info' }} alert-dismissible fade show" role="alert">
+        {{ message }}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+      </div>
+    {% endfor %}{% endblock %}
+
 {% block content %}
+{{ filter_state|json_script:"headSitesFilter" }}
+<div x-data="headSites">
 
 <div class="d-flex justify-content-between align-items-center mb-3">
   <div>
@@ -32,6 +109,30 @@ capacity are Part 5.
 </div>
 
 {% comment %}
+DA-1 — search and Pending-at chips. The counts are server-rendered over the whole tender
+(they do not move as the Head types): a chip says how many sites are on that party's desk,
+which is the question it exists to answer. Each site counts under exactly one chip — see
+PENDING_AT_CHIP in design_views.py for how the ten pending-at labels group by party.
+{% endcomment %}
+<div class="card shadow-sm mb-3">
+  <div class="card-body py-2 d-flex flex-wrap align-items-center gap-2">
+    <input type="search" class="form-control form-control-sm" style="max-width:16rem;"
+           placeholder="Search site code or city" maxlength="50" autocomplete="off"
+           aria-label="Search site code or city" value="{{ q }}" x-model="q">
+    <div class="d-flex flex-wrap gap-1" role="group" aria-label="Pending at">
+      <button type="button" class="btn btn-sm"
+              x-bind:class="status === '' ? 'btn-dark' : 'btn-outline-secondary'"
+              x-on:click="status = ''">All <span class="badge text-bg-light">{{ rows|length }}</span></button>
+      {% for chip in chips %}
+        <button type="button" class="btn btn-sm"
+                x-bind:class="status === '{{ chip.key }}' ? 'btn-dark' : 'btn-outline-secondary'"
+                x-on:click="status = '{{ chip.key }}'">{{ chip.label }} <span class="badge text-bg-light">{{ chip.count }}</span></button>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+{% comment %}
 Bulk allocation: one designer, many sites, one transaction.
 
 This form contains ONLY the designer picker and its submit button. It must NOT wrap
@@ -46,6 +147,7 @@ page, and any markup named inside it becomes real elements.
 {% endcomment %}
 <form method="post" action="{% url 'design_bulk_allocate' pk=program.pk %}" id="bulkAllocateForm">
   {% csrf_token %}
+  {% include "projects/design/_head_sites_filter_fields.html" %}
 </form>
 
 <div class="card shadow-sm mb-3">
@@ -85,14 +187,34 @@ page, and any markup named inside it becomes real elements.
             <th class="text-end">Actions</th>
           </tr>
         </thead>
-        <tbody>
+        {% comment %}
+        DA-1 — ONE <tbody> PER SITE, holding its main row, its message rows and its four
+        collapse panels, so a single x-show hides all of them together and `#site-<code>`
+        has one element to land on. A table may hold any number of <tbody> elements.
+
+        data-chip / data-search / data-pinned are what visible() reads; pinned means this
+        site has a message from the Head's last action and must not be filtered away.
+        {% endcomment %}
         {% for row in rows %}
+        <tbody id="site-{{ row.site.project_id }}" data-chip="{{ row.chip }}"
+               data-search="{{ row.site.project_id|lower }} {{ row.site.city|lower }}"
+               data-pinned="{% if row.messages %}1{% else %}0{% endif %}"
+               x-show="visible($el)">
           <tr {% if row.is_blocked %}class="table-warning"{% endif %}>
             <td>
               {% if row.allocatable %}
-                {# Checkbox posts with the bulk form above, via its form attribute. #}
+                {% comment %}
+                Checkbox posts with the bulk form above, via its form attribute.
+
+                DA-1: DISABLED WHILE ITS SITE IS FILTERED OUT. A disabled input is not
+                submitted, so a box ticked and then hidden by a search or chip cannot ride
+                along unseen in a bulk allocation — the 31 Oct incident was a bulk POST of
+                more sites than the Head meant. The tick survives, and counts again the
+                moment the site is shown.
+                {% endcomment %}
                 <input type="checkbox" class="form-check-input" name="site_ids"
-                       form="bulkAllocateForm" value="{{ row.site.project_id }}">
+                       form="bulkAllocateForm" value="{{ row.site.project_id }}"
+                       x-bind:disabled="!visible($el.closest('tbody'))">
               {% else %}
                 {# Disabled, not absent, so the reason is visible rather than a blank cell. #}
                 <input type="checkbox" class="form-check-input" disabled
@@ -266,6 +388,21 @@ page, and any markup named inside it becomes real elements.
             </td>
           </tr>
 
+          {% comment %}
+          DA-1 — the outcome of the Head's last action on THIS site, shown where he took it.
+          Text and level are the view's, unchanged; only where it renders has moved.
+          {% endcomment %}
+          {% for message in row.messages %}
+          <tr class="head-sites-message">
+            <td colspan="9" class="py-1">
+              <div class="alert alert-{{ message.level_tag|default:'info' }} alert-dismissible fade show mb-0 py-2 small" role="alert">
+                {{ message }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+
           {# ── inline action panels (collapse, one row each) ───────────────── #}
           <tr class="collapse" id="up{{ row.site.pk }}">
             <td colspan="9" class="bg-light">
@@ -273,6 +410,7 @@ page, and any markup named inside it becomes real elements.
                     action="{% url 'design_survey_upload' project_id=row.site.project_id %}"
                     class="d-flex flex-wrap align-items-center gap-2 py-2">
                 {% csrf_token %}
+                {% include "projects/design/_head_sites_filter_fields.html" %}
                 <input type="file" name="survey_file" class="form-control form-control-sm"
                        style="max-width:22rem;" required>
                 <button class="btn btn-sm btn-primary">Upload</button>
@@ -290,6 +428,7 @@ page, and any markup named inside it becomes real elements.
                     action="{% url 'design_survey_link_set' project_id=row.site.project_id %}"
                     class="d-flex flex-wrap align-items-center gap-2 py-2">
                 {% csrf_token %}
+                {% include "projects/design/_head_sites_filter_fields.html" %}
                 <input type="url" name="survey_folder_url" class="form-control form-control-sm"
                        style="max-width:32rem;" required
                        placeholder="https://drive.google.com/drive/folders/…"
@@ -310,6 +449,7 @@ page, and any markup named inside it becomes real elements.
               <form method="post" action="{% url 'design_allocate' project_id=row.site.project_id %}"
                     class="d-flex flex-wrap align-items-center gap-2 py-2">
                 {% csrf_token %}
+                {% include "projects/design/_head_sites_filter_fields.html" %}
                 {% comment %}
                 Session B.1 — `row.designer_choices`, not the flat `designers` list: this
                 site's current gate-1 reviewer is removed, mirroring the QC selector below
@@ -350,6 +490,7 @@ page, and any markup named inside it becomes real elements.
               <form method="post" action="{% url 'design_assign_qc' project_id=row.site.project_id %}"
                     class="d-flex flex-wrap align-items-center gap-2 py-2">
                 {% csrf_token %}
+                {% include "projects/design/_head_sites_filter_fields.html" %}
                 <span class="small text-muted">Design QC:</span>
                 <select name="qc_id" class="form-select form-select-sm" style="max-width:16rem;">
                   <option value="">Open pool — any QC reviewer</option>
@@ -395,11 +536,13 @@ page, and any markup named inside it becomes real elements.
                 </span>
                 <form method="post" action="{% url 'design_due_date_approve' project_id=row.site.project_id %}">
                   {% csrf_token %}
+                  {% include "projects/design/_head_sites_filter_fields.html" %}
                   <button class="btn btn-sm btn-success">Approve</button>
                 </form>
                 <form method="post" action="{% url 'design_due_date_reject' project_id=row.site.project_id %}"
                       class="d-flex align-items-center gap-2">
                   {% csrf_token %}
+                  {% include "projects/design/_head_sites_filter_fields.html" %}
                   <input type="text" name="reason" class="form-control form-control-sm"
                          placeholder="Reason (optional)" style="max-width:18rem;">
                   <button class="btn btn-sm btn-outline-danger">Reject</button>
@@ -415,6 +558,7 @@ page, and any markup named inside it becomes real elements.
               <form method="post" action="{% url 'design_due_date_change' project_id=row.site.project_id %}"
                     class="d-flex flex-wrap align-items-center gap-2 py-2">
                 {% csrf_token %}
+                {% include "projects/design/_head_sites_filter_fields.html" %}
                 <input type="date" min="{% now 'Y-m-d' %}" max="{{ typed_date_max }}" name="proposed_date" class="form-control form-control-sm"
                        style="max-width:12rem;" required>
                 <input type="text" name="change_reason" class="form-control form-control-sm"
@@ -427,15 +571,26 @@ page, and any markup named inside it becomes real elements.
             </td>
           </tr>
           {% endif %}
+        </tbody>
 
         {% empty %}
+        <tbody>
           <tr><td colspan="9" class="text-center text-muted py-4 small">
             This tender has no sites yet.
           </td></tr>
-        {% endfor %}
         </tbody>
+        {% endfor %}
+        {% if rows %}
+        {# DA-1: shown only when the search and chip together hide every site. #}
+        <tbody x-show="noMatches()" style="display:none;">
+          <tr><td colspan="9" class="text-center text-muted py-4 small">
+            No site matches this search and chip.
+          </td></tr>
+        </tbody>
+        {% endif %}
       </table>
     </div>
 </div>
 
+</div>{# /x-data headSites #}
 {% endblock %}

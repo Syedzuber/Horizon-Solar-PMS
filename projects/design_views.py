@@ -20,7 +20,7 @@ import json
 import logging
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
-from urllib.parse import urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 from django.contrib import messages
 from django.core.exceptions import ValidationError
@@ -82,6 +82,11 @@ from .models import (
     # constants it is keyed on. Pure and query-free; design_head_sites() hands it the
     # three prefetched facts it reads. See its docstring in models.py.
     design_pending_at,
+    # DA-1 — every label design_pending_at() can return, so the site list's chips can be
+    # keyed on the constants rather than on the badge text.
+    PENDING_AT_SURVEY, PENDING_AT_DESIGN_HEAD, PENDING_AT_DESIGNER, PENDING_AT_QC,
+    PENDING_AT_QC_POOL, PENDING_AT_PM, PENDING_AT_ON_HOLD, PENDING_AT_SCM,
+    PENDING_AT_CHANGE_REQUEST, PENDING_AT_CHANGE_REQUEST_WITH_PM,
     DESIGN_AWAITING_SURVEY, DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED,
     DESIGN_DUE_DATE_PROPOSED, DESIGN_IN_DESIGN, DESIGN_SURVEY_RETURNED,
     DESIGN_ARKA_SUBMITTED, DESIGN_ARKA_REJECTED, DESIGN_ARTIFACTS_UPLOADED,
@@ -1430,17 +1435,156 @@ def latest_design_transition(field, outer_ref='pk', **match):
 
 
 # ---------------------------------------------------------------------------
+# DA-1 — the Head's site list: Pending-at chips, and the way back to the row
+#
+# The list is filtered in the browser (Alpine, no request), but the filter has to survive
+# every POST on the screen, or the Head lands back on an unfiltered 94-row table and has
+# to find the site again. So each form carries `q` and `status` as hidden inputs, and each
+# of the eight action views redirects through _head_sites_redirect(), which rebuilds the
+# URL from those two values and the site the view itself loaded. Messages about one site
+# are tagged so the screen can show them on that site's row instead of at the top.
+# ---------------------------------------------------------------------------
+
+#: Chip keys. Constants rather than literals because three places must spell them the
+#: same way: the mapping below, the validator, and the template's data-chip attribute.
+CHIP_SURVEY, CHIP_DESIGN_HEAD, CHIP_DESIGNER = 'survey', 'design_head', 'designer'
+CHIP_QC, CHIP_PM, CHIP_RELEASED, CHIP_ON_HOLD = 'qc', 'pm', 'released', 'on_hold'
+
+#: The chips in display order. "All" is not a member: it is the ABSENCE of a filter
+#: (status=''), so there is no value a tampered request could use to reach it wrongly.
+HEAD_SITES_CHIPS = (
+    (CHIP_SURVEY, 'Survey'), (CHIP_DESIGN_HEAD, 'Design Head'), (CHIP_DESIGNER, 'Designer'),
+    (CHIP_QC, 'QC'), (CHIP_PM, 'PM'), (CHIP_RELEASED, 'Released'), (CHIP_ON_HOLD, 'On hold'),
+)
+HEAD_SITES_CHIP_KEYS = frozenset(key for key, _label in HEAD_SITES_CHIPS)
+
+#: Every value design_pending_at() can return -> the chip it is counted under. GROUPED BY
+#: PARTY, ruled 4 Nov 2026: a chip answers "whose desk is this on", so the pool variant
+#: of QC is still QC, and a change request is still the Design Head's or the PM's. The row
+#: badge keeps the exact pending_at text, so nothing the label says is lost by the
+#: grouping. `With SCM` is the released status's label, hence the Released chip; a
+#: released site whose SCM change request waits on the PM reads `PM (change request)` and
+#: is therefore counted under PM, not Released.
+#:
+#: tests_design_sites_filter discovers every PENDING_AT_* constant in models.py by name and
+#: fails on one missing here, so a new label cannot silently drop out of every chip.
+PENDING_AT_CHIP = {
+    PENDING_AT_SURVEY:                 CHIP_SURVEY,
+    PENDING_AT_DESIGN_HEAD:            CHIP_DESIGN_HEAD,
+    PENDING_AT_CHANGE_REQUEST:         CHIP_DESIGN_HEAD,
+    PENDING_AT_DESIGNER:               CHIP_DESIGNER,
+    PENDING_AT_QC:                     CHIP_QC,
+    PENDING_AT_QC_POOL:                CHIP_QC,
+    PENDING_AT_PM:                     CHIP_PM,
+    PENDING_AT_CHANGE_REQUEST_WITH_PM: CHIP_PM,
+    PENDING_AT_SCM:                    CHIP_RELEASED,
+    PENDING_AT_ON_HOLD:                CHIP_ON_HOLD,
+}
+
+#: Longest search the screen keeps. Site codes and city names are far shorter; the cap
+#: exists so a crafted POST cannot grow the redirect URL without bound.
+HEAD_SITES_Q_MAX = 50
+
+#: Message tags. `site:<project_id>` puts a message on that site's row; `page` ALSO keeps
+#: it at the top (bulk results, which concern a batch but should land near the work).
+#: Space-separated, because Django's Message.extra_tags is one string.
+SITE_MESSAGE_PREFIX = 'site:'
+PAGE_MESSAGE_TAG = 'page'
+
+
+def _head_sites_filter(data):
+    """The (q, status) pair carried by `data` (request.GET or request.POST), validated.
+
+    `status` must be a chip key or it is dropped, never echoed; `q` is trimmed and capped.
+    Both are only ever written back into a URL by urlencode(), and only ever compared
+    against data attributes in the browser, so no further escaping is needed here.
+    """
+    q = (data.get('q') or '').strip()[:HEAD_SITES_Q_MAX]
+    status = (data.get('status') or '').strip()
+    if status not in HEAD_SITES_CHIP_KEYS:
+        status = ''
+    return q, status
+
+
+def _head_sites_redirect(request, program_id, site=None):
+    """Redirect back to the Head's site list with its search and chip kept, landing on
+    `site`'s row when one is given.
+
+    BUILT SERVER-SIDE FROM AN ALLOW-LIST, NEVER FROM A POSTED URL. There is no `next`
+    parameter and no Referer: the path is reverse()d, the query is the two validated
+    values above, and the anchor is the project_id of the site the CALLING VIEW loaded —
+    so a crafted form can change which filter the Head sees, and nothing else. That is
+    the open-redirect hole _triage_redirect() leaves open with its startswith('/') test;
+    this does not inherit it.
+
+    Both keys are always present (`?q=&status=`) so the URL has one shape whatever the
+    filter, which is what the tests pin. Views that fail before any site is loaded (the
+    bulk form with nothing chosen) pass no `site` and get no anchor.
+    """
+    data = request.POST if request.method == 'POST' else request.GET
+    q, status = _head_sites_filter(data)
+    url = (reverse('design_head_sites', kwargs={'pk': program_id})
+           + '?' + urlencode({'q': q, 'status': status}))
+    if site is not None:
+        url += '#site-' + quote(site.project_id, safe='')
+    return redirect(url)
+
+
+def _site_tag(site, page=False):
+    """The extra_tags string that puts a message on `site`'s row (and, with page=True,
+    at the top of the screen as well). None when there is no site to name."""
+    if site is None:
+        return PAGE_MESSAGE_TAG if page else ''
+    tag = SITE_MESSAGE_PREFIX + site.project_id
+    return f'{tag} {PAGE_MESSAGE_TAG}' if page else tag
+
+
+def _split_site_messages(request, site_codes):
+    """The request's queued messages, split into ({project_id: [message]}, [page message]).
+
+    READING THEM HERE CONSUMES THEM. Iterating Django's message storage marks it used, and
+    the middleware then drops everything it held when the response goes out — so a refresh
+    of the screen shows nothing, exactly as base.html's own loop behaves. head_sites.html
+    overrides base.html's {% block messages %} to render only the page list, so no message
+    is shown twice.
+
+    A message tagged for a site that is NOT on this screen (deleted since, or another
+    tender's) falls back to the top rather than vanishing.
+    """
+    by_site, page = {}, []
+    for message in messages.get_messages(request):
+        tags = (message.extra_tags or '').split()
+        codes = [t[len(SITE_MESSAGE_PREFIX):] for t in tags
+                 if t.startswith(SITE_MESSAGE_PREFIX)]
+        shown_on_row = False
+        for code in codes:
+            if code in site_codes:
+                by_site.setdefault(code, []).append(message)
+                shown_on_row = True
+        if not shown_on_row or PAGE_MESSAGE_TAG in tags:
+            page.append(message)
+    return by_site, page
+
+
+# ---------------------------------------------------------------------------
 # Screens
 # ---------------------------------------------------------------------------
 
 @login_required
 def design_head_sites(request, pk):
     """Design Head's working screen for one tender: every site, its status, designer,
-    current due date and blocked flag, with the actions for each."""
+    current due date and blocked flag, with the actions for each. Access: Design Head
+    authority (the Head or the Head's deputy) only.
+
+    DA-1: `?q=&status=` seed the in-browser search and Pending-at chip (validated here, not
+    parsed by the page), and messages tagged for a site are handed to that site's row."""
+    # Design Head authority only: this screen is where sites are allocated and dates set,
+    # and those are the Head's decisions. Designers work from design_my_sites instead.
     if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
 
     program = get_object_or_404(Program, pk=pk, is_deleted=False, program_type='OPEX')
+    q, status_filter = _head_sites_filter(request.GET)
     sites = (program.sites.filter(is_deleted=False)
              .select_related('design_assignment', 'design_assignment__assigned_to__user',
                              'design_assignment__qc_assigned_to__user')
@@ -1594,10 +1738,32 @@ def design_head_sites(request, pk):
                                          and assignment.qc_assigned_to_id == d.pk)],
         })
 
+    # DA-1 — chips and row messages, both derived from the rows already in hand: no query.
+    # `.get()` rather than indexing so a label added to design_pending_at() without a chip
+    # degrades to "shown under All only" instead of a 500; the coverage test is what makes
+    # that omission loud.
+    by_site, page_messages = _split_site_messages(
+        request, {row['site'].project_id for row in rows})
+    chip_counts = dict.fromkeys(HEAD_SITES_CHIP_KEYS, 0)
+    for row in rows:
+        row['chip'] = PENDING_AT_CHIP.get(row['pending_at'], '')
+        if row['chip']:
+            chip_counts[row['chip']] += 1
+        row['messages'] = by_site.get(row['site'].project_id, [])
+
     return render(request, 'projects/design/head_sites.html', {
         'program':   program,
         'rows':      rows,
         'designers': designers,
+        'chips': [{'key': key, 'label': label, 'count': chip_counts[key]}
+                  for key, label in HEAD_SITES_CHIPS],
+        'page_messages': page_messages,
+        # The search and chip the page opens with. Rendered into the page as JSON for
+        # Alpine and as the hidden inputs' initial values, so the filter works from the
+        # server's validated reading of the URL, never from client-side parsing of it.
+        'q':             q,
+        'status_filter': status_filter,
+        'filter_state':  {'q': q, 'status': status_filter},
     })
 
 
@@ -1676,15 +1842,16 @@ def design_survey_upload(request, project_id):
     derived from the allocation and any approved due date.
     """
     project = _opex_site(project_id)
+    tag = _site_tag(project)  # DA-1: every message here is about this one site
     if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
     if request.method != 'POST':
-        return redirect('design_head_sites', pk=project.program_id)
+        return _head_sites_redirect(request, project.program_id, project)
 
     upload = request.FILES.get('survey_file')
     if not upload:
-        messages.error(request, 'Please choose a survey file to upload.')
-        return redirect('design_head_sites', pk=project.program_id)
+        messages.error(request, 'Please choose a survey file to upload.', extra_tags=tag)
+        return _head_sites_redirect(request, project.program_id, project)
 
     assignment = getattr(project, 'design_assignment', None)
     was_blocked = bool(assignment and assignment.status == DESIGN_SURVEY_RETURNED)
@@ -1696,15 +1863,15 @@ def design_survey_upload(request, project_id):
         messages.error(
             request,
             f'{project.project_id}: the survey cannot be replaced after allocation '
-            f'unless the designer has placed the site on Design Hold.')
-        return redirect('design_head_sites', pk=project.program_id)
+            f'unless the designer has placed the site on Design Hold.', extra_tags=tag)
+        return _head_sites_redirect(request, project.program_id, project)
 
     path = build_design_path(project.project_id, 'survey', upload.name)
     try:
         bucket, stored_path = upload_design_file(upload, path)
     except DesignStorageError as exc:
-        messages.error(request, f'{project.project_id}: {exc}')
-        return redirect('design_head_sites', pk=project.program_id)
+        messages.error(request, f'{project.project_id}: {exc}', extra_tags=tag)
+        return _head_sites_redirect(request, project.program_id, project)
 
     profile = request.user.profile
     with transaction.atomic():
@@ -1754,12 +1921,12 @@ def design_survey_upload(request, project_id):
 
     if was_blocked:
         messages.success(request, f'{project.project_id}: replacement survey uploaded, '
-                                  f'Design Hold cleared ({assignment.get_status_display()}).')
+                                  f'Design Hold cleared ({assignment.get_status_display()}).', extra_tags=tag)
     elif replacing:
-        messages.success(request, f'{project.project_id}: survey replaced.')
+        messages.success(request, f'{project.project_id}: survey replaced.', extra_tags=tag)
     else:
-        messages.success(request, f'{project.project_id}: survey uploaded — ready to allocate.')
-    return redirect('design_head_sites', pk=project.program_id)
+        messages.success(request, f'{project.project_id}: survey uploaded — ready to allocate.', extra_tags=tag)
+    return _head_sites_redirect(request, project.program_id, project)
 
 
 def _survey_link_host_allowed(url):
@@ -1802,27 +1969,28 @@ def design_survey_link_set(request, project_id):
     replace-lock below.
     """
     project = _opex_site(project_id)
+    tag = _site_tag(project)  # DA-1: every message here is about this one site
     if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
     if request.method != 'POST':
-        return redirect('design_head_sites', pk=project.program_id)
+        return _head_sites_redirect(request, project.program_id, project)
 
     url = (request.POST.get('survey_folder_url') or '').strip()
     if not url:
-        messages.error(request, 'Please enter the survey folder link.')
-        return redirect('design_head_sites', pk=project.program_id)
+        messages.error(request, 'Please enter the survey folder link.', extra_tags=tag)
+        return _head_sites_redirect(request, project.program_id, project)
     try:
         URLValidator()(url)
     except ValidationError:
         messages.error(request, f'{project.project_id}: please enter a valid survey '
-                                f'folder link (a full URL, including https://).')
-        return redirect('design_head_sites', pk=project.program_id)
+                                f'folder link (a full URL, including https://).', extra_tags=tag)
+        return _head_sites_redirect(request, project.program_id, project)
     if not _survey_link_host_allowed(url):
         messages.error(
             request,
             f'{project.project_id}: the survey folder link must point at Google Drive, '
-            f'OneDrive, SharePoint or Dropbox.')
-        return redirect('design_head_sites', pk=project.program_id)
+            f'OneDrive, SharePoint or Dropbox.', extra_tags=tag)
+        return _head_sites_redirect(request, project.program_id, project)
 
     assignment = getattr(project, 'design_assignment', None)
     was_blocked = bool(assignment and assignment.status == DESIGN_SURVEY_RETURNED)
@@ -1839,8 +2007,8 @@ def design_survey_link_set(request, project_id):
         messages.error(
             request,
             f'{project.project_id}: the survey folder link cannot be changed after '
-            f'allocation unless the designer has placed the site on Design Hold.')
-        return redirect('design_head_sites', pk=project.program_id)
+            f'allocation unless the designer has placed the site on Design Hold.', extra_tags=tag)
+        return _head_sites_redirect(request, project.program_id, project)
 
     profile = request.user.profile
     with transaction.atomic():
@@ -1883,13 +2051,13 @@ def design_survey_link_set(request, project_id):
 
     if was_blocked:
         messages.success(request, f'{project.project_id}: survey folder link saved, '
-                                  f'Design Hold cleared ({assignment.get_status_display()}).')
+                                  f'Design Hold cleared ({assignment.get_status_display()}).', extra_tags=tag)
     elif replacing:
-        messages.success(request, f'{project.project_id}: survey folder link updated.')
+        messages.success(request, f'{project.project_id}: survey folder link updated.', extra_tags=tag)
     else:
         messages.success(request, f'{project.project_id}: survey folder link added — '
-                                  f'ready to allocate.')
-    return redirect('design_head_sites', pk=project.program_id)
+                                  f'ready to allocate.', extra_tags=tag)
+    return _head_sites_redirect(request, project.program_id, project)
 
 
 @login_required
@@ -2048,34 +2216,35 @@ def _resolve_designer(raw_id):
 def design_allocate(request, project_id):
     """Allocate one OPEX site to a designer. Design Head only, POST only."""
     project = _opex_site(project_id)
+    tag = _site_tag(project)  # DA-1: every message here is about this one site
     if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
     if request.method != 'POST':
-        return redirect('design_head_sites', pk=project.program_id)
+        return _head_sites_redirect(request, project.program_id, project)
 
     try:
         designer = _resolve_designer(request.POST.get('designer_id', ''))
     except ValueError as exc:
-        messages.error(request, str(exc))
-        return redirect('design_head_sites', pk=project.program_id)
+        messages.error(request, str(exc), extra_tags=tag)
+        return _head_sites_redirect(request, project.program_id, project)
 
     assignment = getattr(project, 'design_assignment', None)
     if assignment is None or not assignment.survey_ready:
         messages.error(request, f'{project.project_id} cannot be allocated before its '
-                                f'survey is uploaded.')
-        return redirect('design_head_sites', pk=project.program_id)
+                                f'survey is uploaded.', extra_tags=tag)
+        return _head_sites_redirect(request, project.program_id, project)
 
     try:
         with transaction.atomic():
             due = _allocate_one(assignment, designer, request.user.profile)
     except ValueError as exc:
-        messages.error(request, f'{project.project_id} {exc}.')
-        return redirect('design_head_sites', pk=project.program_id)
+        messages.error(request, f'{project.project_id} {exc}.', extra_tags=tag)
+        return _head_sites_redirect(request, project.program_id, project)
 
     messages.success(request, f'{project.project_id} allocated to '
                               f'{designer.user.get_full_name() or designer.user.username} — '
-                              f'due {due}.')
-    return redirect('design_head_sites', pk=project.program_id)
+                              f'due {due}.', extra_tags=tag)
+    return _head_sites_redirect(request, project.program_id, project)
 
 
 @login_required
@@ -2085,29 +2254,43 @@ def design_bulk_allocate(request, pk):
     ALL OR NOTHING: one transaction, and the first site that fails any rule aborts the
     whole batch. A partially-applied bulk allocation would be worse than none — the Head
     would have to work out which half landed.
+
+    Access: Design Head authority only, POST only.
+
+    DA-1 — messages and the redirect. The two refusals that happen before any site is
+    loaded (no designer, no selection) are page-level and land with no anchor. The batch
+    outcome is page-level AND tagged to one site, so it stays at the top while the page
+    lands near the work: the failing site on a refusal, the first allocated site on
+    success. Which site that is comes from the rows THIS view loaded, never from POST text.
     """
+    # Design Head authority only: bulk allocation is the Head's allocation decision made
+    # many times at once, and carries exactly the single-site view's authority.
     if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
     program = get_object_or_404(Program, pk=pk, is_deleted=False, program_type='OPEX')
     if request.method != 'POST':
-        return redirect('design_head_sites', pk=program.pk)
+        return _head_sites_redirect(request, program.pk)
 
     try:
         designer = _resolve_designer(request.POST.get('designer_id', ''))
     except ValueError as exc:
         messages.error(request, str(exc))
-        return redirect('design_head_sites', pk=program.pk)
+        return _head_sites_redirect(request, program.pk)
 
     project_ids = request.POST.getlist('site_ids')
     if not project_ids:
         messages.error(request, 'Select at least one site to allocate.')
-        return redirect('design_head_sites', pk=program.pk)
+        return _head_sites_redirect(request, program.pk)
 
     actor = request.user.profile
     # ONE allocation date for the whole batch (Part 8). Computed before the loop, not
     # per site: a bulk run that crossed midnight would otherwise hand the first sites a
     # different due date from the last, and the Head has no way to see that happened.
     batch_date = timezone.localdate()
+    # DA-1 bookkeeping for the message tag and the anchor only — neither changes what the
+    # loop allocates or refuses. `current` is the site being worked on when a refusal is
+    # raised: every ValueError below is raised after that site was loaded.
+    current = first_site = None
     try:
         with transaction.atomic():
             allocated = []
@@ -2116,22 +2299,26 @@ def design_bulk_allocate(request, pk):
                 site = get_object_or_404(
                     Project, project_id=project_id, is_deleted=False,
                     project_type='OPEX', program=program)
+                current = site
                 assignment = getattr(site, 'design_assignment', None)
                 if assignment is None or not assignment.survey_ready:
                     raise ValueError(f'{site.project_id} cannot be allocated before its '
                                      f'survey is uploaded')
                 due = _allocate_one(assignment, designer, actor, allocated_on=batch_date)
                 allocated.append(site.project_id)
+                if first_site is None:
+                    first_site = site
     except ValueError as exc:
-        messages.error(request, f'Nothing was allocated — {exc}.')
-        return redirect('design_head_sites', pk=program.pk)
+        messages.error(request, f'Nothing was allocated — {exc}.',
+                       extra_tags=_site_tag(current, page=True))
+        return _head_sites_redirect(request, program.pk, current)
 
     messages.success(
         request,
         f'{len(allocated)} site(s) allocated to '
         f'{designer.user.get_full_name() or designer.user.username}, due {due}: '
-        f'{", ".join(allocated)}.')
-    return redirect('design_head_sites', pk=program.pk)
+        f'{", ".join(allocated)}.', extra_tags=_site_tag(first_site, page=True))
+    return _head_sites_redirect(request, program.pk, first_site)
 
 
 # ---------------------------------------------------------------------------
@@ -2211,35 +2398,36 @@ def design_assign_qc(request, project_id):
     to be inconsistent with.
     """
     project = _opex_site(project_id)
+    tag = _site_tag(project)  # DA-1: every message here is about this one site
     if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
     if request.method != 'POST':
-        return redirect('design_head_sites', pk=project.program_id)
+        return _head_sites_redirect(request, project.program_id, project)
 
     assignment = getattr(project, 'design_assignment', None)
     if assignment is None:
         messages.error(request, f'{project.project_id}: design has not started on this '
-                                f'site, so there is no review to assign.')
-        return redirect('design_head_sites', pk=project.program_id)
+                                f'site, so there is no review to assign.', extra_tags=tag)
+        return _head_sites_redirect(request, project.program_id, project)
 
     if _gate1_verdict_recorded(_current_attempt(assignment)):
         messages.error(request, f'{project.project_id}: Design QC has already recorded a '
                                 f'verdict on this attempt — the reviewer cannot be changed '
-                                f'now.')
-        return redirect('design_head_sites', pk=project.program_id)
+                                f'now.', extra_tags=tag)
+        return _head_sites_redirect(request, project.program_id, project)
 
     try:
         reviewer = _resolve_qc_reviewer(request.POST.get('qc_id', ''), assignment)
     except ValueError as exc:
-        messages.error(request, f'{project.project_id}: {exc}.')
-        return redirect('design_head_sites', pk=project.program_id)
+        messages.error(request, f'{project.project_id}: {exc}.', extra_tags=tag)
+        return _head_sites_redirect(request, project.program_id, project)
 
     previous = assignment.qc_assigned_to
     if (previous.pk if previous else None) == (reviewer.pk if reviewer else None):
         messages.info(request, f'{project.project_id}: no change — the Design QC reviewer '
                                f'was already '
-                               f'{"unassigned" if reviewer is None else reviewer.user.get_full_name() or reviewer.user.username}.')
-        return redirect('design_head_sites', pk=project.program_id)
+                               f'{"unassigned" if reviewer is None else reviewer.user.get_full_name() or reviewer.user.username}.', extra_tags=tag)
+        return _head_sites_redirect(request, project.program_id, project)
 
     actor = request.user.profile
     now = timezone.now()
@@ -2270,11 +2458,11 @@ def design_assign_qc(request, project_id):
 
     if reviewer is None:
         messages.success(request, f'{project.project_id}: Design QC reviewer cleared — any '
-                                  f'QC reviewer may now take this site.')
+                                  f'QC reviewer may now take this site.', extra_tags=tag)
     else:
         messages.success(request, f'{project.project_id}: Design QC assigned to '
-                                  f'{reviewer.user.get_full_name() or reviewer.user.username}.')
-    return redirect('design_head_sites', pk=project.program_id)
+                                  f'{reviewer.user.get_full_name() or reviewer.user.username}.', extra_tags=tag)
+    return _head_sites_redirect(request, project.program_id, project)
 
 
 # ---------------------------------------------------------------------------
@@ -2414,24 +2602,25 @@ def design_due_date_approve(request, project_id):
     `approved_at` so the history of what was agreed and when stays intact.
     """
     project = _opex_site(project_id)
+    tag = _site_tag(project)  # DA-1: every message here is about this one site
     if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
     if request.method != 'POST':
-        return redirect('design_head_sites', pk=project.program_id)
+        return _head_sites_redirect(request, project.program_id, project)
 
     assignment = getattr(project, 'design_assignment', None)
     back = project.program_id
     if assignment is None:
-        messages.error(request, f'{project.project_id}: no design assignment.')
-        return redirect('design_head_sites', pk=back)
+        messages.error(request, f'{project.project_id}: no design assignment.', extra_tags=tag)
+        return _head_sites_redirect(request, back, project)
 
     # Gated on a pending ROW, not on a status: an extension can be requested from any
     # working stage, so there is no one status that means "awaiting a due-date verdict".
     commitment = _pending_extension(assignment)
     if commitment is None:
         messages.error(request, f'{project.project_id}: there is no extension request '
-                                f'awaiting approval.')
-        return redirect('design_head_sites', pk=back)
+                                f'awaiting approval.', extra_tags=tag)
+        return _head_sites_redirect(request, back, project)
 
     profile = request.user.profile
     with transaction.atomic():
@@ -2447,8 +2636,8 @@ def design_due_date_approve(request, project_id):
                      action_code='design_due_date_extension_approved')
 
     messages.success(request, f'{project.project_id}: extension approved — the due date is '
-                              f'now {commitment.proposed_date}.')
-    return redirect('design_head_sites', pk=back)
+                              f'now {commitment.proposed_date}.', extra_tags=tag)
+    return _head_sites_redirect(request, back, project)
 
 
 @login_required
@@ -2463,22 +2652,23 @@ def design_due_date_reject(request, project_id):
     extension request harder to reason about. The two are flipped in one transaction.
     """
     project = _opex_site(project_id)
+    tag = _site_tag(project)  # DA-1: every message here is about this one site
     if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
     if request.method != 'POST':
-        return redirect('design_head_sites', pk=project.program_id)
+        return _head_sites_redirect(request, project.program_id, project)
 
     assignment = getattr(project, 'design_assignment', None)
     back = project.program_id
     if assignment is None:
-        messages.error(request, f'{project.project_id}: no design assignment.')
-        return redirect('design_head_sites', pk=back)
+        messages.error(request, f'{project.project_id}: no design assignment.', extra_tags=tag)
+        return _head_sites_redirect(request, back, project)
 
     commitment = _pending_extension(assignment)
     if commitment is None:
         messages.error(request, f'{project.project_id}: there is no extension request '
-                                f'awaiting approval.')
-        return redirect('design_head_sites', pk=back)
+                                f'awaiting approval.', extra_tags=tag)
+        return _head_sites_redirect(request, back, project)
 
     reason = (request.POST.get('reason') or '').strip()
     profile = request.user.profile
@@ -2501,8 +2691,8 @@ def design_due_date_reject(request, project_id):
         request,
         f'{project.project_id}: extension rejected — the due date remains '
         f'{restored.proposed_date}.' if restored else
-        f'{project.project_id}: extension rejected.')
-    return redirect('design_head_sites', pk=back)
+        f'{project.project_id}: extension rejected.', extra_tags=tag)
+    return _head_sites_redirect(request, back, project)
 
 
 @login_required
@@ -2541,11 +2731,14 @@ def design_due_date_change(request, project_id):
                          'design_my_sites')
         return HttpResponseForbidden('Only the Design Head may revise an agreed due date.')
     if request.method != 'POST':
-        return redirect('design_head_sites', pk=project.program_id)
+        return _head_sites_redirect(request, project.program_id, project)
 
     def _back(msg, ok=False):
-        (messages.success if ok else messages.error)(request, msg)
-        return redirect('design_head_sites', pk=project.program_id)
+        # DA-1: every outcome of this view is about this one site, so every message is
+        # tagged to its row and the redirect lands there with the Head's filter kept.
+        (messages.success if ok else messages.error)(request, msg,
+                                                     extra_tags=_site_tag(project))
+        return _head_sites_redirect(request, project.program_id, project)
 
     # Prompt 3.1a: membership, not equality. The pm_rejected prompt moved the test to
     # DESIGN_NOT_WITH_DESIGNER_STATUSES, and the D13 prompt to DESIGN_CLOCK_STOPPED_STATUSES,

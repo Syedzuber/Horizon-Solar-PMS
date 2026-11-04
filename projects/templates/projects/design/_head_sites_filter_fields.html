@@ -1,0 +1,11 @@
+{% comment %}
+DA-1 — the Head's search and Pending-at chip, carried by EVERY form on head_sites.html so
+the view it posts to can send the Head back to the same filtered list (see
+design_views._head_sites_redirect, which validates both before using them).
+
+`value` is the server's validated reading of the URL, so the fields are right even if
+Alpine never loads; `x-bind:value` then keeps them in step with what the Head types or
+clicks after the page opens.
+{% endcomment %}
+<input type="hidden" name="q" value="{{ q }}" x-bind:value="q">
+<input type="hidden" name="status" value="{{ status_filter }}" x-bind:value="status">

@@ -110,7 +110,8 @@ class DesignAssignQcTests(TestCase):
         before = timezone.now()
         response = self._post(self.qc_a.pk)
 
-        self.assertRedirects(response, reverse('design_head_sites', kwargs={'pk': self.program.pk}),
+        self.assertRedirects(response, reverse('design_head_sites', kwargs={'pk': self.program.pk})
+                             + '?q=&status=#site-AQ001',
                              fetch_redirect_response=False)
         a = self._reload()
         self.assertEqual(a.qc_assigned_to_id, self.qc_a.pk)
@@ -298,6 +299,7 @@ class DesignAssignQcTests(TestCase):
         counts = self._counts()
         response = self.client.get(
             reverse('design_assign_qc', kwargs={'project_id': self.site.project_id}))
-        self.assertRedirects(response, reverse('design_head_sites', kwargs={'pk': self.program.pk}),
+        self.assertRedirects(response, reverse('design_head_sites', kwargs={'pk': self.program.pk})
+                             + '?q=&status=#site-AQ001',
                              fetch_redirect_response=False)
         self._assert_nothing_written(None, counts)
