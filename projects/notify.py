@@ -16,6 +16,14 @@ notify() causes carry event_code and, for an email rendered from a stored versio
 template_version. The two kinds of row notify() writes itself — 'skipped' for a paused
 event, 'failed' for anything that went wrong for one person — go through the same _log().
 
+WHATSAPP (NTF-DCG S3a). An event whose registry entry declares a WhatsAppSpec also gets
+a WhatsApp leg, unless Admin has left it paused, which is its state until switched on
+(default_state_for). Such an event is always deferred (a registry rule), so the send
+goes through notify_deferred like a deferred email: one pending row per recipient,
+finished by send_notification(). The values are cleaned and cut by
+whatsapp_params.sanitise_params() first, and within one send a phone number gets one
+message however many recipients share it (W9).
+
 DEFERRED EVENTS (NTF-DCG S2). For an event registered with deferred=True, the email is
 rendered here as usual and then handed to notify_deferred, which writes a 'pending' row
 and makes the send_notification() call from a background thread. In-app, recipients and
@@ -43,8 +51,9 @@ from django.utils.safestring import mark_safe
 
 from . import notify_deferred
 from .models import NotificationEventSetting, NotificationTemplate
-from .notifications import _log, send_notification
-from .notify_registry import IDENTIFIER_RE, PLACEHOLDER_RE, get_event
+from .notifications import _log, send_notification, valid_whatsapp_number
+from .notify_registry import IDENTIFIER_RE, PLACEHOLDER_RE, WHATSAPP, get_event
+from .whatsapp_params import describe_params, sanitise_params
 
 logger = logging.getLogger(__name__)
 
@@ -178,11 +187,12 @@ def render_email(event, template, values, link):
 
 
 def channel_is_active(event, channel):
-    """Whether `event` may send on `channel`: the setting row, else the registry default."""
+    """Whether `event` may send on `channel`: the setting row, else the registry default
+    for that channel (default_state_for: WhatsApp is always paused until switched on)."""
     setting = NotificationEventSetting.objects.filter(
         event_code=event.code, channel=channel).only('is_active').first()
     if setting is None:
-        return event.default_state == 'active'
+        return event.default_state_for(channel) == 'active'
     return setting.is_active
 
 
@@ -235,13 +245,30 @@ def _email_plan(event):
         return 'error', exc
 
 
-def _send_to_one(event, recipient, values, actor, related_project, link, plan, log_label):
-    """In-app, then email, for one person. The channels are independent (ruling Q4): a
-    failure on one is logged and the other is still attempted.
+def _whatsapp_plan(event):
+    """What every recipient's WhatsApp does, decided once per send, as _email_plan:
+    ('paused', None), ('send', event.whatsapp) or ('error', exception)."""
+    try:
+        if not channel_is_active(event, WHATSAPP):
+            return 'paused', None
+        return 'send', event.whatsapp
+    except Exception as exc:
+        logger.exception('notify: could not read the WhatsApp state of %s', event.code)
+        return 'error', exc
+
+
+def _send_to_one(event, recipient, values, actor, related_project, link, plan, log_label,
+                 wa_plan=None, wa_seen=None):
+    """In-app, then email, then WhatsApp, for one person. The channels are independent
+    (ruling Q4): a failure on one is logged and the others are still attempted.
 
     `log_label` reaches send_notification() as `template`. On the in_app and email
     channels that argument is used for one thing only, NotificationLog.template_name, so
     this is how the label lands on the rows without a change to send_notification().
+
+    `wa_plan` is _whatsapp_plan()'s answer, None for an event without a WhatsApp leg.
+    `wa_seen` is the set of numbers already handed off in this send (W9), shared by
+    every recipient of one notify() call.
     """
     name = recipient.user.get_full_name() or recipient.user.username
     values = dict(values, recipient_name=name, link=absolute_url(link))
@@ -264,8 +291,18 @@ def _send_to_one(event, recipient, values, actor, related_project, link, plan, l
         _log(base, 'in_app', 'failed', f'{type(exc).__name__}: {exc}',
              event_code=event.code)
 
-    if plan is None:
-        return
+    if plan is not None:
+        _email_leg(event, recipient, values, actor, related_project, link, plan,
+                   log_label, base)
+    if wa_plan is not None:
+        _whatsapp_leg(event, recipient, values, wa_plan, base,
+                      set() if wa_seen is None else wa_seen)
+
+
+def _email_leg(event, recipient, values, actor, related_project, link, plan, log_label,
+               base):
+    """The email of one person. The body _send_to_one() always had for it, moved here
+    unchanged (S3a) so that its early returns end the email leg only, not WhatsApp."""
     state, payload = plan
     if state == 'paused':
         _log(base, 'email', 'skipped', 'event paused', event_code=event.code)
@@ -306,12 +343,68 @@ def _send_to_one(event, recipient, values, actor, related_project, link, plan, l
              event_code=event.code, template_version=payload)
 
 
+def _whatsapp_leg(event, recipient, values, plan, base, seen):
+    """The WhatsApp of one person (NTF-DCG S3a, W2-W5, W9). Never raises.
+
+    Paused ⇒ a 'skipped' row and nothing else, as for email. Otherwise the builder's
+    values are checked against param_count, sanitised (W4) and handed to the deferred
+    pool with ONE pending row; the job, inside send_notification(), applies the master
+    switch, the person's preference and the strict number check (W5), then posts.
+
+    The row's template_name is the Interakt template and its message the exact values
+    sent, header and body marked (ruling Q7): the in-app row already holds the in-app
+    text, and this is what the person's phone shows.
+    """
+    state, payload = plan
+    wa_base = dict(base, template_name=event.whatsapp.template)
+    if state == 'paused':
+        _log(wa_base, WHATSAPP, 'skipped', 'event paused', event_code=event.code)
+        return
+    if state == 'error':
+        _log(wa_base, WHATSAPP, 'failed', f'{type(payload).__name__}: {payload}',
+             event_code=event.code)
+        return
+    spec = payload
+    try:
+        # W9: one message per phone per send. Two profiles sharing a number (a test
+        # handset, a family phone) would otherwise get the same WhatsApp twice. Read at
+        # hand-off from the profile notify() was given; the job re-reads the number and
+        # checks it (W5). An invalid number is never "seen", so each such person still
+        # gets their own 'failed' row from the job.
+        digits = valid_whatsapp_number(recipient.phone_number)
+        if digits is not None:
+            if digits in seen:
+                _log(wa_base, WHATSAPP, 'skipped', 'duplicate phone in this send',
+                     event_code=event.code)
+                return
+            seen.add(digits)
+        raw = list(spec.params(values))
+        if len(raw) != spec.param_count:
+            raise ValueError(f'params builder returned {len(raw)} values, '
+                             f'param_count is {spec.param_count}')
+        params = sanitise_params(raw, header_fixed_chars=spec.header_fixed_chars,
+                                 body_fixed_chars=spec.body_fixed_chars)
+        text = describe_params(params)
+        notify_deferred.defer(
+            recipient=recipient, channel=WHATSAPP,
+            row_fields=dict(wa_base, message=text, event_code=event.code),
+            send_kwargs=dict(message=text, channels=[WHATSAPP], template=spec.template,
+                             template_params=params, whatsapp_language=spec.language,
+                             whatsapp_strict_phone=True))
+    except Exception as exc:
+        logger.exception('notify: WhatsApp %s to %s failed', event.code, recipient.pk)
+        _log(wa_base, WHATSAPP, 'failed', f'{type(exc).__name__}: {exc}',
+             event_code=event.code)
+
+
 def _send(event, recipients, values, actor, related_project, link, log_label):
     plan = _email_plan(event) if 'email' in event.channels else None
+    wa_plan = _whatsapp_plan(event) if event.whatsapp is not None else None
+    wa_seen = set()   # W9: numbers already handed off in THIS send
     for recipient in recipients:
         try:
             _send_to_one(event, recipient, values, actor, related_project, link, plan,
-                         log_label)
+                         log_label, wa_plan, wa_seen)
         except Exception:
             # _send_to_one already catches per channel; this is the backstop for
             # anything outside those (reading the recipient's name, say), so one

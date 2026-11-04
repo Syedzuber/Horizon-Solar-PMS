@@ -1,10 +1,10 @@
 """
 Deferred external sends (NTF-DCG Session 2, ruling N9).
 
-For an event registered with deferred=True, notify()'s email leg does not call the
-provider in the request. _send_to_one() renders the email as it always does, then calls
-defer(), which writes a 'pending' NotificationLog row and hands the send to a small
-background pool. The job calls send_notification() with log_row_id, so the master
+For an event registered with deferred=True, notify()'s email and WhatsApp legs (the
+latter from Session 3a) do not call the provider in the request. _send_to_one() renders
+the email, or builds and sanitises the WhatsApp values, then calls defer(), which
+writes a 'pending' NotificationLog row and hands the send to a small background pool. The job calls send_notification() with log_row_id, so the master
 switch, the person's preference and the provider call all run exactly as for a
 synchronous send, and their outcome finishes that same row: sent, failed or skipped.
 send_notification() stays the only thing that talks to Interakt or ZeptoMail.
@@ -45,10 +45,13 @@ from .notifications import finish_pending, send_notification
 
 logger = logging.getLogger(__name__)
 
-# Small on purpose: production runs one gunicorn worker (SECONDARY_FINDINGS, NTF-DCG
-# S2), so this is the whole site's concurrent provider traffic, and every thread holds
-# a database connection while it works.
-MAX_WORKERS = 4
+# PER PROCESS, and small on purpose: every gunicorn worker has its own pool, so the
+# site's concurrent provider traffic is MAX_WORKERS x the worker count, and every thread
+# holds a database connection while it works. Production runs (or will run) 2 workers,
+# so 2 here keeps the total at 4 (NTF-DCG S3a, W6). The worker count is set by the
+# GUNICORN_CMD_ARGS Railway variable, not by the Procfile, which passes no --workers:
+# raising it there multiplies this.
+MAX_WORKERS = 2
 
 _POOL = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix='notify-deferred')
 
@@ -57,7 +60,7 @@ def defer(*, recipient, channel, row_fields, send_kwargs):
     """Write the 'pending' row for one deferred send and hand it off. Returns the row pk.
 
     recipient   : UserProfile; the job loads it again by pk on its own connection.
-    channel     : 'email' (or 'whatsapp' from Session 3), the row's channel.
+    channel     : 'email' or 'whatsapp', the row's channel.
     row_fields  : the row's fixed fields, as notify._log_base builds them, plus
                   event_code and template_version.
     send_kwargs : send_notification()'s arguments other than recipient and log_row_id;

@@ -15,14 +15,25 @@ in-app text, default subject or default body that the event does not declare, so
 default that cannot render never reaches a deploy. `link` and `recipient_name` are
 reserved: notify() supplies them for every send, and no event may declare them.
 
-This module imports nothing from the app, so models.py, notify.py and notify_admin.py
-can all import it without a cycle.
+WHATSAPP (NTF-DCG Session 3a, rulings W1-W2). A deferred event may declare a WhatsApp
+leg: a WhatsAppSpec naming the approved Interakt template, its language, its approved
+header and body text, and a builder that turns the event's values into
+[header, *body]. The template's wording lives in Interakt, not here; the texts are
+declared only so the import-time check can verify the counts and Meta's layout rules
+against what was approved. A WhatsApp channel starts PAUSED whatever the event's
+default_state (default_state_for) and is switched on by Admin only.
+
+This module imports nothing from the app except whatsapp_params, which is pure and
+imports nothing itself, so models.py, notify.py and notify_admin.py can all import it
+without a cycle.
 """
 
 import re
 from dataclasses import dataclass
 
 from django.core.exceptions import ImproperlyConfigured
+
+from .whatsapp_params import BODY_LIMIT, HEADER_LIMIT
 
 TIER_ACT  = 'ACT'    # the recipient has something to do
 TIER_KNOW = 'KNOW'   # the recipient is being told something
@@ -43,12 +54,45 @@ RESERVED_SAMPLES = {'recipient_name': 'Priya Sharma', 'link': '/'}
 PLACEHOLDER_RE = re.compile(r'\{\{(.*?)\}\}', re.S)
 IDENTIFIER_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
+# Interakt/Meta numbered variables in an approved WhatsApp text: {{1}}, {{2}}, ...
+WA_VARIABLE_RE = re.compile(r'\{\{\s*(\d+)\s*\}\}')
+# Two variables with nothing but whitespace between them, which Meta refuses (Q5).
+_WA_ADJACENT_RE = re.compile(r'\{\{\s*\d+\s*\}\}\s*\{\{\s*\d+\s*\}\}')
+
+# The channel whose default is always paused (ruling W2): a new WhatsApp leg sends
+# nothing until Admin switches it on, after a real-phone test (notify_admin.set_state).
+WHATSAPP = 'whatsapp'
+
 
 @dataclass(frozen=True)
 class Variable:
     name: str
     meaning: str   # one line shown to Admin beside the placeholder
     sample: str    # used by the preview, never by a real send
+
+
+@dataclass(frozen=True)
+class WhatsAppSpec:
+    """The WhatsApp leg of an event (ruling W1). Checked at import by _build_registry.
+
+    `params` is called with the event's values (recipient_name and the absolute link
+    included) and returns [header, *body] in Interakt's REGISTERED order: params[0] is
+    the header value, params[1:] the body values (the convention every approved
+    template of ours follows; each has exactly one header variable). Values need not be
+    clean: notify() passes them through whatsapp_params.sanitise_params() before the send.
+    """
+    template: str            # Interakt template name, exactly as approved in the console
+    language: str            # Meta language code the template is approved in, e.g. 'en'
+    header_text: str         # The approved header, its one variable written {{1}}
+    body_text: str           # The approved body, its variables written {{1}}..{{n}}
+    header_fixed_chars: int  # Characters of header_text outside its variable; checked against the text
+    body_fixed_chars: int    # Characters of body_text outside its variables; checked against the text
+    param_count: int         # 1 header value + n body values; the builder must return exactly this many
+    params: object           # Callable(values) -> [header, *body]
+
+    def fixed_chars(self, text):
+        """`text` without its variables, as Interakt counts the rendered length."""
+        return len(WA_VARIABLE_RE.sub('', text))
 
 
 @dataclass(frozen=True)
@@ -74,6 +118,19 @@ class NotificationEvent:
     # provider; each send gets a 'pending' log row that moves to sent/failed/skipped.
     # In-app stays synchronous. Opt-in per event: no event shipped before S2 sets it.
     deferred: bool = False
+    # NTF-DCG S3a (W1): the WhatsApp leg sent through notify(), or None. Declaring it
+    # needs deferred=True and 'whatsapp' in channels (and the reverse); see
+    # _whatsapp_errors. Not to be confused with whatsapp_sent_separately, which marks a
+    # call site that still sends WhatsApp itself, outside notify().
+    whatsapp: WhatsAppSpec = None
+
+    def default_state_for(self, channel):
+        """The state of `channel` when Admin has never switched it: WhatsApp is always
+        paused (ruling W2), every other channel follows default_state. The one rule for
+        notify.channel_is_active and the notification screens, so they cannot disagree."""
+        if channel == WHATSAPP:
+            return 'paused'
+        return self.default_state
 
     @property
     def variable_names(self):
@@ -90,6 +147,77 @@ class NotificationEvent:
 def placeholder_names(text):
     """The stripped contents of every {{ ... }} in `text`, in order, repeats kept."""
     return [m.group(1).strip() for m in PLACEHOLDER_RE.finditer(text or '')]
+
+
+def _wa_text_errors(where, label, text, count, fixed_chars):
+    """Faults in one approved WhatsApp text: its variables must be {{1}}..{{count}}, each
+    once; it may not begin or end with a variable, nor hold two side by side (Meta's
+    layout rules, Q5); its declared fixed length must match the text."""
+    errors = []
+    numbers = [int(n) for n in WA_VARIABLE_RE.findall(text)]
+    if sorted(numbers) != list(range(1, count + 1)):
+        errors.append(f'{where}: whatsapp {label} must use {{{{1}}}}..{{{{{count}}}}} '
+                      f'once each; it uses {numbers}')
+    if len(placeholder_names(text)) != len(numbers):
+        errors.append(f'{where}: whatsapp {label} has a {{{{ }}}} that is not a number')
+    stripped = text.strip()
+    if numbers and WA_VARIABLE_RE.match(stripped):
+        errors.append(f'{where}: whatsapp {label} may not begin with a variable')
+    if numbers and re.search(r'\{\{\s*\d+\s*\}\}$', stripped):
+        errors.append(f'{where}: whatsapp {label} may not end with a variable')
+    if _WA_ADJACENT_RE.search(text):
+        errors.append(f'{where}: whatsapp {label} has two variables side by side')
+    actual = len(WA_VARIABLE_RE.sub('', text))
+    if fixed_chars != actual:
+        errors.append(f'{where}: whatsapp {label}_fixed_chars is {fixed_chars}, '
+                      f'the text has {actual}')
+    return errors
+
+
+def _whatsapp_errors(event, where):
+    """Faults in an event's WhatsApp leg (rulings W1, Q5). Empty when it has none and
+    does not list the channel."""
+    spec = event.whatsapp
+    listed = WHATSAPP in (event.channels or ())
+    if spec is None:
+        return [f'{where}: lists the whatsapp channel but declares no WhatsAppSpec'] if listed else []
+    errors = []
+    if not isinstance(spec, WhatsAppSpec):
+        return [f'{where}: whatsapp must be a WhatsAppSpec']
+    if not event.deferred:
+        # W1: WhatsApp is sent only through the deferred path, so the request never
+        # waits on Interakt and every send has a pending row.
+        errors.append(f'{where}: declares WhatsApp but is not deferred')
+    if not listed:
+        errors.append(f'{where}: declares WhatsApp but does not list the whatsapp channel')
+    if not spec.template or not spec.language:
+        errors.append(f'{where}: whatsapp template and language are required')
+    if not callable(spec.params):
+        errors.append(f'{where}: whatsapp params must be callable')
+    if not isinstance(spec.param_count, int) or spec.param_count < 1:
+        # The header value is always params[0] (W1), so at least one value.
+        return errors + [f'{where}: whatsapp param_count must be at least 1']
+    body_count = spec.param_count - 1
+    errors += _wa_text_errors(where, 'header', spec.header_text, 1, spec.header_fixed_chars)
+    errors += _wa_text_errors(where, 'body', spec.body_text, body_count, spec.body_fixed_chars)
+    # Room for the values once the fixed text is counted: at least one character each,
+    # or sanitise_params() could not keep a rendered message under Interakt's limits.
+    if HEADER_LIMIT - spec.header_fixed_chars < 1:
+        errors.append(f'{where}: whatsapp header text leaves no room for its value')
+    if BODY_LIMIT - spec.body_fixed_chars < body_count:
+        errors.append(f'{where}: whatsapp body text leaves no room for its values')
+    if callable(spec.params):
+        try:
+            out = spec.params(event.samples())
+        except Exception as exc:
+            errors.append(f'{where}: whatsapp params builder fails on the samples: '
+                          f'{type(exc).__name__}: {exc}')
+        else:
+            if not isinstance(out, (list, tuple)) or len(out) != spec.param_count:
+                got = len(out) if isinstance(out, (list, tuple)) else type(out).__name__
+                errors.append(f'{where}: whatsapp params builder returns {got} values, '
+                              f'param_count is {spec.param_count}')
+    return errors
 
 
 def _build_registry(events):
@@ -121,6 +249,7 @@ def _build_registry(events):
                 if name not in available:
                     errors.append(f'{where}: {field} uses undeclared placeholder '
                                   f'{{{{ {name} }}}}')
+        errors.extend(_whatsapp_errors(event, where))
         registry[event.code] = event
     if errors:
         raise ImproperlyConfigured('; '.join(errors))

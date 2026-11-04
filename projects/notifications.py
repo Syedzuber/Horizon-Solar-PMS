@@ -14,6 +14,7 @@ Layer 5 guardrails:
 """
 
 import logging
+import re
 
 import requests
 from django.conf import settings
@@ -44,6 +45,8 @@ def send_notification(
     event_code=None,
     template_version=None,
     log_row_id=None,
+    whatsapp_language='en',
+    whatsapp_strict_phone=False,
 ):
     """
     Send a notification to recipient on one or more channels.
@@ -71,6 +74,12 @@ def send_notification(
                           creating a new one (NTF-DCG S2). Passed only by notify_deferred,
                           with one channel. None for every other caller, whose rows are
                           created exactly as before.
+        whatsapp_language     : Meta language code of the Interakt template. 'en', the
+                          value every legacy caller has always sent, unless a registry
+                          event's WhatsAppSpec names another (NTF-DCG S3a, W1).
+        whatsapp_strict_phone : True refuses a number that is not a valid Indian mobile
+                          after normalising (ruling W5). Passed only by notify()'s
+                          WhatsApp leg; legacy callers keep the old, looser check.
     """
     from .models import Notification, NotificationLog, SystemSettings
 
@@ -114,7 +123,8 @@ def send_notification(
             if not recipient.whatsapp_notifications:
                 _log(_base, 'whatsapp', 'skipped', 'User preference off')
                 continue
-            _send_whatsapp(recipient, template, template_params, _base)
+            _send_whatsapp(recipient, template, template_params, _base,
+                           language=whatsapp_language, strict_phone=whatsapp_strict_phone)
 
         elif channel == 'email':
             if not email_enabled:
@@ -140,51 +150,101 @@ def _send_in_app(recipient, message, link, base):
         _log(base, 'in_app', 'failed', str(e))
 
 
-def _send_whatsapp(recipient, template, template_params, base):
-    if not template:
-        _log(base, 'whatsapp', 'failed', 'No template name provided')
-        return
+INTERAKT_URL = 'https://api.interakt.ai/v1/public/message/'
 
-    phone = (recipient.phone_number or '').strip()
-    if not phone:
-        _log(base, 'whatsapp', 'failed', 'Recipient has no phone number')
-        return
+# A WhatsApp number the strict check accepts (ruling W5): ten digits starting 6-9, the
+# rule every user form already applies to UserProfile.phone_number.
+_INDIAN_MOBILE_RE = re.compile(r'[6-9][0-9]{9}')
 
-    # Normalise: DB stores raw 10-digit number without country code.
-    # Guard against double-prefixing if someone saves "+91..." or "91..." in the DB.
+NO_VALID_WHATSAPP_NUMBER = 'no valid WhatsApp number on profile'
+
+
+def whatsapp_number(raw):
+    """`raw` as Interakt's phoneNumber: stripped, with a +91 / 12-digit 91 prefix removed.
+
+    The one normaliser, used by _send_whatsapp() as it always was, by notify()'s
+    duplicate-phone check (W9) and by test_whatsapp. Nothing is validated here: a legacy
+    send has always posted whatever this returns.
+    """
+    # DB stores raw 10-digit number without country code. Guard against
+    # double-prefixing if someone saves "+91..." or "91..." in the DB.
+    phone = (raw or '').strip()
     if phone.startswith('+91'):
-        phone_digits = phone[3:]
-    elif phone.startswith('91') and len(phone) == 12:
-        phone_digits = phone[2:]
-    else:
-        phone_digits = phone
+        return phone[3:]
+    if phone.startswith('91') and len(phone) == 12:
+        return phone[2:]
+    return phone
 
-    api_key = getattr(settings, 'INTERAKT_API_KEY', '')
-    if not api_key:
-        _log(base, 'whatsapp', 'failed', 'INTERAKT_API_KEY not configured')
-        return
 
-    # Interakt template API: header and body variables are separate fields.
-    # Convention: pass template_params as one flat list — first element is the single
-    # header variable value, remaining elements are body variable values (in registered order).
-    # This matches all our approved templates which each have exactly 1 header variable.
+def valid_whatsapp_number(raw):
+    """whatsapp_number(raw) when it is a valid Indian mobile, else None (ruling W5)."""
+    digits = whatsapp_number(raw)
+    return digits if _INDIAN_MOBILE_RE.fullmatch(digits) else None
+
+
+def interakt_payload(phone_digits, template, template_params, callback, language='en'):
+    """The Interakt template-message body. The single home of its shape.
+
+    Interakt template API: header and body variables are separate fields.
+    Convention: pass template_params as one flat list — first element is the single
+    header variable value, remaining elements are body variable values (in registered
+    order). This matches all our approved templates which each have exactly 1 header
+    variable. Built exactly as _send_whatsapp() built it before NTF-DCG S3a, key order
+    included, so a legacy send posts the same bytes; `language` defaults to the 'en'
+    that was hard-coded.
+    """
     params = [str(p) for p in (template_params or [])]
-    payload = {
+    return {
         'countryCode': '+91',
         'phoneNumber': phone_digits,
-        'callbackData': f'solarpms-{recipient.pk}',
+        'callbackData': callback,
         'type': 'Template',
         'template': {
             'name': template,
-            'languageCode': 'en',
+            'languageCode': language,
             'headerValues': params[:1],   # first element = the single header variable
             'bodyValues':   params[1:],   # remaining elements = body variables
         },
     }
 
+
+def _send_whatsapp(recipient, template, template_params, base, language='en',
+                   strict_phone=False):
+    """Post one template message and log its outcome. Never raises.
+
+    Returns {'payload', 'status_code', 'response_text'} for the caller that wants to
+    print what happened (test_whatsapp, W7); every key is None when no request was made.
+    send_notification() ignores it.
+    """
+    result = {'payload': None, 'status_code': None, 'response_text': None}
+    if not template:
+        _log(base, 'whatsapp', 'failed', 'No template name provided')
+        return result
+
+    if strict_phone:
+        phone_digits = valid_whatsapp_number(recipient.phone_number)
+        if phone_digits is None:
+            _log(base, 'whatsapp', 'failed', NO_VALID_WHATSAPP_NUMBER)
+            return result
+    else:
+        phone = (recipient.phone_number or '').strip()
+        if not phone:
+            _log(base, 'whatsapp', 'failed', 'Recipient has no phone number')
+            return result
+        phone_digits = whatsapp_number(phone)
+
+    api_key = getattr(settings, 'INTERAKT_API_KEY', '')
+    if not api_key:
+        _log(base, 'whatsapp', 'failed', 'INTERAKT_API_KEY not configured')
+        return result
+
+    payload = interakt_payload(phone_digits, template, template_params,
+                               f'solarpms-{recipient.pk}', language)
+    result['payload'] = payload
+
     try:
         resp = requests.post(
-            'https://api.interakt.ai/v1/public/message/',
+            INTERAKT_URL,
             headers={
                 'Authorization': f'Basic {api_key}',
                 'Content-Type': 'application/json',
@@ -192,6 +252,7 @@ def _send_whatsapp(recipient, template, template_params, base):
             json=payload,
             timeout=10,
         )
+        result['status_code'], result['response_text'] = resp.status_code, resp.text
         body = resp.text[:500]
         if 200 <= resp.status_code < 300:
             try:
@@ -200,10 +261,11 @@ def _send_whatsapp(recipient, template, template_params, base):
             except Exception:
                 msg_id = ''
             _log(base, 'whatsapp', 'sent', interakt_message_id=msg_id)
-            return
+            return result
         _log(base, 'whatsapp', 'failed', f'HTTP {resp.status_code}: {body}')
     except Exception as e:
         _log(base, 'whatsapp', 'failed', str(e))
+    return result
 
 
 def _zeptomail_post(to_email, to_name, subject, text_body, html_body=None):

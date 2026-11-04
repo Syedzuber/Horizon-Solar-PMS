@@ -152,7 +152,7 @@ def admin_notification_events(request):
             stats = stats_by.get((event.code, channel), {})
             channels.append({
                 'channel': channel,
-                'active': setting.is_active if setting else event.default_state == 'active',
+                'active': setting.is_active if setting else event.default_state_for(channel) == 'active',
                 'is_default_state': setting is None,
                 'live_version': live_by.get((event.code, channel)),
                 'last_sent': stats.get('last_sent'),
@@ -204,7 +204,7 @@ def admin_notification_event(request, event_code):
         subject, html, error = _preview(event, live)
         channels.append({
             'channel': channel,
-            'active': setting.is_active if setting else event.default_state == 'active',
+            'active': setting.is_active if setting else event.default_state_for(channel) == 'active',
             'is_default_state': setting is None,
             'live': live,
             'draft': draft,

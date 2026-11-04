@@ -22,12 +22,14 @@ counts only when its log row is 'sent' and:
 Refusals raise NotificationAdminRefused with a sentence a screen can show.
 """
 
+from datetime import timedelta
+
 from django.db import transaction
 from django.db.models import Max, ProtectedError
 from django.utils import timezone
 
 from .models import (
-    NOTIFY_CHANNEL_EMAIL, NOTIFY_STATE_ACTIVE, NOTIFY_STATE_PAUSED,
+    NOTIFY_CHANNEL_EMAIL, NOTIFY_CHANNEL_WHATSAPP, NOTIFY_STATE_ACTIVE, NOTIFY_STATE_PAUSED,
     NotificationEventSetting, NotificationEventSettingChange, NotificationLog,
     NotificationTemplate,
 )
@@ -40,6 +42,14 @@ BODY_MAX_CHARS = 5000
 # NotificationLog.template_name of every test send, and the subject's prefix.
 TEST_TEMPLATE_NAME  = 'notify_test'
 TEST_SUBJECT_PREFIX = '[TEST] '
+
+# A WhatsApp test (test_whatsapp --event, NTF-DCG S3a W7) cannot use TEST_TEMPLATE_NAME:
+# its template_name must be the Interakt template, which the switch-on gate matches
+# (ruling Q3). It reuses the other existing marker, the '[TEST] ' prefix, at the start
+# of the row's message. A real WhatsApp row's message starts 'header: ' (describe_params).
+WHATSAPP_TEST_MARKER = TEST_SUBJECT_PREFIX
+# How recent that test must be for set_state() to switch the WhatsApp channel on (Q3).
+WHATSAPP_TEST_WINDOW = timedelta(days=14)
 
 
 class NotificationAdminRefused(Exception):
@@ -270,6 +280,25 @@ def _sent_tests(event_code, channel, template):
     return rows.filter(template_version=template)
 
 
+def whatsapp_tested(event, now=None):
+    """Q3: a W7 test of the event's CURRENT Interakt template, sent, in the window.
+
+    A W7 row is a NotificationLog row on the whatsapp channel carrying the event code,
+    the Interakt template name as template_name, and a message starting with
+    WHATSAPP_TEST_MARKER (test_whatsapp writes it). Matching the template name means a
+    change of template in the registry makes earlier tests stop counting, as a change of
+    email wording does for live_content_tested().
+    """
+    if event.whatsapp is None:
+        return False
+    since = (now or timezone.now()) - WHATSAPP_TEST_WINDOW
+    return NotificationLog.objects.filter(
+        channel=NOTIFY_CHANNEL_WHATSAPP, event_code=event.code,
+        template_name=event.whatsapp.template, status='sent',
+        message__startswith=WHATSAPP_TEST_MARKER, created_at__gte=since,
+    ).exists()
+
+
 def version_tested(template):
     """A6 + P3: a sent test of this exact version, after its last save."""
     since = template.updated_at or template.created_at
@@ -368,7 +397,8 @@ def set_state(event_code, channel, is_active, by, reason):
 
     The setting row and its history row are written in one transaction. Switching to
     the state it is already in is refused, so the history holds changes only. Switching
-    email on is refused until the live content has been test-sent (A7, ruling T-4).
+    email on is refused until the live content has been test-sent (A7, ruling T-4);
+    switching WhatsApp on, until whatsapp_tested() (NTF-DCG S3a, Q3).
     """
     event = _event_for(event_code, channel)
     reason = (reason or '').strip()
@@ -394,6 +424,16 @@ def set_state(event_code, channel, is_active, by, reason):
             raise NotificationAdminRefused(
                 'Send a test of the live content to yourself first. For an active '
                 'version the test must be sent after it was activated.')
+        # NTF-DCG S3a (Q3): WhatsApp goes on only after a real-phone test of the
+        # template the event sends NOW. There is no screen test for WhatsApp; the test is
+        # manage.py test_whatsapp --event, which writes the row this looks for. Pausing
+        # is never gated: stopping a bad message must always be possible.
+        if is_active and channel == NOTIFY_CHANNEL_WHATSAPP and not whatsapp_tested(event):
+            template = event.whatsapp.template if event.whatsapp else '(none declared)'
+            raise NotificationAdminRefused(
+                f'Test this WhatsApp on a real phone first: run "manage.py test_whatsapp '
+                f'--event {event.code} --user <your username>". A sent test of template '
+                f'{template} from the last {WHATSAPP_TEST_WINDOW.days} days is needed.')
 
         if setting is None:
             setting = NotificationEventSetting(event_code=event_code, channel=channel)
