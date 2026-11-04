@@ -258,6 +258,7 @@ from .design_views import (
 # DC-B1 — a site's delivery challans counted by status, for the DC detail page and the
 # overview's Delivery Challans card. Read-only; the module imports models and nothing else.
 from .delivery_summary import site_challan_counts, site_challan_counts_for_project
+from .delivery_notify import notify_dc_created
 from .delivery_storage import (
     DC_DOCUMENTS_MAX_FILES, DeliveryStorageError, delivery_bucket,
     discard_unrecorded_dc_document, dc_document_url, upload_dc_document,
@@ -14100,6 +14101,11 @@ def _create_delivery_challan_rows(request, project, profile, vendor, warehouse, 
             project, profile, dc_rule_hits, challan=challan,
             reason=request.POST.get('phase_rule_reason', ''), may_explain=dc_may_explain,
         )
+
+        # NTF-DCG 3b (D4): tell the site's Site Engineers. Last in the block, after the
+        # lines it summarises; notify() sends on commit, so a create that rolls back
+        # tells nobody. Fired on the R1 path too — that warning is about design.
+        notify_dc_created(project, challan, profile)
     return challan, dc_rule_rows, dc_may_explain
 
 

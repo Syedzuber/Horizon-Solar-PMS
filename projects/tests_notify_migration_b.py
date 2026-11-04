@@ -844,7 +844,10 @@ class SeedNewEventsTests(TestCase):
 
     def test_a_run_after_t3a_seeds_only_the_new_events(self):
         _admin()
-        old = [code for code in NOTIFICATION_EVENTS if code not in self.NEW]
+        # Email events only: the command seeds email versions and refuses --event for an
+        # event with no email channel (NTF-DCG 3b's in-app + WhatsApp ones).
+        old = [code for code, event in NOTIFICATION_EVENTS.items()
+               if code not in self.NEW and 'email' in event.channels]
         for code in old:
             self._run('--event', code)
         self.assertEqual(set(NotificationTemplate.objects.values_list('event_code', flat=True)),

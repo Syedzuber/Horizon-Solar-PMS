@@ -271,7 +271,11 @@ def _send_to_one(event, recipient, values, actor, related_project, link, plan, l
     every recipient of one notify() call.
     """
     name = recipient.user.get_full_name() or recipient.user.username
-    values = dict(values, recipient_name=name, link=absolute_url(link))
+    # NTF-DCG 3b (Q3): the first name, for a WhatsApp greeting. A key no other event
+    # declares, so their rendering cannot read it and is byte-identical.
+    first_name = recipient.user.first_name.strip() or recipient.user.username
+    values = dict(values, recipient_name=name, recipient_first_name=first_name,
+                  link=absolute_url(link))
     allowed = event.variable_names
     base = _log_base(event, recipient, actor, related_project, log_label)
 

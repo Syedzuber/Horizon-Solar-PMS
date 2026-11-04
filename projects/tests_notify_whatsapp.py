@@ -244,13 +244,13 @@ class RegistryCheckTests(SimpleTestCase):
         self.assertRefused(_event(whatsapp=_spec(params=lambda v: [v['nope']] * 4)),
                            'fails on the samples')
 
-    def test_header_may_not_begin_or_end_with_its_variable(self):
-        self.assertRefused(_event(whatsapp=_spec(header_text='{{1}} delivery',
-                                                 header_fixed_chars=9)),
-                           'header may not begin with a variable')
-        self.assertRefused(_event(whatsapp=_spec(header_text='Delivery {{1}}',
-                                                 header_fixed_chars=9)),
-                           'header may not end with a variable')
+    def test_header_may_begin_or_end_with_its_variable(self):
+        # NTF-DCG 3b, ruling D1: Meta approved headers ending in their variable, so the
+        # begin/end rule is the body's only (the body test below is unchanged).
+        for header in ('{{1}} delivery', 'Delivery {{1}}'):
+            with self.subTest(header=header):
+                _build_registry([_event(whatsapp=_spec(header_text=header,
+                                                       header_fixed_chars=9))])
 
     def test_body_may_not_begin_or_end_with_a_variable(self):
         body = '{{1}} challan {{2}} open {{3}} now'
@@ -288,9 +288,10 @@ class RegistryCheckTests(SimpleTestCase):
         self.assertEqual(event.default_state_for('email'), 'active')
 
     def test_no_shipped_event_declares_whatsapp(self):
-        # W8: infrastructure only in this session.
+        # W8: infrastructure only in 3a; NTF-DCG 3b added the two challan events.
         self.assertEqual([e.code for e in NOTIFICATION_EVENTS.values()
-                          if e.whatsapp is not None or 'whatsapp' in e.channels], [])
+                          if e.whatsapp is not None or 'whatsapp' in e.channels],
+                         ['dc_created', 'dc_updated'])
         self.assertNotIn(WA_EVENT, NOTIFICATION_EVENTS)
 
 

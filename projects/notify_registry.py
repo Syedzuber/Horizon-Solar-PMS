@@ -149,10 +149,11 @@ def placeholder_names(text):
     return [m.group(1).strip() for m in PLACEHOLDER_RE.finditer(text or '')]
 
 
-def _wa_text_errors(where, label, text, count, fixed_chars):
+def _wa_text_errors(where, label, text, count, fixed_chars, *, check_ends=True):
     """Faults in one approved WhatsApp text: its variables must be {{1}}..{{count}}, each
-    once; it may not begin or end with a variable, nor hold two side by side (Meta's
-    layout rules, Q5); its declared fixed length must match the text."""
+    once; it may not hold two side by side (Meta's layout rules, Q5); its declared fixed
+    length must match the text. With `check_ends` (the body), it may also not begin or
+    end with a variable."""
     errors = []
     numbers = [int(n) for n in WA_VARIABLE_RE.findall(text)]
     if sorted(numbers) != list(range(1, count + 1)):
@@ -161,9 +162,14 @@ def _wa_text_errors(where, label, text, count, fixed_chars):
     if len(placeholder_names(text)) != len(numbers):
         errors.append(f'{where}: whatsapp {label} has a {{{{ }}}} that is not a number')
     stripped = text.strip()
-    if numbers and WA_VARIABLE_RE.match(stripped):
+    # The begin/end rule is the BODY's only (NTF-DCG 3b, ruling D1). Meta's documented
+    # "dangling parameter" refusal is about the body; Interakt/Meta approved dc_created
+    # and dc_updated on 4 Nov 2026 with headers ENDING in their variable
+    # ("Challan updated – {{1}}"), and no source shows a rule for a header that begins
+    # with one either, so the header has neither check. Every body check stays.
+    if check_ends and numbers and WA_VARIABLE_RE.match(stripped):
         errors.append(f'{where}: whatsapp {label} may not begin with a variable')
-    if numbers and re.search(r'\{\{\s*\d+\s*\}\}$', stripped):
+    if check_ends and numbers and re.search(r'\{\{\s*\d+\s*\}\}$', stripped):
         errors.append(f'{where}: whatsapp {label} may not end with a variable')
     if _WA_ADJACENT_RE.search(text):
         errors.append(f'{where}: whatsapp {label} has two variables side by side')
@@ -198,7 +204,8 @@ def _whatsapp_errors(event, where):
         # The header value is always params[0] (W1), so at least one value.
         return errors + [f'{where}: whatsapp param_count must be at least 1']
     body_count = spec.param_count - 1
-    errors += _wa_text_errors(where, 'header', spec.header_text, 1, spec.header_fixed_chars)
+    errors += _wa_text_errors(where, 'header', spec.header_text, 1, spec.header_fixed_chars,
+                              check_ends=False)
     errors += _wa_text_errors(where, 'body', spec.body_text, body_count, spec.body_fixed_chars)
     # Room for the values once the fixed text is counted: at least one character each,
     # or sanitise_params() could not keep a rendered message under Interakt's limits.
@@ -254,6 +261,59 @@ def _build_registry(events):
     if errors:
         raise ImproperlyConfigured('; '.join(errors))
     return registry
+
+
+# --- NTF-DCG 3b: the two approved delivery-challan templates -------------------------
+# Copied exactly as Interakt approved them (language en, both with the fixed footer
+# "Horizon Renewable Power", which is not a variable and not sent). The dash in each
+# header is an en dash, U+2013. The two bodies differ on purpose — "Thanks." / "Thanks",
+# and dc_updated's link is followed by a full stop — because that is what was approved.
+DC_CREATED_HEADER = 'Material dispatch – {{1}}'
+DC_CREATED_BODY = (
+    'Hello {{1}},\n\n'
+    'Delivery challan {{2}} has been created for site {{3}}.\n\n'
+    'Material: {{4}}\n'
+    'Expected delivery: {{5}}\n\n'
+    'Please check the challan and be ready to receive the material: {{6}}\n\n'
+    'Thanks.'
+)
+DC_UPDATED_HEADER = 'Challan updated – {{1}}'
+DC_UPDATED_BODY = (
+    'Hello {{1}},\n\n'
+    'Delivery challan {{2}} for site {{3}} has been updated by SCM.\n\n'
+    'Updated material: {{4}}\n'
+    'Expected delivery: {{5}}\n\n'
+    'Please refer to the latest challan before receiving the material: {{6}}.\n\n'
+    'Thanks'
+)
+
+
+def _dc_whatsapp_params(values):
+    """[header, *body] for both challan templates, in Interakt's registered order:
+    site code | first name, DC number, site name, material, delivery date, link.
+    `link` is already absolute (notify() and test_whatsapp make it so); the rest come
+    from delivery_notify.challan_values() and notify()'s recipient_first_name."""
+    return [values['site_code'], values['recipient_first_name'], values['dc_number'],
+            values['site_name'], values['material_summary'], values['delivery_text'],
+            values['link']]
+
+
+# The variables both challan events declare. recipient_first_name is supplied by
+# notify() for each person (it overrides anything passed); it is declared only so the
+# W7 test's samples hold one.
+_DC_VARIABLES = (
+    Variable('site_code', 'The site code (the project ID)', 'UKRU001'),
+    Variable('site_name', 'The site name; for a site without one, the customer (and '
+             'city, on a tender site)', 'Rashtrapati Udyan-Dehradun'),
+    Variable('dc_number', 'The challan number, as printed on the vendor document', '004'),
+    Variable('material_summary', 'Up to five lines "description qty unit", then '
+             '"+N more items" (never a rate or amount)',
+             '1C x 4 Sqmm DC solar cable 2000 Mtr; MC4 Connector 200 Pair'),
+    Variable('delivery_text', 'The expected delivery date, or "Not given (dispatched '
+             '<DC date>)"', '08 Nov 2026'),
+    Variable('recipient_first_name', 'The recipient\'s first name, else their username '
+             '(filled in for each person)', 'Priya'),
+)
 
 
 NOTIFICATION_EVENTS = _build_registry([
@@ -1384,6 +1444,59 @@ NOTIFICATION_EVENTS = _build_registry([
                          'command and is not paused here.'),
         default_state='paused',
         whatsapp_sent_separately=True,
+    ),
+
+    # --- NTF-DCG 3b: delivery challan created / updated -------------------------------
+    # In-app and WhatsApp, no email (ruling D2). Deferred, as every WhatsApp event must
+    # be. The WhatsApp channel starts paused whatever default_state says
+    # (default_state_for); 'active' here is the in-app default. Fired only by
+    # delivery_notify, from the create view and the challan edit save.
+    NotificationEvent(
+        code='dc_created',
+        label='Delivery challan created',
+        module='Delivery',
+        tier=TIER_ACT,
+        channels=('whatsapp',),
+        variables=_DC_VARIABLES,
+        in_app_text=('Delivery challan {{ dc_number }} created for {{ site_code }} — '
+                     'expected delivery: {{ delivery_text }}.'),
+        default_subject='',
+        default_body='',
+        button_label='',
+        recipients_rule=('Active Site Engineers holding at least one open task (not Done, '
+                         'not Not Applicable) on the site, except its QA/QC engineer; if '
+                         'none, the site\'s assigned PM. Never the person who created the '
+                         'challan.'),
+        default_state='active',
+        deferred=True,
+        whatsapp=WhatsAppSpec(
+            template='dc_created', language='en',
+            header_text=DC_CREATED_HEADER, body_text=DC_CREATED_BODY,
+            header_fixed_chars=20, body_fixed_chars=160, param_count=7,
+            params=_dc_whatsapp_params),
+    ),
+    NotificationEvent(
+        code='dc_updated',
+        label='Delivery challan updated',
+        module='Delivery',
+        tier=TIER_ACT,
+        channels=('whatsapp',),
+        variables=_DC_VARIABLES,
+        in_app_text=('Delivery challan {{ dc_number }} for {{ site_code }} updated by SCM — '
+                     'expected delivery: {{ delivery_text }}.'),
+        default_subject='',
+        default_body='',
+        button_label='',
+        recipients_rule=('As "Delivery challan created". Sent only when an edit changes a '
+                         'line or the expected delivery date, and never once the challan '
+                         'is Received or Rejected.'),
+        default_state='active',
+        deferred=True,
+        whatsapp=WhatsAppSpec(
+            template='dc_updated', language='en',
+            header_text=DC_UPDATED_HEADER, body_text=DC_UPDATED_BODY,
+            header_fixed_chars=18, body_fixed_chars=178, param_count=7,
+            params=_dc_whatsapp_params),
     ),
 ])
 

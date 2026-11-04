@@ -26,8 +26,9 @@ THE ORDER, which is what makes it all-or-nothing (the GRN views' shape):
 
 and on ANY exception from the block the uploads are discarded.
 
-This module imports models, storage, forms, number_input and grn_damage's lock; it is
-imported by views.py and never imports it, so there is no cycle.
+This module imports models, storage, forms, number_input, grn_damage's lock and
+delivery_notify (NTF-DCG 3b); it is imported by views.py and never imports it, so there
+is no cycle (delivery_notify reaches views only lazily, at call time).
 """
 import re
 from dataclasses import dataclass, field
@@ -38,6 +39,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Exists, OuterRef
 
+from .delivery_notify import notify_dc_updated
 from .delivery_storage import (
     DC_DOCUMENTS_MAX_FILES, DeliveryStorageError, delivery_bucket,
     discard_unrecorded_dc_document, upload_dc_document, validate_dc_document,
@@ -756,4 +758,9 @@ def _write_edit(plan, project, challan, profile, stored):
               else f'Edited DC {old_number} — now {locked.dc_number}')
     log_activity(project, profile, action, entity_type='DeliveryChallan',
                  entity_id=locked.pk, action_code='dc_edited')
+
+    # NTF-DCG 3b (D5): dc_updated, decided from this revision's two snapshots — silent
+    # for a header-only edit or a Received/Rejected challan. Inside the block, so an
+    # edit that rolls back tells nobody.
+    notify_dc_updated(project, revision, profile)
     return revision

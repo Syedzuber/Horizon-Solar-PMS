@@ -263,9 +263,11 @@ class ShippedRegistryTests(TestCase):
     """Outside Base, whose setUp makes admin_test_message deferred."""
 
     def test_no_shipped_event_is_deferred(self):
-        # S1: the 38 events that existed before S2 all stay synchronous.
-        self.assertEqual(len(NOTIFICATION_EVENTS), 38)
-        self.assertEqual([c for c, e in NOTIFICATION_EVENTS.items() if e.deferred], [])
+        # S1: the 38 events that existed before S2 all stay synchronous. NTF-DCG 3b added
+        # the two delivery-challan events, deferred because they send WhatsApp.
+        self.assertEqual(len(NOTIFICATION_EVENTS), 40)
+        self.assertEqual([c for c, e in NOTIFICATION_EVENTS.items() if e.deferred],
+                         ['dc_created', 'dc_updated'])
 
     def test_deferred_defaults_to_false(self):
         field = {f.name: f for f in dataclasses.fields(notify_registry.NotificationEvent)}

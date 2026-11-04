@@ -91,6 +91,27 @@
       </button>
     {% endif %}
   </form>
+  {% if ch.whatsapp %}
+  {% comment %}
+    NTF-DCG 3b (D9): a WhatsApp card. The wording is the template approved in Interakt
+    and the test is test_whatsapp on a real phone, so email's preview, screen test,
+    drafts and versions are not shown. The gate line is set_state()'s rule.
+  {% endcomment %}
+  <div class="mb-6 text-sm text-gray-700 space-y-1">
+    <p><span class="text-gray-500">Interakt template:</span> <span class="font-mono">{{ ch.whatsapp.template }}</span>
+       <span class="text-gray-500 ml-3">Language:</span> <span class="font-mono">{{ ch.whatsapp.language }}</span></p>
+    <p><span class="text-gray-500">Header:</span> {{ ch.whatsapp.header_text }}</p>
+    <p class="text-gray-500">Phone test, in the Railway Console:</p>
+    <p class="font-mono text-xs bg-gray-50 border border-gray-200 rounded px-3 py-2">{{ ch.wa_test_command }}</p>
+    <p><span class="text-gray-500">Last phone test:</span>
+      {% if ch.wa_last_test %}{{ ch.wa_last_test.created_at|date:"d M Y H:i" }} — {{ ch.wa_last_test.get_status_display }}{% if ch.wa_last_test.error_detail %} ({{ ch.wa_last_test.error_detail|truncatechars:120 }}){% endif %}{% else %}never{% endif %}</p>
+    {% if ch.wa_tested %}
+      <p class="text-xs text-green-700">A sent test from the last {{ ch.wa_test_window_days }} days is on record, so this can be switched on.</p>
+    {% else %}
+      <p class="text-xs text-amber-700">Switching on needs a sent phone test of this template from the last {{ ch.wa_test_window_days }} days.</p>
+    {% endif %}
+  </div>
+  {% else %}
   {% if not ch.active and not ch.live_tested %}
     <p class="text-xs text-amber-700 -mt-4 mb-6">Send a test of the live content to yourself before switching it on.</p>
   {% endif %}
@@ -175,6 +196,7 @@
   {% else %}
   <p class="text-sm text-gray-500 mb-6">No versions yet: the built-in default is live.</p>
   {% endif %}
+  {% endif %}{# ch.whatsapp #}
 
   {# Switch history #}
   <h3 class="text-sm font-semibold text-gray-700 mb-2">Switch history</h3>

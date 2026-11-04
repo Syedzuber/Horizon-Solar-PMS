@@ -31,7 +31,7 @@ from django.utils import timezone
 from . import notify_admin
 from .decorators import login_required, role_required
 from .models import (
-    NOTIFY_STATE_ACTIVE, NOTIFY_STATE_PAUSED,
+    NOTIFY_CHANNEL_WHATSAPP, NOTIFY_STATE_ACTIVE, NOTIFY_STATE_PAUSED,
     NotificationEventSetting, NotificationEventSettingChange, NotificationLog,
     NotificationTemplate, log_activity,
 )
@@ -197,24 +197,41 @@ def admin_notification_event(request, event_code):
 
     channels = []
     for channel in event.channels:
-        chan_versions = [v for v in versions if v.channel == channel]
-        live = next((v for v in chan_versions if v.status == NotificationTemplate.ACTIVE), None)
-        draft = next((v for v in chan_versions if v.status == NotificationTemplate.DRAFT), None)
         setting = settings_by.get(channel)
-        subject, html, error = _preview(event, live)
-        channels.append({
+        card = {
             'channel': channel,
             'active': setting.is_active if setting else event.default_state_for(channel) == 'active',
             'is_default_state': setting is None,
+            'changes': [c for c in changes if c.channel == channel],
+        }
+        if channel == NOTIFY_CHANNEL_WHATSAPP:
+            # NTF-DCG 3b (D9): the wording is the Interakt template, not a stored version,
+            # and the test is test_whatsapp on a real phone, so the card shows those and
+            # none of email's preview, screen test or drafts. Two queries: the last W7
+            # row and the 14-day gate set_state() applies.
+            card.update({
+                'whatsapp': event.whatsapp,
+                'wa_last_test': notify_admin.last_whatsapp_test(event),
+                'wa_tested': notify_admin.whatsapp_tested(event),
+                'wa_test_command': notify_admin.whatsapp_test_command(event),
+                'wa_test_window_days': notify_admin.WHATSAPP_TEST_WINDOW.days,
+            })
+            channels.append(card)
+            continue
+        chan_versions = [v for v in versions if v.channel == channel]
+        live = next((v for v in chan_versions if v.status == NotificationTemplate.ACTIVE), None)
+        draft = next((v for v in chan_versions if v.status == NotificationTemplate.DRAFT), None)
+        subject, html, error = _preview(event, live)
+        card.update({
             'live': live,
             'draft': draft,
             'versions': chan_versions,
-            'changes': [c for c in changes if c.channel == channel],
             'preview_subject': subject,
             'preview_html': html,
             'preview_error': error,
             'live_tested': notify_admin.live_content_tested(event.code, channel),
         })
+        channels.append(card)
 
     return render(request, 'projects/admin/notifications/event.html', {
         'event': event,

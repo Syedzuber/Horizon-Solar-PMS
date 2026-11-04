@@ -866,7 +866,10 @@ class RegistryShapeTests(TestCase):
 
     def test_the_nineteen_events_are_registered_in_order_after_t3b(self):
         self.assertEqual(len(T3C_EVENTS), 19)
-        self.assertEqual(list(NOTIFICATION_EVENTS)[-len(T3C_EVENTS) - 1:-1], list(T3C_EVENTS))  # ATT-B4's attendance_missing follows them
+        # ATT-B4's attendance_missing follows them (and NTF-DCG 3b's events follow it).
+        codes = list(NOTIFICATION_EVENTS)
+        end = codes.index('attendance_missing')
+        self.assertEqual(codes[end - len(T3C_EVENTS):end], list(T3C_EVENTS))
 
     def test_none_sends_whatsapp_or_says_it_does(self):
         """M8: email only, and no WhatsApp sent beside them."""
@@ -1007,7 +1010,10 @@ class SeedT3cEventsTests(TestCase):
 
     def test_a_run_after_t3b_seeds_only_the_new_events(self):
         _admin()
-        old = [code for code in NOTIFICATION_EVENTS if code not in T3C_EVENTS]
+        # Email events only: the command seeds email versions and refuses --event for an
+        # event with no email channel (NTF-DCG 3b's in-app + WhatsApp ones).
+        old = [code for code, event in NOTIFICATION_EVENTS.items()
+               if code not in T3C_EVENTS and 'email' in event.channels]
         for code in old:
             self._run('--event', code)
         created = {line.split()[3].rstrip(':') for line in self._run('--dry-run').splitlines()

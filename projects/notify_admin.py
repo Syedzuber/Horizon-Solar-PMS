@@ -83,6 +83,13 @@ def create_draft(event_code, channel, by, *, from_version=None):
     another draft is open (A1).
     """
     event = _event_for(event_code, channel)
+    # NTF-DCG 3b (D9): a WhatsApp message's wording is the template Meta approved in
+    # Interakt, and nothing here reads a stored WhatsApp version, so a draft would be
+    # wording that never reaches anyone. Refused here as well as hidden on the card, so
+    # a hand-made POST cannot make one either.
+    if channel == NOTIFY_CHANNEL_WHATSAPP:
+        raise NotificationAdminRefused(
+            'WhatsApp wording is the template approved in Interakt; it has no drafts here.')
     if from_version is not None and (from_version.event_code, from_version.channel) != (
             event_code, channel):
         raise NotificationAdminRefused(
@@ -297,6 +304,25 @@ def whatsapp_tested(event, now=None):
         template_name=event.whatsapp.template, status='sent',
         message__startswith=WHATSAPP_TEST_MARKER, created_at__gte=since,
     ).exists()
+
+
+def last_whatsapp_test(event):
+    """The newest W7 test row of the event's CURRENT Interakt template, whatever its
+    status, or None (NTF-DCG 3b, D9). The WhatsApp card shows its time and status beside
+    whether whatsapp_tested() — the 14-day gate — is met; the same rows, newest first,
+    so a failed test after a good one is what Admin sees."""
+    if event.whatsapp is None:
+        return None
+    return NotificationLog.objects.filter(
+        channel=NOTIFY_CHANNEL_WHATSAPP, event_code=event.code,
+        template_name=event.whatsapp.template, message__startswith=WHATSAPP_TEST_MARKER,
+    ).order_by('-created_at', '-pk').first()
+
+
+def whatsapp_test_command(event):
+    """The W7 command for `event`, as the WhatsApp card prints it (Railway Console runs
+    it after activating the venv). <your username> is the one word Admin replaces."""
+    return f'python manage.py test_whatsapp --event {event.code} --user <your username>'
 
 
 def version_tested(template):
