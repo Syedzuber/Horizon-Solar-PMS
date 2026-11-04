@@ -214,7 +214,7 @@ class RedirectToRowTests(SitesFilterBase):
 
         def bulk_refused(code):
             self._site(code)
-            self._site(code + 'Q', DESIGN_IN_QC, self.designer)
+            self._site(code + 'Q', DESIGN_IN_QC, self.designer2)
             return ('design_bulk_allocate', None,
                     {'designer_id': str(self.designer.pk), 'site_ids': [code, code + 'Q']},
                     code + 'Q')                                    # the failing site
@@ -504,7 +504,14 @@ class ChipCountTests(SitesFilterBase):
         html = self.client.get(self._sites_url('mb', CHIP_DESIGNER)).content.decode()
         forms = re.findall(r'<form method="post".*?</form>', html, re.S)
         action_forms = [f for f in forms if 'blockTaskModalForm' not in f]
-        self.assertEqual(len(action_forms), 8)
+        # 7, not 8, since DA-2: on an allocatable row Save QC is part of the combined form.
+        self.assertEqual(len(action_forms), 7)
         for form in action_forms:
             self.assertIn('<input type="hidden" name="q" value="mb"', form)
             self.assertIn(f'<input type="hidden" name="status" value="{CHIP_DESIGNER}"', form)
+
+        # A non-allocatable row (in_qc) still renders the separate Save QC form.
+        self._site('SFF-QC', DESIGN_IN_QC, self.designer)
+        html = self.client.get(self._sites_url('mb', CHIP_DESIGNER)).content.decode()
+        self.assertIn(reverse('design_assign_qc', kwargs={'project_id': 'SFF-QC'}),
+                      self._tbody(html, 'SFF-QC'))

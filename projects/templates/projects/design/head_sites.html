@@ -18,6 +18,8 @@ capacity are Part 5.
 
 {% block extra_head %}
 <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+{# DA-2: notes that only Alpine may reveal stay hidden until it has started. #}
+<style>[x-cloak] { display: none !important; }</style>
 <script>
 /*
  * DA-1 — the site list's in-browser filter. Registered on alpine:init, which fires when the
@@ -30,6 +32,12 @@ capacity are Part 5.
  *
  * The URL is kept in step with replaceState so a reload or a shared link reopens the same
  * filter; the server, not this script, is what reads it back.
+ *
+ * DA-2 — bulk selection. `selected` holds every ticked site code; only those whose row is
+ * VISIBLE count (N) — a ticked box on a filtered-out row is disabled (DA-1) and so is not
+ * submitted, and the counter says so: "N selected · M hidden by filter (not included until
+ * shown)". The button shows and acts on N. The bulk QC selector cannot offer the chosen
+ * designer; if it was showing them it falls back to "Keep current QC", with a note.
  */
 document.addEventListener('alpine:init', function () {
   Alpine.data('headSites', function () {
@@ -37,8 +45,18 @@ document.addEventListener('alpine:init', function () {
     return {
       q: initial.q,
       status: initial.status,
+      selected: [],
+      bulkKeep: '',
+      bulkDesigner: '',
+      bulkQc: '',
+      bulkQcReset: false,
       init: function () {
         var self = this;
+        this.bulkKeep = this.$el.dataset.bulkKeep;
+        this.bulkQc = this.bulkKeep;
+        this.$watch('bulkDesigner', function (value) {
+          if (value && self.bulkQc === value) { self.bulkQc = self.bulkKeep; self.bulkQcReset = true; }
+        });
         this.$watch('q', function () { self.syncUrl(); });
         this.$watch('status', function () { self.syncUrl(); });
         // The browser jumps to #site-<code> before Alpine has hidden the filtered-out rows,
@@ -64,6 +82,42 @@ document.addEventListener('alpine:init', function () {
       syncUrl: function () {
         var params = new URLSearchParams({q: this.q.trim().slice(0, 50), status: this.status});
         window.history.replaceState(null, '', window.location.pathname + '?' + params.toString());
+      },
+      // Ticked AND visible: exactly the boxes the bulk form will submit.
+      visibleSelected: function () {
+        var self = this;
+        return this.selected.filter(function (code) {
+          var el = document.getElementById('site-' + code);
+          return el && self.visible(el);
+        });
+      },
+      selectionSummary: function () {
+        var shown = this.visibleSelected().length;
+        var hidden = this.selected.length - shown;
+        return shown + ' selected' +
+          (hidden ? ' · ' + hidden + ' hidden by filter (not included until shown)' : '');
+      }
+    };
+  });
+
+  // DA-2 — one row's combined Designer + Design QC form. Seeded from the row's current
+  // designer and reviewer (data attributes, server-rendered). Choosing as designer the person
+  // the QC select shows resets QC to the open pool and says so, because nobody reviews their
+  // own site; the server refuses that pair regardless (design_allocate, S3 a).
+  Alpine.data('allocForm', function () {
+    return {
+      designer: '',
+      qc: '',
+      currentDesigner: '',
+      qcReset: false,
+      init: function () {
+        var self = this;
+        this.currentDesigner = this.$el.dataset.currentDesigner;
+        this.designer = this.currentDesigner;
+        this.qc = this.$el.dataset.currentQc;
+        this.$watch('designer', function (value) {
+          if (value && self.qc === value) { self.qc = ''; self.qcReset = true; }
+        });
       }
     };
   });
@@ -87,7 +141,7 @@ untagged message the two are the same string, so this renders exactly as base.ht
 
 {% block content %}
 {{ filter_state|json_script:"headSitesFilter" }}
-<div x-data="headSites">
+<div x-data="headSites" data-bulk-keep="{{ bulk_qc_keep }}">
 
 <div class="d-flex justify-content-between align-items-center mb-3">
   <div>
@@ -150,17 +204,42 @@ page, and any markup named inside it becomes real elements.
   {% include "projects/design/_head_sites_filter_fields.html" %}
 </form>
 
+{% comment %}
+DA-2 — the bulk Design QC selector. "Keep current QC" (the default) leaves every selected
+site's reviewer as it is; "Open pool" clears them; a name sets them. The chosen designer is
+never offered (Alpine disables and hides that option, and resets to Keep if it was chosen);
+the bulk view refuses the pair anyway, and refuses Keep when a selected site's reviewer IS
+the chosen designer, naming those sites.
+
+The counter and the button use N = ticked AND visible, the boxes that will actually be
+submitted (a box on a filtered-out row is disabled). Hidden ticks are counted separately.
+{% endcomment %}
 <div class="card shadow-sm mb-3">
   <div class="card-body py-2 d-flex flex-wrap align-items-center gap-2">
     <span class="small fw-semibold">Bulk allocate selected:</span>
-    <select name="designer_id" form="bulkAllocateForm"
-            class="form-select form-select-sm" style="max-width:16rem;">
+    <select name="designer_id" form="bulkAllocateForm" x-model="bulkDesigner" autocomplete="off"
+            class="form-select form-select-sm" style="max-width:16rem;" aria-label="Designer">
       <option value="">Choose a designer…</option>
       {% for d in designers %}
         <option value="{{ d.pk }}">{{ d.user.get_full_name|default:d.user.username }}</option>
       {% endfor %}
     </select>
-    <button type="submit" form="bulkAllocateForm" class="btn btn-sm btn-success">Allocate selected</button>
+    <select name="qc_id" form="bulkAllocateForm" x-model="bulkQc" autocomplete="off"
+            class="form-select form-select-sm" style="max-width:16rem;" aria-label="Design QC">
+      <option value="{{ bulk_qc_keep }}" selected>Keep current QC</option>
+      <option value="">Open pool — any QC reviewer</option>
+      {% for r in designers %}
+        <option value="{{ r.pk }}" x-bind:disabled="bulkDesigner === '{{ r.pk }}'"
+                x-bind:hidden="bulkDesigner === '{{ r.pk }}'">{{ r.user.get_full_name|default:r.user.username }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit" form="bulkAllocateForm" class="btn btn-sm btn-success"
+            x-bind:disabled="!visibleSelected().length"
+            x-text="visibleSelected().length ? 'Allocate ' + visibleSelected().length + ' selected' : 'Allocate selected'">Allocate selected</button>
+    <span class="small" x-show="selected.length" x-text="selectionSummary()" x-cloak></span>
+    <span class="small text-info" x-show="bulkQcReset" x-cloak>
+      Design QC reset to Keep current — the designer cannot review their own sites.
+    </span>
     <span class="text-muted small ms-auto">
       All-or-nothing — if any selected site fails, none are allocated.
     </span>
@@ -211,9 +290,13 @@ page, and any markup named inside it becomes real elements.
                 along unseen in a bulk allocation — the 31 Oct incident was a bulk POST of
                 more sites than the Head meant. The tick survives, and counts again the
                 moment the site is shown.
+
+                DA-2: x-model feeds `selected`, which the bulk counter reads. autocomplete off
+                so a reload cannot restore ticks the counter does not know about.
                 {% endcomment %}
                 <input type="checkbox" class="form-check-input" name="site_ids"
                        form="bulkAllocateForm" value="{{ row.site.project_id }}"
+                       x-model="selected" autocomplete="off"
                        x-bind:disabled="!visible($el.closest('tbody'))">
               {% else %}
                 {# Disabled, not absent, so the reason is visible rather than a blank cell. #}
@@ -344,13 +427,18 @@ page, and any markup named inside it becomes real elements.
               MULTI-LINE, so it uses the comment TAG. The single-line hash form cannot
               span lines — see the note at the top of this file; it renders straight onto
               the page instead of disappearing.
+
+              DA-2: not drawn where design_survey_link_set() would refuse the change.
+              `row.link_locked` is _survey_link_locked(), the view's own rule.
               {% endcomment %}
+              {% if not row.link_locked %}
               <div class="d-inline-block">
                 <button class="btn btn-sm btn-outline-secondary" type="button"
                         data-bs-toggle="collapse" data-bs-target="#lk{{ row.site.pk }}">
                   {% if row.has_link %}Edit link{% else %}Add link{% endif %}
                 </button>
               </div>
+              {% endif %}
 
               {# Allocate one #}
               {% comment %}
@@ -422,6 +510,7 @@ page, and any markup named inside it becomes real elements.
             </td>
           </tr>
 
+          {% if not row.link_locked %}
           <tr class="collapse" id="lk{{ row.site.pk }}">
             <td colspan="9" class="bg-light">
               <form method="post"
@@ -441,32 +530,65 @@ page, and any markup named inside it becomes real elements.
               </form>
             </td>
           </tr>
+          {% endif %}
 
           {% if row.allocatable or row.qc_assignable %}
           <tr class="collapse" id="al{{ row.site.pk }}">
             <td colspan="9" class="bg-light">
               {% if row.allocatable %}
+              {% comment %}
+              DA-2 (U4/U5) — ONE FORM: designer and Design QC together, one button, one
+              transaction in design_allocate(). Pre-filled with the site's current designer
+              and reviewer, so saving without a change writes nothing ("Nothing changed").
+
+              Every designer is offered as designer — including this site's current reviewer,
+              so the two roles can be swapped in one save. The QC list is every designer too;
+              Alpine (allocForm) disables and hides whichever one is chosen as designer, and
+              if the QC select was showing that person it falls back to the open pool and
+              says so. The server checks the submitted pair itself (S3 a).
+
+              The QC select is drawn only while the reviewer can still change (no gate-1
+              verdict). Without it, no `qc_id` is posted and the reviewer is left alone.
+              {% endcomment %}
               <form method="post" action="{% url 'design_allocate' project_id=row.site.project_id %}"
-                    class="d-flex flex-wrap align-items-center gap-2 py-2">
+                    class="d-flex flex-wrap align-items-center gap-2 py-2" x-data="allocForm"
+                    data-current-designer="{{ row.assignment.assigned_to_id|default_if_none:'' }}"
+                    data-current-qc="{{ row.assignment.qc_assigned_to_id|default_if_none:'' }}">
                 {% csrf_token %}
                 {% include "projects/design/_head_sites_filter_fields.html" %}
-                {% comment %}
-                Session B.1 — `row.designer_choices`, not the flat `designers` list: this
-                site's current gate-1 reviewer is removed, mirroring the QC selector below
-                which removes this site's designer. One person cannot hold both roles on
-                one site, and the two dropdowns say so in the same way from both sides.
-                _allocate_one() refuses the pairing on POST regardless of what is rendered.
-                {% endcomment %}
-                <select name="designer_id" class="form-select form-select-sm" style="max-width:16rem;" required>
+                <span class="small text-muted">Designer:</span>
+                <select name="designer_id" class="form-select form-select-sm" style="max-width:16rem;"
+                        required x-model="designer" aria-label="Designer">
                   <option value="">Choose a designer…</option>
-                  {% for d in row.designer_choices %}
+                  {% for d in designers %}
                     <option value="{{ d.pk }}"
                       {% if row.assignment.assigned_to_id == d.pk %}selected{% endif %}>
                       {{ d.user.get_full_name|default:d.user.username }}
                     </option>
                   {% endfor %}
                 </select>
-                <button class="btn btn-sm btn-primary">Allocate</button>
+                {% if row.qc_assignable %}
+                <span class="small text-muted">Design QC:</span>
+                <select name="qc_id" class="form-select form-select-sm" style="max-width:16rem;"
+                        x-model="qc" aria-label="Design QC">
+                  <option value="">Open pool — any QC reviewer</option>
+                  {% for r in designers %}
+                    <option value="{{ r.pk }}"
+                      {% if row.assignment.qc_assigned_to_id == r.pk %}selected{% endif %}
+                      x-bind:disabled="designer === '{{ r.pk }}'"
+                      x-bind:hidden="designer === '{{ r.pk }}'">
+                      {{ r.user.get_full_name|default:r.user.username }}
+                    </option>
+                  {% endfor %}
+                </select>
+                {% endif %}
+                <button class="btn btn-sm btn-primary">{% if row.assignment.assigned_to_id %}Save{% else %}Allocate{% endif %}</button>
+                <span class="small text-warning" x-show="currentDesigner && designer && designer !== currentDesigner" x-cloak>
+                  Changing the designer resets the due date to today + 2 working days.
+                </span>
+                <span class="small text-info" x-show="qcReset" x-cloak>
+                  Design QC reset to the open pool — the designer cannot review their own site.
+                </span>
               </form>
               {% endif %}
 
@@ -485,8 +607,12 @@ page, and any markup named inside it becomes real elements.
               The empty option is a real instruction — it clears the assignment and returns
               gate 1 to the open pool — which is why it is worded as a state and not as a
               prompt to choose.
+
+              DA-2: drawn only on rows that are NOT allocatable. On an allocatable row the
+              combined form above carries the QC select; this form stays for the long span
+              after the designer is fixed and before gate 1 rules.
               {% endcomment %}
-              {% if row.qc_assignable %}
+              {% if row.qc_assignable and not row.allocatable %}
               <form method="post" action="{% url 'design_assign_qc' project_id=row.site.project_id %}"
                     class="d-flex flex-wrap align-items-center gap-2 py-2">
                 {% csrf_token %}

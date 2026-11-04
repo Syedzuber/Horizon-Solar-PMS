@@ -159,19 +159,24 @@ from .permissions import (
 
 logger = logging.getLogger(__name__)
 
-# Statuses at which the site has not yet started design work. Reallocation is allowed
-# only while the assignment is still in one of these — see design_allocate().
+# The statuses at which _allocate_one() will (re)allocate a site's designer; it refuses
+# every other status. THE RULE IS THIS STATUS LIST AND NOTHING ELSE — it reads no attempt
+# and no Arka history.
 #
 # PART 8 ADDED `in_design`, and it is not optional. Allocation now lands a site straight
 # in `in_design`, so without it the Head would lose the ability to correct a
 # mis-allocation the instant he made one: every allocated site would be past the
-# reallocation gate before he could see the result. `in_design` means work is under way
-# with no Arka submitted yet, so nothing is orphaned by moving the site to a different
-# designer. `arka_submitted` and everything after it remain closed — reallocating once an
-# Arka exists would leave artifacts pointing at another designer's layout.
+# reallocation gate before he could see the result. `arka_submitted` and every status
+# after it are refused.
+#
+# `in_design` IS NOT ONLY "BEFORE ANY ARKA". A site also comes back to `in_design` on a new
+# attempt through _open_next_attempt() — a QC failure, an accepted change request, a PM
+# send-back — whenever no approved Arka is carried forward, and it is then reallocatable
+# although its earlier attempts hold the first designer's Arka. Left as it is by ruling
+# (DA-2, 4 Nov 2026); the open question is DESIGN_MODULE_DEFERRED.md W1.
 #
 # `allocated` and `due_date_proposed` are kept here for the rows that already carry them;
-# no new row can reach either. See DESIGN_MODULE_DEFERRED.md.
+# no new row can reach either (W2). See DESIGN_MODULE_DEFERRED.md.
 REALLOCATABLE_STATUSES = (DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED,
                           DESIGN_DUE_DATE_PROPOSED, DESIGN_IN_DESIGN)
 
@@ -1722,20 +1727,20 @@ def design_head_sites(request, pk):
             'pending_at':    design_pending_at(
                 assignment, current_arka, change_request_pending,
                 change_request_with_pm=change_request_with_pm),
-            # THE TWO SELECTORS EXCLUDE EACH OTHER'S CURRENT HOLDER, and the symmetry is
-            # the point: one person cannot be both the designer and the gate-1 reviewer of
-            # the same site, so whichever role is already filled removes that person from
-            # the other list. Both are comprehensions over the single `qc_reviewers` list
-            # built before the loop — no query per row.
+            # The separate Save QC form's options: every designer except this site's own,
+            # a comprehension over the single `qc_reviewers` list built before the loop — no
+            # query per row. A courtesy, not the rule: assign_design_qc() refuses the
+            # pairing on POST, so a crafted form gets the same answer as the dropdown.
             #
-            # Neither is the rule, only its courtesy. _resolve_qc_reviewer() and
-            # _allocate_one() each refuse the pairing on POST, so a crafted form gets the
-            # same answer as the dropdown.
+            # DA-2: there is no per-row designer list any more. The combined form (allocatable
+            # rows) offers every designer and lets the Head swap the two roles; its Alpine
+            # state removes the chosen designer from the QC options, and the server checks the
+            # submitted pair (design_allocate, S3 a).
             'qc_choices':    [r for r in qc_reviewers
                               if not (assignment and assignment.assigned_to_id == r.pk)],
-            'designer_choices': [d for d in qc_reviewers
-                                 if not (assignment
-                                         and assignment.qc_assigned_to_id == d.pk)],
+            # DA-2 — hides the link button exactly where design_survey_link_set() would
+            # refuse; _survey_link_locked() is the one copy of that rule.
+            'link_locked':   _survey_link_locked(assignment),
         })
 
     # DA-1 — chips and row messages, both derived from the rows already in hand: no query.
@@ -1764,6 +1769,9 @@ def design_head_sites(request, pk):
         'q':             q,
         'status_filter': status_filter,
         'filter_state':  {'q': q, 'status': status_filter},
+        # DA-2 — the bulk QC selector's "Keep current QC" value, from the one constant the
+        # bulk view compares against.
+        'bulk_qc_keep':  BULK_QC_KEEP,
     })
 
 
@@ -1943,6 +1951,22 @@ def _survey_link_host_allowed(url):
                for allowed in SURVEY_LINK_ALLOWED_HOSTS)
 
 
+def _survey_link_locked(assignment):
+    """True when the site's survey folder link may no longer be changed.
+
+    THE ONE COPY OF THE RULE (DA-2), moved out of design_survey_link_set() unchanged so the
+    Head's site list can hide the "Edit link" button on exactly the rows the view would
+    refuse. Locked once a link exists AND the site has left the allocation queue, unless
+    the designer has put it on Design Hold — the folder a designer works from must not
+    change underneath them. A site with no link yet is never locked: adding a first link
+    takes nothing away from anyone.
+    """
+    return bool(assignment and assignment.survey_folder_url
+                and assignment.status != DESIGN_SURVEY_RETURNED
+                and assignment.status not in (DESIGN_AWAITING_SURVEY,
+                                              DESIGN_AWAITING_ALLOCATION))
+
+
 @login_required
 def design_survey_link_set(request, project_id):
     """Design Head records (or edits) the survey FOLDER LINK for an OPEX site.
@@ -2002,8 +2026,10 @@ def design_survey_link_set(request, project_id):
     # Keyed on survey_folder_url, NOT on survey_ready. Adding a FIRST link to a site that
     # already has a file is not a replace and must not be locked — nothing is being taken
     # away from the designer.
-    if (assignment and assignment.survey_folder_url and not was_blocked
-            and assignment.status not in (DESIGN_AWAITING_SURVEY, DESIGN_AWAITING_ALLOCATION)):
+    #
+    # DA-2: the rule now lives in _survey_link_locked(), which head_sites.html also reads
+    # (as the row's `link_locked` flag) to hide the link button the view would refuse.
+    if _survey_link_locked(assignment):
         messages.error(
             request,
             f'{project.project_id}: the survey folder link cannot be changed after '
@@ -2156,7 +2182,8 @@ def _allocate_one(assignment, designer, actor, allocated_on=None):
             f'its Design QC reviewer — nobody reviews their own work, so change the '
             f'reviewer first')
     if assignment.status not in REALLOCATABLE_STATUSES:
-        # Reallocation after work has started is out of scope for Part 2.
+        # A status test only — see the note on REALLOCATABLE_STATUSES: a rework site back
+        # in `in_design` passes it although an earlier attempt has an Arka (DEFERRED W1).
         raise ValueError(
             f'has already started design work (status {assignment.status}); '
             f'reallocation at this stage is not supported yet')
@@ -2212,56 +2239,195 @@ def _resolve_designer(raw_id):
         raise ValueError('Selected user is not an active Design user.')
 
 
+class _SiteRefused(ValueError):
+    """A per-site refusal, already worded with its site code, raised inside the allocation
+    transaction so that everything written before it rolls back."""
+
+
+def _person(profile):
+    """A UserProfile's display name, as every allocation message words it."""
+    return profile.user.get_full_name() or profile.user.username
+
+
+def _apply_site_allocation(locked, designer, reviewer, set_qc, actor, allocated_on=None):
+    """S1 + S3 (DA-2) for ONE site: give `locked` the designer `designer` and, when `set_qc`,
+    the gate-1 reviewer `reviewer` (None = open pool). Shared by design_allocate() and
+    design_bulk_allocate() so the single and bulk paths cannot apply different rules.
+
+    `locked` must be a DesignAssignment read with select_for_update() inside the CALLER's
+    transaction. Returns None when nothing changed, else a dict:
+    {'designer_changed', 'due', 'qc_changed', 'reviewer'}. Raises _SiteRefused, worded with
+    the site code; the caller lets it leave the atomic block, which rolls back every step.
+
+    S1 — A DESIGNER EQUAL TO THE CURRENT ONE IS NOT AN ALLOCATION. _allocate_one() would
+    re-run in full: a new due date of today + 2 working days, a new commitment row and an
+    "allocated" log line, for a change nobody made. So it is called only when the designer
+    actually changes.
+
+    S3 — THE ORDER THAT MAKES A SWAP POSSIBLE. Each of _allocate_one() and
+    assign_design_qc() refuses the designer/reviewer pairing against the site's CURRENT
+    state, so designer D1 / QC Q -> designer Q / QC D1 is refused whichever runs first. The
+    caller has already refused a submitted pair that is one person; then:
+      b) the new designer is the current reviewer -> clear the reviewer first;
+      c) the designer changes                     -> _allocate_one();
+      d) the reviewer still differs               -> assign_design_qc() names them.
+    The row is re-read after each write, because both helpers update by queryset and leave
+    the instance stale, and each step's own check must see the previous step's result.
+
+    `set_qc` False is the designer-only post (no `qc_id` field at all — the walkthrough seed
+    and older callers, and bulk's "Keep current QC"). The reviewer is then never touched, and
+    _allocate_one()'s own refusal stands when the designer is the site's reviewer.
+    """
+    code = locked.project.project_id
+    original_qc = locked.qc_assigned_to_id
+    target_qc = reviewer.pk if reviewer is not None else None
+    designer_changed = locked.assigned_to_id != designer.pk
+    if not designer_changed and not (set_qc and original_qc != target_qc):
+        return None
+
+    due = None
+    try:
+        if designer_changed and set_qc and locked.qc_assigned_to_id == designer.pk:   # b
+            assign_design_qc(locked, None, actor)
+            locked.refresh_from_db()
+    except ValueError as exc:
+        raise _SiteRefused(f'{code}: {exc}')
+    try:
+        if designer_changed:                                                          # c
+            due = _allocate_one(locked, designer, actor, allocated_on=allocated_on)
+            locked.refresh_from_db()
+    except ValueError as exc:
+        # The wording design_allocate() has always used for _allocate_one's refusals.
+        raise _SiteRefused(f'{code} {exc}')
+    try:
+        if set_qc and locked.qc_assigned_to_id != target_qc:                          # d
+            assign_design_qc(locked, reviewer, actor)
+            locked.refresh_from_db()
+    except ValueError as exc:
+        raise _SiteRefused(f'{code}: {exc}')
+
+    return {'designer_changed': designer_changed, 'due': due,
+            'qc_changed': locked.qc_assigned_to_id != original_qc,
+            'reviewer': locked.qc_assigned_to}
+
+
+def _qc_outcome_sentence(reviewer):
+    """How a QC change reads in a success message (no site code) — Save QC's own words."""
+    if reviewer is None:
+        return 'Design QC reviewer cleared — any QC reviewer may now take this site.'
+    return f'Design QC assigned to {_person(reviewer)}.'
+
+
 @login_required
 def design_allocate(request, project_id):
-    """Allocate one OPEX site to a designer. Design Head only, POST only."""
+    """Allocate one OPEX site: its designer and, from the combined form, its gate-1 Design
+    QC reviewer, in ONE transaction. Access: Design Head authority only, POST only.
+
+    Two kinds of post, told apart by whether a `qc_id` field arrives at all:
+      * designer only (no `qc_id`) — the shape this view has always taken. The reviewer is
+        left exactly as it is.
+      * designer + `qc_id` (blank = open pool) — head_sites.html's combined form (DA-2 U4).
+    Both go through _apply_site_allocation(), so S1 (an unchanged designer is not
+    re-allocated) holds on both.
+    """
     project = _opex_site(project_id)
     tag = _site_tag(project)  # DA-1: every message here is about this one site
+    # Design Head authority only: choosing who designs and who reviews a site is the Head's
+    # allocation decision. Designers and reviewers act on sites; they do not assign them.
     if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
     if request.method != 'POST':
         return _head_sites_redirect(request, project.program_id, project)
 
+    def _say(text, level=messages.error):
+        level(request, text, extra_tags=tag)
+        return _head_sites_redirect(request, project.program_id, project)
+
     try:
         designer = _resolve_designer(request.POST.get('designer_id', ''))
     except ValueError as exc:
-        messages.error(request, str(exc), extra_tags=tag)
-        return _head_sites_redirect(request, project.program_id, project)
+        return _say(str(exc))
+
+    set_qc = 'qc_id' in request.POST
+    reviewer = None
+    if set_qc and (request.POST.get('qc_id') or '').strip():
+        try:
+            reviewer = _resolve_designer(request.POST['qc_id'].strip())
+        except ValueError:
+            return _say(f'{project.project_id}: the selected Design QC reviewer is not an '
+                           f'active Design user.')
+    # S3 (a) — the submitted pair, checked before anything is read or written. The two
+    # helpers check against the site's CURRENT state; this is the check against the state
+    # being asked for.
+    if reviewer is not None and reviewer.pk == designer.pk:
+        return _say(f'{project.project_id}: {_person(designer)} cannot be both the '
+                       f'designer and the Design QC reviewer of this site — nobody reviews '
+                       f'their own work.')
 
     assignment = getattr(project, 'design_assignment', None)
     if assignment is None or not assignment.survey_ready:
-        messages.error(request, f'{project.project_id} cannot be allocated before its '
-                                f'survey is uploaded.', extra_tags=tag)
-        return _head_sites_redirect(request, project.program_id, project)
+        return _say(f'{project.project_id} cannot be allocated before its '
+                       f'survey is uploaded.')
 
     try:
         with transaction.atomic():
-            due = _allocate_one(assignment, designer, request.user.profile)
-    except ValueError as exc:
-        messages.error(request, f'{project.project_id} {exc}.', extra_tags=tag)
-        return _head_sites_redirect(request, project.program_id, project)
+            # Locked for the whole sequence so a second Head's save cannot interleave with
+            # the swap steps. Only this row: no join, so no other table is locked.
+            locked = DesignAssignment.objects.select_for_update().get(pk=assignment.pk)
+            result = _apply_site_allocation(locked, designer, reviewer, set_qc,
+                                            request.user.profile)
+    except _SiteRefused as exc:
+        return _say(f'{exc}.')
 
-    messages.success(request, f'{project.project_id} allocated to '
-                              f'{designer.user.get_full_name() or designer.user.username} — '
-                              f'due {due}.', extra_tags=tag)
+    if result is None:
+        return _say(f'Nothing changed for {project.project_id}.', level=messages.info)
+    if result['designer_changed']:
+        text = (f'{project.project_id} allocated to {_person(designer)} — '
+                f'due {result["due"]}.')
+        if result['qc_changed']:
+            text += ' ' + _qc_outcome_sentence(result['reviewer'])
+    else:
+        text = f'{project.project_id}: ' + _qc_outcome_sentence(result['reviewer'])
+    messages.success(request, text, extra_tags=tag)
     return _head_sites_redirect(request, project.program_id, project)
+
+
+#: The bulk form's "Keep current QC" value. Not a pk and not blank (blank is "Open pool"),
+#: and a post with no `qc_id` at all also means keep — the shape the form had before DA-2.
+BULK_QC_KEEP = 'keep'
+
+#: Longest list of codes a bulk message spells out before "and N more".
+BULK_MESSAGE_CODES = 20
+
+
+def _codes(codes):
+    """Site codes for a message, capped so a crafted 1,000-id post cannot fill the page."""
+    codes = list(codes)
+    shown = ', '.join(codes[:BULK_MESSAGE_CODES])
+    extra = len(codes) - BULK_MESSAGE_CODES
+    return shown + (f' and {extra} more' if extra > 0 else '')
 
 
 @login_required
 def design_bulk_allocate(request, pk):
-    """Allocate several sites of one tender to a single designer.
+    """Allocate several sites of one tender to a single designer, optionally setting their
+    gate-1 Design QC reviewer too. Access: Design Head authority only, POST only.
 
     ALL OR NOTHING: one transaction, and the first site that fails any rule aborts the
     whole batch. A partially-applied bulk allocation would be worse than none — the Head
     would have to work out which half landed.
 
-    Access: Design Head authority only, POST only.
+    DA-2 — each site goes through _apply_site_allocation(), the single-site rules exactly.
+    A site already held by the chosen designer, whose reviewer would not change, is
+    UNCHANGED rather than failed. Every refusal names its sites. Ruled 4 Nov: with "Keep
+    current QC", any selected site whose reviewer IS the chosen designer refuses the whole
+    batch, listing every such site — keeping that reviewer is impossible and the Head must
+    say what replaces it, rather than have it silently cleared.
 
-    DA-1 — messages and the redirect. The two refusals that happen before any site is
-    loaded (no designer, no selection) are page-level and land with no anchor. The batch
-    outcome is page-level AND tagged to one site, so it stays at the top while the page
-    lands near the work: the failing site on a refusal, the first allocated site on
-    success. Which site that is comes from the rows THIS view loaded, never from POST text.
+    DA-1 — messages and the redirect. Refusals that come before any site is identified are
+    page-level and land with no anchor. Otherwise the outcome is page-level AND tagged to
+    one site, so it stays at the top while the page lands near the work. Which site that is
+    comes from the rows THIS view loaded, never from POST text.
     """
     # Design Head authority only: bulk allocation is the Head's allocation decision made
     # many times at once, and carries exactly the single-site view's authority.
@@ -2271,54 +2437,108 @@ def design_bulk_allocate(request, pk):
     if request.method != 'POST':
         return _head_sites_redirect(request, program.pk)
 
+    def _refuse(text, site=None):
+        messages.error(request, text, extra_tags=_site_tag(site, page=site is not None))
+        return _head_sites_redirect(request, program.pk, site)
+
     try:
         designer = _resolve_designer(request.POST.get('designer_id', ''))
     except ValueError as exc:
-        messages.error(request, str(exc))
-        return _head_sites_redirect(request, program.pk)
+        return _refuse(str(exc))
 
-    project_ids = request.POST.getlist('site_ids')
+    qc_choice = (request.POST.get('qc_id', BULK_QC_KEEP) or '').strip()
+    keep_qc = qc_choice == BULK_QC_KEEP
+    reviewer = None
+    if not keep_qc and qc_choice:
+        try:
+            reviewer = _resolve_designer(qc_choice)
+        except ValueError:
+            return _refuse('Nothing was allocated — the selected Design QC reviewer is not '
+                           'an active Design user.')
+    if reviewer is not None and reviewer.pk == designer.pk:
+        return _refuse(f'Nothing was allocated — {_person(designer)} cannot be both the '
+                       f'designer and the Design QC reviewer of the same sites.')
+
+    # De-duplicated in posted order: one site ticked twice is one site, not two allocations
+    # (the 31 Oct incident wrote two commitments for one site this way).
+    project_ids = list(dict.fromkeys(
+        pid.strip() for pid in request.POST.getlist('site_ids') if pid.strip()))
     if not project_ids:
-        messages.error(request, 'Select at least one site to allocate.')
-        return _head_sites_redirect(request, program.pk)
+        return _refuse('Select at least one site to allocate.')
+
+    # Every selected site in ONE query, with its assignment, instead of a get_object_or_404
+    # per id: an id that is not a live OPEX site of THIS tender becomes a named refusal
+    # rather than a bare 404 page.
+    found = {site.project_id: site for site in
+             Project.objects.filter(project_id__in=project_ids, is_deleted=False,
+                                    project_type='OPEX', program=program)
+             .select_related('design_assignment')}
+    unknown = [pid for pid in project_ids if pid not in found]
+    if unknown:
+        return _refuse(f'Nothing was allocated — not a site of this tender: {_codes(unknown)}.')
+    sites = [found[pid] for pid in project_ids]
+
+    no_survey = [site for site in sites
+                 if getattr(site, 'design_assignment', None) is None
+                 or not site.design_assignment.survey_ready]
+    if no_survey:
+        verb = 'its' if len(no_survey) == 1 else 'their'
+        return _refuse(f'Nothing was allocated — '
+                       f'{_codes(s.project_id for s in no_survey)} cannot be allocated '
+                       f'before {verb} survey is uploaded.', no_survey[0])
 
     actor = request.user.profile
     # ONE allocation date for the whole batch (Part 8). Computed before the loop, not
     # per site: a bulk run that crossed midnight would otherwise hand the first sites a
     # different due date from the last, and the Head has no way to see that happened.
     batch_date = timezone.localdate()
-    # DA-1 bookkeeping for the message tag and the anchor only — neither changes what the
-    # loop allocates or refuses. `current` is the site being worked on when a refusal is
-    # raised: every ValueError below is raised after that site was loaded.
-    current = first_site = None
+    current = None
+    allocated, qc_changed, unchanged, due = [], [], [], None
     try:
         with transaction.atomic():
-            allocated = []
-            due = None
-            for project_id in project_ids:
-                site = get_object_or_404(
-                    Project, project_id=project_id, is_deleted=False,
-                    project_type='OPEX', program=program)
+            # Every selected assignment locked up front, in pk order so two overlapping
+            # batches take their locks in the same order and cannot deadlock. The checks
+            # below read these locked rows, not the ones loaded above.
+            locked = {a.project_id: a for a in DesignAssignment.objects.select_for_update()
+                      .filter(pk__in=[s.design_assignment.pk for s in sites]).order_by('pk')}
+            if keep_qc:
+                clash = [s for s in sites if locked[s.pk].qc_assigned_to_id == designer.pk]
+                if clash:
+                    current = clash[0]
+                    raise _SiteRefused(
+                        f'{_person(designer)} is already the Design QC reviewer of '
+                        f'{_codes(s.project_id for s in clash)}. Choose Open pool or another '
+                        f'QC reviewer for these sites')
+            for site in sites:
                 current = site
-                assignment = getattr(site, 'design_assignment', None)
-                if assignment is None or not assignment.survey_ready:
-                    raise ValueError(f'{site.project_id} cannot be allocated before its '
-                                     f'survey is uploaded')
-                due = _allocate_one(assignment, designer, actor, allocated_on=batch_date)
-                allocated.append(site.project_id)
-                if first_site is None:
-                    first_site = site
-    except ValueError as exc:
-        messages.error(request, f'Nothing was allocated — {exc}.',
-                       extra_tags=_site_tag(current, page=True))
-        return _head_sites_redirect(request, program.pk, current)
+                result = _apply_site_allocation(locked[site.pk], designer, reviewer,
+                                                not keep_qc, actor, allocated_on=batch_date)
+                if result is None:
+                    unchanged.append(site)
+                    continue
+                if result['designer_changed']:
+                    allocated.append(site)
+                    due = result['due']
+                if result['qc_changed']:
+                    qc_changed.append(site)
+    except _SiteRefused as exc:
+        return _refuse(f'Nothing was allocated — {exc}.', current)
 
-    messages.success(
-        request,
-        f'{len(allocated)} site(s) allocated to '
-        f'{designer.user.get_full_name() or designer.user.username}, due {due}: '
-        f'{", ".join(allocated)}.', extra_tags=_site_tag(first_site, page=True))
-    return _head_sites_redirect(request, program.pk, first_site)
+    parts = [f'{len(allocated)} site(s) allocated to {_person(designer)}'
+             + (f', due {due}: {_codes(s.project_id for s in allocated)}.' if allocated
+                else '.')]
+    if qc_changed:
+        how = (f'set to {_person(reviewer)}' if reviewer is not None
+               else 'cleared to the open pool')
+        parts.append(f'Design QC {how} on {len(qc_changed)} site(s): '
+                     f'{_codes(s.project_id for s in qc_changed)}.')
+    parts.append(f'{len(unchanged)} unchanged'
+                 + (f': {_codes(s.project_id for s in unchanged)}.' if unchanged else '.'))
+    changed = allocated or qc_changed
+    anchor = (allocated or qc_changed or unchanged)[0]
+    (messages.success if changed else messages.info)(
+        request, ' '.join(parts), extra_tags=_site_tag(anchor, page=True))
+    return _head_sites_redirect(request, program.pk, anchor)
 
 
 # ---------------------------------------------------------------------------
@@ -2381,10 +2601,77 @@ def _resolve_qc_reviewer(raw_id, assignment):
         return None
     reviewer = _resolve_designer(raw_id)
     if assignment.assigned_to_id and assignment.assigned_to_id == reviewer.pk:
-        raise ValueError(
-            f'{reviewer.user.get_full_name() or reviewer.user.username} is the designer '
-            f'allocated to this site, and nobody reviews their own work at either gate')
+        raise ValueError(_self_review_refusal(reviewer))
     return reviewer
+
+
+#: The gate-1 lock's refusal, without the site code — design_assign_qc() and
+#: assign_design_qc() word it from this one string so the two can never drift.
+QC_LOCKED_REFUSAL = ('Design QC has already recorded a verdict on this attempt — the '
+                     'reviewer cannot be changed now')
+
+
+def _self_review_refusal(reviewer):
+    """The refusal for naming a site's own designer as its gate-1 reviewer (no site code)."""
+    return (f'{reviewer.user.get_full_name() or reviewer.user.username} is the designer '
+            f'allocated to this site, and nobody reviews their own work at either gate')
+
+
+def assign_design_qc(assignment, reviewer, actor):
+    """Name `reviewer` as `assignment`'s gate-1 Design QC reviewer, or clear it to the open
+    pool with None. Returns the ActivityLog code written, or None when `reviewer` is
+    already the site's reviewer (nothing is written at all).
+
+    THE ONE WRITER OF THE qc_assigned_* TRIPLE (DA-2; the helper agreed on 31 Oct). Moved
+    out of design_assign_qc() unchanged — the same write, the same three log codes and
+    detail text — so the Save QC form, the combined allocation form and bulk allocation all
+    name a reviewer the same way.
+
+    It re-checks the two rules design_assign_qc() checks before calling it, and raises
+    ValueError (worded WITHOUT the site code; callers add it) when either fails:
+      * the gate-1 lock — once Design QC has recorded a verdict on the current attempt the
+        reviewer is fixed;
+      * self-review — the site's CURRENT designer cannot be its reviewer. "Current" is
+        whatever `assignment` says at the call, which is why the combined view refreshes
+        the row after reallocating and before naming the new reviewer.
+
+    Caller owns the transaction, and the row lock where it takes one. `assignment` is not
+    refreshed here: a caller that goes on using it calls refresh_from_db().
+    """
+    if _gate1_verdict_recorded(_current_attempt(assignment)):
+        raise ValueError(QC_LOCKED_REFUSAL)
+    if reviewer is not None and assignment.assigned_to_id == reviewer.pk:
+        raise ValueError(_self_review_refusal(reviewer))
+
+    previous = assignment.qc_assigned_to
+    if (previous.pk if previous else None) == (reviewer.pk if reviewer else None):
+        return None
+
+    now = timezone.now()
+    # filter().update() rather than save(): two Heads assigning the same site at once
+    # would otherwise each write a whole row from their own stale copy, and the loser's
+    # view of every other field would silently win.
+    DesignAssignment.objects.filter(pk=assignment.pk).update(
+        qc_assigned_to=reviewer, qc_assigned_by=actor, qc_assigned_at=now,
+        updated_at=now)
+
+    if reviewer is None:
+        detail = (f'Design QC reviewer cleared — gate 1 returns to the open pool '
+                  f'(was {previous.user.get_full_name() or previous.user.username})')
+        code = 'design_qc_unassigned'
+    elif previous is not None:
+        detail = (f'Design QC reviewer changed from '
+                  f'{previous.user.get_full_name() or previous.user.username} to '
+                  f'{reviewer.user.get_full_name() or reviewer.user.username}')
+        code = 'design_qc_reassigned'
+    else:
+        detail = (f'Design QC reviewer assigned: '
+                  f'{reviewer.user.get_full_name() or reviewer.user.username}')
+        code = 'design_qc_assigned'
+    log_activity(assignment.project, actor, detail,
+                 entity_type='DesignAssignment', entity_id=assignment.pk,
+                 action_code=code)
+    return code
 
 
 @login_required
@@ -2396,9 +2683,13 @@ def design_assign_qc(request, project_id):
     work starts (REALLOCATABLE_STATUSES), but the reviewer is not chosen for the work, they
     are chosen for the review, and until the review has produced a verdict there is nothing
     to be inconsistent with.
+
+    DA-2: the write itself is assign_design_qc(). The checks below stay here, in this order,
+    so every message this view gives is word for word what it gave before the move.
     """
     project = _opex_site(project_id)
     tag = _site_tag(project)  # DA-1: every message here is about this one site
+    # Design Head authority only: who reviews a site is the Head's assignment decision.
     if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
     if request.method != 'POST':
@@ -2411,9 +2702,7 @@ def design_assign_qc(request, project_id):
         return _head_sites_redirect(request, project.program_id, project)
 
     if _gate1_verdict_recorded(_current_attempt(assignment)):
-        messages.error(request, f'{project.project_id}: Design QC has already recorded a '
-                                f'verdict on this attempt — the reviewer cannot be changed '
-                                f'now.', extra_tags=tag)
+        messages.error(request, f'{project.project_id}: {QC_LOCKED_REFUSAL}.', extra_tags=tag)
         return _head_sites_redirect(request, project.program_id, project)
 
     try:
@@ -2429,32 +2718,8 @@ def design_assign_qc(request, project_id):
                                f'{"unassigned" if reviewer is None else reviewer.user.get_full_name() or reviewer.user.username}.', extra_tags=tag)
         return _head_sites_redirect(request, project.program_id, project)
 
-    actor = request.user.profile
-    now = timezone.now()
     with transaction.atomic():
-        # filter().update() rather than save(): two Heads assigning the same site at once
-        # would otherwise each write a whole row from their own stale copy, and the loser's
-        # view of every other field would silently win.
-        DesignAssignment.objects.filter(pk=assignment.pk).update(
-            qc_assigned_to=reviewer, qc_assigned_by=actor, qc_assigned_at=now,
-            updated_at=now)
-
-        if reviewer is None:
-            detail = (f'Design QC reviewer cleared — gate 1 returns to the open pool '
-                      f'(was {previous.user.get_full_name() or previous.user.username})')
-            code = 'design_qc_unassigned'
-        elif previous is not None:
-            detail = (f'Design QC reviewer changed from '
-                      f'{previous.user.get_full_name() or previous.user.username} to '
-                      f'{reviewer.user.get_full_name() or reviewer.user.username}')
-            code = 'design_qc_reassigned'
-        else:
-            detail = (f'Design QC reviewer assigned: '
-                      f'{reviewer.user.get_full_name() or reviewer.user.username}')
-            code = 'design_qc_assigned'
-        log_activity(project, actor, detail,
-                     entity_type='DesignAssignment', entity_id=assignment.pk,
-                     action_code=code)
+        assign_design_qc(assignment, reviewer, request.user.profile)
 
     if reviewer is None:
         messages.success(request, f'{project.project_id}: Design QC reviewer cleared — any '

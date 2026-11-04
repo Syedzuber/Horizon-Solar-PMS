@@ -1066,8 +1066,9 @@ def attention_list(sites, today=None, limit=ATTENTION_LIMIT,
 # corrections. Nothing records who worked the attempt that reached review: the
 # nearest fields are DesignAttempt.boq_submitted_by, which is carried forward to the next
 # attempt, and ArkaSubmission.submitted_by, which is per Arka version. Deferred because
-# _allocate_one() refuses to reallocate once Arka work starts and BC-3 made the admin
-# assigned_to read-only, so this needs a reallocation the product no longer makes.
+# _allocate_one() reallocates only inside REALLOCATABLE_STATUSES and BC-3 made the admin
+# assigned_to read-only, so the case is narrow: a rework site back in `in_design`, which
+# can still be reallocated (DESIGN_MODULE_DEFERRED.md W1).
 # ---------------------------------------------------------------------------
 
 #: Fewest reached-review sites a designer needs before the panel shows a rate. Below this

@@ -1980,3 +1980,42 @@ fixed.
 **Location:** `projects/management/commands/` — the four seeds above; `projects/views.py`
 — `project_overview` (`show_design_selector`); `projects/admin.py` —
 `DesignAssignmentAdmin`
+
+---
+
+## W. Found while building DA-2 (one-step designer + QC allocation)
+
+Ruled 4 Nov 2026: the reallocation rules are left exactly as they are. These are the
+facts the DA-A audit found under them, recorded so the question can be put to the Design
+Head.
+
+### W1 — a rework site can be reallocated although an earlier attempt has an Arka
+
+`REALLOCATABLE_STATUSES` is a status test only: `_allocate_one()` reallocates any site whose
+status is in the list and reads no attempt or Arka history. A site comes back to
+`in_design` on a new attempt through `_open_next_attempt()` — a QC failure, an accepted
+change request, or a PM send-back — whenever no head-approved Arka is carried forward. It
+is then reallocatable, and the new designer takes over rework whose earlier attempts hold
+the first designer's Arka, CAD and BOQ. The old comments ("`in_design` means … no Arka
+submitted yet", "refuses to reallocate once Arka work starts") said otherwise; DA-2
+corrected them. There were no such rows on the 2 Nov restore.
+
+Since BC-3 made `DesignAssignment.assigned_to` read-only in the admin, reallocation is the
+only way to move a departed designer's site. Closing W1 by refusing reallocation on rework
+would also take that route away for rework sites.
+
+**Question for Praveen:** should rework stay with the original designer, or is moving it
+to another designer a normal Head decision?
+
+**Location:** `projects/design_views.py` — `REALLOCATABLE_STATUSES`, `_allocate_one`,
+`_open_next_attempt`
+
+### W2 — `allocated` and `due_date_proposed` are dead statuses still in the list
+
+Both are in `REALLOCATABLE_STATUSES` for rows that already carried them before Part 8. No
+code path writes either any more (allocation goes straight to `in_design`), and no site on
+the 2 Nov restore holds one. Removing them is a data question (are there any such rows in
+production?) before it is a code change.
+
+**Location:** `projects/design_views.py` — `REALLOCATABLE_STATUSES`; `projects/models.py`
+— `DESIGN_ALLOCATED`, `DESIGN_DUE_DATE_PROPOSED`
