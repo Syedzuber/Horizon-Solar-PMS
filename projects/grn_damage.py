@@ -16,12 +16,23 @@ THE ORDER, which is what makes it all-or-nothing (R8). The two views call, in tu
     upload_planned_photos() before the transaction; a partial run discards itself
     -- transaction.atomic() --
     lock_challan()          the challan row, so two GRNs cannot both raise an Issue
-    (the view's line saves)
+    reload_grn_lines()      DG-L: the lines again, as they are under the lock
+    recheck_damage_plan()   DG-L: plan_damage's checks again, on those fresh rows
+    (the view's line saves, on the fresh rows, receipt columns only)
     record_damage()         Issue / Comment / photo rows, after a fresh Issue lookup
-    (recalculate_dc_status, unchanged, then notify_delivery_issue_raised for a new Issue)
+    (recalculate_dc_status on the locked challan, then notify_delivery_issue_raised)
 
 and on ANY exception from the block they call discard_stored(). Nothing here changes how
 _read_grn_lines parses or clamps, nor how recalculate_dc_status decides a status.
+
+DG-L, WHY THE RELOAD. Everything before the lock reads the challan as the page-load saw
+it, and the upload in between can take seconds. A DC-B3 edit (or a second GRN) that
+commits in that window used to be undone: the views saved their pre-lock line copies
+whole, so an edited description went back, a removed line was INSERTed again, and
+recalculate_dc_status wrote the stale header back. Now the writes go to rows read under
+the lock, and a GRN whose basis moved meanwhile is refused with the draft kept
+(ChallanChangedMeanwhile). The damage Issue appearing or closing is NOT such a move: that
+race stays record_damage()'s (ruling QK, DG-L Q2).
 
 This module imports models, storage, permissions and the notification senders; it is
 imported by views.py and never imports it, so there is no cycle.
@@ -61,6 +72,23 @@ GRN_DRAFT_OVERRIDE = 'override'
 # Its own key, not issue_draft's: a refused GRN must never overwrite a refused Issue's
 # draft, or the other way round.
 _GRN_DRAFT_SESSION_KEY = 'grn_draft'
+
+#: DG-L: the refusal when the challan moved between the page and the lock.
+GRN_CHANGED_MEANWHILE = ('This challan changed while you were saving — please check and '
+                         'submit again.')
+
+#: DG-L: what the GRN form shows about a line, and so what the person relied on. A change
+#: to any of these on a posted line refuses the GRN (ruling Q1). The same four columns as
+#: dc_edit.LINE_EDIT_FIELDS — repeated, not imported: dc_edit imports this module, so the
+#: import would be a cycle. tests_grn_damage pins that the two stay equal.
+GRN_LINE_BASIS = ('boq_category', 'item_description', 'ordered_quantity', 'unit')
+
+#: DG-L: the columns a GRN writes, and the only ones its line saves name — the same set as
+#: dc_edit.RECEIPT_FIELDS. With update_fields a save can never write another column back,
+#: and a row deleted meanwhile raises instead of being INSERTed again.
+GRN_RECEIPT_FIELDS = ('received_quantity', 'damaged_quantity', 'condition', 'grn_date',
+                      'grn_confirmed_by', 'grn_notes', 'grn_on_behalf',
+                      'grn_on_behalf_reason')
 
 
 def photo_field(item):
@@ -177,6 +205,9 @@ class DamagePlan:
     # The damage Issue the page-time lookup found. record_damage() looks again under the
     # challan lock; a difference between the two is the race ruling QK settles.
     expected_issue_pk: int = None
+    # DG-L: {line_id: (live, all)} photo counts the plan was decided on, so
+    # recheck_damage_plan() can see one move. None when the plan asked nothing about damage.
+    photo_counts: dict = None
 
     @property
     def files(self):
@@ -198,16 +229,52 @@ def plan_damage(request, challan, line_items, grn_lines):
     read = {item.pk: damaged for item, _received, damaged, _condition, _notes in grn_lines}
     files_by_line = {item.pk: request.FILES.getlist(photo_field(item)) for item in line_items}
 
+    plan, counts, errors = _check_lines(challan, line_items, read, files_by_line)
+    if counts is None:
+        return plan, []
+    plan.photo_counts = counts
+
+    issue = open_damage_issue(challan) if (plan.recorded or plan.cleared) else None
+    plan.expected_issue_pk = issue.pk if issue else None
+    plan.description = request.POST.get(DAMAGE_DESCRIPTION_FIELD, '').strip()
+    if plan.recorded and issue is None and len(plan.description) < DAMAGE_DESCRIPTION_MIN:
+        errors.append(f'Describe the damage (at least {DAMAGE_DESCRIPTION_MIN} characters). '
+                      f'It becomes the description of the damage issue raised for this '
+                      f'challan.')
+    if errors:
+        return None, errors
+
+    if plan.files and not delivery_bucket():
+        return None, [DAMAGE_PHOTO_STORAGE_OFF]
+    for upload in plan.files:
+        try:
+            validate_damage_photo(upload)
+        except DeliveryStorageError as exc:
+            errors.append(str(exc))
+    if errors:
+        return None, errors
+    return plan, []
+
+
+def _check_lines(challan, line_items, read, files_by_line):
+    """plan_damage()'s per-line checks (QF, R2, which lines record or clear damage),
+    asked of `line_items` as they are. Returns (plan, photo counts, errors); the counts
+    are None when nothing about damage was asked.
+
+    Shared with recheck_damage_plan(), which asks them again of the rows read under the
+    lock (DG-L). The description, the Issue lookup and the files themselves are not
+    here: those are asked once, by plan_damage().
+    """
     # A GRN with no damage, no prior damage and no photo is the GRN of before DG-B: no
     # photo query, no Issue lookup, nothing else asked.
     if not (any(read.values()) or any(files_by_line.values())
             or any(item.damaged_quantity for item in line_items)):
-        return DamagePlan(), []
+        return DamagePlan(), None, []
 
     counts = _photo_counts(challan)
     errors, plan = [], DamagePlan()
     for item in line_items:
-        files = files_by_line[item.pk]
+        files = files_by_line.get(item.pk, [])
         label = _line_label(item)
         if item.pk not in read:
             # QF: a skipped line (blank received box) records nothing, so its photos
@@ -234,27 +301,7 @@ def plan_damage(request, challan, line_items, grn_lines):
                           f'— {live} already on record and {len(files)} attached.')
         if files or damaged != item.damaged_quantity:
             plan.recorded.append(DamageLine(item=item, damaged=damaged, files=files))
-
-    issue = open_damage_issue(challan) if (plan.recorded or plan.cleared) else None
-    plan.expected_issue_pk = issue.pk if issue else None
-    plan.description = request.POST.get(DAMAGE_DESCRIPTION_FIELD, '').strip()
-    if plan.recorded and issue is None and len(plan.description) < DAMAGE_DESCRIPTION_MIN:
-        errors.append(f'Describe the damage (at least {DAMAGE_DESCRIPTION_MIN} characters). '
-                      f'It becomes the description of the damage issue raised for this '
-                      f'challan.')
-    if errors:
-        return None, errors
-
-    if plan.files and not delivery_bucket():
-        return None, [DAMAGE_PHOTO_STORAGE_OFF]
-    for upload in plan.files:
-        try:
-            validate_damage_photo(upload)
-        except DeliveryStorageError as exc:
-            errors.append(str(exc))
-    if errors:
-        return None, errors
-    return plan, []
+    return plan, counts, errors
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +353,70 @@ def lock_challan(challan):
     Issue. A no-op on SQLite, which the test suite runs on; proved on Postgres by hand.
     """
     return DeliveryChallan.objects.select_for_update().get(pk=challan.pk)
+
+
+class ChallanChangedMeanwhile(Exception):
+    """DG-L: the challan moved between the page's reads and the lock — a posted line was
+    removed or edited, or what the damage plan was decided on is no longer so. A refusal,
+    raised inside the transaction so nothing written so far survives; the views discard
+    the uploads and keep the draft, exactly as for DamageIssueClosed."""
+
+
+def reload_grn_lines(locked, grn_lines):
+    """The challan's lines as they are now, and `grn_lines` with each item swapped for its
+    fresh row. Call right after lock_challan(), with the row it returned. One query.
+
+    Raises ChallanChangedMeanwhile when a posted line no longer exists (saving the stale
+    copy would INSERT it again) or differs in a GRN_LINE_BASIS column (the receipt would
+    be recorded against an item the person never saw). Lines added meanwhile, and lines
+    the GRN skipped, are not its business: it writes neither.
+    """
+    fresh_lines = list(locked.line_items.all())
+    by_pk = {line.pk: line for line in fresh_lines}
+    rebound = []
+    for item, received_qty, damaged_qty, condition, grn_notes in grn_lines:
+        fresh = by_pk.get(item.pk)
+        if fresh is None or any(getattr(fresh, name) != getattr(item, name)
+                                for name in GRN_LINE_BASIS):
+            raise ChallanChangedMeanwhile(GRN_CHANGED_MEANWHILE)
+        rebound.append((fresh, received_qty, damaged_qty, condition, grn_notes))
+    return fresh_lines, rebound
+
+
+def recheck_damage_plan(plan, locked, fresh_lines, fresh_grn_lines):
+    """Ask plan_damage()'s per-line checks again, of the rows read under the lock, and
+    point the plan at those rows. Raises ChallanChangedMeanwhile when the answer differs:
+    a check now fails, a different set of lines records or clears damage, or a posted
+    line's live photo count moved. At most one query (the photo counts).
+
+    WHY, when the plan already passed: it was decided on the stored damaged_quantity and
+    photo counts of the page-time copies. A second GRN in the window can change both, and
+    a plan built on the old values would record a Comment, or skip one, for damage that is
+    no longer what it said. Same answer means same plan, so the plan's files, description
+    and expected Issue all still hold. The Issue itself is NOT asked again here:
+    record_damage() does that, and decides that race (ruling QK, DG-L Q2).
+    """
+    read = {item.pk: damaged for item, _received, damaged, _condition, _notes in fresh_grn_lines}
+    files_by_line = {line.item.pk: line.files for line in plan.recorded}
+    fresh, counts, errors = _check_lines(locked, fresh_lines, read, files_by_line)
+    if errors:
+        raise ChallanChangedMeanwhile(GRN_CHANGED_MEANWHILE)
+    # Sets, not lists: DCLineItem orders by category only, so two reads may tie apart.
+    if ({line.item.pk for line in fresh.recorded} != {line.item.pk for line in plan.recorded}
+            or {item.pk for item in fresh.cleared} != {item.pk for item in plan.cleared}):
+        raise ChallanChangedMeanwhile(GRN_CHANGED_MEANWHILE)
+    if plan.photo_counts is not None and counts is not None:
+        for pk in read:
+            if counts.get(pk, (0, 0))[0] != plan.photo_counts.get(pk, (0, 0))[0]:
+                raise ChallanChangedMeanwhile(GRN_CHANGED_MEANWHILE)
+
+    # The stored tuples upload_planned_photos() returned hold these same DamageLine
+    # objects, so record_damage()'s photo rows and Comment lines see the fresh rows too.
+    by_pk = {line.pk: line for line in fresh_lines}
+    for line in plan.recorded:
+        line.item = by_pk[line.item.pk]
+    plan.cleared = [by_pk[item.pk] for item in plan.cleared]
+    return plan
 
 
 def record_damage(plan, challan, project, profile, stored):

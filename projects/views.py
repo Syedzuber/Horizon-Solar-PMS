@@ -267,10 +267,11 @@ from .delivery_storage import (
 # DG-B — damaged delivery at GRN. Every damage decision and write is in grn_damage; the
 # two GRN views only call it in its fixed order (see that module's docstring).
 from .grn_damage import (
-    DamageIssueClosed, GRN_DRAFT_CONFIRM, GRN_DRAFT_OVERRIDE, OPEN_DAMAGE_ISSUE_STATUSES,
+    ChallanChangedMeanwhile, DamageIssueClosed, GRN_CHANGED_MEANWHILE, GRN_DRAFT_CONFIRM,
+    GRN_DRAFT_OVERRIDE, GRN_RECEIPT_FIELDS, OPEN_DAMAGE_ISSUE_STATUSES,
     damage_issue_scm_recipients, damage_message, discard_stored, lock_challan,
-    notify_delivery_issue_raised, plan_damage, pop_grn_draft, record_damage,
-    stash_grn_draft, upload_planned_photos,
+    notify_delivery_issue_raised, plan_damage, pop_grn_draft, recheck_damage_plan,
+    record_damage, reload_grn_lines, stash_grn_draft, upload_planned_photos,
 )
 # DC-B3 — correcting a challan after creation. Every decision and write is in dc_edit;
 # delivery_challan_edit only checks access and calls it.
@@ -14551,6 +14552,8 @@ def confirm_grn(request, project_id, dc_id):
     damage Issue (grn_damage). Every refusal comes before any upload; uploads come
     before the one transaction that writes the lines, the Issue or Comment and the photo
     rows; any exception in it discards the uploads. A refusal keeps the typed values.
+    DG-L: inside it the challan and lines are read again under the lock and written there;
+    a challan that changed meanwhile refuses the GRN, uploads discarded, draft kept.
     Access: Site Engineer only. POST only.
     """
     if request.method != 'POST':
@@ -14621,7 +14624,18 @@ def confirm_grn(request, project_id, dc_id):
     # they are now inside it so a failed Issue or photo row takes them back too.
     try:
         with transaction.atomic():
-            lock_challan(challan)
+            # RACE (DG-L): everything above read the challan before the lock, and the
+            # upload can take seconds. A DC-B3 edit or a second GRN committing in that
+            # window would be undone by saving those copies, so from here on `challan`
+            # and the lines are the rows read under the lock, and a GRN whose basis moved
+            # is refused (grn_damage.ChallanChangedMeanwhile).
+            challan = lock_challan(challan)
+            # The pre-lock Received guard, asked again: an SCM override may have closed
+            # the challan meanwhile. Refused with the draft kept, not a bare 403 (Q4).
+            if challan.status == DeliveryChallan.RECEIVED:
+                raise ChallanChangedMeanwhile(GRN_CHANGED_MEANWHILE)
+            fresh_lines, grn_lines = reload_grn_lines(challan, grn_lines)
+            recheck_damage_plan(damage_plan, challan, fresh_lines, grn_lines)
             for item, received_qty, damaged_qty, derived_condition, grn_notes in grn_lines:
                 item.received_quantity = received_qty
                 item.damaged_quantity  = damaged_qty
@@ -14629,7 +14643,9 @@ def confirm_grn(request, project_id, dc_id):
                 item.grn_date          = today
                 item.grn_confirmed_by  = profile
                 item.grn_notes         = grn_notes
-                item.save()
+                # Receipt columns only: a second GRN's values in the window are
+                # overwritten by this one (last writer wins, DG-L Q3), nothing else is.
+                item.save(update_fields=GRN_RECEIPT_FIELDS)
 
             damage = record_damage(damage_plan, challan, project, profile, stored_photos)
 
@@ -14647,7 +14663,7 @@ def confirm_grn(request, project_id, dc_id):
             if damage is not None and damage.created:
                 notify_delivery_issue_raised(damage.issue, profile,
                                              also_tell=damage_issue_scm_recipients())
-    except DamageIssueClosed as exc:
+    except (DamageIssueClosed, ChallanChangedMeanwhile) as exc:
         discard_stored(stored_photos)
         _refuse_grn(request, challan, GRN_DRAFT_CONFIRM, line_items, [str(exc)],
                     'The GRN was not recorded.')
@@ -14698,6 +14714,8 @@ def override_grn(request, project_id, dc_id):
     DG-B: the same damage rule as confirm_grn, in the same order (grn_damage). A
     correction that keeps damage on a line that already has a live photo needs no new
     photo. Every refusal keeps the typed values, the on-behalf reason included.
+    DG-L: the same reload under the lock as confirm_grn, and the first-time decision is
+    asked again of the fresh rows.
     Access: SCM role, and project scope. POST only.
     """
     if request.method != 'POST':
@@ -14775,7 +14793,21 @@ def override_grn(request, project_id, dc_id):
     # ── Second pass: one transaction for every write this request makes. ───────
     try:
         with transaction.atomic():
-            lock_challan(challan)
+            # RACE (DG-L), as in confirm_grn: from here on `challan` and the lines are
+            # the rows read under the lock, and a GRN whose basis moved is refused.
+            challan = lock_challan(challan)
+            fresh_lines, grn_lines = reload_grn_lines(challan, grn_lines)
+            recheck_damage_plan(damage_plan, challan, fresh_lines, grn_lines)
+            # The first pass decided first-time or correction, and with it whether the
+            # on-behalf reason was required, on the pre-lock copies. An SE confirming a
+            # line in the window turns a first-time receipt into a correction (or a
+            # reverted confirmer the other way): the R3 decision no longer holds, so
+            # refused (DG-L condition e). `pending` and grn_lines are in the same order.
+            pending = [(*line, first_time)
+                       for line, (*_stale, first_time) in zip(grn_lines, pending)]
+            if any((item.grn_confirmed_by_id is None) != first_time
+                   for item, *_values, first_time in pending):
+                raise ChallanChangedMeanwhile(GRN_CHANGED_MEANWHILE)
             for item, received_qty, damaged_qty, derived_condition, grn_notes, first_time in pending:
                 item.received_quantity = received_qty
                 item.damaged_quantity  = damaged_qty
@@ -14791,7 +14823,8 @@ def override_grn(request, project_id, dc_id):
                 # Otherwise grn_confirmed_by is NOT overwritten, and the on-behalf pair is
                 # left exactly as it stands -- correcting a quantity does not change who
                 # received the material, nor how that receipt was captured.
-                item.save()
+                # Receipt columns only, as in confirm_grn (last writer wins, DG-L Q3).
+                item.save(update_fields=GRN_RECEIPT_FIELDS)
 
             damage = record_damage(damage_plan, challan, project, profile, stored_photos)
 
@@ -14810,7 +14843,7 @@ def override_grn(request, project_id, dc_id):
             if damage is not None and damage.created:
                 notify_delivery_issue_raised(damage.issue, profile,
                                              also_tell=damage_issue_scm_recipients())
-    except DamageIssueClosed as exc:
+    except (DamageIssueClosed, ChallanChangedMeanwhile) as exc:
         discard_stored(stored_photos)
         _refuse_grn(request, challan, GRN_DRAFT_OVERRIDE, line_items, [str(exc)],
                     'The GRN was not changed.')

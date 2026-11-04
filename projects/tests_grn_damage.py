@@ -16,6 +16,10 @@ WHAT IS PINNED
   * R8: refusals before any upload; a storage failure part way and a database failure
     inside the transaction both discard every upload; QK's race refuses cleanly.
   * R11: the draft — typed values, description and on-behalf reason come back once.
+  * DG-L: a challan changed between the page's reads and the lock — a line edited or
+    removed, damage or a photo moved, Received, a first-time line confirmed — refuses
+    the GRN with the edit intact; header edits and added lines survive a GRN; a second
+    GRN in the window is overwritten only on the lines both post.
   * R3/QH/QI: the open view (live: project viewers; withdrawn: SCM/Admin), withdraw
     (SCM/Admin, reason >= 10, object kept), opens hidden from Recent activity.
   * the model's three CHECKs, append-only, PROTECT; query cost of both pages;
@@ -639,6 +643,238 @@ class AllOrNothingTests(GrnDamageBase):
         self.assertFalse(Comment.objects.exists())
         self.assertEqual(self.uploads(), [])
         self.assertNotIn('grn_draft', self.client.session)
+
+
+# ---------------------------------------------------------------------------
+# DG-L — the challan changed between the page's reads and the lock
+# ---------------------------------------------------------------------------
+
+class ChangedMeanwhileTests(GrnDamageBase):
+    """The window is simulated where the QK tests above simulate it: the concurrent write
+    commits inside upload_planned_photos, which both views call on every GRN — after
+    every pre-lock read and before the lock. The writes are the columns a DC-B3 edit or
+    another GRN would commit (ORM updates, not their views). The row lock itself is a
+    no-op on SQLite; what is pinned is that the views write the rows read after it."""
+
+    def in_the_window(self, change):
+        real = grn_damage.upload_planned_photos
+
+        def change_then_upload(plan, project):
+            change()
+            return real(plan, project)
+
+        return mock.patch('projects.views.upload_planned_photos', side_effect=change_then_upload)
+
+    def assert_refused(self, response, closing='The GRN was not recorded.'):
+        # The last two: the redirect is not followed, so subTests' messages accumulate.
+        self.assertEqual(self.messages_of(response)[-2:],
+                         [grn_damage.GRN_CHANGED_MEANWHILE, closing])
+        self.assertIn('grn_draft', self.client.session)
+
+    def test_the_basis_columns_are_dc_edits_columns(self):
+        from .dc_edit import LINE_EDIT_FIELDS, RECEIPT_FIELDS
+        self.assertEqual(grn_damage.GRN_LINE_BASIS, LINE_EDIT_FIELDS)
+        self.assertEqual(grn_damage.GRN_RECEIPT_FIELDS, RECEIPT_FIELDS)
+
+    def test_a_line_edit_in_the_window_is_not_reverted_and_refuses_the_grn(self):
+        edits = {'boq_category': 'BOS', 'item_description': 'Panel 545Wp',
+                 'ordered_quantity': Decimal('12.00'), 'unit': 'Pcs'}
+        for name, value in edits.items():
+            with self.subTest(column=name):
+                before = getattr(self.panels, name)
+                with self.in_the_window(lambda: DCLineItem.objects.filter(
+                        pk=self.panels.pk).update(**{name: value})):
+                    response = self.confirm({self.panels: ('10', '0', [])})
+                self.assert_refused(response)
+                self.panels.refresh_from_db()
+                self.assertEqual(getattr(self.panels, name), value)     # the edit stands
+                self.assertIsNone(self.panels.received_quantity)        # nothing recorded
+                self.assertEqual(self.client.session['grn_draft']['lines'][str(self.panels.pk)]
+                                 ['received'], '10')
+                DCLineItem.objects.filter(pk=self.panels.pk).update(**{name: before})
+                self.panels.refresh_from_db()
+
+    def test_a_removed_line_is_not_recreated_uploads_discarded_draft_kept(self):
+        with self.in_the_window(lambda: DCLineItem.objects.filter(pk=self.inverter.pk).delete()):
+            response = self.confirm({self.panels: ('10', '2', [jpg()]),
+                                     self.inverter: ('2', '0', [])},
+                                    description='Two panels cracked in transit')
+        self.assert_refused(response)
+        self.assertFalse(DCLineItem.objects.filter(pk=self.inverter.pk).exists())
+        self.panels.refresh_from_db()
+        self.assertIsNone(self.panels.received_quantity)
+        self.assertFalse(Issue.objects.exists())
+        self.assertFalse(DCLineDamagePhoto.objects.exists())
+        self.assertEqual(len(self.uploads()), 1)
+        self.assertEqual(self.removes(), [mock.call([self.uploads()[0]])])
+
+    def test_a_header_edit_in_the_window_is_kept_and_the_grn_goes_through(self):
+        # Before DG-L recalculate_dc_status saved the page-time challan whole, putting
+        # these two back to what the page had read.
+        with self.in_the_window(lambda: DeliveryChallan.objects.filter(pk=self.dc.pk).update(
+                po_number='PO-EDITED', notes='Edited while the GRN was saving')):
+            response = self.confirm({self.panels: ('10', '0', []), self.inverter: ('2', '0', [])})
+        self.assertIn('GRN confirmed. DC status: Received.', self.messages_of(response))
+        self.dc.refresh_from_db()
+        self.assertEqual((self.dc.po_number, self.dc.notes),
+                         ('PO-EDITED', 'Edited while the GRN was saving'))
+        self.assertEqual(self.dc.status, DeliveryChallan.RECEIVED)
+
+    def test_a_line_added_in_the_window_is_left_alone(self):
+        added = {}
+
+        def add_line():
+            added['line'] = DCLineItem.objects.create(
+                challan=self.dc, boq_category='BOS', item_description='DC cable 4 sq mm',
+                ordered_quantity=Decimal('50'), unit='m')
+
+        with self.in_the_window(add_line):
+            response = self.confirm({self.panels: ('10', '0', [])})
+        self.assertIn('GRN confirmed. DC status: Received.', self.messages_of(response))
+        added['line'].refresh_from_db()
+        self.assertIsNone(added['line'].received_quantity)
+
+    def test_a_second_grn_in_the_window_the_later_one_writes_on_fresh_rows(self):
+        # DG-L Q3: the earlier GRN's values on a line both post are overwritten by the
+        # later one; its values on a line only it posted stay.
+        def other_grn():
+            DCLineItem.objects.filter(pk=self.panels.pk).update(
+                received_quantity=Decimal('9'), grn_confirmed_by=self.scm, grn_date=date.today(),
+                grn_notes='SCM count', condition=DCLineItem.GOOD)
+            DCLineItem.objects.filter(pk=self.inverter.pk).update(
+                received_quantity=Decimal('1'), grn_confirmed_by=self.scm, grn_date=date.today(),
+                grn_notes='one short', condition=DCLineItem.GOOD)
+
+        with self.in_the_window(other_grn):
+            response = self.confirm({self.panels: ('10', '0', [])})
+        self.refresh(self.panels, self.inverter)
+        self.assertEqual((self.panels.received_quantity, self.panels.grn_confirmed_by,
+                          self.panels.grn_notes), (Decimal('10'), self.se, f'note {self.panels.pk}'))
+        self.assertEqual((self.inverter.received_quantity, self.inverter.grn_notes),
+                         (Decimal('1'), 'one short'))
+        # The status is decided on both GRNs' rows: the inverter is one short.
+        self.assertIn('GRN confirmed. DC status: Partially Received.', self.messages_of(response))
+
+    def test_damage_recorded_by_a_second_grn_in_the_window_refuses_the_later_one(self):
+        # The page saw no damage, so the plan asked nothing; under the lock the line has
+        # damage and a photo, and posting 0 would clear it with no Comment (R7).
+        def other_grn():
+            DCLineItem.objects.filter(pk=self.panels.pk).update(
+                received_quantity=Decimal('10'), damaged_quantity=2, grn_confirmed_by=self.scm,
+                grn_date=date.today(), condition=DCLineItem.PARTIAL)
+            self.damage_issue()
+
+        with self.in_the_window(other_grn):
+            response = self.confirm({self.panels: ('10', '0', [])})
+        self.assert_refused(response)
+        self.panels.refresh_from_db()
+        self.assertEqual(self.panels.damaged_quantity, 2)
+        self.assertFalse(Comment.objects.exists())
+
+    def test_a_photo_withdrawn_in_the_window_refuses_a_grn_relying_on_it(self):
+        DCLineItem.objects.filter(pk=self.panels.pk).update(
+            received_quantity=Decimal('10'), damaged_quantity=2, grn_confirmed_by=self.se,
+            grn_date=date.today(), condition=DCLineItem.PARTIAL)
+        issue = self.damage_issue()
+        photo = DCLineDamagePhoto.objects.get(issue=issue)
+        self.panels.refresh_from_db()
+
+        with self.in_the_window(lambda: DCLineDamagePhoto.objects.filter(pk=photo.pk).update(
+                withdrawn_at=timezone.now(), withdrawn_by=self.scm,
+                withdrawn_reason='Wrong crate in the photo')):
+            response = self.confirm({self.panels: ('10', '2', [])})
+        self.assert_refused(response)
+        self.panels.refresh_from_db()
+        self.assertEqual(self.panels.grn_notes, '')
+
+    def test_a_challan_received_in_the_window_refuses_the_se(self):
+        with self.in_the_window(lambda: DeliveryChallan.objects.filter(pk=self.dc.pk).update(
+                status=DeliveryChallan.RECEIVED)):
+            response = self.confirm({self.panels: ('10', '0', [])})
+        self.assert_refused(response)
+        self.panels.refresh_from_db()
+        self.assertIsNone(self.panels.received_quantity)
+
+    def test_an_se_confirming_in_the_window_refuses_a_first_time_override(self):
+        def se_confirms():
+            DCLineItem.objects.filter(pk=self.inverter.pk).update(
+                received_quantity=Decimal('2'), grn_confirmed_by=self.se, grn_date=date.today(),
+                condition=DCLineItem.GOOD)
+
+        with self.in_the_window(se_confirms):
+            response = self.override({self.inverter: ('2', '0', [])},
+                                     reason='Engineer phone dead at site')
+        self.assert_refused(response, closing='The GRN was not changed.')
+        self.inverter.refresh_from_db()
+        self.assertEqual(self.inverter.grn_confirmed_by, self.se)
+        self.assertFalse(self.inverter.grn_on_behalf)
+        self.assertEqual(self.client.session['grn_draft']['on_behalf_reason'],
+                         'Engineer phone dead at site')
+
+    def test_no_race_confirm_then_override_write_as_before(self):
+        self.assertIn('GRN confirmed. DC status: Received.', self.messages_of(
+            self.confirm({self.panels: ('10', '0', []), self.inverter: ('2', '0', [])})))
+        self.assertIn('GRN overridden. DC status: Partially Received.', self.messages_of(
+            self.override({self.panels: ('9', '0', [])})))
+        self.refresh(self.panels, self.inverter)
+        self.assertEqual((self.panels.received_quantity, self.panels.grn_confirmed_by,
+                          self.panels.grn_on_behalf), (Decimal('9'), self.se, False))
+        self.assertEqual((self.panels.boq_category, self.panels.item_description,
+                          self.panels.ordered_quantity, self.panels.unit),
+                         ('Solar Modules', 'Panel 540Wp', Decimal('10'), 'Nos'))
+        self.assertEqual(self.inverter.received_quantity, Decimal('2'))
+
+
+class CheckDcEditRevertsTests(GrnDamageBase):
+    """The read-only damage check: a revision's `after` against what came next."""
+
+    def revise(self, change):
+        from .dc_edit import challan_snapshot, lines_for_edit
+        from .models import DeliveryChallanRevision
+        before = challan_snapshot(self.dc, lines_for_edit(self.dc))
+        change()
+        self.dc.refresh_from_db()
+        return DeliveryChallanRevision.objects.create(
+            challan=self.dc, revision_no=self.dc.revisions.count() + 1, revised_by=self.scm,
+            reason='Vendor sent a corrected challan', before=before,
+            after=challan_snapshot(self.dc, lines_for_edit(self.dc)))
+
+    def run_check(self):
+        from io import StringIO
+        from django.core.management import call_command
+        out = StringIO()
+        call_command('check_dc_edit_reverts', stdout=out)
+        return out.getvalue()
+
+    def grn_logged(self):
+        ActivityLog.objects.create(project=self.site, actor=self.se,
+                                   action='SE confirmed GRN for DC GD-1 — Received',
+                                   entity_type='DeliveryChallan', entity_id=self.dc.pk)
+
+    def test_an_edit_reverted_after_a_grn_and_a_recreated_line_are_listed(self):
+        self.revise(lambda: (
+            DCLineItem.objects.filter(pk=self.panels.pk).update(item_description='Panel 545Wp'),
+            DeliveryChallan.objects.filter(pk=self.dc.pk).update(notes='Corrected'),
+            DCLineItem.objects.filter(pk=self.inverter.pk).delete()))
+        # What the old GRN path did: the page-time copies written back, the removed line
+        # INSERTed under its old id.
+        self.grn_logged()
+        self.panels.save()
+        self.inverter.save()
+        DeliveryChallan.objects.filter(pk=self.dc.pk).update(notes='')
+        out = self.run_check()
+        self.assertRegex(out, r'line \d+ item_description\s+Panel 545Wp\s+Panel 540Wp.*SUSPECT')
+        self.assertRegex(out, r'notes\s+Corrected\s+current.*SUSPECT')
+        self.assertRegex(out, rf'line {self.inverter.pk}\s+absent\s+present.*RECREATED')
+        self.assertIn('3 difference row(s): 2 suspect, 1 recreated, 0 unexplained. '
+                      'Challans: 1 with a GRN after the edit', out)
+
+    def test_an_untouched_edit_lists_nothing(self):
+        self.revise(lambda: DeliveryChallan.objects.filter(pk=self.dc.pk).update(notes='Corrected'))
+        self.grn_logged()
+        out = self.run_check()
+        self.assertIn('1 revision(s) on 1 challan(s) checked. 0 difference row(s)', out)
+        self.assertEqual(ActivityLog.objects.count(), 1)       # wrote nothing
 
 
 # ---------------------------------------------------------------------------
