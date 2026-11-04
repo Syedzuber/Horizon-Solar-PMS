@@ -69,6 +69,11 @@ class NotificationEvent:
     # pausing the event here pauses its email and not that WhatsApp (T3b, P2). The Admin
     # screens say so on the event. Goes when the WhatsApp phase moves those sends.
     whatsapp_sent_separately: bool = False
+    # NTF-DCG S2 (ruling N9, S1): True sends the external channels (email; WhatsApp from
+    # Session 3) from a background thread after commit, so the request never waits on a
+    # provider; each send gets a 'pending' log row that moves to sent/failed/skipped.
+    # In-app stays synchronous. Opt-in per event: no event shipped before S2 sets it.
+    deferred: bool = False
 
     @property
     def variable_names(self):

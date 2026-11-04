@@ -72,3 +72,11 @@ PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
 # emailing or messaging a real person.
 ZEPTOMAIL_API_KEY = ''
 INTERAKT_API_KEY = ''
+
+# DEFERRED SENDS RUN INLINE (NTF-DCG S2, S8). notify_deferred hands a deferred event's
+# email to a background thread; that thread would open its own connection, and an
+# in-memory SQLite database is private to one connection, so it would find no tables.
+# Inline, the job still runs after commit (at hand-off, inside the on_commit callback),
+# so captureOnCommitCallbacks still proves nothing is sent before commit. Real threads
+# are exercised by `manage.py notify_deferred_smoke` on local Postgres.
+NOTIFY_DEFERRED_SYNC = True

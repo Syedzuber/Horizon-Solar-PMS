@@ -16,6 +16,11 @@ notify() causes carry event_code and, for an email rendered from a stored versio
 template_version. The two kinds of row notify() writes itself — 'skipped' for a paused
 event, 'failed' for anything that went wrong for one person — go through the same _log().
 
+DEFERRED EVENTS (NTF-DCG S2). For an event registered with deferred=True, the email is
+rendered here as usual and then handed to notify_deferred, which writes a 'pending' row
+and makes the send_notification() call from a background thread. In-app, recipients and
+rendering stay on this thread. Every other event is untouched.
+
 RENDERING NEVER USES THE TEMPLATE ENGINE ON STORED TEXT. Subject and body are Admin-typed;
 running them through Template(), format() or format_map() would let `{% load %}`,
 `{{ request }}` or `{0.__class__}` reach code. Placeholders are `{{ name }}` only, found by
@@ -36,6 +41,7 @@ from django.template.loader import render_to_string
 from django.utils.html import escape
 from django.utils.safestring import mark_safe
 
+from . import notify_deferred
 from .models import NotificationEventSetting, NotificationTemplate
 from .notifications import _log, send_notification
 from .notify_registry import IDENTIFIER_RE, PLACEHOLDER_RE, get_event
@@ -270,6 +276,18 @@ def _send_to_one(event, recipient, values, actor, related_project, link, plan, l
         return
     try:
         subject, text, html = render_email(event, payload, values, link)
+        if event.deferred:
+            # NTF-DCG S2: the same rendered email, sent from the background pool. The
+            # pending row carries what send_notification() would have logged; the job
+            # finishes it. Only the provider call leaves this thread.
+            row_fields = dict(base, message=text, event_code=event.code)
+            if payload is not None:
+                row_fields['template_version'] = payload
+            notify_deferred.defer(
+                recipient=recipient, channel='email', row_fields=row_fields,
+                send_kwargs=dict(message=text, channels=['email'], subject=subject,
+                                 html_message=html, template=log_label))
+            return
         send_notification(
             recipient=recipient,
             message=text,

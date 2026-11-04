@@ -2478,6 +2478,10 @@ class NotificationLog(models.Model):
         ('sent',    'Sent'),
         ('failed',  'Failed'),
         ('skipped', 'Skipped'),
+        # NTF-DCG S2: a deferred send handed to the background pool and not yet finished.
+        # Only notify_deferred writes it; send_notification() moves it to one of the three
+        # above. A row left here is stranded (list_stuck_notifications).
+        ('pending', 'Pending'),
     ]
 
     recipient       = models.ForeignKey(
@@ -2516,6 +2520,7 @@ class NotificationLog(models.Model):
         'NotificationTemplate', null=True, blank=True, on_delete=models.PROTECT,
         related_name='notification_logs',
     )  # The ACTIVE version the email was rendered from; NULL = the code default or not an email
+    finished_at          = models.DateTimeField(null=True, blank=True)  # When a deferred ('pending') row reached sent/failed/skipped; NULL on every row written synchronously, whose created_at is already its outcome time
 
     class Meta:
         ordering = ['-created_at']

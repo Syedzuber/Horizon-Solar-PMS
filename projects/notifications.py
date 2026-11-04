@@ -17,8 +17,17 @@ import logging
 
 import requests
 from django.conf import settings
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
+
+# The key under which send_notification() carries log_row_id inside its `base` dict to
+# _log(). Never a NotificationLog field, so _log() removes it before any create().
+_PENDING_ROW = '_pending_row'
+
+# How much error text a deferred row keeps (S5). A provider can return a long body or
+# a traceback-sized message; the stuck/failed listings need the start of it, not all.
+PENDING_ERROR_LIMIT = 1000
 
 
 def send_notification(
@@ -34,6 +43,7 @@ def send_notification(
     html_message=None,
     event_code=None,
     template_version=None,
+    log_row_id=None,
 ):
     """
     Send a notification to recipient on one or more channels.
@@ -57,6 +67,10 @@ def send_notification(
                           only by notify.notify(); None for every other caller.
         template_version: NotificationTemplate the email was rendered from, stored on
                           every log row. Passed only by notify.notify().
+        log_row_id      : pk of a 'pending' NotificationLog row to FINISH instead of
+                          creating a new one (NTF-DCG S2). Passed only by notify_deferred,
+                          with one channel. None for every other caller, whose rows are
+                          created exactly as before.
     """
     from .models import Notification, NotificationLog, SystemSettings
 
@@ -85,6 +99,9 @@ def send_notification(
         _base['event_code'] = event_code
     if template_version is not None:
         _base['template_version'] = template_version
+    # Same rule: only a deferred send carries it, so every other base is unchanged.
+    if log_row_id is not None:
+        _base[_PENDING_ROW] = log_row_id
 
     for channel in channels:
         if channel == 'in_app':
@@ -342,8 +359,38 @@ def send_aggregate_email(to_email, subject, text_body, html_body=None,
     _record('sent' if ok else 'failed', '' if ok else detail)
 
 
+def finish_pending(row_id, status, error_detail='', interakt_message_id=''):
+    """Move the 'pending' row `row_id` to `status`, stamping finished_at. Never raises.
+
+    The one writer of a deferred row's outcome: _log() calls it for a send made with
+    log_row_id, and notify_deferred calls it when the job itself fails. Error text is
+    cut to PENDING_ERROR_LIMIT.
+    """
+    # Late import, as in every helper of this module: notifications.py never imports
+    # models at load time. No cycle is known today; kept for consistency.
+    from .models import NotificationLog
+    try:
+        # RACE: filter(status='pending').update() and not get() + save(). Only the one
+        # job that owns the row should finish it, and a row already finished (by that
+        # job, or by a person in a shell) must not be overwritten by a late second
+        # writer. The status condition makes the update a no-op for anyone but the first.
+        NotificationLog.objects.filter(pk=row_id, status='pending').update(
+            status=status,
+            error_detail=(error_detail or '')[:PENDING_ERROR_LIMIT],
+            interakt_message_id=interakt_message_id or '',
+            finished_at=timezone.now(),
+        )
+    except Exception as e:
+        logger.error('finish_pending: NotificationLog %s update failed — %s', row_id, e)
+
+
 def _log(base, channel, status, error_detail='', interakt_message_id='',
          event_code=None, template_version=None):
+    # A deferred send finishes its own pending row instead of adding a second one (S5).
+    # Absent from every other base, so their rows are created exactly as before.
+    if _PENDING_ROW in base:
+        finish_pending(base[_PENDING_ROW], status, error_detail, interakt_message_id)
+        return
     from .models import NotificationLog
     # event_code / template_version are for the rows notify.notify() writes itself
     # (a paused event, a failed render), whose base it builds without them. Rows from
