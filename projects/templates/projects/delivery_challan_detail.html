@@ -286,6 +286,49 @@ them out of the query for anyone else), and only they see the Withdraw control.
 </div>
 
 {% comment %}
+NTF-DCG 4a (G6): the numbered receipts, newest first, read-only, to everyone who can read
+this page. A list with <details>, not a table, so a phone never scrolls sideways; each
+receipt opens to its lines as "before → after (delta)". An Imported receipt says on the
+page, not only on hover (phones have no hover), that it is approximate.
+{% endcomment %}
+{% if goods_receipts %}
+<div class="card shadow-sm mb-4" id="dc-receipts">
+  <div class="card-header fw-semibold">Receipts <span class="text-muted fw-normal">— {{ goods_receipts|length }}</span></div>
+  <div class="card-body">
+    <ul class="list-unstyled mb-0">
+      {% for receipt in goods_receipts %}
+      <li class="dc-receipt{% if not forloop.last %} border-bottom pb-2 mb-2{% endif %}">
+        <details>
+          <summary class="small text-break">
+            <span class="fw-semibold">{{ receipt.number }}</span>
+            · {{ receipt.receipt_date|date:"d M Y" }}
+            · <span class="badge {% if receipt.kind == 'correction' %}bg-warning text-dark{% elif receipt.kind == 'imported' %}bg-secondary{% else %}bg-success{% endif %}"{% if receipt.kind == 'imported' %} title="Recorded before receipt numbering began. Earlier GRNs saved every line again on each submission, so this shows each line as it stood, not the separate deliveries."{% endif %}>{{ receipt.get_kind_display }}</span>
+            · {% if receipt.recorded_by %}{{ receipt.recorded_by.user.get_full_name|default:receipt.recorded_by.user.username }}{% else %}<span class="text-muted">not recorded</span>{% endif %}
+            · {{ receipt.lines.all|length }} line{{ receipt.lines.all|length|pluralize }}
+          </summary>
+          {% if receipt.kind == 'imported' %}
+          <div class="small text-muted mt-1">Imported from receipts recorded before numbering began. Approximate: earlier GRNs saved every line again on each submission, so separate deliveries cannot be told apart.</div>
+          {% endif %}
+          {% if receipt.on_behalf_reason %}
+          <div class="small text-muted mt-1 text-break">On behalf of the site team: {{ receipt.on_behalf_reason }}</div>
+          {% endif %}
+          <ul class="small mb-0 mt-1">
+            {% for line in receipt.lines.all %}
+            <li class="text-break">
+              {{ line.item_description }} <span class="text-muted">({{ line.ordered_quantity }} {{ line.unit }} ordered)</span>:
+              received {{ line.received_change }}{% if line.has_damage %}, damaged {{ line.damaged_change }}{% endif %}{% if line.condition %} · {{ line.condition }}{% endif %}{% if line.grn_notes %} — {{ line.grn_notes }}{% endif %}
+            </li>
+            {% endfor %}
+          </ul>
+        </details>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+</div>
+{% endif %}
+
+{% comment %}
 DC-B3: the challan's edit history (E9), newest first, to everyone who can read this page:
 who, when, the reason, and what changed. Document names are never listed (ruling Q-B).
 {% endcomment %}
@@ -367,7 +410,8 @@ for SCM and Admin (the view splits them off), and only they see the Withdraw con
   </div>
   <div class="card-body">
     <p class="text-muted small mb-3">
-      Enter received quantities below. In the <strong>Damaged</strong> column, enter how many
+      Enter the <strong>total received so far (including earlier deliveries)</strong> on each
+      line — not just today's delivery. In the <strong>Damaged</strong> column, enter how many
       of the received units arrived damaged (enter 0 if all are in good condition).
       Leave a row blank to skip it. A damaged line needs at least one photo of the damage.
     </p>
@@ -387,7 +431,7 @@ for SCM and Admin (the view splits them off), and only they see the Withdraw con
               <th>Category</th>
               <th>Description</th>
               <th class="text-end">Ordered</th>
-              <th style="width:10rem;">Received Qty</th>
+              <th style="width:10rem;">Total received so far (including earlier deliveries)</th>
               <th style="width:9rem;">Damaged</th>
               <th style="width:14rem;">GRN Notes</th>
               <th style="width:16rem;">Damage photos</th>
@@ -399,7 +443,7 @@ for SCM and Admin (the view splits them off), and only they see the Withdraw con
               <td class="grn-cat"><span class="badge bg-light text-dark border">{{ item.boq_category }}</span></td>
               <td class="small grn-desc">{{ item.item_description }}</td>
               <td class="text-end text-muted grn-ordered" data-label="Ordered">{{ item.ordered_quantity }} {{ item.unit }}</td>
-              <td class="grn-field" data-label="Received qty">
+              <td class="grn-field" data-label="Total received so far (including earlier deliveries)">
                 <input type="number" name="received_qty_{{ item.pk }}"
                        class="form-control form-control-sm"
                        step="any" min="0" inputmode="decimal"
@@ -621,7 +665,8 @@ document.addEventListener('DOMContentLoaded', function () {
         </div>
         <div class="modal-body">
           <p class="text-muted small mb-3">
-            Override received quantities and damage counts.
+            Override received quantities and damage counts. The received box is the
+            <strong>total received so far (including earlier deliveries)</strong>.
             On a line an engineer has already confirmed, the original submitter is preserved.
             Enter how many of the received units are damaged in the <strong>Damaged</strong> column.
             A damaged line needs at least one photo of the damage; a line that already has
@@ -668,7 +713,7 @@ document.addEventListener('DOMContentLoaded', function () {
                   <th>Category</th>
                   <th>Description</th>
                   <th class="text-end">Ordered</th>
-                  <th style="width:10rem;">Received Qty</th>
+                  <th style="width:10rem;">Total received so far (including earlier deliveries)</th>
                   <th style="width:9rem;">Damaged</th>
                   <th style="width:14rem;">GRN Notes</th>
                   <th style="width:16rem;">Damage photos</th>
@@ -680,7 +725,7 @@ document.addEventListener('DOMContentLoaded', function () {
                   <td class="grn-cat"><span class="badge bg-light text-dark border">{{ item.boq_category }}</span></td>
                   <td class="small grn-desc">{{ item.item_description }}</td>
                   <td class="text-end text-muted grn-ordered" data-label="Ordered">{{ item.ordered_quantity }} {{ item.unit }}</td>
-                  <td class="grn-field" data-label="Received qty">
+                  <td class="grn-field" data-label="Total received so far (including earlier deliveries)">
                     <input type="number" name="received_qty_{{ item.pk }}"
                            class="form-control form-control-sm"
                            step="any" min="0" inputmode="decimal"

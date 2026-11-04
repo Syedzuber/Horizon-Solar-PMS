@@ -274,6 +274,13 @@ from .grn_damage import (
     notify_delivery_issue_raised, plan_damage, pop_grn_draft, recheck_damage_plan,
     record_damage, reload_grn_lines, stash_grn_draft, upload_planned_photos,
 )
+# NTF-DCG 4a — goods receipts. The two GRN views narrow to changed lines, refuse an
+# empty submission and write the numbered receipt through goods_receipts; the DC page
+# lists the receipts (see that module's docstring for the order).
+from .goods_receipts import (
+    NOTHING_TO_RECORD, changed_grn_lines, receipts_for_challan, write_goods_receipt,
+)
+from .models import GOODS_RECEIPT_CORRECTION, GOODS_RECEIPT_RECEIPT
 # DC-B3 — correcting a challan after creation. Every decision and write is in dc_edit;
 # delivery_challan_edit only checks access and calls it.
 from .dc_edit import (
@@ -14191,9 +14198,16 @@ def delivery_challan_detail(request, project_id, dc_id):
     # was asked at the top of this view), so it costs no query.
     dc_revisions = challan_revisions(challan)
 
+    # NTF-DCG 4a (G6): the challan's numbered receipts, newest first, with their lines —
+    # two queries at most, whatever their number. Shown to everyone who can read this
+    # page, like the edit history: a receipt holds nothing this page does not already
+    # show line by line, and no price (DC lines carry none).
+    goods_receipts = receipts_for_challan(challan)
+
     return render(request, 'projects/delivery_challan_detail.html', {
         'project':           project,
         'dc_revisions':      dc_revisions,
+        'goods_receipts':    goods_receipts,
         'can_edit_dc':       user_can_edit_dc(request.user, project),
         'dc_documents_live':      [d for d in dc_documents if d.is_live],
         'dc_documents_withdrawn': [d for d in dc_documents if not d.is_live],
@@ -14560,6 +14574,9 @@ def confirm_grn(request, project_id, dc_id):
     rows; any exception in it discards the uploads. A refusal keeps the typed values.
     DG-L: inside it the challan and lines are read again under the lock and written there;
     a challan that changed meanwhile refuses the GRN, uploads discarded, draft kept.
+    NTF-DCG 4a: only lines this submission changes are saved (a pre-filled line posted
+    back unchanged keeps its date and confirmer); none changed is refused as empty; and
+    the transaction writes one numbered GoodsReceipt (kind 'receipt') for the saved lines.
     Access: Site Engineer only. POST only.
     """
     if request.method != 'POST':
@@ -14611,6 +14628,10 @@ def confirm_grn(request, project_id, dc_id):
         _refuse_grn(request, challan, GRN_DRAFT_CONFIRM, line_items, qty_errors,
                     'The GRN was not recorded.')
         return back
+    # NTF-DCG 4a, ruling WA: the form pre-fills every recorded line, so a line posted
+    # back unchanged is dropped here and never saved — its GRN date and confirmer stay
+    # those of the submission that recorded it. Everything below sees changed lines only.
+    grn_lines = changed_grn_lines(request, grn_lines)
 
     # DG-B: every damage refusal — missing or excess photos, photos on an undamaged or
     # skipped line, missing description, then the files themselves — before any upload.
@@ -14618,6 +14639,11 @@ def confirm_grn(request, project_id, dc_id):
     if damage_errors:
         _refuse_grn(request, challan, GRN_DRAFT_CONFIRM, line_items, damage_errors,
                     'The GRN was not recorded.')
+        return back
+    # G4: nothing recorded or changed on any line. After the other refusals, so each
+    # keeps its own message; before the upload, so nothing is stored. Draft kept.
+    if not grn_lines:
+        _refuse_grn(request, challan, GRN_DRAFT_CONFIRM, line_items, [NOTHING_TO_RECORD], '')
         return back
     try:
         stored_photos = upload_planned_photos(damage_plan, project)
@@ -14642,7 +14668,18 @@ def confirm_grn(request, project_id, dc_id):
                 raise ChallanChangedMeanwhile(GRN_CHANGED_MEANWHILE)
             fresh_lines, grn_lines = reload_grn_lines(challan, grn_lines)
             recheck_damage_plan(damage_plan, challan, fresh_lines, grn_lines)
+            # 4a: "changed" asked again of the fresh rows. A GRN that committed the same
+            # values in the window leaves such a line unchanged, and it is not saved; if
+            # no line is left, the basis moved and the GRN is refused, draft kept. A line
+            # in the damage plan always still differs here (recheck_damage_plan proved
+            # the plan unchanged), so the plan and the saved lines agree.
+            grn_lines = changed_grn_lines(request, grn_lines)
+            if not grn_lines:
+                raise ChallanChangedMeanwhile(GRN_CHANGED_MEANWHILE)
+            receipt_entries = []
             for item, received_qty, damaged_qty, derived_condition, grn_notes in grn_lines:
+                # The receipt's "before", from the row read under the lock (ruling P1).
+                receipt_entries.append((item, item.received_quantity, item.damaged_quantity))
                 item.received_quantity = received_qty
                 item.damaged_quantity  = damaged_qty
                 item.condition         = derived_condition
@@ -14653,7 +14690,13 @@ def confirm_grn(request, project_id, dc_id):
                 # overwritten by this one (last writer wins, DG-L Q3), nothing else is.
                 item.save(update_fields=GRN_RECEIPT_FIELDS)
 
-            damage = record_damage(damage_plan, challan, project, profile, stored_photos)
+            # G2: the numbered receipt, from the fresh rows just saved, in this
+            # transaction — a refusal or rollback below takes it back with the lines.
+            receipt = write_goods_receipt(
+                challan, kind=GOODS_RECEIPT_RECEIPT, recorded_by=profile,
+                receipt_date=today, entries=receipt_entries)
+            damage = record_damage(damage_plan, challan, project, profile, stored_photos,
+                                   receipt=receipt)
 
             # Recalculate DC status ONCE after all line items saved — never inside the loop
             # (calling it inside the loop causes status to oscillate incorrectly).
@@ -14722,6 +14765,8 @@ def override_grn(request, project_id, dc_id):
     photo. Every refusal keeps the typed values, the on-behalf reason included.
     DG-L: the same reload under the lock as confirm_grn, and the first-time decision is
     asked again of the fresh rows.
+    NTF-DCG 4a: as in confirm_grn — changed lines only, empty refused — and the receipt
+    is always kind 'correction', carrying the on-behalf reason when a line used it.
     Access: SCM role, and project scope. POST only.
     """
     if request.method != 'POST':
@@ -14762,6 +14807,10 @@ def override_grn(request, project_id, dc_id):
         _refuse_grn(request, challan, GRN_DRAFT_OVERRIDE, line_items, qty_errors,
                     'The GRN was not changed.')
         return back
+    # NTF-DCG 4a, ruling WA, as in confirm_grn: a line posted back unchanged is dropped
+    # and never saved. So an untouched line nobody confirmed does not take the
+    # first-time branch, and asks for no on-behalf reason.
+    grn_lines = changed_grn_lines(request, grn_lines)
 
     for item, received_qty, damaged_qty, derived_condition, grn_notes in grn_lines:
         # `_id`, so an unconfirmed line costs no query to recognise.
@@ -14789,6 +14838,10 @@ def override_grn(request, project_id, dc_id):
         _refuse_grn(request, challan, GRN_DRAFT_OVERRIDE, line_items, damage_errors,
                     'The GRN was not changed.')
         return back
+    # G4, as in confirm_grn: after every other refusal, before any upload, draft kept.
+    if not grn_lines:
+        _refuse_grn(request, challan, GRN_DRAFT_OVERRIDE, line_items, [NOTHING_TO_RECORD], '')
+        return back
     try:
         stored_photos = upload_planned_photos(damage_plan, project)
     except DeliveryStorageError as exc:
@@ -14814,7 +14867,17 @@ def override_grn(request, project_id, dc_id):
             if any((item.grn_confirmed_by_id is None) != first_time
                    for item, *_values, first_time in pending):
                 raise ChallanChangedMeanwhile(GRN_CHANGED_MEANWHILE)
+            # 4a: "changed" asked again of the fresh rows, as in confirm_grn; a line left
+            # unchanged by a GRN in the window is not saved, and none left refuses.
+            still_changed = {line[0].pk for line in changed_grn_lines(request, grn_lines)}
+            pending = [line for line in pending if line[0].pk in still_changed]
+            if not pending:
+                raise ChallanChangedMeanwhile(GRN_CHANGED_MEANWHILE)
+            receipt_entries, any_first_time = [], False
             for item, received_qty, damaged_qty, derived_condition, grn_notes, first_time in pending:
+                # The receipt's "before", from the row read under the lock (ruling P1).
+                receipt_entries.append((item, item.received_quantity, item.damaged_quantity))
+                any_first_time = any_first_time or first_time
                 item.received_quantity = received_qty
                 item.damaged_quantity  = damaged_qty
                 item.condition         = derived_condition
@@ -14832,7 +14895,15 @@ def override_grn(request, project_id, dc_id):
                 # Receipt columns only, as in confirm_grn (last writer wins, DG-L Q3).
                 item.save(update_fields=GRN_RECEIPT_FIELDS)
 
-            damage = record_damage(damage_plan, challan, project, profile, stored_photos)
+            # G2/G5: always a correction, a first-time on-behalf entry included; the
+            # on-behalf reason is carried only when some line took that branch, since
+            # only then was it asked for and stored on the line.
+            receipt = write_goods_receipt(
+                challan, kind=GOODS_RECEIPT_CORRECTION, recorded_by=profile,
+                receipt_date=today, entries=receipt_entries,
+                on_behalf_reason=on_behalf_reason if any_first_time else '')
+            damage = record_damage(damage_plan, challan, project, profile, stored_photos,
+                                   receipt=receipt)
 
             # Recalculate DC status ONCE after all line items saved.
             # The ledger records the overriding actor here. On a correction that differs

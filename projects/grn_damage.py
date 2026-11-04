@@ -419,10 +419,15 @@ def recheck_damage_plan(plan, locked, fresh_lines, fresh_grn_lines):
     return plan
 
 
-def record_damage(plan, challan, project, profile, stored):
+def record_damage(plan, challan, project, profile, stored, *, receipt=None):
     """Write the damage Issue or its Comment and the photo rows. Call inside the
     transaction, after lock_challan() and the line saves. Returns a DamageOutcome, or
-    None when there was nothing to record or nowhere to record it."""
+    None when there was nothing to record or nowhere to record it.
+
+    `receipt` (NTF-DCG 4a, ruling P5) is the GoodsReceipt the GRN view wrote just
+    before this call; every photo row stored now carries it, so a receipt can list the
+    photos taken with it. Optional so a caller without one still works; both GRN views
+    pass it."""
     if not plan.recorded and not plan.cleared:
         return None
     issue, created, comment_lines = open_damage_issue(challan), False, []
@@ -459,7 +464,7 @@ def record_damage(plan, challan, project, profile, stored):
                 for line in plan.recorded
             ]
         for line, upload in stored:
-            DCLineDamagePhoto.objects.create(line=line.item, issue=issue,
+            DCLineDamagePhoto.objects.create(line=line.item, issue=issue, receipt=receipt,
                                              uploaded_by=profile, **upload)
 
     # R7: damage set back to 0 on a line that has photos. The photos and the Issue are

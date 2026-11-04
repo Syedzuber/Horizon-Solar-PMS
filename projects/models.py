@@ -1872,6 +1872,13 @@ class DCLineDamagePhoto(models.Model):
     issue = models.ForeignKey(  # the damage Issue it was recorded under; set once, at create
         Issue, on_delete=models.PROTECT, null=True, blank=True, related_name='damage_photos',
     )
+    # NTF-DCG 4a (ruling P5): the numbered receipt this photo was taken at, set once at
+    # create by record_damage(). NULL on every photo stored before receipts existed, and
+    # never back-filled: which pre-4a GRN a photo belonged to is not recorded anywhere.
+    receipt = models.ForeignKey(
+        'GoodsReceipt', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='damage_photos',
+    )
     uploaded_by = models.ForeignKey(
         'UserProfile', on_delete=models.PROTECT, related_name='dc_damage_photos_uploaded',
     )
@@ -1991,6 +1998,183 @@ class DeliveryChallanRevision(models.Model):
     def delete(self, *args, **kwargs):
         raise AppendOnlyViolation(
             "DeliveryChallanRevision is append-only — a challan's edit history stays.")
+
+
+# ---------------------------------------------------------------------------
+# Goods receipts — the numbered journal of GRN submissions (NTF-DCG 4a)
+# ---------------------------------------------------------------------------
+#
+# THE DC LINE STAYS THE SOURCE OF TRUTH. DCLineItem's receipt columns are what every
+# screen, recalculate_dc_status and the delivery mirrors read, exactly as before. A
+# GoodsReceipt is a journal entry written beside them, in the same locked transaction,
+# so Finance can cite "GRN-000123" for what one submission recorded. Nothing reads a
+# receipt to decide anything.
+#
+# WHAT A RECEIPT LINE HOLDS. The received box on the GRN form is the line's running
+# total, overwritten on each submission (pre-flight P1), so a line stores the values
+# BEFORE and AFTER the submission and the delta is derived (ruling P1). Storing only the
+# posted value would read "150 arrived" when 50 did.
+
+GOODS_RECEIPT_RECEIPT    = 'receipt'      # a site engineer's confirm_grn
+GOODS_RECEIPT_CORRECTION = 'correction'   # override_grn, first-time on-behalf entries included (G5)
+GOODS_RECEIPT_IMPORTED   = 'imported'     # backfill_goods_receipts, state before 4a (G7)
+GOODS_RECEIPT_KIND_CHOICES = [
+    (GOODS_RECEIPT_RECEIPT,    'Receipt'),
+    # Names the role although DCLineItem.grn_on_behalf is deliberately actor-neutral:
+    # the label is ruling G5's wording, and override_grn is SCM-only today. Change the
+    # label, not the stored value, when a second role can correct a GRN.
+    (GOODS_RECEIPT_CORRECTION, 'Correction (by SCM)'),
+    (GOODS_RECEIPT_IMPORTED,   'Imported'),
+]
+GOODS_RECEIPT_NUMBER_FORMAT = 'GRN-{:06d}'
+
+
+class GoodsReceipt(models.Model):
+    """One successful GRN submission: a site engineer's confirm, an SCM override, or one
+    group of pre-4a receipt data imported by backfill_goods_receipts. APPEND-ONLY.
+
+    Written by goods_receipts.write_goods_receipt() inside confirm_grn / override_grn's
+    locked transaction, after the line saves, so a refused or rolled-back GRN leaves no
+    receipt. save() on an existing row and delete() raise; there is no admin
+    registration. A queryset update()/delete() bypasses both, as for every append-only
+    model here.
+
+    PROTECT on the challan, as DeliveryChallanRevision: a received challan cannot be
+    deleted, so the teardown commands and a project hard-delete refuse it.
+    """
+    challan = models.ForeignKey(
+        DeliveryChallan, on_delete=models.PROTECT, related_name='goods_receipts',
+    )
+    # "GRN-000123", from the pk (ruling P6). NULL only between the INSERT and the
+    # numbering UPDATE inside save()'s own transaction, so no committed row lacks one.
+    # Gaps are accepted: a rolled-back GRN still uses up a pk.
+    number = models.CharField(max_length=20, unique=True, null=True, editable=False)
+    kind = models.CharField(max_length=20, choices=GOODS_RECEIPT_KIND_CHOICES)
+    # Who submitted it. NULL only on an imported receipt whose lines named no confirmer
+    # (CHECK below). PROTECT, as DCLineDamagePhoto.uploaded_by: a person with receipts
+    # on record is deactivated, never deleted.
+    recorded_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='goods_receipts_recorded',
+    )
+    on_behalf_reason = models.TextField(blank=True, default='')  # the override's on-behalf reason when a line took the first-time branch; blank otherwise
+    receipt_date = models.DateField()       # the date the view wrote to the lines' grn_date
+    notes = models.TextField(blank=True, default='')   # blank today: the forms post no whole-submission note; line notes are on the lines
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['challan', 'pk']
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(kind__in=[value for value, _ in GOODS_RECEIPT_KIND_CHOICES]),
+                name='goods_receipt_kind_valid'),
+            # A live submission always has a submitter; only history imported from rows
+            # that named nobody may lack one.
+            models.CheckConstraint(
+                condition=(models.Q(recorded_by__isnull=False)
+                           | models.Q(kind=GOODS_RECEIPT_IMPORTED)),
+                name='goods_receipt_recorded_by_unless_imported'),
+        ]
+
+    def __str__(self):
+        return f'{self.number} — DC {self.challan.dc_number}'
+
+    @property
+    def is_imported(self):
+        return self.kind == GOODS_RECEIPT_IMPORTED
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'GoodsReceipt is append-only — a receipt is never rewritten; a later '
+                'correction is a new receipt.')
+        # The number comes from the pk, which only the INSERT knows. Both writes in one
+        # transaction, so the row is never visible unnumbered. RACE: none between two
+        # workers — each INSERT draws its own pk from the sequence, so two numbers can
+        # never collide; the unique index is the backstop.
+        using = kwargs.get('using')
+        with transaction.atomic(using=using):
+            super().save(*args, **kwargs)
+            self.number = GOODS_RECEIPT_NUMBER_FORMAT.format(self.pk)
+            super().save(update_fields=['number'], using=using)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation('GoodsReceipt is append-only — a receipt stays.')
+
+
+def _qty_text(value):
+    """150.00 -> '150', 2.50 -> '2.5'. Display only."""
+    if value is None:
+        return '—'
+    return f'{value.normalize():f}' if hasattr(value, 'normalize') else str(value)
+
+
+def _change_text(before, after, imported):
+    """'100 → 150 (+50)' (ruling P1). An imported line knows no before: just the value."""
+    if imported:
+        return _qty_text(after)
+    delta = after - (before or 0)
+    sign = '+' if delta > 0 else ('−' if delta < 0 else '±')
+    return f'{_qty_text(before)} → {_qty_text(after)} ({sign}{_qty_text(abs(delta))})'
+
+
+class GoodsReceiptLine(models.Model):
+    """One DC line as one GoodsReceipt recorded it. APPEND-ONLY, like its receipt.
+
+    Written only for lines the submission recorded or changed (G3, pre-flight P3), never
+    for lines posted unchanged. The DC line's description, unit and ordered quantity are
+    snapshotted so the receipt still reads as it was if the line is later corrected.
+    """
+    receipt = models.ForeignKey(GoodsReceipt, on_delete=models.PROTECT, related_name='lines')
+    dc_line = models.ForeignKey(
+        DCLineItem, on_delete=models.PROTECT, related_name='receipt_lines',
+    )
+    # Before values: NULL when nothing was recorded on the line before this submission,
+    # and on every imported line (what came before receipts began is not known).
+    received_before = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    received_after  = models.DecimalField(max_digits=10, decimal_places=2)
+    damaged_before  = models.PositiveIntegerField(null=True, blank=True)
+    damaged_after   = models.PositiveIntegerField()
+    condition = models.CharField(max_length=20, choices=DCLineItem.CONDITION_CHOICES,
+                                 blank=True, default='')   # the line's condition after this submission
+    grn_notes = models.TextField(blank=True, default='')   # the line's GRN note after this submission
+    item_description = models.CharField(max_length=255)    # snapshot of the DC line at this moment
+    unit             = models.CharField(max_length=20)     # snapshot
+    ordered_quantity = models.DecimalField(max_digits=10, decimal_places=2)  # snapshot
+
+    class Meta:
+        ordering = ['receipt', 'pk']
+        constraints = [
+            models.UniqueConstraint(fields=['receipt', 'dc_line'],
+                                    name='uniq_goods_receipt_line'),
+        ]
+
+    def __str__(self):
+        return f'{self.receipt.number} — {self.item_description[:40]}'
+
+    @property
+    def received_change(self):
+        return _change_text(self.received_before, self.received_after,
+                            self.receipt.is_imported)
+
+    @property
+    def damaged_change(self):
+        return _change_text(self.damaged_before, self.damaged_after,
+                            self.receipt.is_imported)
+
+    @property
+    def has_damage(self):
+        """Damage was recorded on this line, now or before this submission."""
+        return bool(self.damaged_after or self.damaged_before)
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'GoodsReceiptLine is append-only — a receipt line is never rewritten.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation('GoodsReceiptLine is append-only — a receipt line stays.')
 
 
 # ---------------------------------------------------------------------------
