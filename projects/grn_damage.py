@@ -52,7 +52,7 @@ from .models import (
 )
 from .notifications import send_notification
 from .notify import notify, resolve_recipients
-from .permissions import active_scm_users, project_managers
+from .permissions import project_managers
 from .utils import record_transition
 
 #: A damage description shorter than this says nothing a reader of the Issue can use.
@@ -501,26 +501,19 @@ def damage_message(outcome):
 # Notifications — a delivery issue raised
 # ---------------------------------------------------------------------------
 
-def damage_issue_scm_recipients():
-    """Every active SCM user (R6), with the login row joined: resolve_recipients() reads
-    profile.user.is_active for each one."""
-    return list(active_scm_users().select_related('user'))
-
-
-def notify_delivery_issue_raised(issue, actor, *, also_tell=()):
+def notify_delivery_issue_raised(issue, actor):
     """The notices for a newly raised delivery issue. Shared by create_delivery_issue
     and the GRN damage path.
 
     MOVED VERBATIM from create_delivery_issue (pre-flight 6): the assignee gets the
     issue_raised event (in-app + email, after commit) and the WhatsApp leg (after
     commit); every other manager an immediate in-app nudge, which is a database row and
-    so rolls back with the caller's transaction. With `also_tell` empty — as
-    create_delivery_issue calls it — the sends are exactly what they were.
+    so rolls back with the caller's transaction.
 
-    `also_tell` (the GRN path passes every active SCM user, R6) is told through the same
-    issue_raised event, so in-app + email. De-duplicated: the assignee is never told
-    twice, a manager who is also in `also_tell` gets the event instead of the nudge, and
-    notify() drops the actor and anyone deactivated.
+    NTF-DCG 5c (E7, N6). The GRN path no longer also tells every active SCM user: the
+    `also_tell` argument it passed (DG-B ruling R6) and damage_issue_scm_recipients()
+    are gone, because SCM now see the damage in the goods-receipt email (grn_notify).
+    Both paths therefore send exactly what create_delivery_issue always sent.
     """
     project, title, profile = issue.project, issue.title, actor
     assigned_to = issue.assigned_to
@@ -561,12 +554,10 @@ def notify_delivery_issue_raised(issue, actor, *, also_tell=()):
                 )
         transaction.on_commit(_send_issue_whatsapp, robust=True)
 
-    extra = [p for p in also_tell if p != assigned_to]
-    extra_pks = {p.pk for p in extra}
     # Notify every project manager (PM + coordinators), skipping the raiser and the
     # assignee (who are notified through other paths). project_managers() dedupes.
     for _mgr in project_managers(project):
-        if _mgr != profile and _mgr != assigned_to and _mgr.pk not in extra_pks:
+        if _mgr != profile and _mgr != assigned_to:
             send_notification(
                 recipient=_mgr,
                 message=f'Issue "{title}" raised on {project.project_id} — {project.customer_name}.',
@@ -575,9 +566,3 @@ def notify_delivery_issue_raised(issue, actor, *, also_tell=()):
                 related_project=project,
                 actor=profile,
             )
-    if extra:
-        notify(
-            'issue_raised', recipients=extra, actor=profile,
-            related_project=project, link=_ic_link, log_label='issue_created',
-            values=values,
-        )

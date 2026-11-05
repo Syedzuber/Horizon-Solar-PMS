@@ -299,7 +299,9 @@ page, not only on hover (phones have no hover), that it is approximate.
   <div class="card-body">
     <ul class="list-unstyled mb-0">
       {% for receipt in goods_receipts %}
-      <li class="dc-receipt{% if not forloop.last %} border-bottom pb-2 mb-2{% endif %}">
+      {% comment %}NTF-DCG 5c (E5): a stable anchor per receipt, "grn-000123" — the number
+      never changes once set. The goods-receipt email links here (grn_notify.receipt_link).{% endcomment %}
+      <li class="dc-receipt{% if not forloop.last %} border-bottom pb-2 mb-2{% endif %}"{% if receipt.number %} id="{{ receipt.number|lower }}"{% endif %}>
         <details>
           <summary class="small text-break">
             <span class="fw-semibold">{{ receipt.number }}</span>
@@ -369,6 +371,24 @@ page, not only on hover (phones have no hover), that it is approximate.
     </ul>
   </div>
 </div>
+{% comment %}NTF-DCG 5c (Q4): a link to "#grn-000123" scrolls to that receipt, but its
+<details> stays shut; this opens it, on load and when the hash changes. Plain JS, no
+library: it only toggles an element the server already rendered.{% endcomment %}
+<script>
+(function () {
+  function openReceipt() {
+    var id = decodeURIComponent((window.location.hash || '').slice(1));
+    if (!id) return;
+    var entry = document.getElementById(id);
+    if (!entry || !entry.classList.contains('dc-receipt')) return;
+    var details = entry.querySelector('details');
+    if (details) details.open = true;
+    entry.scrollIntoView();
+  }
+  document.addEventListener('DOMContentLoaded', openReceipt);
+  window.addEventListener('hashchange', openReceipt);
+})();
+</script>
 {% endif %}
 
 {% comment %}

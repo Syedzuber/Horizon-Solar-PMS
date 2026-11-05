@@ -272,7 +272,7 @@ from .delivery_storage import (
 from .grn_damage import (
     ChallanChangedMeanwhile, DamageIssueClosed, GRN_CHANGED_MEANWHILE, GRN_DRAFT_CONFIRM,
     GRN_DRAFT_OVERRIDE, GRN_RECEIPT_FIELDS, OPEN_DAMAGE_ISSUE_STATUSES,
-    damage_issue_scm_recipients, damage_message, discard_stored, lock_challan,
+    damage_message, discard_stored, lock_challan,
     notify_delivery_issue_raised, plan_damage, pop_grn_draft, recheck_damage_plan,
     record_damage, reload_grn_lines, stash_grn_draft, upload_planned_photos,
 )
@@ -14756,8 +14756,7 @@ def confirm_grn(request, project_id, dc_id):
                 entity_type='DeliveryChallan', entity_id=challan.pk,
             )
             if damage is not None and damage.created:
-                notify_delivery_issue_raised(damage.issue, profile,
-                                             also_tell=damage_issue_scm_recipients())
+                notify_delivery_issue_raised(damage.issue, profile)
     except (DamageIssueClosed, ChallanChangedMeanwhile) as exc:
         discard_stored(stored_photos)
         discard_receipt_documents(stored_documents)
@@ -14986,8 +14985,7 @@ def override_grn(request, project_id, dc_id):
                 entity_type='DeliveryChallan', entity_id=challan.pk,
             )
             if damage is not None and damage.created:
-                notify_delivery_issue_raised(damage.issue, profile,
-                                             also_tell=damage_issue_scm_recipients())
+                notify_delivery_issue_raised(damage.issue, profile)
     except (DamageIssueClosed, ChallanChangedMeanwhile) as exc:
         discard_stored(stored_photos)
         discard_receipt_documents(stored_documents)

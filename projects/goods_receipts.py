@@ -33,8 +33,11 @@ uploader, discard, open link and withdraw, reused (A1). In the views:
     -- transaction.atomic() -- ... as above, ending with link_receipt_documents()
     any refusal or rollback   discard_stored() AND discard_receipt_documents()
 
-This module imports models, delivery_storage and grn_damage; it is imported by views.py
-and by the backfill command and imports neither, so there is no cycle.
+NTF-DCG 5c — write_goods_receipt() also registers the goods-receipt email for after
+commit (grn_notify.fire_after_commit), the one fire point for both views.
+
+This module imports models, delivery_storage, grn_damage and grn_notify; it is imported
+by views.py and by the backfill command and imports neither, so there is no cycle.
 """
 import re
 
@@ -45,6 +48,7 @@ from .delivery_storage import (
     discard_unrecorded_dc_document, upload_dc_document, validate_dc_document,
 )
 from .grn_damage import photo_field
+from .grn_notify import fire_after_commit
 from .models import (
     RECEIPT_DOCUMENT_TYPE_CHOICES, DeliveryChallanAttachment, GoodsReceipt, GoodsReceiptLine,
 )
@@ -215,6 +219,11 @@ def write_goods_receipt(challan, *, kind, recorded_by, receipt_date, entries,
     submission left it, and its two quantities as they stood under the lock before it.
     A line with no received quantity before has no "before" at all, so damaged_before
     is NULL with it rather than the column's default 0.
+
+    NTF-DCG 5c (E3): the ONE place the goods-receipt email is fired, for both GRN views.
+    It is only registered here, for after commit; the email is built then, once the
+    view has also recorded damage, linked documents and recalculated the status. A
+    refused or rolled-back GRN drops it. No query is added to this transaction.
     """
     receipt = GoodsReceipt.objects.create(
         challan=challan, kind=kind, recorded_by=recorded_by, receipt_date=receipt_date,
@@ -233,6 +242,7 @@ def write_goods_receipt(challan, *, kind, recorded_by, receipt_date, entries,
         )
         for item, received_before, damaged_before in entries
     ])
+    fire_after_commit(receipt)
     return receipt
 
 

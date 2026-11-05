@@ -52,7 +52,7 @@ from django.utils.safestring import mark_safe
 from . import notify_deferred
 from .models import NotificationEventRecipient, NotificationEventSetting, NotificationTemplate
 from .notifications import _log, send_notification, valid_whatsapp_number
-from .notify_registry import IDENTIFIER_RE, PLACEHOLDER_RE, WHATSAPP, get_event
+from .notify_registry import IDENTIFIER_RE, PLACEHOLDER_RE, WHATSAPP, EmailTable, get_event
 from .whatsapp_params import describe_params, sanitise_params
 
 logger = logging.getLogger(__name__)
@@ -120,12 +120,71 @@ def _renders_empty(paragraph, values, allowed):
     return not _substitute(_BOLD_RE.sub(r'\1', paragraph), values, allowed, str).strip()
 
 
+# --- E8 (NTF-DCG 5c, N7): the server-built table block --------------------------------
+# A paragraph that is exactly one placeholder whose VALUE is an EmailTable is drawn as a
+# table. Nothing else changes: only a call site that passes an EmailTable can reach this
+# branch, and none did before 5c, so every existing email renders byte for byte as it
+# did (tests_grn_notify compares all of them with the code before 5c's hashes).
+_WHOLE_PLACEHOLDER_RE = re.compile(r'^\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}$')
+
+# Inline, because email clients strip <style>. Sized for the layout's 600px body cell
+# and to wrap, not scroll, on a phone: three columns, cells break long words.
+_TABLE_STYLE = ('width:100%; border-collapse:collapse; margin:0 0 14px 0; '
+                'font-size:13px; line-height:1.4;')
+_TH_STYLE = ('text-align:left; vertical-align:bottom; padding:6px 6px; color:#6b7785; '
+             'font-weight:bold; border-bottom:2px solid #e5e9ee;')
+_TD_STYLE = ('text-align:left; vertical-align:top; padding:6px 6px; '
+             'border-bottom:1px solid #e5e9ee; word-break:break-word;')
+_TABLE_LINE_STYLE = 'margin:0 0 6px 0;'
+
+
+def _table_value(paragraph, values, allowed):
+    """The EmailTable `paragraph` places, or None. Only a paragraph that is nothing but
+    one allowed placeholder qualifies; a table named inside a sentence renders as its
+    text, escaped, through the ordinary path."""
+    match = _WHOLE_PLACEHOLDER_RE.match(paragraph)
+    if match is None or match.group(1) not in allowed:
+        return None
+    value = values.get(match.group(1))
+    return value if isinstance(value, EmailTable) else None
+
+
+def render_table_html(table):
+    """`table` as HTML. EVERY string in it — caption, header, cell, footer — is escaped
+    before a tag is put round it, and a cell's '\n' becomes <br> only after that, so a
+    description holding markup prints as text. Returns a str; render_body_html() marks
+    the whole body safe, which this justifies."""
+    def cell(text):
+        return str(escape(str(text))).replace('\r\n', '\n').replace('\n', '<br>\n')
+
+    parts = []
+    if table.caption:
+        parts.append(f'<p style="{_TABLE_LINE_STYLE}"><strong>{cell(table.caption)}</strong></p>')
+    parts.append(f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+                 f'style="{_TABLE_STYLE}">')
+    parts.append('<tr>' + ''.join(f'<th style="{_TH_STYLE}">{cell(c)}</th>'
+                                  for c in table.columns) + '</tr>')
+    for row in table.rows:
+        parts.append('<tr>' + ''.join(f'<td style="{_TD_STYLE}">{cell(c)}</td>'
+                                      for c in row) + '</tr>')
+    parts.append('</table>')
+    parts += [f'<p style="{_TABLE_LINE_STYLE}">{cell(line)}</p>' for line in table.footer]
+    # The paragraph margin after the block, as every <p> of the body has.
+    return f'<div style="{_PARAGRAPH_STYLE}">{"".join(parts)}</div>'
+
+
 def render_body_text(body, values, allowed):
     """The plain-text body: paragraphs separated by one blank line, **markers** dropped,
-    a paragraph that fills to nothing left out."""
-    return '\n\n'.join(
-        _substitute(_BOLD_RE.sub(r'\1', p), values, allowed, str) for p in _paragraphs(body)
-        if not _renders_empty(p, values, allowed))
+    a paragraph that fills to nothing left out. A table paragraph (E8) prints the
+    table's text()."""
+    out = []
+    for p in _paragraphs(body):
+        if _renders_empty(p, values, allowed):
+            continue
+        table = _table_value(p, values, allowed)
+        out.append(table.text() if table is not None
+                   else _substitute(_BOLD_RE.sub(r'\1', p), values, allowed, str))
+    return '\n\n'.join(out)
 
 
 def render_body_html(body, values, allowed):
@@ -140,6 +199,9 @@ def render_body_html(body, values, allowed):
     line breaks turned into <br> (T3a, P3: a multi-line value such as an address reads as
     lines, as it does in the text body). Every character in the result is therefore either
     escaped input or a tag written here, which is what justifies mark_safe.
+
+    E8 (NTF-DCG 5c): a paragraph that only places an EmailTable value is drawn by
+    render_table_html(), which escapes every string in the table the same way.
     """
     def fill(value):
         text = str(escape(str(value))).replace('\r\n', '\n')
@@ -148,6 +210,10 @@ def render_body_html(body, values, allowed):
     out = []
     for paragraph in _paragraphs(body):
         if _renders_empty(paragraph, values, allowed):
+            continue
+        table = _table_value(paragraph, values, allowed)
+        if table is not None:
+            out.append(render_table_html(table))
             continue
         marked = _BOLD_RE.sub(r'<strong>\1</strong>', str(escape(paragraph)))
         marked = marked.replace('\n', '<br>\n')

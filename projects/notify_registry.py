@@ -68,7 +68,48 @@ WHATSAPP = 'whatsapp'
 class Variable:
     name: str
     meaning: str   # one line shown to Admin beside the placeholder
-    sample: str    # used by the preview, never by a real send
+    sample: str    # used by the preview, never by a real send; an EmailTable for a table variable (5c)
+
+
+@dataclass(frozen=True)
+class EmailTable:
+    """A table built by the server and passed to notify() as a VALUE (NTF-DCG 5c, E8, N7).
+
+    The one block type an email body can hold besides Admin's paragraphs. Admin's
+    wording places it with a paragraph that is only its placeholder, e.g.
+    `{{ material_table }}`; notify.render_body_html() then draws an HTML table whose
+    every cell is escaped, and render_body_text() prints text(). Admin text itself still
+    allows only today's formatting: a table can come from a value, never from wording.
+    Anywhere else (inside a sentence, a subject, the in-app line) str() gives text(),
+    which the renderers escape like any other value.
+
+    Declared here, beside Variable, and not in notify.py, so an event's samples can hold
+    one without this module importing notify (see the module docstring).
+    """
+    caption: str      # Shown bold above the table; '' for none
+    columns: tuple    # Header labels, one per column
+    rows: tuple       # One tuple of cell strings per row; '\n' in a cell is a line break
+    text_rows: tuple  # One plain-text line per row, for the text part (numbered there)
+    footer: tuple = ()  # Plain lines under the table, e.g. an Issue reference
+
+    def __post_init__(self):
+        # A builder fault, caught by the first test or preview that builds one.
+        if len(self.rows) != len(self.text_rows):
+            raise ValueError('EmailTable needs one text row per row')
+        for row in self.rows:
+            if len(row) != len(self.columns):
+                raise ValueError('EmailTable row has the wrong number of cells')
+
+    def text(self):
+        """The plain-text form: caption, numbered rows, footer lines. '' when empty, so
+        a paragraph holding only an empty table is dropped like an empty value."""
+        lines = [self.caption] if self.caption and (self.rows or self.footer) else []
+        lines += [f'{n}. {line}' for n, line in enumerate(self.text_rows, start=1)]
+        lines += list(self.footer)
+        return '\n'.join(lines)
+
+    def __str__(self):
+        return self.text()
 
 
 @dataclass(frozen=True)
@@ -321,6 +362,59 @@ _DC_VARIABLES = (
 )
 
 
+# --- NTF-DCG 5c: the goods-receipt email's variables ---------------------------------
+# Built by grn_notify.grn_values(). The two tables are EmailTable values (E8); their
+# samples are tables too, so Admin's preview and test send show one (5c-Q7).
+_GRN_MATERIAL_SAMPLE = EmailTable(
+    caption='Material',
+    columns=('Item', 'Received', 'Damage / notes'),
+    rows=(
+        ('1C x 4 Sqmm DC solar cable\nMtr · DC qty 2000', '— → 1500 (+1500)',
+         'Good\nTwo drums; third to follow'),
+        ('MC4 Connector\nPair · DC qty 250', '200 → 250 (+50)',
+         'Damaged 0 → 2 (+2)\nDamaged'),
+    ),
+    text_rows=(
+        '1C x 4 Sqmm DC solar cable — Unit: Mtr · DC qty: 2000 · Received: — → 1500 '
+        '(+1500) · Condition: Good · Notes: Two drums; third to follow',
+        'MC4 Connector — Unit: Pair · DC qty: 250 · Received: 200 → 250 (+50) · '
+        'Damaged: 0 → 2 (+2) · Condition: Damaged',
+    ),
+)
+_GRN_DAMAGE_SAMPLE = EmailTable(
+    caption='Damage',
+    columns=('Item', 'Damaged', 'Condition / notes'),
+    rows=(('Panel 540Wp\nNos · DC qty 40', '0 → 2 (+2)', 'Damaged\nTwo cracked across the glass'),),
+    text_rows=('Panel 540Wp — Unit: Nos · Damaged: 0 → 2 (+2) · Condition: Damaged · '
+               'Notes: Two cracked across the glass',),
+    footer=('Issue #45: Damaged delivery — DC 004', 'Damage photos linked to this receipt: 2'),
+)
+_GRN_VARIABLES = (
+    Variable('subject_prefix', '"Correction: " for an SCM correction, else empty', ''),
+    Variable('grn_number', 'The receipt number', 'GRN-000123'),
+    Variable('receipt_kind', '"Receipt" or "Correction (by SCM)", with the on-behalf '
+             'reason when SCM recorded a receipt the site team had not', 'Receipt'),
+    Variable('recorded_by_name', 'Who recorded the GRN', 'Arfan Khan'),
+    Variable('receipt_date', 'The receipt date, e.g. "05 Nov 2026"', '05 Nov 2026'),
+    Variable('site_code', 'The site code (the project ID)', 'UKRU001'),
+    Variable('site_name', 'The site name; for a site without one, the customer (and '
+             'city, on a tender site)', 'Rashtrapati Udyan-Dehradun'),
+    Variable('dc_number', 'The challan number, as printed on the vendor document', '004'),
+    Variable('dc_date', 'The challan date, e.g. "04 Nov 2026"', '04 Nov 2026'),
+    Variable('vendor_name', 'The challan\'s vendor, or "Not recorded"', 'Polycab India Ltd'),
+    Variable('po_reference', 'The challan\'s PO/PI number, or "not linked"', 'not linked'),
+    Variable('status_after', 'The challan status after this receipt', 'Partially Received'),
+    Variable('material_table', 'A table of the receipt\'s lines: item, unit and DC qty; '
+             'received before → after; damage, condition and notes. Put it on a line '
+             'of its own', _GRN_MATERIAL_SAMPLE),
+    Variable('damage_section', 'The damaged lines with their Issue and photo count, '
+             'or nothing when no line is damaged. Put it on a line of its own',
+             _GRN_DAMAGE_SAMPLE),
+    Variable('documents_summary', 'Documents attached at this receipt, counted by type, '
+             'or "No documents attached"', 'Signed DC copy: 1 · Delivery photo: 2'),
+)
+
+
 NOTIFICATION_EVENTS = _build_registry([
     # Admin's test send (T2): proves email reaches a person, and shows the layout.
     NotificationEvent(
@@ -376,9 +470,10 @@ NOTIFICATION_EVENTS = _build_registry([
         ),
         button_label='View in Horizon Solar PMS',
         recipients_rule=('The person the issue is assigned to, unless they raised it. '
-                         'The project managers get a separate in-app note only. On a '
-                         'damaged-delivery issue raised from a GRN, every active SCM '
-                         'user is also told (in-app and email), except whoever raised it.'),
+                         'The project managers get a separate in-app note only. A '
+                         'damaged-delivery issue raised from a GRN is sent the same way: '
+                         'SCM are not sent it, because the "Goods receipt recorded" email '
+                         'already shows them the damage.'),
         default_state='active',
         whatsapp_sent_separately=True,
     ),
@@ -1502,6 +1597,51 @@ NOTIFICATION_EVENTS = _build_registry([
             header_text=DC_UPDATED_HEADER, body_text=DC_UPDATED_BODY,
             header_fixed_chars=18, body_fixed_chars=178, param_count=7,
             params=_dc_whatsapp_params),
+    ),
+
+    # --- NTF-DCG 5c: a goods receipt recorded -----------------------------------------
+    # Email (rulings E1-E9, N7) to SCM, the site's PM and the named Finance recipients:
+    # the record a vendor payment is reconciled against. Deferred, like every external
+    # send added since S2. The email starts PAUSED (Admin switches it on after a test of
+    # the live version); in-app is never paused, so it is live from the push (5c-Q6).
+    # Fired only by grn_notify, from goods_receipts.write_goods_receipt(), after commit.
+    # No variable carries a rate, price or amount (tests_grn_notify pins it).
+    NotificationEvent(
+        code='grn_recorded',
+        label='Goods receipt recorded',
+        module='Delivery',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=_GRN_VARIABLES,
+        in_app_text=('{{ grn_number }} recorded on DC {{ dc_number }} ({{ site_code }}) — '
+                     '{{ status_after }}.'),
+        default_subject=('{{ subject_prefix }}{{ grn_number }} · {{ site_code }} · '
+                         'DC {{ dc_number }} · {{ status_after }}'),
+        default_body=(
+            'Hello {{ recipient_name }},\n\n'
+            '{{ grn_number }} has been recorded on delivery challan {{ dc_number }} for '
+            '{{ site_code }}.\n\n'
+            '**GRN:** {{ grn_number }} — {{ receipt_kind }}\n'
+            '**Recorded by:** {{ recorded_by_name }} on {{ receipt_date }}\n'
+            '**Site:** {{ site_code }} — {{ site_name }}\n'
+            '**Challan:** DC {{ dc_number }} dated {{ dc_date }}\n'
+            '**Vendor:** {{ vendor_name }}\n'
+            '**PO/PI:** {{ po_reference }}\n'
+            '**Challan status after this receipt:** {{ status_after }}\n\n'
+            '{{ material_table }}\n\n'
+            '{{ damage_section }}\n\n'
+            '**Documents:** {{ documents_summary }}'
+        ),
+        button_label='Open this receipt on the challan',
+        recipients_rule=('Every active SCM user and the site\'s assigned PM (coordinators '
+                         'are not included), except whoever recorded the GRN; and the '
+                         'named recipients below, who receive it even when they recorded '
+                         'it. Sent once for each receipt or SCM correction, after it is '
+                         'saved; never for imported receipts, nor for a GRN that was '
+                         'refused.'),
+        default_state='paused',
+        deferred=True,
+        named_recipients=True,
     ),
 ])
 

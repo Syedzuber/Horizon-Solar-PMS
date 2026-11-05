@@ -10,8 +10,9 @@ WHAT IS PINNED
   * QF: photos on an undamaged or skipped line are refused.
   * R4/R5/QJ: one damage Issue per challan — reused with a Comment while open, a new one
     (title, High, Open, site PM or unassigned) after it is resolved.
-  * R6: the assignee and managers as create_delivery_issue tells them, plus every
-    active SCM user in-app and email, actor excluded, nobody twice.
+  * R6, as changed by NTF-DCG 5c (E7): the assignee and managers exactly as
+    create_delivery_issue tells them; SCM are no longer sent the issue (they see the
+    damage in the goods-receipt email), so the issue_raised event is asserted by code.
   * R7: damage set to 0 adds a Comment and leaves photos and Issue alone.
   * R8: refusals before any upload; a storage failure part way and a database failure
     inside the transaction both discard every upload; QK's race refuses cleanly.
@@ -379,11 +380,21 @@ class DamageIssueTests(GrnDamageBase):
         def in_app(profile):
             return list(Notification.objects.filter(recipient=profile))
 
+        # NTF-DCG 5c: every GRN now also sends grn_recorded (in-app to the PM and SCM), so
+        # the issue's own sends are counted by event code, on the rows notify() logs.
+        def issue_in_app(profile):
+            return list(NotificationLog.objects.filter(
+                recipient=profile, channel='in_app', event_code='issue_raised'))
+
         def emailed(profile):
-            return NotificationLog.objects.filter(recipient=profile, channel='email').exists()
+            return NotificationLog.objects.filter(recipient=profile, channel='email',
+                                                  event_code='issue_raised').exists()
 
         # The assignee, as create_delivery_issue tells one: in-app, email, WhatsApp.
-        self.assertEqual(len(in_app(self.pm)), 1)
+        self.assertEqual(len(issue_in_app(self.pm)), 1)
+        self.assertEqual([n.link for n in in_app(self.pm)
+                          if n.message.startswith('A new issue has been raised on project')],
+                         [link])
         self.assertTrue(emailed(self.pm))
         self.assertTrue(NotificationLog.objects.filter(recipient=self.pm, channel='whatsapp').exists())
         # The other manager: the in-app nudge only.
@@ -391,23 +402,27 @@ class DamageIssueTests(GrnDamageBase):
         self.assertEqual([n.message for n in nudge],
                          [f'Issue "{issue.title}" raised on GD-SITE — GD-SITE Residence.'])
         self.assertFalse(emailed(self.coord))
-        # Every active SCM user, in-app and email — once, the coordinator-SCM included.
+        # E7: no SCM user is sent the issue, in-app or email — the coordinator-SCM gets
+        # only the manager's nudge, as any coordinator does.
         for scm in (self.scm, self.scm2, self.scm_coord):
             with self.subTest(scm=scm.user.username):
-                notes = in_app(scm)
-                self.assertEqual(len(notes), 1)
-                self.assertTrue(notes[0].message.startswith('A new issue has been raised on project'))
-                self.assertEqual(notes[0].link, link)
-                self.assertTrue(emailed(scm))
+                self.assertEqual(issue_in_app(scm), [])
+                self.assertFalse(emailed(scm))
         # The actor hears nothing.
         self.assertEqual(in_app(self.se), [])
         self.assertFalse(NotificationLog.objects.filter(recipient=self.se).exists())
 
-    def test_scm_raising_it_is_not_told_but_the_other_scm_users_are(self):
+    def test_scm_raising_it_no_scm_user_is_sent_the_issue(self):
+        # NTF-DCG 5c (E7): before, the raiser was dropped and the other SCM users were
+        # told; now no SCM user is sent issue_raised (the count of 1 this test used to
+        # read would now be scm2's grn_recorded note, so the event is named).
         self.override({self.panels: ('10', '1', [jpg()])}, description='Inverter box dented',
                       reason='Recorded at the warehouse gate')
+        for scm in (self.scm, self.scm2):
+            with self.subTest(scm=scm.user.username):
+                self.assertFalse(NotificationLog.objects.filter(
+                    recipient=scm, event_code='issue_raised').exists())
         self.assertFalse(Notification.objects.filter(recipient=self.scm).exists())
-        self.assertEqual(Notification.objects.filter(recipient=self.scm2).count(), 1)
 
     def test_an_inactive_scm_user_is_not_told(self):
         UserProfile.objects.filter(pk=self.scm2.pk).update(is_active=False)
@@ -418,6 +433,7 @@ class DamageIssueTests(GrnDamageBase):
         self.confirm({self.panels: ('10', '2', [jpg()])}, description='Two panels cracked')
         issue = Issue.objects.get()
         Notification.objects.all().delete()
+        mark = NotificationLog.objects.order_by('-pk').values_list('pk', flat=True).first() or 0
         response = self.confirm({self.panels: ('10', '2', []), self.inverter: ('2', '1', [jpg('inv.jpg')])})
         self.assertEqual(Issue.objects.count(), 1)
         comment = Comment.objects.get()
@@ -428,7 +444,12 @@ class DamageIssueTests(GrnDamageBase):
         self.assertEqual(DCLineDamagePhoto.objects.filter(line=self.inverter).count(), 1)
         self.assertIn('The damage was added to the open damage issue for this challan.',
                       ' '.join(self.messages_of(response)))
-        self.assertFalse(Notification.objects.exists(), 'a Comment notifies nobody')
+        # NTF-DCG 5c: the second GRN sends its own grn_recorded; the Comment still
+        # notifies nobody, so that event is the only one this submission logged.
+        self.assertEqual(set(NotificationLog.objects.filter(pk__gt=mark)
+                             .values_list('event_code', flat=True)), {'grn_recorded'},
+                         'a Comment notifies nobody')
+        self.assertTrue(all(n.message.startswith('GRN-') for n in Notification.objects.all()))
 
     def test_one_comment_lists_every_line_recording_damage_now(self):
         issue = self.damage_issue()
@@ -492,7 +513,7 @@ class DamageIssueTests(GrnDamageBase):
         self.override({self.panels: ('10', '0', [])})
         self.assertFalse(Comment.objects.exists())
 
-    def test_no_pm_raises_the_issue_unassigned_and_still_tells_managers_and_scm(self):
+    def test_no_pm_raises_the_issue_unassigned_and_still_tells_managers(self):
         no_pm = _project('GD-NOPM')
         no_pm.coordinators.add(self.coord)
         phase = ProjectPhase.objects.create(project=no_pm, phase_name='Install', phase_order=1)
@@ -508,7 +529,12 @@ class DamageIssueTests(GrnDamageBase):
         self.assertIsNone(issue.assigned_to)
         self.assertIn('It is unassigned: this site has no active PM.', ' '.join(self.messages_of(response)))
         self.assertEqual(Notification.objects.filter(recipient=self.coord).count(), 1)
-        self.assertEqual(Notification.objects.filter(recipient=self.scm).count(), 1)
+        # NTF-DCG 5c (E7): SCM is no longer sent the issue; the one in-app row SCM gets
+        # is the grn_recorded note, so the issue event is asserted by its code.
+        self.assertFalse(NotificationLog.objects.filter(
+            recipient=self.scm, event_code='issue_raised').exists())
+        self.assertTrue(NotificationLog.objects.filter(
+            recipient=self.scm, channel='in_app', event_code='grn_recorded').exists())
 
     def test_an_inactive_pm_counts_as_no_pm(self):
         UserProfile.objects.filter(pk=self.pm.pk).update(is_active=False)
@@ -1132,9 +1158,12 @@ class ModelTests(GrnDamageBase):
         with self.assertRaises(ProtectedError):
             self.panels.delete()
 
-    def test_the_registry_names_the_scm_recipients(self):
-        self.assertIn('every active SCM user is also told (in-app and email)',
-                      NOTIFICATION_EVENTS['issue_raised'].recipients_rule)
+    def test_the_registry_says_scm_are_not_sent_a_grn_raised_issue(self):
+        # NTF-DCG 5c (E7): the sentence Admin reads matches the send.
+        rule = NOTIFICATION_EVENTS['issue_raised'].recipients_rule
+        self.assertIn('SCM are not sent it, because the "Goods receipt recorded" email '
+                      'already shows them the damage.', rule)
+        self.assertNotIn('every active SCM user', rule)
 
 
 class PhotoScriptCallerTests(TestCase):
