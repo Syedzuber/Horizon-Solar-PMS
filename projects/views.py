@@ -11701,6 +11701,9 @@ def project_overview(request, project_id):
     # there is no circular import: site_drawings_views imports nothing from this module.
     from .site_drawings_views import site_drawings_context
     site_drawings = site_drawings_context(project)
+    # TD-B3 tender documents card. Lazy import: views_tender_documents imports this module (_active_project), so a top-level import would be circular.
+    from .views_tender_documents import tender_documents_card_context
+    tender_documents_card = tender_documents_card_context(request.user, project)
     # ATT-B1 "Attendance today" card. Lazy import: attendance_views imports this module (_active_project), so a top-level import would be circular.
     from .attendance_views import attendance_card_context
     attendance_card = attendance_card_context(project, request.user)
@@ -11772,6 +11775,7 @@ def project_overview(request, project_id):
         'show_order_list_link':        show_order_list_link,
         'show_payment_queue_link':     show_payment_queue_link,
         'site_drawings':               site_drawings,
+        'tender_documents_card':       tender_documents_card,
         'attendance_card':             attendance_card,
         'user_dashboard_url':          get_user_dashboard(request.user),
         'show_cascade_option':         show_cascade_option,

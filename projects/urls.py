@@ -271,6 +271,9 @@ urlpatterns = [
     path('projects/<str:project_id>/tender-documents/', views_tender_documents.tender_documents_manage, name='tender_documents_manage'),
     path('projects/<str:project_id>/tender-documents/upload/', views_tender_documents.tender_documents_upload, name='tender_documents_upload'),
     path('projects/<str:project_id>/tender-documents/<int:doc_id>/void/', views_tender_documents.tender_documents_void, name='tender_documents_void'),
+    # TD-B3 open one tender document (GET, signs a 300 s link per click). Every viewer of
+    # the site for what their card shows; 404 for anything they may not open (B3-c).
+    path('projects/<str:project_id>/tender-documents/<int:doc_id>/open/', views_tender_documents.tender_documents_open, name='tender_documents_open'),
     # Contractor attendance (ATT-B1), same day only. The page: every viewer of the site, plus
     # a Site Engineer moved off it today for their own entries. Add: a Site Engineer on the
     # site, the PM and coordinators. Edit / time out / void: the same, plus the entry's

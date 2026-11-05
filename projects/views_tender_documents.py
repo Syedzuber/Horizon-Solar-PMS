@@ -1,5 +1,6 @@
 """
 TD-B2 — tender documents: the manage page, upload (with optional supersede) and void.
+TD-B3 — the site overview card's context, and the open view that signs a link per click.
 
 Every view is site-scoped (B2-a): the URL names a site, the documents belong to that
 site's Program, and the page says they apply to all of the tender's live sites.
@@ -7,24 +8,31 @@ site's Program, and the page says they apply to all of the tender's live sites.
 THE GATE, IN THIS ORDER, ON EVERY REQUEST (the challan withdraw view's order)
   a) user_can_view_project            -> refuse_site_view_404 (handover redirect or 404)
   b) tender_docs_enabled_for_site     -> 404 (Residential, CAPEX, Cancelled; R2, R8)
-  c) user_can_manage_tender_documents -> 403 (R1: Admin or a manager of a site in the
-                                         tender)
+  c) user_can_manage_tender_documents_on_site -> 403 (R1: Admin or a manager of a site
+                                         in the tender; the bounded form, ruling A)
 Every POST runs the gate again itself; nothing trusts the page that drew the form.
+
+TD-B3 THE OPEN VIEW HAS ITS OWN ORDER (B3-c), and never relies on the page that drew the
+link: view the site -> 404 page; documents apply -> 404; document in the site's Program
+-> 404; user_can_open_tender_document -> 404 (never 403, so a Management only document's
+existence is not revealed); sign; log the open; redirect.
 
 WHAT THIS MODULE NEVER DOES
   * write ActivityLog (R5): the rows are the audit trail — who uploaded, who replaced,
-    who voided and why;
-  * notify anyone (B2-c): send_notification / notify are not imported;
+    who voided and why; an open is a TenderDocumentOpen row, never a timeline line (B3-g);
+  * notify anyone (B2-c, B3-g): send_notification / notify are not imported;
   * delete a stored file: a voided or replaced document's object stays in the bucket.
     The only removal is discard_tender_document_file() for an object whose row failed
     to save, which refuses any path a row records;
-  * link to a file (B2-d): B3 adds the open view.
+  * put a signed URL in a page: pages link to tender_documents_open, which signs at the
+    click (300 seconds).
 """
 import logging
 from datetime import timedelta
 
 from django.contrib import messages
 from django.db import transaction
+from django.db.models import Count
 from django.http import Http404, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -38,11 +46,15 @@ from .models import (
     TENDER_DOC_SITE_TEAM, TENDER_DOC_VOID_REASON_MIN, TenderDocument,
 )
 from .permissions import (
-    tender_docs_enabled_for_site, user_can_manage_tender_documents,
-    user_can_view_project, user_can_view_tender_document_history,
+    tender_docs_enabled_for_site, user_can_manage_tender_documents_on_site,
+    user_can_open_tender_document, user_can_view_project, user_is_tender_doc_management,
+    visible_tender_documents,
 )
 from .site_pm import refuse_site_view_404
-from .tender_documents import discard_tender_document_file, store_tender_document_file
+from .tender_documents import (
+    discard_tender_document_file, log_tender_document_open, signed_tender_document_url,
+    store_tender_document_file,
+)
 from .views import _active_project
 
 logger = logging.getLogger(__name__)
@@ -52,6 +64,12 @@ logger = logging.getLogger(__name__)
 DUPLICATE_WINDOW_SECONDS = 60
 
 TEMPLATE = 'projects/tender_documents_manage.html'
+
+#: The overview card's anchor (B3-c): a failed open sends the user back to it.
+CARD_ANCHOR = '#tender-documents-card'
+
+OPEN_FAILED = ('This document cannot be opened right now. Try again, or contact the '
+               "tender's PM if it keeps failing.")
 
 
 class _UploadRefused(Exception):
@@ -63,7 +81,10 @@ def _tender_site(request, project_id):
     """Resolve `project_id` and run the three-step gate. Returns (project, None) when the
     user may manage this site's tender documents, else (None, response) — or raises
     Http404, which is the same refusal."""
-    project = _active_project(project_id, select_related=['program'])
+    # program and assigned_pm in the same query: every check below reads them, and
+    # user_can_manage_tender_documents_on_site() stays within its 3 queries only when
+    # assigned_pm is loaded (ruling A).
+    project = _active_project(project_id, select_related=['program', 'assigned_pm'])
     # a) Someone who cannot see the site gets the site pages' 404 (or an outgoing PM's
     #    handover redirect), so nothing says the page exists.
     if not user_can_view_project(request.user, project):
@@ -74,8 +95,9 @@ def _tender_site(request, project_id):
         raise Http404
     # c) Admin, or anyone managing a site in this tender, manages its documents (R1).
     #    A Site Engineer on the site, SCM, Finance, CEO and System Admin can see the site
-    #    but not change what the whole tender reads, so they get a bare 403.
-    if not user_can_manage_tender_documents(request.user, project.program):
+    #    but not change what the whole tender reads, so they get a bare 403. Asked in its
+    #    bounded form (ruling A): the Program form scans every site of the tender.
+    if not user_can_manage_tender_documents_on_site(request.user, project):
         return None, HttpResponseForbidden()
     return project, None
 
@@ -101,20 +123,23 @@ def _render_manage(request, project, form):
     """The manage page for `project`, with `form` as the upload form (bound after a
     refused upload, so its errors show). The caller has already run _tender_site()."""
     program = project.program
-    # Current documents with their uploader's name in the same query; the template
-    # prints uploaded_by.user for every row.
+    # Current documents with their uploader's name and how often each was opened, in one
+    # query (B3-f): the template prints uploaded_by.user and open_count for every row.
+    # Count over the reverse FK is a GROUP BY on the document, so a document never opened
+    # counts 0 and the number of documents does not change the number of queries.
     documents = (active_tender_documents(program)
-                 .select_related('uploaded_by__user'))
-    show_history = user_can_view_tender_document_history(request.user, project)
-    history = None
-    if show_history:
-        # Every row that is no longer current: replaced (with what it was replaced by)
-        # or voided (by whom). Newest first, as the model orders them.
-        history = (TenderDocument.objects
-                   .filter(program=program)
-                   .exclude(voided_at__isnull=True, superseded_by__isnull=True)
-                   .select_related('uploaded_by__user', 'voided_by__user',
-                                   'superseded_by'))
+                 .select_related('uploaded_by__user')
+                 .annotate(open_count=Count('opens')))
+    # Every row that is no longer current: replaced (with what it was replaced by) or
+    # voided (by whom). Newest first, as the model orders them. Shown to everyone who
+    # reaches this page (B3-f): the gate admits only Admin and managers of a site in the
+    # tender, all of whom may open history (user_can_open_tender_document), including a
+    # manager of another site in the tender whom user_can_view_tender_document_history()
+    # would not count (the B2 site-A/site-B finding).
+    history = (TenderDocument.objects
+               .filter(program=program)
+               .exclude(voided_at__isnull=True, superseded_by__isnull=True)
+               .select_related('uploaded_by__user', 'voided_by__user', 'superseded_by'))
     # The tick's initial display, decided here so the template's Alpine state is a
     # literal true/false and never a value echoed from the request.
     site_team_selected = (form.is_bound
@@ -127,7 +152,6 @@ def _render_manage(request, project, form):
         'form': form,
         'site_team_value': TENDER_DOC_SITE_TEAM,
         'site_team_selected': site_team_selected,
-        'show_history': show_history,
         'history': history,
         'void_reason_min': TENDER_DOC_VOID_REASON_MIN,
     })
@@ -136,8 +160,8 @@ def _render_manage(request, project, form):
 @login_required
 @require_GET
 def tender_documents_manage(request, project_id):
-    """Show the tender's current documents, the upload form, a void form per document
-    and, for management, the replaced and voided history (B2-a, R7).
+    """Show the tender's current documents with their open counts, the upload form, a
+    void form per document and the replaced and voided history (B2-a, R7, B3-f).
 
     Access: Admin, or anyone managing a site in this tender (R1), on a site where tender
     documents apply (R2, R8). 404 for anyone who cannot see the site and on Residential,
@@ -306,3 +330,109 @@ def tender_documents_void(request, project_id, doc_id):
     messages.success(request, f'"{document.title}" was voided. It is in the history; '
                               f'its file is kept.')
     return redirect(back)
+
+
+# ---------------------------------------------------------------------------
+# TD-B3 — the site overview card and the open view
+# ---------------------------------------------------------------------------
+
+def tender_documents_card_context(user, project):
+    """The "Tender documents" card on project_overview (B3-a, B3-b), or None when the
+    card is not drawn at all.
+
+    RELIES ON THE PAGE'S GATE (Zuber's B3 go-ahead, ruling 3). project_overview has
+    already asked user_can_view_project() and refused on False, which is the first half
+    of user_can_view_site_drawings(); the OPEX half is inside
+    tender_docs_enabled_for_site(). So visible_tender_documents() is called with
+    site_view_checked=True and that gate is not asked a second time — its queries would
+    repeat the page's own (the DR-2 site_drawings_context precedent). No other caller may
+    use this builder without that gate in front of it. The open view never relies on it.
+
+    What each viewer gets (B3-b):
+      * the Management only audience (user_is_tender_doc_management): every current
+        document with its visibility badge, and a Manage link when they may also manage
+        the tender's documents (user_can_manage_tender_documents_on_site, ruling A);
+      * everyone else on the site: current Site team documents only, no badges, no link;
+      * nothing to show and no Manage link: None, so no empty card is drawn;
+      * a manager with no documents: the card with an empty state and the Manage link.
+
+    Queries: one for the documents (uploader in the same query), and at most three for
+    the audience and manage questions; none per document and none per site, so the count
+    grows with neither the documents nor the tender's sites (pinned by
+    tests_tender_documents_b3).
+    """
+    # Residential, CAPEX, Cancelled: no card, and no further question asked (R2, R8).
+    if not tender_docs_enabled_for_site(project):
+        return None
+    # Asked once here for the badges and the Manage link; visible_tender_documents()
+    # asks the same question for the list. Management sees badges because only they see
+    # both kinds; to everyone else every row is Site team, so a badge would say nothing.
+    is_management = user_is_tender_doc_management(user, project)
+    documents = list(visible_tender_documents(user, project, site_view_checked=True)
+                     .select_related('uploaded_by__user'))
+    # The Manage link goes only to management who also manage the tender's documents
+    # (R1: Admin or a manager of a site in the tender). SCM, Finance and the CEO see all
+    # documents but cannot change them, so they get no link — and the question is never
+    # asked for anyone outside management, so a Site Engineer pays no query for it.
+    # Bounded form (ruling A): the Program form's per-site scan grew with the tender.
+    can_manage = (is_management
+                  and user_can_manage_tender_documents_on_site(user, project))
+    if not documents and not can_manage:
+        return None
+    return {
+        'program_name': project.program.name,
+        'documents': documents,
+        'show_badges': is_management,
+        'site_team_value': TENDER_DOC_SITE_TEAM,
+        'manage_url': _manage_url(project) if can_manage else None,
+    }
+
+
+@login_required
+@require_GET
+def tender_documents_open(request, project_id, doc_id):
+    """Open one tender document's file: a redirect to a link signed now, valid for 300
+    seconds, and one TenderDocumentOpen row (R5). No ActivityLog, no notification, no
+    site timeline line (B3-g). The page opens it in a new tab.
+
+    Access (B3-c, B3-d), in this order, never relying on the page that drew the link:
+      1) can see the site (user_can_view_project) — else the site pages' 404 or handover
+         redirect (refuse_site_view_404);
+      2) tender documents apply to the site — else 404 (Residential, CAPEX, Cancelled);
+      3) the document belongs to this site's Program — else 404;
+      4) user_can_open_tender_document — else 404, not 403, so a Management only or
+         history document says nothing about existing to someone who cannot see it.
+    Current documents open for whoever the card shows them to; history rows only for
+    management of this site or a manager of the tender. A Site Engineer never opens one.
+    """
+    # program and assigned_pm loaded with the site: the checks below read both.
+    project = _active_project(project_id, select_related=['program', 'assigned_pm'])
+    # 1) Someone who cannot see the site gets the site pages' own refusal, so nothing
+    #    says a document exists here.
+    if not user_can_view_project(request.user, project):
+        return refuse_site_view_404(request, project)
+    # 2) No tender documents on Residential, CAPEX or Cancelled sites (R2, R8).
+    if not tender_docs_enabled_for_site(project):
+        raise Http404
+    # 3) Only this site's tender: another Program's document id is the same bare 404 as
+    #    one that does not exist.
+    document = (TenderDocument.objects
+                .filter(pk=doc_id, program_id=project.program_id).first())
+    if document is None:
+        raise Http404
+    # 4) Management only to the Management only audience; history to management or a
+    #    manager of the tender. Everyone else, including every Site Engineer for a history
+    #    row, gets the same 404 as a document that does not exist (B3-c).
+    if not user_can_open_tender_document(request.user, document, project):
+        raise Http404
+    # 5) Signed at the click, in the bucket recorded on the row. A failure logs no open:
+    #    nothing was opened.
+    url = signed_tender_document_url(document)
+    if not url:
+        messages.error(request, OPEN_FAILED)
+        return redirect(reverse('project_overview', args=[project.project_id])
+                        + CARD_ANCHOR)
+    # 6) One row per link minted, from this site (R5).
+    log_tender_document_open(document, request.user, project)
+    # 7) The signed link itself; the browser fetches the file from storage.
+    return redirect(url)

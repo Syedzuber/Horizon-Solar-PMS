@@ -4130,3 +4130,132 @@ def user_can_view_tender_document_history(user, project):
     # Management only, and only where the card exists at all.
     return (tender_docs_enabled_for_site(project)
             and user_is_tender_doc_management(user, project))
+
+
+def user_can_manage_tender_documents_on_site(user, project):
+    """Return exactly user_can_manage_tender_documents(user, project.program), asked from
+    one site, in a bounded number of queries (TD-B3 ruling A).
+
+    WHY A SECOND FORM. user_can_manage_tender_documents() goes through
+    user_can_manage_program(), which loads every live site of the tender and asks
+    user_can_manage_project() of each — about two queries per site. On a tender of a few
+    hundred sites that is hundreds of queries on every overview load and every manage
+    page request. Ruling A: every place the tender documents feature asks "may this user
+    manage the tender's documents?" from a site (the overview card's Manage link, the
+    manage page gate, the history arm of user_can_open_tender_document) asks this
+    instead. user_can_manage_tender_documents() and user_can_manage_program() are left
+    unchanged; the Program pages still use the latter (SECONDARY_FINDINGS, TD-B3).
+
+    Same answer, in this order:
+      1) no Program, or a soft-deleted or non-OPEX Program: False (R2) — the Program row
+         (one query unless the caller select_related it);
+      2) no profile: False; a role in TENDER_DOC_ADMIN_ROLES: True (R1);
+      3) a manager of THIS live site: True — user_can_manage_project(), free when the
+         caller select_related assigned_pm and the user is the site's PM, else the
+         coordinators query;
+      4) otherwise one exists() over the tender's live sites through
+         manageable_projects_q(), the documented queryset form of
+         user_can_manage_project(), so it selects exactly the sites the per-site loop in
+         user_can_manage_program() would have found.
+    At most 3 queries when project.assigned_pm is loaded (every caller in this feature
+    loads it); agreement with user_can_manage_tender_documents() is pinned for every
+    user and site in tests_tender_documents_b3.
+    """
+    if project is None or project.program_id is None:
+        return False
+    program = project.program
+    # R2: only a live OPEX Program takes tender documents, even for Admin.
+    if program.is_deleted or program.program_type != 'OPEX':
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    # R1: Admin manages every tender's documents. Everyone else must manage a live site
+    # in this tender; SCM, Finance, CEO and System Admin are refused unless they do.
+    if profile.role in TENDER_DOC_ADMIN_ROLES:
+        return True
+    # This site first: its PM or a coordinator manages the tender without a site scan.
+    # A soft-deleted site does not count, as in user_can_manage_program().
+    if not project.is_deleted and user_can_manage_project(user, project):
+        return True
+    # Any other live site of the tender, in one query. distinct() is not needed for
+    # exists(), though the coordinators leg of the Q traverses an M2M.
+    return (program.sites.filter(is_deleted=False)
+            .filter(manageable_projects_q(profile)).exists())
+
+
+def user_can_open_tender_document(user, document, project):
+    """Return True if `user` may open `document`'s file from `project`'s pages (TD-B3
+    ruling B3-d) — the open view's last gate.
+
+    A CURRENT document (neither voided nor superseded) opens for exactly the people who
+    see it on the card: user_can_view_tender_document().
+
+    A HISTORY row (superseded or voided, R7) opens only where tender documents apply to
+    the site, the row belongs to the site's own Program, and the user either sees this
+    site's history (user_can_view_tender_document_history: the Management only audience)
+    or manages the tender's documents (user_can_manage_tender_documents_on_site, the
+    bounded form of user_can_manage_tender_documents — ruling A). The second leg
+    is what lets a manager of site A open a history row from site B's manage page in the
+    same tender (the B2 site-A/site-B finding). A Site Engineer is in neither, so an SE
+    can never open a history row, Site team or not.
+
+    Site visibility is the caller's first check (the open view runs user_can_view_project
+    before this); it is asked again for current documents only because
+    user_can_view_tender_document() includes it.
+    """
+    if document is None:
+        return False
+    # Current document: the card's own rule, so a link can never open what the card hides.
+    if document.voided_at is None and document.superseded_by_id is None:
+        return user_can_view_tender_document(user, document, project)
+    # History row: never on a site without tender documents, never another tender's row,
+    # and only for management of this site or a manager of the tender (B3-d).
+    if not tender_docs_enabled_for_site(project):
+        return False
+    if document.program_id != project.program_id:
+        return False
+    return (user_can_view_tender_document_history(user, project)
+            or user_can_manage_tender_documents_on_site(user, project))
+
+
+def visible_tender_documents(user, project, *, site_view_checked=False):
+    """Return the queryset of `project`'s CURRENT tender documents that `user` may see on
+    the site card (TD-B3 ruling B3-e): none, Site team only, or all.
+
+    It answers user_can_view_tender_document() for a whole list at once, and must agree
+    with it for every document (pinned by tests_tender_documents_b3): the base checks —
+    tender documents apply to the site, the user can see the OPEX site, the user is or is
+    not in the Management only audience — are asked ONCE here, not per document. The
+    per-document terms of that helper (same Program, not voided, not superseded,
+    visibility) become the queryset filter.
+
+    `site_view_checked=True` is for a caller that has itself just asked
+    user_can_view_project(user, project) and refused on False — project_overview, whose
+    gate is the first half of user_can_view_site_drawings(); the second half (OPEX) is
+    inside tender_docs_enabled_for_site(). It skips re-asking that gate, whose queries
+    would repeat the page's own (the DR-2 site_drawings_context precedent). Every other
+    caller leaves it False.
+
+    The queryset is unordered beyond the model's own ordering (newest first) and carries
+    no select_related; the caller adds what it prints.
+    """
+    # Import inside the function to avoid a circular import at module level: this module
+    # imports no models (see the note on its only top-level import), the same reason
+    # user_can_view_tender_document() imports TENDER_DOC_SITE_TEAM at call time.
+    from .models import TENDER_DOC_SITE_TEAM, TenderDocument
+    # Base check 1: no card on Residential, CAPEX, Cancelled or deleted sites (R2, R8).
+    if not tender_docs_enabled_for_site(project):
+        return TenderDocument.objects.none()
+    # Base check 2: only someone who can see the OPEX site reads anything on it.
+    if not site_view_checked and not user_can_view_site_drawings(user, project):
+        return TenderDocument.objects.none()
+    # This site's tender, current versions only (R7) — the same two column terms as
+    # forms_tender_documents.active_tender_documents().
+    documents = TenderDocument.objects.filter(
+        program_id=project.program_id, voided_at__isnull=True, superseded_by__isnull=True)
+    # Base check 3, asked once: the Management only audience sees everything; everyone
+    # else on the site sees Site team documents only (R4, R9).
+    if user_is_tender_doc_management(user, project):
+        return documents
+    return documents.filter(visibility=TENDER_DOC_SITE_TEAM)

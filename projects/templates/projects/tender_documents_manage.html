@@ -17,9 +17,12 @@
 {% block content %}
 {% comment %}TD-B2 manage page. Reached only by Admin and the managers of a site in this
    tender (views_tender_documents._tender_site refuses everyone else, and refuses the URL
-   on Residential, CAPEX and Cancelled sites). No open/download links yet (B2-d, B3 adds
-   them). Alpine holds two pieces of local state only: whether the no-prices tick is
-   shown, and whether a form is submitting. The server enforces the tick (R9).{% endcomment %}
+   on Residential, CAPEX and Cancelled sites). TD-B3: every current and history row has
+   an Open link to tender_documents_open (signed at the click, new tab), current rows
+   show how often they were opened, and the History card is always shown, since everyone
+   who reaches this page may open history. Alpine holds two pieces of local state only:
+   whether the no-prices tick is shown, and whether a form is submitting. The server
+   enforces the tick (R9).{% endcomment %}
 <div class="td-page">
   <div class="mb-3">
     <a href="{% url 'project_overview' project.project_id %}" class="text-decoration-none text-muted">&larr; Back to {{ project.project_id }}</a>
@@ -52,7 +55,10 @@
                 <div class="small text-muted">
                   Uploaded by {{ doc.uploaded_by.user.get_full_name|default:doc.uploaded_by.user.username }} · {{ doc.uploaded_at|date:"d M Y H:i" }}
                 </div>
+                <div class="small text-muted" id="td-opens-{{ doc.pk }}">Opened {{ doc.open_count }} time{{ doc.open_count|pluralize }}</div>
               </div>
+              <a href="{% url 'tender_documents_open' project.project_id doc.pk %}" target="_blank" rel="noopener"
+                 class="btn btn-outline-secondary btn-sm px-3 py-2 align-self-start flex-shrink-0">Open</a>
             </div>
             <details class="mt-2">
               <summary class="small text-danger">Void this document</summary>
@@ -146,31 +152,35 @@
     </div>
   </div>
 
-  {% if show_history %}
-    <div class="card shadow-sm mb-4" id="td-history">
-      <div class="card-header"><h5 class="mb-0">History</h5></div>
-      {% if history %}
-        <ul class="list-group list-group-flush">
-          {% for doc in history %}
-            <li class="list-group-item small text-break" id="td-hist-{{ doc.pk }}">
-              <strong>{{ doc.title }}</strong>
-              <span class="text-muted">· {{ doc.original_filename }} · uploaded by {{ doc.uploaded_by.user.get_full_name|default:doc.uploaded_by.user.username }}, {{ doc.uploaded_at|date:"d M Y H:i" }}</span>
-              {% if doc.voided_at %}
-                <div class="text-danger">
-                  Voided by {{ doc.voided_by.user.get_full_name|default:doc.voided_by.user.username }}, {{ doc.voided_at|date:"d M Y H:i" }}: {{ doc.void_reason }}
-                </div>
-              {% else %}
-                <div class="text-muted">
-                  Replaced by "{{ doc.superseded_by.title }}", {{ doc.superseded_at|date:"d M Y H:i" }}
-                </div>
-              {% endif %}
-            </li>
-          {% endfor %}
-        </ul>
-      {% else %}
-        <div class="card-body small text-muted">Nothing replaced or voided yet.</div>
-      {% endif %}
-    </div>
-  {% endif %}
+  <div class="card shadow-sm mb-4" id="td-history">
+    <div class="card-header"><h5 class="mb-0">History</h5></div>
+    {% if history %}
+      <ul class="list-group list-group-flush">
+        {% for doc in history %}
+          <li class="list-group-item small" id="td-hist-{{ doc.pk }}">
+            <div class="d-flex justify-content-between gap-2">
+              <div class="text-break" style="min-width:0;">
+                <strong>{{ doc.title }}</strong>
+                <span class="text-muted">· {{ doc.original_filename }} · uploaded by {{ doc.uploaded_by.user.get_full_name|default:doc.uploaded_by.user.username }}, {{ doc.uploaded_at|date:"d M Y H:i" }}</span>
+                {% if doc.voided_at %}
+                  <div class="text-danger">
+                    Voided by {{ doc.voided_by.user.get_full_name|default:doc.voided_by.user.username }}, {{ doc.voided_at|date:"d M Y H:i" }}: {{ doc.void_reason }}
+                  </div>
+                {% else %}
+                  <div class="text-muted">
+                    Replaced by "{{ doc.superseded_by.title }}", {{ doc.superseded_at|date:"d M Y H:i" }}
+                  </div>
+                {% endif %}
+              </div>
+              <a href="{% url 'tender_documents_open' project.project_id doc.pk %}" target="_blank" rel="noopener"
+                 class="btn btn-outline-secondary btn-sm px-3 py-2 align-self-start flex-shrink-0">Open</a>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <div class="card-body small text-muted">Nothing replaced or voided yet.</div>
+    {% endif %}
+  </div>
 </div>
 {% endblock %}

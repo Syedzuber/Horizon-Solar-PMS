@@ -1,0 +1,74 @@
+{% comment %}
+TD-B3 — the tender documents card: files uploaded once for the whole tender (Program),
+shown on each of its live OPEX sites. Context is `tender_documents_card`, built by
+views_tender_documents.tender_documents_card_context(); None (card not drawn) on
+Residential, CAPEX and Cancelled sites, and for a viewer with nothing to see and no
+Manage link (B3-b).
+
+Who sees what is decided in the builder, never here: management gets every current
+document with its visibility badge (show_badges) and, if they may change the tender's
+documents, the Manage link (manage_url); everyone else on the site gets Site team
+documents only, with no badges and no link. Voided and replaced documents are never on
+this card. Each Open goes to tender_documents_open, which re-checks access and signs the
+link at the click — nothing is signed on this page — and opens in a new tab.
+
+CLOSED BY DEFAULT (DR-2c-1) — a deliberate exception to "overview blocks open by default",
+using the Gantt card's mechanism: Bootstrap collapse without `show`, and aria-expanded
+"false" on the .block-toggle button, which must stay in step or the chevron points the
+wrong way on load. So what a site needs to know without opening it lives in the HEADER:
+the tender it applies to and the document count.
+{% endcomment %}
+{% if tender_documents_card %}
+<div class="card shadow-sm mb-3" id="tender-documents-card">
+  <div class="card-header py-2">
+    <div class="d-flex justify-content-between align-items-center gap-2">
+      <span class="small text-break">
+        <span class="fw-semibold"><i data-lucide="folder-open" class="lucide-icon me-1"></i>Tender documents</span>
+        <span class="text-muted ms-1 d-inline-block" id="tender-documents-summary">{{ tender_documents_card.documents|length }} document{{ tender_documents_card.documents|length|pluralize }} · Applies to all sites in {{ tender_documents_card.program_name }}</span>
+      </span>
+      <button class="btn btn-link btn-sm p-0 text-muted block-toggle"
+              type="button" data-bs-toggle="collapse"
+              data-bs-target="#tenderDocumentsCollapse" aria-expanded="false"
+              aria-controls="tenderDocumentsCollapse">
+        <i class="bi bi-chevron-down collapse-chevron"></i>
+      </button>
+    </div>
+  </div>
+  <div class="collapse" id="tenderDocumentsCollapse">
+    <div class="card-body small px-3 py-3">
+      {% if tender_documents_card.documents %}
+        <ul class="list-unstyled mb-0">
+          {% for doc in tender_documents_card.documents %}
+            <li class="d-flex justify-content-between align-items-center gap-2 py-2{% if not forloop.last %} border-bottom{% endif %}" id="tender-doc-{{ doc.pk }}">
+              <div class="text-break" style="min-width:0;">
+                <div>
+                  <span class="fw-semibold">{{ doc.title }}</span>
+                  {% if tender_documents_card.show_badges %}
+                    {% if doc.visibility == tender_documents_card.site_team_value %}
+                      <span class="badge" style="background:#1a7a4a">Site team</span>
+                    {% else %}
+                      <span class="badge text-bg-secondary">Management only</span>
+                    {% endif %}
+                  {% endif %}
+                </div>
+                <div class="text-muted">
+                  {{ doc.get_category_display }} · {{ doc.uploaded_by.user.get_full_name|default:doc.uploaded_by.user.username }} · {{ doc.uploaded_at|date:"d M Y" }} · {{ doc.size_bytes|filesizeformat }}
+                </div>
+              </div>
+              <a href="{% url 'tender_documents_open' project.project_id doc.pk %}" target="_blank" rel="noopener"
+                 class="btn btn-outline-secondary btn-sm px-3 py-2 flex-shrink-0">Open</a>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <div class="text-muted" id="tender-documents-empty">No tender documents yet.</div>
+      {% endif %}
+      {% if tender_documents_card.manage_url %}
+        <div class="mt-2">
+          <a href="{{ tender_documents_card.manage_url }}" class="btn btn-sm btn-brand py-2" id="tender-documents-manage">Manage</a>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endif %}
