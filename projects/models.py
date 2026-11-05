@@ -2,7 +2,8 @@ import re
 
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
-from django.db.models.functions import Floor, Lower
+from django.db.models.functions import Floor, Length, Lower
+from django.db.models.lookups import GreaterThanOrEqual
 from django.contrib.auth.models import User
 from django.utils import timezone
 
@@ -8780,3 +8781,192 @@ class ContractorAttendanceRevision(models.Model):
     def delete(self, *args, **kwargs):
         raise AppendOnlyViolation(
             "ContractorAttendanceRevision is append-only — an entry's history stays.")
+
+
+# ---------------------------------------------------------------------------
+# TD-B1 — Tender-wide documents (rulings R1-R9, TD_A_AUDIT.md)
+# ---------------------------------------------------------------------------
+
+#: Who may read a tender document, chosen at upload (R9). Management only is the default.
+TENDER_DOC_SITE_TEAM  = 'site_team'
+TENDER_DOC_MANAGEMENT = 'management'
+TENDER_DOC_VISIBILITY_CHOICES = [
+    (TENDER_DOC_SITE_TEAM,  'Site team'),
+    (TENDER_DOC_MANAGEMENT, 'Management only'),
+]
+
+#: What a tender document is (P3, accepted as proposed).
+TENDER_DOC_CATEGORY_CHOICES = [
+    ('technical_spec',   'Technical specification'),
+    ('approved_makes',   'Approved make list'),
+    ('drawing_standard', 'Drawing or SLD standard'),
+    ('hse',              'HSE and safety'),
+    ('client_letter',    'Client letter or circular'),
+    ('tender_loa',       'Tender or LOA'),
+    ('other',            'Other'),
+]
+
+#: The shortest void reason the database accepts (the DC withdraw uses the same 10).
+TENDER_DOC_VOID_REASON_MIN = 10
+
+
+class TenderDocument(models.Model):
+    """A file uploaded once at tender (Program) level and shown on every OPEX site under
+    that tender (TD-B1).
+
+    WHO READS IT is the `visibility` class, chosen at upload: Management only (the
+    default) or Site team, which Site Engineers read. A Site team row always carries the
+    uploader's no-prices confirmation, who and when, held by a CHECK (R9) — the
+    DeliveryChallanAttachment precedent, since both are files a Site Engineer opens.
+
+    STORAGE (R6): the private delivery bucket, path `program/<program_id>/<uuid4>.<ext>`.
+    The bucket and path are stored, never a URL; tender_documents.signed_tender_document_url()
+    mints a 300-second link per click, in the bucket recorded on the row (TD-B1a), so a
+    later change to SUPABASE_DELIVERY_BUCKET never redirects an existing document.
+
+    NOTHING IS DELETED. A replacement is a new row, and the old row points at it through
+    `superseded_by` (R7, one link deep, the DesignFile shape). A wrong file is voided with
+    a reason: when, who and why together, or none of them. The views (B2) write both;
+    this model has no save() override and no signal (locked rule).
+
+    READ GATES live in permissions.py: tender_docs_enabled_for_site(),
+    user_can_view_tender_document(), user_can_view_tender_document_history().
+    """
+
+    # PROTECT: a Program soft-deletes, and a document must never take its tender with it.
+    # db_index=False because the named (program, voided_at) index in Meta leads with this
+    # column and already serves every lookup by program; Django's automatic FK index
+    # would duplicate it (TD-B1a).
+    program = models.ForeignKey(
+        Program, on_delete=models.PROTECT, related_name='tender_documents',
+        db_index=False,
+    )
+    title = models.CharField(max_length=200)
+    category = models.CharField(max_length=20, choices=TENDER_DOC_CATEGORY_CHOICES)
+    visibility = models.CharField(
+        max_length=12, choices=TENDER_DOC_VISIBILITY_CHOICES,
+        default=TENDER_DOC_MANAGEMENT,
+    )
+
+    storage_bucket = models.CharField(max_length=100)             # the bucket the file was uploaded to, recorded at write time; links are signed here, never in today's configured bucket (TD-B1a)
+    storage_path = models.CharField(max_length=500, unique=True)  # within storage_bucket; uuid filename, never a URL (R6)
+    original_filename = models.CharField(max_length=255)          # as uploaded; never used in the path
+    content_type = models.CharField(max_length=100)               # canonical type from validate_dc_document, not the browser's claim
+    size_bytes = models.PositiveIntegerField()                    # bytes; at most 20 MB (validate_dc_document, R3)
+
+    uploaded_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='tender_documents_uploaded',
+    )
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    # R9: the uploader's confirmation that the file shows no price. Required (CHECK) for a
+    # Site team row; may also be recorded on a Management only row.
+    no_prices_confirmed_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='tender_documents_no_prices_confirmed',
+    )
+    no_prices_confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    # R7: the row that replaced this one. PROTECT, not SET_NULL (TD-B1 brief): a
+    # replacement can never be deleted out from under the row it superseded, so the chain
+    # cannot lose a link. db_index=False because Meta declares the (superseded_by) index by
+    # name, and the FK's own index would duplicate it.
+    superseded_by = models.ForeignKey(
+        'self', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='supersedes', db_index=False,
+    )
+    superseded_at = models.DateTimeField(null=True, blank=True)
+
+    voided_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='tender_documents_voided',
+    )
+    voided_at = models.DateTimeField(null=True, blank=True)  # NULL = not voided
+    void_reason = models.TextField(blank=True, default='')  # mandatory once voided, >= TENDER_DOC_VOID_REASON_MIN chars
+
+    class Meta:
+        ordering = ['program', '-uploaded_at', '-pk']
+        indexes = [
+            # The site card's read: one Program's unvoided documents.
+            models.Index(fields=['program', 'voided_at'], name='tender_doc_program_voided'),
+            # "Is this row superseded", and the reverse walk to its predecessor.
+            models.Index(fields=['superseded_by'], name='tender_doc_superseded_by'),
+        ]
+        constraints = [
+            # R9: a Site team document is readable by Site Engineers, so it is stored only
+            # with the no-prices confirmation, who and when.
+            models.CheckConstraint(
+                condition=(~models.Q(visibility=TENDER_DOC_SITE_TEAM)
+                           | (models.Q(no_prices_confirmed_by__isnull=False)
+                              & models.Q(no_prices_confirmed_at__isnull=False))),
+                name='tender_doc_site_team_no_prices'),
+            # The confirmation is one fact: who and when together, or neither.
+            models.CheckConstraint(
+                condition=(models.Q(no_prices_confirmed_by__isnull=True,
+                                    no_prices_confirmed_at__isnull=True)
+                           | models.Q(no_prices_confirmed_by__isnull=False,
+                                      no_prices_confirmed_at__isnull=False)),
+                name='tender_doc_no_prices_together'),
+            # R7: superseded by whom and when, together or neither.
+            models.CheckConstraint(
+                condition=(models.Q(superseded_by__isnull=True, superseded_at__isnull=True)
+                           | models.Q(superseded_by__isnull=False,
+                                      superseded_at__isnull=False)),
+                name='tender_doc_superseded_together'),
+            # A row cannot replace itself. A NULL superseded_by makes the comparison NULL,
+            # which a CHECK passes, so a live row is unaffected.
+            models.CheckConstraint(
+                condition=~models.Q(superseded_by=models.F('pk')),
+                name='tender_doc_not_self_superseded'),
+            # Void: when, who and a reason of at least TENDER_DOC_VOID_REASON_MIN
+            # characters, or none of them. The database counts characters as stored, so
+            # the view must strip the reason before writing it.
+            models.CheckConstraint(
+                condition=((models.Q(voided_at__isnull=True)
+                            & models.Q(voided_by__isnull=True)
+                            & models.Q(void_reason=''))
+                           | (models.Q(voided_at__isnull=False)
+                              & models.Q(voided_by__isnull=False)
+                              & models.Q(GreaterThanOrEqual(Length('void_reason'),
+                                                            TENDER_DOC_VOID_REASON_MIN)))),
+                name='tender_doc_void_fields'),
+        ]
+
+    def __str__(self):
+        return f"{self.program} — {self.title}"
+
+
+class TenderDocumentOpen(models.Model):
+    """One open of a tender document: who, when, and the site card it was opened from (R5).
+
+    The feature's dedicated access log. Opens are never written to ActivityLog: the site
+    timeline is read by everyone on the site, and a Management only document's open must
+    not appear there. Written by tender_documents.log_tender_document_open(), one row per
+    signed link minted.
+    """
+
+    # db_index=False because the named (document, opened_at) index in Meta leads with this
+    # column; Django's automatic FK index would duplicate it (TD-B1a).
+    document = models.ForeignKey(
+        TenderDocument, on_delete=models.PROTECT, related_name='opens', db_index=False,
+    )
+    user = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='tender_document_opens',
+    )
+    # The site whose card the link was clicked on; null for an open from anywhere else (B3
+    # decides whether one exists). PROTECT, as projects soft-delete.
+    project = models.ForeignKey(
+        Project, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='tender_document_opens',
+    )
+    opened_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-opened_at', '-pk']
+        indexes = [
+            # "Who opened this document, latest first."
+            models.Index(fields=['document', 'opened_at'], name='tender_doc_open_doc_time'),
+        ]
+
+    def __str__(self):
+        return f"{self.document_id} opened by {self.user_id} at {self.opened_at}"

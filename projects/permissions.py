@@ -3996,3 +3996,137 @@ def user_can_view_vendor_attendance(user):
     the PM and Site Engineers read their own sites' attendance pages. Role only."""
     profile = getattr(user, 'profile', None)
     return profile is not None and profile.role in ATTENDANCE_MAPPER_ROLES
+
+
+# ---------------------------------------------------------------------------
+# Tender-wide documents — TD-B1 (rulings R1-R9, TD_A_AUDIT.md)
+#
+# Every role and status decision for the feature lives here, in the named sets below
+# (TD-B1 P2e option (a)): tender_documents.py, the views and the templates ask these
+# helpers and never compare a role or status string themselves.
+# ---------------------------------------------------------------------------
+
+#: R1: the role that manages tender documents on every tender, beside the managers of a
+#: site in that tender (user_can_manage_program).
+TENDER_DOC_ADMIN_ROLES = frozenset({'Admin'})
+
+#: R4: the portfolio roles in the Management only audience, beside whoever manages the
+#: site (user_can_manage_project). System Admin is left out by omission, by ruling. This
+#: is NOT MONEY_PORTFOLIO_ROLES, which includes System Admin; that set is not reused.
+TENDER_DOC_MANAGEMENT_ROLES = frozenset({'SCM', 'Finance', 'CEO', 'Admin'})
+
+#: R8: site statuses on which the tender documents card is hidden. Test sites still show
+#: it (Project.is_test is not asked).
+TENDER_DOC_HIDDEN_STATUSES = frozenset({'Cancelled'})
+
+
+def tender_docs_enabled_for_site(project):
+    """Return True if tender documents apply to `project` at all (R2, R8): an OPEX site,
+    under a Program, not soft-deleted, and not in TENDER_DOC_HIDDEN_STATUSES.
+
+    R2 is enforced by project_type, not by "has a Program": a CAPEX site can sit under a
+    CAPEX Program (the model allows it, TD-A K2), and that site must not get the card.
+    The Program test is still needed, because a legacy OPEX site could in principle have
+    none. Residential never has a Program (_validate_program_link). Test-flagged sites
+    are deliberately NOT excluded (R8). No query: every term is a column on the row.
+    """
+    if project is None:
+        return False
+    # OPEX only (R2): Residential and CAPEX sites are refused even when CAPEX has a Program.
+    return (project.project_type == 'OPEX'
+            and project.program_id is not None
+            and not project.is_deleted
+            and project.status not in TENDER_DOC_HIDDEN_STATUSES)
+
+
+def user_can_manage_tender_documents(user, program):
+    """Return True if `user` may upload, supersede or void `program`'s tender documents
+    (R1): a role in TENDER_DOC_ADMIN_ROLES, or anyone who manages a live site in this
+    tender — user_can_manage_program(), which is user_can_manage_project() over the
+    Program's sites, so a PM or a coordinator of any one site qualifies and the right
+    follows the seat through a handover (TD-A K12).
+
+    Only an OPEX Program that is not soft-deleted takes tender documents (R2): a CAPEX
+    Program is refused even for Admin, since none of its sites could ever show the card.
+    user_can_manage_program() returns False for a creator who manages no site, so the
+    Program-page creator fallback (user_can_access_program) never grants this.
+    """
+    if program is None or program.is_deleted or program.program_type != 'OPEX':
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    # Admin manages every tender's documents; everyone else only a tender in which they
+    # manage a site. A PM of another tender, SCM, Finance, CEO and System Admin are refused.
+    if profile.role in TENDER_DOC_ADMIN_ROLES:
+        return True
+    return user_can_manage_program(user, program)
+
+
+def user_is_tender_doc_management(user, project):
+    """Return True if `user` is in the Management only audience for `project` (R4):
+    whoever manages the site (user_can_manage_project — its assigned PM and its
+    coordinators, whatever their role string), or a role in TENDER_DOC_MANAGEMENT_ROLES
+    (SCM, Finance, CEO, Admin).
+
+    System Admin is NOT in it (ruling R4). Neither are a Site Engineer, Design, Design
+    Head, BD, nor a PM or coordinator who sees the site only as its QA/QC engineer: they
+    read Site team documents only. A deliberate twin of user_can_see_project_money(),
+    not a reuse of it, because that one admits System Admin.
+    """
+    if project is None:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    # Portfolio management roles first, at no query cost. System Admin falls through to
+    # the manager test and is refused unless they manage the site.
+    if profile.role in TENDER_DOC_MANAGEMENT_ROLES:
+        return True
+    return user_can_manage_project(user, project)
+
+
+def user_can_view_tender_document(user, document, project):
+    """Return True if `user` may see and open `document` on `project`'s tender documents
+    card (R2, R4, R7, R8, R9).
+
+    All of: tender documents apply to the site; the document belongs to the site's own
+    Program (a link from another tender's card is refused); the document is neither
+    voided nor superseded (only the latest of a chain is shown, R7); the user can see the
+    OPEX site's drawings (user_can_view_site_drawings — every viewer of the site); and
+    the document is Site team, or the user is in the Management only audience.
+
+    Voided and superseded rows are read only through
+    user_can_view_tender_document_history(), by management.
+    """
+    if document is None or not tender_docs_enabled_for_site(project):
+        return False
+    # A document of another tender is never shown on this site's card.
+    if document.program_id != project.program_id:
+        return False
+    if document.voided_at is not None or document.superseded_by_id is not None:
+        return False
+    if not user_can_view_site_drawings(user, project):
+        return False
+    # Import inside the function to avoid a circular import at module level: this module
+    # imports no models (see the note on its only top-level import), the same reason
+    # managed_project_ids_by_profile() imports Project at call time.
+    from .models import TENDER_DOC_SITE_TEAM
+    # Site team documents are for everyone on the site; anything else is Management only.
+    if document.visibility == TENDER_DOC_SITE_TEAM:
+        return True
+    return user_is_tender_doc_management(user, project)
+
+
+def user_can_view_tender_document_history(user, project):
+    """Return True if `user` may see `project`'s superseded and voided tender documents
+    (R7): the Management only audience on a site where tender documents apply. The Site
+    team never sees history — only the latest live version of a Site team document.
+
+    Site visibility is not asked separately: every member of the management audience can
+    already see the site (TENDER_DOC_MANAGEMENT_ROLES are all PORTFOLIO_VIEW_ROLES, and a
+    manager of the site sees it through user_can_view_project's first branch).
+    """
+    # Management only, and only where the card exists at all.
+    return (tender_docs_enabled_for_site(project)
+            and user_is_tender_doc_management(user, project))
