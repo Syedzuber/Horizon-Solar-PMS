@@ -12,6 +12,7 @@ from . import cod_views      # Closeout step 4 COD record screens — separate m
 from . import site_drawings_views  # DR-2 site drawings card and drawing open — separate module, same pattern
 from . import notify_views   # T2 notification template Admin screens — separate module, same pattern
 from . import attendance_views  # ATT-B1 contractor attendance screens — separate module, same pattern
+from . import views_tender_documents  # TD-B2 tender documents manage page — separate module, same pattern
 
 urlpatterns = [
     # ---------------------------------------------------------------------------
@@ -264,6 +265,12 @@ urlpatterns = [
     path('projects/<str:project_id>/cod/record/', cod_views.cod_record, name='cod_record'),
     path('projects/<str:project_id>/cod/<int:record_pk>/withdraw/', cod_views.cod_withdraw, name='cod_withdraw'),
     path('projects/<str:project_id>/cod/<int:record_pk>/pdf/', cod_views.cod_record_pdf, name='cod_record_pdf'),
+    # TD-B2 tender documents (OPEX sites under a Program; 404 elsewhere) — Admin, or
+    # anyone managing a site in the tender (403 for other viewers). Upload and void are
+    # POST only and re-check the same gate.
+    path('projects/<str:project_id>/tender-documents/', views_tender_documents.tender_documents_manage, name='tender_documents_manage'),
+    path('projects/<str:project_id>/tender-documents/upload/', views_tender_documents.tender_documents_upload, name='tender_documents_upload'),
+    path('projects/<str:project_id>/tender-documents/<int:doc_id>/void/', views_tender_documents.tender_documents_void, name='tender_documents_void'),
     # Contractor attendance (ATT-B1), same day only. The page: every viewer of the site, plus
     # a Site Engineer moved off it today for their own entries. Add: a Site Engineer on the
     # site, the PM and coordinators. Edit / time out / void: the same, plus the entry's

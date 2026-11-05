@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% block title %}Tender documents — {{ project.project_id }}{% endblock %}
+
+{% block extra_head %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<style>
+  :root { --hz-green: #1a7a4a; }
+  .td-page { max-width: 880px; }
+  .td-page .text-break { word-break: break-word; }
+  @media (max-width: 575.98px) {
+    /* .container gives 12px each side; 4px more makes the 16px phone gutter. */
+    .td-page { padding-left: 4px; padding-right: 4px; }
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+{% comment %}TD-B2 manage page. Reached only by Admin and the managers of a site in this
+   tender (views_tender_documents._tender_site refuses everyone else, and refuses the URL
+   on Residential, CAPEX and Cancelled sites). No open/download links yet (B2-d, B3 adds
+   them). Alpine holds two pieces of local state only: whether the no-prices tick is
+   shown, and whether a form is submitting. The server enforces the tick (R9).{% endcomment %}
+<div class="td-page">
+  <div class="mb-3">
+    <a href="{% url 'project_overview' project.project_id %}" class="text-decoration-none text-muted">&larr; Back to {{ project.project_id }}</a>
+  </div>
+
+  <h4 class="mb-2">Tender documents</h4>
+  <div class="alert alert-info small" id="td-applies">
+    Applies to all {{ site_count }} site{{ site_count|pluralize }} in <strong>{{ program.name }}</strong>.
+    A document uploaded or voided here changes what every one of those sites shows.
+  </div>
+
+  {# Current documents #}
+  <div class="card shadow-sm mb-4" id="td-current">
+    <div class="card-header"><h5 class="mb-0">Current documents</h5></div>
+    {% if documents %}
+      <ul class="list-group list-group-flush">
+        {% for doc in documents %}
+          <li class="list-group-item" id="td-doc-{{ doc.pk }}">
+            <div class="d-flex flex-wrap justify-content-between gap-2">
+              <div class="text-break">
+                <strong>{{ doc.title }}</strong>
+                {% if doc.visibility == site_team_value %}
+                  <span class="badge" style="background:var(--hz-green)">Site team</span>
+                {% else %}
+                  <span class="badge text-bg-secondary">Management only</span>
+                {% endif %}
+                <div class="small text-muted">
+                  {{ doc.get_category_display }} · {{ doc.original_filename }} · {{ doc.size_bytes|filesizeformat }}
+                </div>
+                <div class="small text-muted">
+                  Uploaded by {{ doc.uploaded_by.user.get_full_name|default:doc.uploaded_by.user.username }} · {{ doc.uploaded_at|date:"d M Y H:i" }}
+                </div>
+              </div>
+            </div>
+            <details class="mt-2">
+              <summary class="small text-danger">Void this document</summary>
+              <form method="post" action="{% url 'tender_documents_void' project.project_id doc.pk %}"
+                    class="mt-2" x-data="{ submitting: false }"
+                    x-on:submit="submitting = true"
+                    x-on:pageshow.window="if ($event.persisted) submitting = false">
+                {% csrf_token %}
+                <label class="form-label small" for="void-reason-{{ doc.pk }}">Reason (at least {{ void_reason_min }} characters). The file is kept; the document moves to the history.</label>
+                <textarea class="form-control form-control-sm mb-2" id="void-reason-{{ doc.pk }}" name="void_reason" rows="2" minlength="{{ void_reason_min }}" required></textarea>
+                <button type="submit" class="btn btn-sm btn-outline-danger" x-bind:disabled="submitting">Void</button>
+              </form>
+            </details>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <div class="card-body small text-muted">No documents yet.</div>
+    {% endif %}
+  </div>
+
+  {# Upload #}
+  <div class="card shadow-sm mb-4" id="td-upload">
+    <div class="card-header"><h5 class="mb-0">Upload a document</h5></div>
+    <div class="card-body">
+      <p class="small text-muted">One file per document: PDF, JPG or PNG, at most 20 MB.</p>
+      {% if form.non_field_errors %}
+        <div class="alert alert-danger small">{% for e in form.non_field_errors %}{{ e }} {% endfor %}</div>
+      {% endif %}
+      <form method="post" enctype="multipart/form-data"
+            action="{% url 'tender_documents_upload' project.project_id %}"
+            x-data="{ siteTeam: {% if site_team_selected %}true{% else %}false{% endif %}, submitting: false }"
+            x-on:submit="submitting = true"
+            x-on:pageshow.window="if ($event.persisted) submitting = false">
+        {% csrf_token %}
+
+        <div class="mb-3">
+          <label class="form-label" for="{{ form.title.id_for_label }}">Title</label>
+          <input type="text" class="form-control{% if form.title.errors %} is-invalid{% endif %}" name="title" id="{{ form.title.id_for_label }}" maxlength="200" required value="{{ form.title.value|default:'' }}">
+          {% for e in form.title.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label" for="{{ form.category.id_for_label }}">Category</label>
+          <select class="form-select{% if form.category.errors %} is-invalid{% endif %}" name="category" id="{{ form.category.id_for_label }}" required>
+            {% for value, label in form.fields.category.choices %}
+              <option value="{{ value }}"{% if form.category.value == value %} selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+          {% for e in form.category.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+        </div>
+
+        <fieldset class="mb-3">
+          <legend class="form-label fs-6">Who can see it</legend>
+          {% for value, label in form.fields.visibility.choices %}
+            <div class="form-check">
+              <input class="form-check-input" type="radio" name="visibility" id="td-vis-{{ value }}" value="{{ value }}"
+                     {% if form.visibility.value == value %}checked{% endif %}
+                     x-on:change="siteTeam = {% if value == site_team_value %}true{% else %}false{% endif %}">
+              <label class="form-check-label" for="td-vis-{{ value }}">{{ label }}</label>
+            </div>
+          {% endfor %}
+          {% for e in form.visibility.errors %}<div class="text-danger small">{{ e }}</div>{% endfor %}
+        </fieldset>
+
+        <div class="mb-3" id="td-no-prices" x-show="siteTeam"{% if not site_team_selected %} style="display:none"{% endif %}>
+          <div class="form-check">
+            <input class="form-check-input{% if form.no_prices_confirmed.errors %} is-invalid{% endif %}" type="checkbox" name="no_prices_confirmed" id="td-no-prices-tick" value="on">
+            <label class="form-check-label" for="td-no-prices-tick">This file shows no rates, values or amounts. Site Engineers will see it.</label>
+            {% for e in form.no_prices_confirmed.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+          </div>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label" for="{{ form.file.id_for_label }}">File</label>
+          <input type="file" class="form-control{% if form.file.errors %} is-invalid{% endif %}" name="file" id="{{ form.file.id_for_label }}" accept=".pdf,.jpg,.jpeg,.png" required>
+          {% for e in form.file.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label" for="{{ form.replaces.id_for_label }}">Replaces (optional)</label>
+          {{ form.replaces }}
+          <div class="form-text">The replaced document moves to the history; its file is kept.</div>
+          {% for e in form.replaces.errors %}<div class="text-danger small">{{ e }}</div>{% endfor %}
+        </div>
+
+        <button type="submit" class="btn btn-brand" x-bind:disabled="submitting">
+          <span x-show="!submitting">Upload</span><span x-show="submitting" style="display:none">Uploading…</span>
+        </button>
+      </form>
+    </div>
+  </div>
+
+  {% if show_history %}
+    <div class="card shadow-sm mb-4" id="td-history">
+      <div class="card-header"><h5 class="mb-0">History</h5></div>
+      {% if history %}
+        <ul class="list-group list-group-flush">
+          {% for doc in history %}
+            <li class="list-group-item small text-break" id="td-hist-{{ doc.pk }}">
+              <strong>{{ doc.title }}</strong>
+              <span class="text-muted">· {{ doc.original_filename }} · uploaded by {{ doc.uploaded_by.user.get_full_name|default:doc.uploaded_by.user.username }}, {{ doc.uploaded_at|date:"d M Y H:i" }}</span>
+              {% if doc.voided_at %}
+                <div class="text-danger">
+                  Voided by {{ doc.voided_by.user.get_full_name|default:doc.voided_by.user.username }}, {{ doc.voided_at|date:"d M Y H:i" }}: {{ doc.void_reason }}
+                </div>
+              {% else %}
+                <div class="text-muted">
+                  Replaced by "{{ doc.superseded_by.title }}", {{ doc.superseded_at|date:"d M Y H:i" }}
+                </div>
+              {% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <div class="card-body small text-muted">Nothing replaced or voided yet.</div>
+      {% endif %}
+    </div>
+  {% endif %}
+</div>
+{% endblock %}

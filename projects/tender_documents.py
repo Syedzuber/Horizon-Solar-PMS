@@ -2,12 +2,15 @@
 TD-B1 — tender-wide documents: the storage wrapper. THE ONLY PLACE THIS FEATURE TOUCHES
 SUPABASE (rulings R3, R5, R6).
 
-THREE FUNCTIONS, AND NO OTHERS
-------------------------------
+FOUR FUNCTIONS, AND NO OTHERS
+-----------------------------
   store_tender_document_file(program_id, uploaded_file)
       validate (validate_dc_document, unchanged — R3), then upload to the private
       delivery bucket at program/<program_id>/<uuid4>.<ext> (R6). Returns
       (storage_bucket, storage_path, content_type, size_bytes); never a URL.
+  discard_tender_document_file(bucket, path)
+      best-effort removal of an object stored above whose TenderDocument row then
+      failed to save (TD-B2). Refuses a path any row records; never raises.
   signed_tender_document_url(document)
       a link signed now in the bucket RECORDED on the row, valid for 300 seconds, or
       None (TD-B1a).
@@ -27,7 +30,7 @@ import uuid
 
 from .delivery_storage import DeliveryStorageError, delivery_bucket, validate_dc_document
 from .design_storage import DesignStorageError, _client, get_design_file_url
-from .models import TenderDocumentOpen
+from .models import TenderDocument, TenderDocumentOpen
 
 logger = logging.getLogger(__name__)
 
@@ -65,11 +68,9 @@ def store_tender_document_file(program_id, uploaded_file):
       * validate_dc_document refuses the file (type, emptiness, 20 MB, MIME claim,
         leading bytes) — R3;
       * the file cannot be read or the upload fails.
-    The caller therefore writes no row pointing at an object that does not exist.
-
-    TODO: no discard for an object stored here whose row then fails to save (the
-    discard_unrecorded_dc_document pattern). Deferred to TD-B2, which writes the row;
-    TD-B1's brief allows these three functions only.
+    The caller therefore writes no row pointing at an object that does not exist. If the
+    row then fails to save, the caller removes the object with
+    discard_tender_document_file().
     """
     bucket = delivery_bucket()
     # Same refusal as upload_dc_document (delivery_storage.py:122-124): with the bucket
@@ -95,6 +96,29 @@ def store_tender_document_file(program_id, uploaded_file):
         raise DeliveryStorageError(f'Upload to storage failed: {type(exc).__name__}. '
                                    f'Nothing was saved.')
     return bucket, path, content_type, uploaded_file.size
+
+
+def discard_tender_document_file(bucket, path):
+    """Remove an object store_tender_document_file() stored whose TenderDocument row then
+    failed to save (TD-B2). A copy of delivery_storage.discard_unrecorded_dc_document.
+
+    Refuses to remove anything a TenderDocument row records — a recorded document is
+    never deleted, voided or not (R7) — and anything outside the delivery bucket. Never
+    raises: a failed cleanup leaves an orphan object, which is logged, never a failed
+    page. Returns True when the object was removed.
+    """
+    if not bucket or not path or bucket != delivery_bucket():
+        return False
+    # A recorded path is a document someone can still open or audit; only an unrecorded
+    # upload is ours to remove. Checked by bucket and path, the pair the signer uses.
+    if TenderDocument.objects.filter(storage_bucket=bucket, storage_path=path).exists():
+        return False
+    try:
+        _client().storage.from_(bucket).remove([path])
+        return True
+    except Exception as exc:
+        logger.error('Tender document cleanup failed for %s/%s — %s', bucket, path, exc)
+        return False
 
 
 def signed_tender_document_url(document):
