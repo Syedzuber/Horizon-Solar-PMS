@@ -531,7 +531,7 @@ for SCM and Admin (the view splits them off), and only they see the Withdraw con
       gallery and files. No data-qaqc-photo (Q5): documents upload at full size.{% endcomment %}
       <div class="border rounded p-2 mb-2 grn-docs" data-grn-docs>
         <div class="small fw-semibold mb-1">Delivery documents <span class="text-muted fw-normal">(optional)</span></div>
-        <p class="small text-muted mb-2">Signed challan copy, LR/bilty or delivery photo. Site Engineers will see this file — no rates or amounts.</p>
+        <p class="small text-muted mb-2">Signed challan copy, LR/bilty or delivery photo. Site Engineers and Finance will see this file — no rates or amounts.</p>
         {% for n in "12345" %}
         <div class="row g-2 mb-2" data-grn-doc-slot>
           <div class="col-12 col-md-4">
@@ -554,7 +554,7 @@ for SCM and Admin (the view splits them off), and only they see the Withdraw con
         <div class="form-text">PDF, JPG or PNG; up to 5 documents, 20 MB each. Choose what each one is.</div>
         <div class="form-check mt-1">
           <input class="form-check-input" type="checkbox" name="receipt_docs_no_prices" value="1" id="grnDocsNoPricesC">
-          <label class="form-check-label small" for="grnDocsNoPricesC">These documents show no rates, values or amounts. Site Engineers will see them.</label>
+          <label class="form-check-label small" for="grnDocsNoPricesC">These documents show no rates, values or amounts. Site Engineers and Finance will see them.</label>
         </div>
       </div>
       {% comment %}DG-B: the damage Issue. With one open, damage recorded now is added to it;
@@ -644,6 +644,11 @@ for SCM and Admin (the view splits them off), and only they see the Withdraw con
 {% endif %}
 
 {# ── Raise Issue modal (DC-scoped) ────────────────────────────────────────── #}
+{% comment %}NTF-DCG 5a (Q4): the modal, its draft reopen and its script carry the Raise
+Issue button's own condition, so a page without the button carries no hidden issue form.
+Finance reads this page and raises nothing on it. create_delivery_issue's own gate is
+unchanged (SECONDARY_FINDINGS: it admits any project viewer).{% endcomment %}
+{% if role == 'Site Engineer' or role == 'SCM' or role == 'PM' or role == 'Project Coordinator' or role == 'Admin' %}
 {% if issue_draft %}
 {% comment %}A refused issue (due date out of range) comes back here with what was typed —
 views._stash_issue_draft. Reopen the modal so the user fixes the date, not the text.{% endcomment %}
@@ -724,6 +729,7 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 });
 </script>
+{% endif %}
 
 {% if role == 'SCM' %}
 <div class="modal fade" id="editGrnModal" tabindex="-1"
@@ -843,7 +849,7 @@ document.addEventListener('DOMContentLoaded', function () {
           correction this override writes.{% endcomment %}
           <div class="border rounded p-2 mb-2 grn-docs" data-grn-docs>
             <div class="small fw-semibold mb-1">Delivery documents <span class="text-muted fw-normal">(optional)</span></div>
-            <p class="small text-muted mb-2">Signed challan copy, LR/bilty or delivery photo. Site Engineers will see this file — no rates or amounts.</p>
+            <p class="small text-muted mb-2">Signed challan copy, LR/bilty or delivery photo. Site Engineers and Finance will see this file — no rates or amounts.</p>
             {% for n in "12345" %}
             <div class="row g-2 mb-2" data-grn-doc-slot>
               <div class="col-12 col-md-4">
@@ -866,7 +872,7 @@ document.addEventListener('DOMContentLoaded', function () {
             <div class="form-text">PDF, JPG or PNG; up to 5 documents, 20 MB each. Choose what each one is.</div>
             <div class="form-check mt-1">
               <input class="form-check-input" type="checkbox" name="receipt_docs_no_prices" value="1" id="grnDocsNoPricesO">
-              <label class="form-check-label small" for="grnDocsNoPricesO">These documents show no rates, values or amounts. Site Engineers will see them.</label>
+              <label class="form-check-label small" for="grnDocsNoPricesO">These documents show no rates, values or amounts. Site Engineers and Finance will see them.</label>
             </div>
           </div>
           {% comment %}DG-B: the damage Issue, as on the SE form.{% endcomment %}

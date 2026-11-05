@@ -75,7 +75,7 @@ RECEIPT_DOCUMENTS_NO_PRICES_FIELD = 'receipt_docs_no_prices'
 DOCUMENTS_NEED_A_QUANTITY = ('Documents can only be attached with a quantity change for '
                              'now — enter the received quantity, or ask SCM.')
 RECEIPT_DOCUMENTS_NO_PRICES = ('Tick "These documents show no rates, values or amounts" to '
-                               'attach them — Site Engineers will see them.')
+                               'attach them — Site Engineers and Finance will see them.')
 RECEIPT_DOCUMENT_STORAGE_OFF = ('Delivery documents cannot be stored right now: the private '
                                 'delivery bucket is not configured. Nothing was saved — '
                                 'remove the documents to record the receipt without them.')

@@ -242,7 +242,7 @@ class CreateWithDocumentsTests(DcAttachmentBase):
     def test_files_without_the_no_prices_tick_are_refused(self):
         response = self.post([_file('dc.pdf', PDF, 'application/pdf')], tick=False)
         self.assert_refused_clean(response, 'These documents show no rates, values or amounts')
-        self.assertContains(response, 'Site Engineers will see them. Nothing was saved.')
+        self.assertContains(response, 'Site Engineers and Finance will see them. Nothing was saved.')
 
     def test_a_refused_form_with_files_says_attach_again_and_is_never_pre_ticked(self):
         response = self.post([_file('dc.pdf', PDF, 'application/pdf')], dc_number='')
@@ -353,9 +353,10 @@ class OpenTests(DcAttachmentBase):
         self.assertEqual(self.opened_rows().count(), 2)
 
     def test_ceo_and_system_admin_are_outside_the_detail_audience(self):
-        # Ruling Q1: the detail page's role list is not widened, so neither opens even
-        # a live file, nor a withdrawn one.
-        for profile in (self.ceo, self.sysadmin, self.finance):
+        # Ruling Q1: the detail page's role list is not widened for CEO or System Admin,
+        # so neither opens even a live file, nor a withdrawn one. Finance was admitted
+        # read-only by NTF-DCG 5a; its access is covered in tests_finance_dc_access.
+        for profile in (self.ceo, self.sysadmin):
             for doc in (self.live, self.gone):
                 with self.subTest(role=profile.role, doc=doc.original_name):
                     self.assertEqual(self.open(profile, doc).status_code, 404)

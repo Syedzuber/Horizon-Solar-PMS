@@ -119,6 +119,8 @@ from .decorators import (
 from .permissions import (
     user_can_manage_project, user_can_view_project, manageable_projects_q,
     user_can_open_dc_document, user_can_manage_dc_documents,
+    # NTF-DCG 5a: the role half of the challan read audience (Finance read-only).
+    user_has_dc_read_role,
     # DC-B3: who may correct a challan after creation (SCM/Admin + view).
     user_can_edit_dc,
     # DG-B: a GRN damage photo — live to every project viewer, withdrawn to SCM/Admin.
@@ -13978,7 +13980,7 @@ def create_delivery_challan(request, project_id):
         if request.POST.get('no_prices_confirmed') != '1':
             document_errors.append(
                 'Tick "These documents show no rates, values or amounts" to attach them — '
-                'Site Engineers will see them. Nothing was saved.')
+                'Site Engineers and Finance will see them. Nothing was saved.')
         if not delivery_bucket():
             document_errors.append(DELIVERY_STORAGE_OFF)
         for document in documents:
@@ -14127,13 +14129,19 @@ def delivery_challan_detail(request, project_id, dc_id):
     DC detail page: line items table, GRN confirmation form (SE), Edit GRN button (SCM).
     Cross-project guard: DC must belong to the project in the URL — returns 404 on mismatch
     to prevent cross-project data leakage via URL manipulation.
-    Access: SCM, PM, SE, Admin.
+    Access: user_can_view_delivery_challan — SCM, PM, Project Coordinator, SE and Admin
+    who can see the site, and (NTF-DCG 5a) active Finance users READ-ONLY: every write
+    control below is gated on its own role or helper, none of which admits Finance.
     """
     project = _active_project(project_id)
     profile = request.user.profile
 
-    # Only SCM, PM, SE, Admin can view DC pages
-    if profile.role not in ('SCM', 'PM', 'Project Coordinator', 'Site Engineer', 'Admin'):
+    # NTF-DCG 5a (F1): the role half of user_can_view_delivery_challan. SCM, PM,
+    # Coordinator, SE and Admin read and act here; Finance reads only, and only while
+    # active, to reconcile vendor payments against the receipts. CEO, System Admin,
+    # Design and BD are refused — the page is the receiving desk, not a report. Asked
+    # before the project term (below) so a wrong role stays a 403, as it always was.
+    if not user_has_dc_read_role(request.user):
         return HttpResponseForbidden()
 
     # 0.2 lockdown (completed in 0.2c): project scope for EVERY role, not just PM. This

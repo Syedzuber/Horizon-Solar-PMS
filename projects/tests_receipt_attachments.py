@@ -501,7 +501,7 @@ class FormTests(ReceiptDocumentBase):
                 self.assertEqual(re.findall(r'<option value="([^"]+)"', first), expected_options)
                 self.assertIn('name="receipt_docs_no_prices" value="1"', form)
                 self.assertIn('Signed challan copy, LR/bilty or delivery photo. Site Engineers '
-                              'will see this file — no rates or amounts.', form)
+                              'and Finance will see this file — no rates or amounts.', form)
 
     def test_no_capture_and_no_client_side_shrinking(self):
         for which, form in self.forms().items():

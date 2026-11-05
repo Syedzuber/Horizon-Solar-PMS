@@ -603,7 +603,8 @@ def read_edit(request, challan, lines):
         # the uploader's word for that; without it nothing is stored.
         if request.POST.get('no_prices_confirmed') != '1':
             errors.append('Tick "These documents show no rates, values or amounts" to '
-                          'attach them — Site Engineers will see them. Nothing was saved.')
+                          'attach them — Site Engineers and Finance will see them. '
+                          'Nothing was saved.')
         if not delivery_bucket():
             errors.append(EDIT_STORAGE_OFF)
         for document in plan.documents:

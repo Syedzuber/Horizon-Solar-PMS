@@ -2729,31 +2729,84 @@ MONEY_PORTFOLIO_ROLES = frozenset({'CEO', 'Admin', 'System Admin', 'Finance', 'S
 VENDOR_ORDER_PORTFOLIO_ROLES = MONEY_PORTFOLIO_ROLES
 
 
-#: The roles delivery_challan_detail admits, before its project-scope check. A COPY of the
-#: tuple inline in that view, which DC-B2 was not permitted to change; tests_dc_attachments
-#: pins the two to the same answers role by role, so they cannot drift apart silently.
-DC_DETAIL_ROLES = ('SCM', 'PM', 'Project Coordinator', 'Site Engineer', 'Admin')
+#: The roles that may READ a delivery challan page, before its project-scope check
+#: (user_has_dc_read_role). A READ list only: no write gate reads it — confirm_grn,
+#: override_grn, delivery_challan_edit and both withdraw views each keep their own role
+#: test, and tests_finance_dc_access pins that none of them names this tuple.
+#: NTF-DCG 5a (ruling N5 / Q1): Finance added, read-only, so the GRN email's link opens
+#: for them and they can reconcile vendor payments against the receipt documents. Their
+#: extra active-user condition is READ_ONLY_DC_ROLES below. tests_dc_attachments pins the
+#: page's role refusal to this tuple role by role, so the two cannot drift apart.
+DC_DETAIL_ROLES = ('SCM', 'PM', 'Project Coordinator', 'Site Engineer', 'Admin', 'Finance')
+
+#: Roles in DC_DETAIL_ROLES that READ the challan page and act on nothing on it
+#: (NTF-DCG 5a). They are admitted only while both the login (User.is_active) and the
+#: profile (UserProfile.is_active, the soft deactivation) are active: no middleware
+#: refuses a deactivated profile whose login still works, and a role added for reading
+#: money-adjacent documents must not outlive the person's employment.
+READ_ONLY_DC_ROLES = ('Finance',)
 
 #: Who sees a challan's WITHDRAWN documents and may withdraw one (DC-B2, ruling Q1).
 DC_DOCUMENT_ADMIN_ROLES = ('SCM', 'Admin')
 
 
-def user_can_open_dc_document(user, project):
-    """Return True if `user` may open `project`'s LIVE challan documents (DC-B2).
+def user_has_dc_read_role(user):
+    """Return True if `user`'s role may read a delivery challan page — the ROLE half of
+    user_can_view_delivery_challan(), with no project term (NTF-DCG 5a).
 
-    Exactly the delivery_challan_detail audience: a role in DC_DETAIL_ROLES AND
-    user_can_view_project(). Anyone who can read the challan page can read the vendor's
-    document behind it — which is why every document is uploaded with the confirmation
-    that it shows no prices, and why a Site Engineer is in this audience. CEO, System
-    Admin, Finance, Design and BD cannot open the detail page today and are not given a
-    second door to its documents here (ruling Q1: the role list is not widened).
+    A role in DC_DETAIL_ROLES; for a READ_ONLY_DC_ROLES role (Finance), only while both
+    the login and the profile are active. Every other role is admitted as it was before
+    5a, active flags unasked, so no existing reader changes.
+
+    Kept separate from the project term only so delivery_challan_detail can answer the
+    two questions in their historical order — a wrong role is a 403, a site you cannot
+    see is the site pages' 404 or PM-11 handover redirect. Costs no query.
     """
     profile = getattr(user, 'profile', None)
-    if profile is None or project is None:
+    if profile is None:
         return False
     if profile.role not in DC_DETAIL_ROLES:
         return False
+    if profile.role in READ_ONLY_DC_ROLES:
+        # Finance reads only while employed: a deactivated profile keeps its login
+        # (nothing refuses it at sign-in), so the flag must be asked here.
+        return bool(user.is_active and profile.is_active)
+    return True
+
+
+def user_can_view_delivery_challan(user, project):
+    """Return True if `user` may READ `project`'s delivery challans: the detail page, its
+    receipts (GRNs), and its live challan and receipt documents (NTF-DCG 5a, ruling F1).
+
+    The audience is user_has_dc_read_role() AND user_can_view_project(): SCM, PM, Project
+    Coordinator, Site Engineer and Admin as before, plus active Finance users. Finance is
+    portfolio-wide in user_can_view_project(), so they read every project's challans.
+
+    READ ONLY. This answers nothing about acting on a challan: confirm_grn (Site
+    Engineer), override_grn (SCM), delivery_challan_edit and both withdraw views (SCM and
+    Admin) keep their own gates, and must never be widened by calling this. CEO, System
+    Admin, Design and BD are still not in the audience.
+    """
+    if project is None:
+        return False
+    if not user_has_dc_read_role(user):
+        return False
     return user_can_view_project(user, project)
+
+
+def user_can_open_dc_document(user, project):
+    """Return True if `user` may open `project`'s LIVE challan documents (DC-B2) — a
+    challan-level document or one attached at a receipt (NTF-DCG 4b).
+
+    Exactly the delivery challan read audience, user_can_view_delivery_challan(): anyone
+    who can read the challan page can read the vendor's document behind it — which is why
+    every document is uploaded with the confirmation that it shows no prices, and why a
+    Site Engineer and (NTF-DCG 5a) Finance are in this audience. CEO, System Admin,
+    Design and BD cannot open the detail page and are not given a second door to its
+    documents here. A WITHDRAWN document is a separate question
+    (user_can_manage_dc_documents), asked by the open view.
+    """
+    return user_can_view_delivery_challan(user, project)
 
 
 def user_can_manage_dc_documents(user, project):
