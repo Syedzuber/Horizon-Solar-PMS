@@ -2252,14 +2252,57 @@ def _dc_item_severity(received_qty, ordered_qty, damaged_qty):
     return 'amber'  # Shortfall only, or full qty with some damage
 
 
+def derive_dc_status(line_items):
+    """The DeliveryChallan status these line items give. Pure: reads only the received,
+    ordered and damaged quantities of the rows passed in, writes nothing, runs no query
+    of its own (pass a list, or a queryset the caller is happy to evaluate).
+
+    THE RULE ITSELF, kept apart from recalculate_dc_status() so the read-only report
+    dc_status_check asks exactly the question the GRN views do, not a restatement of it.
+
+    Severity per line (via _dc_item_severity): green / amber / red; a blank line has
+    none. The challan takes the WORST case across the recorded lines:
+      none recorded            → Expected
+      any red                  → Rejected  (repurposed: severe delivery failure —
+                                 shortfall AND damage, or nothing received; a recorded
+                                 0 is red. Blank lines do not soften it.)
+      all green, none blank    → Received
+      otherwise                → Partially Received (amber, or green with lines blank)
+
+    NTF-DCG 4c (ruling (a), 4 Nov 2026): Received means every line has a recorded
+    received quantity — a recorded 0 counts as recorded, a blank does not. Before this,
+    blank lines were simply left out of the rollup, so a challan with 2 of 7 lines
+    confirmed in full read Received; and a Received challan hides the SE's GRN form, so
+    the other 5 could never be recorded.
+    """
+    items     = list(line_items)
+    confirmed = [item for item in items if item.received_quantity is not None]
+
+    if not confirmed:
+        # No items have GRN data yet
+        return DeliveryChallan.EXPECTED
+
+    worst = 'green'
+    for item in confirmed:
+        sev = _dc_item_severity(item.received_quantity, item.ordered_quantity, item.damaged_quantity)
+        if sev == 'red':
+            # Can't get worse; short-circuit. Rejected whatever is still blank (S4).
+            return DeliveryChallan.REJECTED
+        elif sev == 'amber':
+            worst = 'amber'
+
+    # A blank line is material not yet accounted for, so an all-green challan with one
+    # stays open (Partially Received) and the SE's GRN form stays on the page.
+    if worst == 'green' and len(confirmed) == len(items):
+        return DeliveryChallan.RECEIVED
+    return DeliveryChallan.PARTIALLY_RECEIVED
+
+
 def recalculate_dc_status(challan, actor=None, reason_code='', remark=''):
     """
-    Recalculate and save DeliveryChallan.status using per-line-item severity rollup.
-    Severity per item (via _dc_item_severity): green / amber / red.
-    DC takes the WORST case across all confirmed items:
-      green  → Received
-      amber  → Partially Received
-      red    → Rejected  (repurposed: severe delivery failure — shortfall+damage or nothing received)
+    Recalculate and save DeliveryChallan.status from its line items. The rule is
+    derive_dc_status() (above): worst severity across recorded lines, and Received only
+    when no line is left blank (NTF-DCG 4c).
     Must be called ONCE after all line items are saved — never inside the save loop.
 
     `actor`/`reason_code`/`remark` feed the state ledger (prompt 0.3, R-2). They are
@@ -2278,30 +2321,7 @@ def recalculate_dc_status(challan, actor=None, reason_code='', remark=''):
     from .design_views import sync_delivery_mirrors
 
     previous = challan.status
-
-    items     = list(challan.line_items.all())
-    confirmed = [item for item in items if item.received_quantity is not None]
-
-    if not confirmed:
-        # No items have GRN data yet
-        challan.status = DeliveryChallan.EXPECTED
-    else:
-        worst = 'green'
-        for item in confirmed:
-            sev = _dc_item_severity(item.received_quantity, item.ordered_quantity, item.damaged_quantity)
-            if sev == 'red':
-                worst = 'red'
-                break          # Can't get worse; short-circuit
-            elif sev == 'amber':
-                worst = 'amber'
-
-        if worst == 'green':
-            challan.status = DeliveryChallan.RECEIVED
-        elif worst == 'amber':
-            challan.status = DeliveryChallan.PARTIALLY_RECEIVED
-        else:
-            # 'red': severe delivery failure — quantity short AND damage, or nothing received
-            challan.status = DeliveryChallan.REJECTED
+    challan.status = derive_dc_status(challan.line_items.all())
 
     # The save() still happens unconditionally, exactly as before — only the ledger
     # row is conditional on the status having moved.

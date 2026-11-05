@@ -447,7 +447,7 @@ for SCM and Admin (the view splits them off), and only they see the Withdraw con
                 <input type="number" name="received_qty_{{ item.pk }}"
                        class="form-control form-control-sm"
                        step="any" min="0" inputmode="decimal"
-                       value="{% if item.grn_draft %}{{ item.grn_draft.received }}{% else %}{{ item.received_quantity|default:'' }}{% endif %}"
+                       value="{% if item.grn_draft %}{{ item.grn_draft.received }}{% elif item.received_quantity is not None %}{{ item.received_quantity }}{% endif %}"
                        placeholder="0" aria-label="Received quantity">
               </td>
               <td class="grn-field" data-label="Damaged">
@@ -729,7 +729,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     <input type="number" name="received_qty_{{ item.pk }}"
                            class="form-control form-control-sm"
                            step="any" min="0" inputmode="decimal"
-                           value="{% if item.grn_draft %}{{ item.grn_draft.received }}{% else %}{{ item.received_quantity|default:'' }}{% endif %}"
+                           value="{% if item.grn_draft %}{{ item.grn_draft.received }}{% elif item.received_quantity is not None %}{{ item.received_quantity }}{% endif %}"
                            placeholder="0" aria-label="Received quantity">
                   </td>
                   <td class="grn-field" data-label="Damaged">

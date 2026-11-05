@@ -730,7 +730,8 @@ class ChangedMeanwhileTests(GrnDamageBase):
 
         with self.in_the_window(add_line):
             response = self.confirm({self.panels: ('10', '0', [])})
-        self.assertIn('GRN confirmed. DC status: Received.', self.messages_of(response))
+        # NTF-DCG 4c: the added line is still blank, so the challan is not yet Received.
+        self.assertIn('GRN confirmed. DC status: Partially Received.', self.messages_of(response))
         added['line'].refresh_from_db()
         self.assertIsNone(added['line'].received_quantity)
 

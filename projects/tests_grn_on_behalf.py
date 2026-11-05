@@ -171,9 +171,13 @@ class FirstTimeReceiptTests(GrnOnBehalfBase):
     """A line nobody has confirmed, recorded through the override endpoint."""
 
     def test_the_acting_user_is_recorded_and_the_row_is_marked_on_behalf(self):
+        # line_b posted too (NTF-DCG 4c): the challan is Received only once every line is
+        # recorded, and the status below is this test's evidence the write landed.
         response = self._override({
             f'received_qty_{self.line_a.pk}': '10',
             f'damaged_qty_{self.line_a.pk}': '0',
+            f'received_qty_{self.line_b.pk}': '4',
+            f'damaged_qty_{self.line_b.pk}': '0',
             'grn_on_behalf_reason': 'Site engineer unreachable; verified over call',
         })
         self.assertEqual(response.status_code, 302)
@@ -356,10 +360,16 @@ class BlankReasonRefusalTests(GrnOnBehalfBase):
         """No line takes the first-time branch, so the refusal is never reached. This is
         the shape the baseline's override test posts, and it must keep working."""
         self._confirm_as_se(self.line_a, qty='8')
+        # NTF-DCG 4c: line_b recorded by the SE too, and posted back unchanged below, so
+        # every line is recorded (Received needs that) while the override still corrects
+        # line_a only — a first-time line_b here would need a reason and end the test.
+        self._confirm_as_se(self.line_b, qty='4')
 
         response = self._override({
             f'received_qty_{self.line_a.pk}': '10',
             f'damaged_qty_{self.line_a.pk}': '0',
+            f'received_qty_{self.line_b.pk}': '4',
+            f'damaged_qty_{self.line_b.pk}': '0',
         })
         self.assertEqual(response.status_code, 302)
 
