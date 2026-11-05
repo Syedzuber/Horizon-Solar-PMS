@@ -123,6 +123,11 @@ class NotificationEvent:
     # _whatsapp_errors. Not to be confused with whatsapp_sent_separately, which marks a
     # call site that still sends WhatsApp itself, outside notify().
     whatsapp: WhatsAppSpec = None
+    # NTF-DCG 5b (N2): True lets Admin name specific people on the event's page
+    # (NotificationEventRecipient) who receive it beside the people recipients_rule
+    # resolves; notify_now() merges them into every send. False refuses such rows on add.
+    # Opt-in per event: no event shipped in 5b sets it (5c's GRN email is the first).
+    named_recipients: bool = False
 
     def default_state_for(self, channel):
         """The state of `channel` when Admin has never switched it: WhatsApp is always

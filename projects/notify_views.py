@@ -32,8 +32,8 @@ from . import notify_admin
 from .decorators import login_required, role_required
 from .models import (
     NOTIFY_CHANNEL_WHATSAPP, NOTIFY_STATE_ACTIVE, NOTIFY_STATE_PAUSED,
-    NotificationEventSetting, NotificationEventSettingChange, NotificationLog,
-    NotificationTemplate, log_activity,
+    NotificationEventRecipient, NotificationEventSetting, NotificationEventSettingChange,
+    NotificationLog, NotificationTemplate, UserProfile, log_activity,
 )
 from .notify import RenderError
 from .notify_admin import TEST_TEMPLATE_NAME, NotificationAdminRefused
@@ -238,7 +238,83 @@ def admin_notification_event(request, event_code):
         'channels': channels,
         'logs': logs,
         'test_template_name': TEST_TEMPLATE_NAME,
+        'named': _named_card(event) if event.named_recipients else None,
     })
+
+
+def _named_card(event):
+    """The Named recipients card of an opted-in event (NTF-DCG 5b, N4): active rows with
+    their warning badges, removed rows newest first, and the people who may be added.
+    Two queries: every row of the event, and the active people not already on it."""
+    # Every row of this event, active and removed, with the three people each names.
+    rows = list(NotificationEventRecipient.objects.filter(event_code=event.code)
+                .select_related('recipient__user', 'added_by__user', 'removed_by__user')
+                .order_by('added_at', 'pk'))
+    active = [r for r in rows if r.removed_at is None]
+    removed = sorted((r for r in rows if r.removed_at is not None),
+                     key=lambda r: (r.removed_at, r.pk), reverse=True)
+    # Who may be added: active on both flags (add_named_recipient refuses anyone else) and
+    # not already an active named recipient. Any role: Admin chooses (N3).
+    candidates = (UserProfile.objects.filter(is_active=True, user__is_active=True)
+                  .exclude(pk__in=[r.recipient_id for r in active])
+                  .select_related('user')
+                  .order_by('user__first_name', 'user__last_name', 'user__username'))
+    return {
+        'active': [{'row': r, 'warnings': notify_admin.named_recipient_warnings(event, r.recipient)}
+                   for r in active],
+        'removed': removed,
+        'candidates': candidates,
+        'reason_min': notify_admin.NAMED_REASON_MIN_CHARS,
+    }
+
+
+@login_required
+@role_required(['Admin'])
+def admin_notification_named_add(request, event_code):
+    """Add a named recipient to an opted-in event, with a reason (NTF-DCG 5b, N4).
+    Access: Admin only (T-1): who receives a company-wide notification is an
+    administrative setting, as its wording and switch are; System Admin and every other
+    role get 403 from role_required. POST only; refusals come back as a message."""
+    event = _event_or_404(event_code)
+    if request.method != 'POST':
+        return redirect(_event_url(event))
+    raw = (request.POST.get('recipient') or '').strip()
+    recipient = (UserProfile.objects.select_related('user').filter(pk=int(raw)).first()
+                 if raw.isdigit() else None)
+    if recipient is None:
+        messages.error(request, 'Choose the person to add.')
+        return redirect(_event_url(event))
+    try:
+        notify_admin.add_named_recipient(event.code, recipient, request.user.profile,
+                                         request.POST.get('reason', ''))
+    except NotificationAdminRefused as exc:
+        messages.error(request, str(exc))
+        return redirect(_event_url(event))
+    messages.success(request, f'{recipient.user.get_full_name() or recipient.user.username} '
+                              f'now receives {event.label}.')
+    return redirect(_event_url(event))
+
+
+@login_required
+@role_required(['Admin'])
+def admin_notification_named_remove(request, event_code, pk):
+    """Remove a named recipient from an event, with a reason; the row is kept as history
+    (NTF-DCG 5b, N1/N4). Access: Admin only (T-1), as admin_notification_named_add.
+    POST only. A pk of another event's row is a 404, so a URL cannot pair them."""
+    event = _event_or_404(event_code)
+    if request.method != 'POST':
+        return redirect(_event_url(event))
+    row = get_object_or_404(NotificationEventRecipient.objects.select_related('recipient__user'),
+                            pk=pk, event_code=event.code)
+    try:
+        notify_admin.remove_named_recipient(row, request.user.profile,
+                                            request.POST.get('reason', ''))
+    except NotificationAdminRefused as exc:
+        messages.error(request, str(exc))
+        return redirect(_event_url(event))
+    messages.success(request, f'{row.recipient.user.get_full_name() or row.recipient.user.username} '
+                              f'no longer receives {event.label} as a named recipient.')
+    return redirect(_event_url(event))
 
 
 @login_required

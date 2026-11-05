@@ -52,6 +52,30 @@ from .tests_approvals import _profile
 
 EVENT = 'admin_test_message'
 
+# NTF-DCG 5b (N6): every event registered up to NTF-DCG 3b, in registry order. The
+# registry-shape tests assert each is present with its expected properties instead of
+# pinning the whole registry, so a new event no longer breaks them. Shared with
+# tests_notify_deferred and tests_notify_whatsapp.
+SHIPPED_BEFORE_DCG = (
+    EVENT, 'issue_raised', 'issue_resolved', 'project_pm_assigned',
+    'project_unassigned_alert', 'boq_acknowledged', 'payment_milestone_reached',
+    'task_assigned', 'tasks_assigned_bulk', 'change_request_raised',
+    'change_request_raised_with_pm', 'change_request_forwarded_head',
+    'change_request_forwarded_requester', 'change_request_pm_rejected',
+    'change_request_withdrawn', 'change_request_accepted', 'change_request_rejected',
+    'change_request_corrected',
+    'approval_step_activated', 'approval_work_to_confirm',
+    'approval_step_activated_deputy', 'approval_approved',
+    'approval_changes_requested', 'approval_work_not_done', 'approval_rejected',
+    'approval_withdrawn', 'approval_withdrawn_work', 'cod_recorded', 'cod_withdrawn',
+    'punch_point_raised_by_visit', 'punch_point_rectified',
+    'punch_point_reverify_rejected', 'site_qaqc_assigned', 'site_qaqc_removed',
+    'qaqc_visit_submitted', 'pm_handover_incoming', 'pm_handover_outgoing', 'attendance_missing',
+)
+# NTF-DCG 3b: the delivery-challan events, in-app + WhatsApp, deferred.
+DCG_3B_EVENTS = ('dc_created', 'dc_updated')
+SHIPPED_UP_TO_DCG_3B = SHIPPED_BEFORE_DCG + DCG_3B_EVENTS
+
 
 def _event(**overrides):
     """A valid event to build registries from, with `overrides` applied."""
@@ -89,23 +113,13 @@ class RegistryTests(TestCase):
         # T3a added the first moved sends after it; the admin test message stays first.
         # T3b added task assignment and the change requests after those; T3c the
         # approvals, then COD, punch points, QA/QC and the PM handover.
-        self.assertEqual(list(NOTIFICATION_EVENTS), [
-            EVENT, 'issue_raised', 'issue_resolved', 'project_pm_assigned',
-            'project_unassigned_alert', 'boq_acknowledged', 'payment_milestone_reached',
-            'task_assigned', 'tasks_assigned_bulk', 'change_request_raised',
-            'change_request_raised_with_pm', 'change_request_forwarded_head',
-            'change_request_forwarded_requester', 'change_request_pm_rejected',
-            'change_request_withdrawn', 'change_request_accepted', 'change_request_rejected',
-            'change_request_corrected',
-            'approval_step_activated', 'approval_work_to_confirm',
-            'approval_step_activated_deputy', 'approval_approved',
-            'approval_changes_requested', 'approval_work_not_done', 'approval_rejected',
-            'approval_withdrawn', 'approval_withdrawn_work', 'cod_recorded', 'cod_withdrawn',
-            'punch_point_raised_by_visit', 'punch_point_rectified',
-            'punch_point_reverify_rejected', 'site_qaqc_assigned', 'site_qaqc_removed',
-            'qaqc_visit_submitted', 'pm_handover_incoming', 'pm_handover_outgoing', 'attendance_missing',
-            # NTF-DCG 3b: the delivery-challan events, in-app + WhatsApp.
-            'dc_created', 'dc_updated'])
+        # NTF-DCG 5b (N6): every event shipped up to 3b must still be registered, but the
+        # whole set is no longer pinned, so a new event does not break this test.
+        codes = list(NOTIFICATION_EVENTS)
+        self.assertEqual(codes[0], EVENT)
+        for code in SHIPPED_UP_TO_DCG_3B:
+            with self.subTest(event=code):
+                self.assertIn(code, NOTIFICATION_EVENTS)
         event = get_event(EVENT)
         self.assertEqual((event.tier, event.default_state, event.channels),
                          ('KNOW', 'active', ('email',)))

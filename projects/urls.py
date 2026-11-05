@@ -525,6 +525,10 @@ urlpatterns = [
          notify_views.admin_notification_events, name='admin_notification_events'),
     path('portal-admin/notifications/<str:event_code>/',
          notify_views.admin_notification_event, name='admin_notification_event'),
+    path('portal-admin/notifications/<str:event_code>/named-recipients/add/',
+         notify_views.admin_notification_named_add, name='admin_notification_named_add'),  # NTF-DCG 5b, Admin only
+    path('portal-admin/notifications/<str:event_code>/named-recipients/<int:pk>/remove/',
+         notify_views.admin_notification_named_remove, name='admin_notification_named_remove'),
     path('portal-admin/notifications/<str:event_code>/<str:channel>/state/',
          notify_views.admin_notification_set_state, name='admin_notification_set_state'),
     path('portal-admin/notifications/<str:event_code>/<str:channel>/test/',

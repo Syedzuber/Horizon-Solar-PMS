@@ -1,8 +1,8 @@
 """
 Notification template and switch service functions (T1; the T2 screens call these).
 
-The ONLY writers of NotificationTemplate, NotificationEventSetting and
-NotificationEventSettingChange. No views live here and nothing here checks who the
+The ONLY writers of NotificationTemplate, NotificationEventSetting,
+NotificationEventSettingChange and (NTF-DCG 5b) NotificationEventRecipient. No views live here and nothing here checks who the
 caller is: the screens in notify_views.py decide that (Admin only). What these functions
 refuse is what is wrong whoever asks — an unknown event, a channel the event does not
 declare, editing a non-draft, a second open draft, activating text that would not render
@@ -24,16 +24,16 @@ Refusals raise NotificationAdminRefused with a sentence a screen can show.
 
 from datetime import timedelta
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Max, ProtectedError
 from django.utils import timezone
 
 from .models import (
     NOTIFY_CHANNEL_EMAIL, NOTIFY_CHANNEL_WHATSAPP, NOTIFY_STATE_ACTIVE, NOTIFY_STATE_PAUSED,
-    NotificationEventSetting, NotificationEventSettingChange, NotificationLog,
-    NotificationTemplate,
+    NotificationEventRecipient, NotificationEventSetting, NotificationEventSettingChange,
+    NotificationLog, NotificationTemplate, log_activity,
 )
-from .notifications import send_notification
+from .notifications import send_notification, valid_whatsapp_number
 from .notify import RenderError, active_template, channel_is_active, render_email
 from .notify_registry import IDENTIFIER_RE, NOTIFICATION_EVENTS, placeholder_names
 
@@ -471,3 +471,128 @@ def set_state(event_code, channel, is_active, by, reason):
             event_code=event_code, channel=channel, from_state=from_state,
             to_state=to_state, changed_by=by, reason=reason)
     return setting
+
+
+# ---------------------------------------------------------------------------
+# Named recipients (NTF-DCG 5b, rulings N1-N5)
+#
+# The only writers of NotificationEventRecipient. The Admin screen and the
+# seed_named_recipients command both come here, so the rules below and the activity-log
+# line are the same whoever adds or removes someone.
+# ---------------------------------------------------------------------------
+
+NAMED_REASON_MIN_CHARS = 10
+
+ACTION_NAMED_ADDED   = 'notify_named_recipient_added'
+ACTION_NAMED_REMOVED = 'notify_named_recipient_removed'
+
+
+def _profile_name(profile):
+    return profile.user.get_full_name() or profile.user.username
+
+
+def _named_event(event_code):
+    """The registered event, refusing an unknown code or one that does not opt in (N2)."""
+    event = NOTIFICATION_EVENTS.get(event_code)
+    if event is None:
+        raise NotificationAdminRefused(f'There is no notification event {event_code!r}.')
+    if not event.named_recipients:
+        raise NotificationAdminRefused(
+            f'{event.label} does not take named recipients; its recipients are decided '
+            f'by the event itself.')
+    return event
+
+
+def _named_reason(reason, what):
+    reason = (reason or '').strip()
+    if len(reason) < NAMED_REASON_MIN_CHARS:
+        raise NotificationAdminRefused(
+            f'Give a reason for {what} of at least {NAMED_REASON_MIN_CHARS} characters.')
+    return reason
+
+
+def active_named_recipient(event_code, recipient):
+    """The ACTIVE row naming `recipient` on the event, or None."""
+    return NotificationEventRecipient.objects.filter(
+        event_code=event_code, recipient=recipient, removed_at__isnull=True).first()
+
+
+def add_named_recipient(event_code, recipient, by, reason):
+    """Name `recipient` (UserProfile) to receive the event, with a reason; one
+    ActivityLog line. Refused: an event that does not opt in, a deactivated person (either
+    flag), a reason under 10 characters, a person already active on the event."""
+    event = _named_event(event_code)
+    reason = _named_reason(reason, 'adding someone')
+    if not (recipient.is_active and recipient.user.is_active):
+        raise NotificationAdminRefused(
+            f'{_profile_name(recipient)} is deactivated and cannot be added.')
+    if active_named_recipient(event.code, recipient) is not None:
+        raise NotificationAdminRefused(
+            f'{_profile_name(recipient)} is already a named recipient of {event.label}.')
+    try:
+        with transaction.atomic():
+            # The check above is not a lock: two Admins adding the same person at once both
+            # pass it, and the second insert hits notification_event_recipient_one_active.
+            # That IntegrityError is caught below and becomes the same refusal.
+            row = NotificationEventRecipient.objects.create(
+                event_code=event.code, recipient=recipient, added_by=by, add_reason=reason)
+            log_activity(
+                None, by,
+                (f"Named recipient {_profile_name(recipient)} added to notification "
+                 f"'{event.label}': {reason}")[:255],
+                entity_type='NotificationEventRecipient', entity_id=row.pk,
+                action_code=ACTION_NAMED_ADDED)
+    except IntegrityError:
+        raise NotificationAdminRefused(
+            f'{_profile_name(recipient)} is already a named recipient of {event.label}.')
+    return row
+
+
+def remove_named_recipient(row, by, reason):
+    """Remove an active named recipient, with a reason; one ActivityLog line. The row is
+    kept with removed_* set (N1). Allowed even when the event no longer opts in, so a
+    stale list can always be cleared."""
+    reason = _named_reason(reason, 'removing someone')
+    with transaction.atomic():
+        # Locks the row so two Admins removing it at once are serialised: the second
+        # re-reads removed_at under the lock and is refused instead of saving over the
+        # first removal (which the model would refuse anyway).
+        locked = (NotificationEventRecipient.objects.select_for_update()
+                  .select_related('recipient__user').get(pk=row.pk))
+        if locked.removed_at is not None:
+            raise NotificationAdminRefused(
+                f'{_profile_name(locked.recipient)} was already removed.')
+        locked.removed_by = by
+        locked.removed_at = timezone.now()
+        locked.remove_reason = reason
+        locked.save()
+        event = NOTIFICATION_EVENTS.get(locked.event_code)
+        label = event.label if event else locked.event_code
+        log_activity(
+            None, by,
+            (f"Named recipient {_profile_name(locked.recipient)} removed from notification "
+             f"'{label}': {reason}")[:255],
+            entity_type='NotificationEventRecipient', entity_id=locked.pk,
+            action_code=ACTION_NAMED_REMOVED)
+    return locked
+
+
+def named_recipient_warnings(event, profile):
+    """The reasons `profile` would not receive `event` on a channel it declares (N4), as
+    badge texts, in a fixed order. Only declared channels are asked about: an email-only
+    event never warns about a phone."""
+    warnings = []
+    if NOTIFY_CHANNEL_EMAIL in event.channels and not profile.email_notifications:
+        warnings.append('email off')
+    if NOTIFY_CHANNEL_WHATSAPP in event.channels and not profile.whatsapp_notifications:
+        warnings.append('WhatsApp off')
+    if not (profile.is_active and profile.user.is_active):
+        warnings.append('inactive')
+    if NOTIFY_CHANNEL_EMAIL in event.channels and not (profile.user.email or '').strip():
+        warnings.append('no email address')
+    # Ruling 5b-Q6: the strict check the WhatsApp leg's job applies (W5), so the badge
+    # shows exactly when that send would fail.
+    if (NOTIFY_CHANNEL_WHATSAPP in event.channels
+            and valid_whatsapp_number(profile.phone_number) is None):
+        warnings.append('no valid phone')
+    return warnings

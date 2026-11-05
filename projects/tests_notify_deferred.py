@@ -265,9 +265,15 @@ class ShippedRegistryTests(TestCase):
     def test_no_shipped_event_is_deferred(self):
         # S1: the 38 events that existed before S2 all stay synchronous. NTF-DCG 3b added
         # the two delivery-challan events, deferred because they send WhatsApp.
-        self.assertEqual(len(NOTIFICATION_EVENTS), 40)
-        self.assertEqual([c for c, e in NOTIFICATION_EVENTS.items() if e.deferred],
-                         ['dc_created', 'dc_updated'])
+        # NTF-DCG 5b (N6): each is asserted by name; the registry's size is not pinned.
+        from .tests_notify import DCG_3B_EVENTS, SHIPPED_BEFORE_DCG  # lazy only to keep the N6 change inside this test; tests_notify never imports this module, so no circular import
+        self.assertEqual(len(SHIPPED_BEFORE_DCG), 38)
+        for code in SHIPPED_BEFORE_DCG:
+            with self.subTest(event=code):
+                self.assertFalse(NOTIFICATION_EVENTS[code].deferred)
+        for code in DCG_3B_EVENTS:
+            with self.subTest(event=code):
+                self.assertTrue(NOTIFICATION_EVENTS[code].deferred)
 
     def test_deferred_defaults_to_false(self):
         field = {f.name: f for f in dataclasses.fields(notify_registry.NotificationEvent)}

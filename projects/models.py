@@ -7,6 +7,9 @@ from django.contrib.auth.models import User
 from django.utils import timezone
 
 from .units import MEASURED_UNITS, UNIT_CHOICES, UNIT_CODES
+# NTF-DCG 5b: NotificationEventRecipient.save() asks the registry whether an event takes
+# named recipients. The registry imports nothing from this module, so there is no cycle.
+from .notify_registry import NOTIFICATION_EVENTS
 
 
 class Project(models.Model):
@@ -8434,6 +8437,108 @@ class NotificationEventSettingChange(models.Model):
     def delete(self, *args, **kwargs):
         raise AppendOnlyViolation(
             'NotificationEventSettingChange is append-only — rows are never deleted.')
+
+
+class NamedRecipientsNotAllowed(Exception):
+    """Raised when a NotificationEventRecipient is added for an event whose registry entry
+    does not opt in to named recipients (NTF-DCG 5b, ruling N2)."""
+
+
+class NotificationEventRecipient(models.Model):
+    """One person Admin named to receive an event, on top of the people the event's own
+    code resolves (NTF-DCG 5b, ruling N1). notify.notify_now() merges the ACTIVE rows of an
+    opted-in event into every send.
+
+    A RECORD TRAIL, NOT A SETTING. Rows are never deleted: removing someone sets the
+    removed_* fields once, and that row then never changes again. Re-adding the same person
+    later is a NEW row, so the history shows every period they were on the list, who put
+    them there and why. save() enforces it: on an existing row the only change allowed is
+    the one removal, and any save on a removed row raises.
+
+    Active = removed_at IS NULL; the partial unique constraint allows one active row per
+    (event_code, recipient), however many removed ones exist. Written only by notify_admin
+    (add_named_recipient / remove_named_recipient).
+    """
+
+    event_code    = models.CharField(max_length=100)  # notify_registry event code; the event must declare named_recipients=True (checked on add)
+    recipient     = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='named_notification_events',
+    )
+    added_by      = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='named_recipients_added',
+    )
+    added_at      = models.DateTimeField(auto_now_add=True)
+    add_reason    = models.TextField()  # Why Admin named this person; mandatory (CHECK)
+    removed_by    = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='named_recipients_removed',
+    )
+    removed_at    = models.DateTimeField(null=True, blank=True)  # NULL = active; set once, on removal
+    remove_reason = models.TextField(blank=True, default='')  # Set together with removed_by/removed_at (CHECK)
+
+    # The fields fixed at add; save() refuses a change to any of them.
+    _ADD_FIELDS = ('event_code', 'recipient_id', 'added_by_id', 'added_at', 'add_reason')
+
+    class Meta:
+        ordering = ['event_code', 'added_at', 'pk']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['event_code', 'recipient'],
+                condition=models.Q(removed_at__isnull=True),
+                name='notification_event_recipient_one_active',
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(add_reason=''),
+                name='notification_event_recipient_add_reason_required',
+            ),
+            # Removal is all three fields or none of them.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(removed_by__isnull=True, removed_at__isnull=True,
+                             remove_reason='')
+                    | (models.Q(removed_by__isnull=False, removed_at__isnull=False)
+                       & ~models.Q(remove_reason=''))
+                ),
+                name='notification_event_recipient_removal_all_or_none',
+            ),
+        ]
+
+    def __str__(self):
+        state = 'removed' if self.removed_at else 'active'
+        return f"{self.event_code}: {self.recipient_id} ({state})"
+
+    @property
+    def is_active(self):
+        return self.removed_at is None
+
+    def save(self, *args, **kwargs):
+        if self.pk is None:
+            # N2: the model is the backstop; notify_admin refuses first with a message.
+            event = NOTIFICATION_EVENTS.get(self.event_code)
+            if event is None or not event.named_recipients:
+                raise NamedRecipientsNotAllowed(
+                    f'{self.event_code!r} does not take named recipients.')
+            if self.removed_at is not None:
+                raise AppendOnlyViolation(
+                    'A named recipient is added active; removal is a later save.')
+            return super().save(*args, **kwargs)
+        stored = type(self).objects.filter(pk=self.pk).first()
+        if stored is None:
+            raise AppendOnlyViolation('NotificationEventRecipient rows are never re-created.')
+        if stored.removed_at is not None:
+            raise AppendOnlyViolation(
+                'A removed named recipient stays removed; re-adding is a new row.')
+        if any(getattr(self, f) != getattr(stored, f) for f in self._ADD_FIELDS):
+            raise AppendOnlyViolation(
+                'A named recipient row changes only once, when it is removed.')
+        if self.removed_at is None:
+            raise AppendOnlyViolation(
+                'The only change to an active named recipient is its removal.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            'NotificationEventRecipient rows are never deleted; removal sets removed_*.')
 
 
 # ---------------------------------------------------------------------------

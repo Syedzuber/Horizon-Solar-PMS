@@ -50,7 +50,7 @@ from django.utils.html import escape
 from django.utils.safestring import mark_safe
 
 from . import notify_deferred
-from .models import NotificationEventSetting, NotificationTemplate
+from .models import NotificationEventRecipient, NotificationEventSetting, NotificationTemplate
 from .notifications import _log, send_notification, valid_whatsapp_number
 from .notify_registry import IDENTIFIER_RE, PLACEHOLDER_RE, WHATSAPP, get_event
 from .whatsapp_params import describe_params, sanitise_params
@@ -224,6 +224,54 @@ def resolve_recipients(recipients, actor):
             continue
         out.append(profile)
     return out
+
+
+INACTIVE_NAMED_RECIPIENT = 'inactive'
+
+
+def merge_named_recipients(event, targets):
+    """(targets + the event's active named recipients, inactive named recipients), for an
+    event registered with named_recipients=True (NTF-DCG 5b, N3). Read at send time.
+
+    De-duplicated by profile: a person already in `targets` (code-resolved) keeps that
+    place and gets no second send. Named recipients are NOT filtered by the actor (ruling
+    5b-Q2: the list is a record trail, so the person Admin named hears even about their
+    own act) and face no permission check (Admin chose them). A deactivated one is
+    returned in the second list so notify_now() can log why they got nothing (ruling
+    5b-Q3), instead of being dropped silently as resolve_recipients() drops a
+    code-resolved one.
+    """
+    seen = {p.pk for p in targets}
+    merged, inactive = list(targets), []
+    # The active rows of this event, oldest first, with each person's user loaded: the
+    # active flags are read here and the name and address in _send_to_one().
+    rows = (NotificationEventRecipient.objects
+            .filter(event_code=event.code, removed_at__isnull=True)
+            .select_related('recipient__user').order_by('added_at', 'pk'))
+    for row in rows:
+        profile = row.recipient
+        if profile.pk in seen:
+            continue
+        seen.add(profile.pk)
+        if profile.is_active and profile.user.is_active:
+            merged.append(profile)
+        else:
+            inactive.append(profile)
+    return merged, inactive
+
+
+def _log_inactive_named(event, profile, actor, related_project, log_label):
+    """One 'skipped' row per channel a deactivated named recipient would have reached:
+    in-app and each declared channel. "inactive" wins over "event paused" (ruling 5b-Q3),
+    so these rows are written whatever the channels' switches say."""
+    base = _log_base(event, profile, actor, related_project, log_label)
+    _log(base, 'in_app', 'skipped', INACTIVE_NAMED_RECIPIENT, event_code=event.code)
+    for channel in event.channels:
+        row_base = base
+        if channel == WHATSAPP and event.whatsapp is not None:
+            # As _whatsapp_leg's rows: a WhatsApp row names the Interakt template.
+            row_base = dict(base, template_name=event.whatsapp.template)
+        _log(row_base, channel, 'skipped', INACTIVE_NAMED_RECIPIENT, event_code=event.code)
 
 
 def _log_base(event, recipient, actor, related_project, log_label):
@@ -431,10 +479,28 @@ def notify_now(event_code, *, recipients, values, actor=None, related_project=No
     exactly what notify() exists to prevent; use notify() everywhere else.
 
     Raises KeyError for an unknown event code. Nothing after that raises.
+
+    NAMED RECIPIENTS (NTF-DCG 5b, N3) are merged HERE, the one place every send of every
+    channel passes through: notify() reaches it after commit, the assignment cooldown
+    calls it directly. _send() then takes each merged person through in-app, email and
+    WhatsApp, deferred or not, exactly as a code-resolved one.
     """
     event = get_event(event_code)
     try:
         targets = resolve_recipients(recipients, actor)
+        if event.named_recipients:
+            try:
+                targets, inactive = merge_named_recipients(event, targets)
+            except Exception:
+                # Reading the list failed: the code-resolved people still get the event.
+                logger.exception('notify_now: could not read named recipients of %s',
+                                 event_code)
+                inactive = []
+            for profile in inactive:
+                try:
+                    _log_inactive_named(event, profile, actor, related_project, log_label)
+                except Exception:
+                    logger.exception('notify_now: could not log inactive %s', profile.pk)
         if targets:
             _send(event, targets, dict(values or {}), actor, related_project, link,
                   log_label)
@@ -468,10 +534,12 @@ def notify(event_code, *, recipients, values, actor=None, related_project=None, 
     the time of the act. notify_now() resolves the same profile objects again, which reads
     the flags already loaded and drops nobody new.
     """
-    get_event(event_code)
+    event = get_event(event_code)
     try:
         targets = resolve_recipients(recipients, actor)
-        if not targets:
+        # NTF-DCG 5b (ruling 5b-Q4): an opted-in event is scheduled even when its code
+        # resolves nobody, because its named recipients are read in notify_now().
+        if not targets and not event.named_recipients:
             return
         frozen = dict(values or {})
         # After commit, so a rolled-back action sends nothing; outside a transaction

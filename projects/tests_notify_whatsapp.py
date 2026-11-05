@@ -289,9 +289,16 @@ class RegistryCheckTests(SimpleTestCase):
 
     def test_no_shipped_event_declares_whatsapp(self):
         # W8: infrastructure only in 3a; NTF-DCG 3b added the two challan events.
-        self.assertEqual([e.code for e in NOTIFICATION_EVENTS.values()
-                          if e.whatsapp is not None or 'whatsapp' in e.channels],
-                         ['dc_created', 'dc_updated'])
+        # NTF-DCG 5b (N6): each is asserted by name; the full WhatsApp list is not pinned.
+        from .tests_notify import DCG_3B_EVENTS, SHIPPED_BEFORE_DCG  # lazy only to keep the N6 change inside this test; tests_notify never imports this module, so no circular import
+        for code in SHIPPED_BEFORE_DCG:
+            with self.subTest(event=code):
+                event = NOTIFICATION_EVENTS[code]
+                self.assertTrue(event.whatsapp is None and 'whatsapp' not in event.channels)
+        for code in DCG_3B_EVENTS:
+            with self.subTest(event=code):
+                event = NOTIFICATION_EVENTS[code]
+                self.assertTrue(event.whatsapp is not None and 'whatsapp' in event.channels)
         self.assertNotIn(WA_EVENT, NOTIFICATION_EVENTS)
 
 
