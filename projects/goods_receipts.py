@@ -19,17 +19,165 @@ THE ORDER in both GRN views, around grn_damage's (see that module's docstring):
     (the view's line saves, the changed lines only)
     write_goods_receipt()     from the fresh, saved rows (G2)
     record_damage(receipt=)   photo rows carry the receipt (ruling P5)
+    link_receipt_documents()  4b: the documents' rows carry the receipt (ruling A5)
 
-This module imports models and grn_damage; it is imported by views.py and by the
-backfill command and imports neither, so there is no cycle.
+NTF-DCG 4b — DOCUMENTS AT RECEIPT. A signed DC copy, LR/bilty or delivery photo may be
+attached to either GRN form, each with its type (A2), at most five (A3). They are
+DeliveryChallanAttachment rows with `receipt` set — DC-B2's model, bucket, validator,
+uploader, discard, open link and withdraw, reused (A1). In the views:
+
+    ... damage refusals, then G4 (a documents-only submission is refused there, Q2) ...
+    plan_receipt_documents()  type, count, tick, storage, each file — before any upload
+    upload_planned_photos()   unchanged, then
+    upload_receipt_documents() the same DC-B2 uploader, folder 'grn-document' (Q7)
+    -- transaction.atomic() -- ... as above, ending with link_receipt_documents()
+    any refusal or rollback   discard_stored() AND discard_receipt_documents()
+
+This module imports models, delivery_storage and grn_damage; it is imported by views.py
+and by the backfill command and imports neither, so there is no cycle.
 """
+import re
+
 from django.db.models import Prefetch
 
+from .delivery_storage import (
+    RECEIPT_DOCUMENT_PATH_KIND, DeliveryStorageError, delivery_bucket,
+    discard_unrecorded_dc_document, upload_dc_document, validate_dc_document,
+)
 from .grn_damage import photo_field
-from .models import GoodsReceipt, GoodsReceiptLine
+from .models import (
+    RECEIPT_DOCUMENT_TYPE_CHOICES, DeliveryChallanAttachment, GoodsReceipt, GoodsReceiptLine,
+)
 
 #: G4: a submission in which no line is recorded or changed.
 NOTHING_TO_RECORD = 'Nothing to record — enter a received quantity on at least one line.'
+
+# ---------------------------------------------------------------------------
+# NTF-DCG 4b — documents attached at receipt
+# ---------------------------------------------------------------------------
+
+#: A3: at most this many documents in one GRN submission; more refuses the whole GRN.
+#: The forms render this many slots (tests_receipt_attachments pins the two together).
+RECEIPT_DOCUMENTS_MAX_FILES = 5
+
+#: One file input and one type select per slot, numbered from 1. Slots, not one
+#: `multiple` input: a type is chosen per file (A2), and a `multiple` input cannot carry
+#: one per file.
+RECEIPT_DOCUMENT_FIELD = 'receipt_doc_{}'
+RECEIPT_DOCUMENT_TYPE_FIELD = 'receipt_doc_type_{}'
+_RECEIPT_DOCUMENT_FIELD_RE = re.compile(r'^receipt_doc_(\d+)$')
+
+#: A4: the uploader's tick that no document shows a price, one per submission as DC-B2.
+RECEIPT_DOCUMENTS_NO_PRICES_FIELD = 'receipt_docs_no_prices'
+
+#: Ruling Q2 (option b): a submission carrying only documents is refused by G4, in these
+#: words. A separate "add documents to an existing receipt" action is NTF-DCG 4b-2.
+DOCUMENTS_NEED_A_QUANTITY = ('Documents can only be attached with a quantity change for '
+                             'now — enter the received quantity, or ask SCM.')
+RECEIPT_DOCUMENTS_NO_PRICES = ('Tick "These documents show no rates, values or amounts" to '
+                               'attach them — Site Engineers will see them.')
+RECEIPT_DOCUMENT_STORAGE_OFF = ('Delivery documents cannot be stored right now: the private '
+                                'delivery bucket is not configured. Nothing was saved — '
+                                'remove the documents to record the receipt without them.')
+_RECEIPT_DOCUMENT_TYPES = frozenset(value for value, _ in RECEIPT_DOCUMENT_TYPE_CHOICES)
+
+
+def _chosen_documents(request):
+    """[(slot, type posted, file)] for every file in a receipt-document slot, in slot
+    order. Every `receipt_doc_N` key is read, not only 1..5, so a sixth file from a
+    crafted form is counted and refused, never dropped silently."""
+    chosen = []
+    for key in request.FILES:
+        match = _RECEIPT_DOCUMENT_FIELD_RE.match(key)
+        if not match:
+            continue
+        slot = int(match.group(1))
+        doc_type = (request.POST.get(RECEIPT_DOCUMENT_TYPE_FIELD.format(slot)) or '').strip()
+        chosen.extend((slot, doc_type, upload)
+                      for upload in request.FILES.getlist(key) if upload and upload.name)
+    chosen.sort(key=lambda entry: entry[0])
+    return chosen
+
+
+def receipt_documents_chosen(request):
+    """True when the submission carries at least one receipt document (for G4's message)."""
+    return bool(_chosen_documents(request))
+
+
+def plan_receipt_documents(request):
+    """Decide the documents this GRN attaches. Returns ([(type, file)], errors).
+
+    Writes nothing and uploads nothing, so the views call it before any upload (A5) and a
+    refusal leaves no trace. Refused: more than RECEIPT_DOCUMENTS_MAX_FILES; a file with
+    no type or an unknown one (A2); no no-prices tick (A4); storage off; then each file
+    through DC-B2's validate_dc_document (PDF/JPG/PNG, 20 MB, MIME, leading bytes). A type
+    chosen in a slot with no file is ignored: it records nothing.
+    """
+    chosen = _chosen_documents(request)
+    if not chosen:
+        return [], []
+    errors = []
+    if len(chosen) > RECEIPT_DOCUMENTS_MAX_FILES:
+        errors.append(f'At most {RECEIPT_DOCUMENTS_MAX_FILES} documents can be attached to '
+                      f'one receipt; {len(chosen)} were chosen.')
+    for _slot, doc_type, upload in chosen:
+        if doc_type not in _RECEIPT_DOCUMENT_TYPES:
+            errors.append(f'{upload.name}: choose what this document is — Signed DC copy, '
+                          f'LR or bilty, Delivery photo or Other.')
+    if request.POST.get(RECEIPT_DOCUMENTS_NO_PRICES_FIELD) != '1':
+        errors.append(RECEIPT_DOCUMENTS_NO_PRICES)
+    if errors:
+        return [], errors
+    if not delivery_bucket():
+        return [], [RECEIPT_DOCUMENT_STORAGE_OFF]
+    for _slot, _type, upload in chosen:
+        try:
+            validate_dc_document(upload)
+        except DeliveryStorageError as exc:
+            errors.append(str(exc))
+    if errors:
+        return [], errors
+    return [(doc_type, upload) for _slot, doc_type, upload in chosen], []
+
+
+def upload_receipt_documents(documents, project):
+    """Upload every planned document with DC-B2's uploader, in the 'grn-document' folder.
+    Returns [(type, stored dict)]. Raises DeliveryStorageError after discarding whatever
+    this run already stored, as grn_damage.upload_planned_photos() does."""
+    stored = []
+    try:
+        for doc_type, upload in documents:
+            stored.append((doc_type, upload_dc_document(
+                upload, project, path_kind=RECEIPT_DOCUMENT_PATH_KIND)))
+    except DeliveryStorageError:
+        discard_receipt_documents(stored)
+        raise
+    return stored
+
+
+def discard_receipt_documents(stored):
+    """Remove uploads no attachment row records — after a refused or rolled-back GRN.
+    DC-B2's discard, which never removes a recorded document. Never raises."""
+    for _type, upload in stored:
+        discard_unrecorded_dc_document(upload)
+
+
+def link_receipt_documents(receipt, stored, uploaded_by):
+    """Write one attachment row per stored document, on `receipt` and its challan. Call
+    inside the GRN view's transaction, after write_goods_receipt() (A5), so a rollback
+    takes the rows back and the views' discard then finds the objects unrecorded.
+    no_prices_confirmed is True because plan_receipt_documents() refused the submission
+    without the tick. One INSERT per document (at most five); create(), not bulk_create(),
+    so the model's append-only save() is the one that runs."""
+    return [
+        DeliveryChallanAttachment.objects.create(
+            challan=receipt.challan, receipt=receipt, document_type=doc_type,
+            uploaded_by=uploaded_by, original_name=upload['original_name'],
+            bucket=upload['bucket'], path=upload['path'], size=upload['size'],
+            mime=upload['mime'], no_prices_confirmed=True,
+        )
+        for doc_type, upload in stored
+    ]
 
 
 def line_changed(item, received_qty, damaged_qty, grn_notes, files):
@@ -88,13 +236,35 @@ def write_goods_receipt(challan, *, kind, recorded_by, receipt_date, entries,
     return receipt
 
 
-def receipts_for_challan(challan):
+def documents_message(documents, receipt):
+    """The sentence a GRN's success message ends with when documents were attached, or
+    '' — the same shape as grn_damage.damage_message()."""
+    if not documents:
+        return ''
+    count = len(documents)
+    return f' {count} document{"s" if count != 1 else ""} attached to {receipt.number}.'
+
+
+def receipts_for_challan(challan, *, include_withdrawn=False):
     """The challan's receipts, newest first, each with `lines` prefetched in order and
-    the recorder's login joined — for the DC page's Receipts section (G6). Two queries
-    whatever the number of receipts, one when there are none."""
+    the recorder's login joined — for the DC page's Receipts section (G6). Three queries
+    whatever the number of receipts, one when there are none.
+
+    NTF-DCG 4b (A7): each receipt's `documents` are prefetched too, oldest first. A
+    WITHDRAWN document is fetched only when `include_withdrawn` — the caller passes
+    user_can_manage_dc_documents(), SCM and Admin (ruling Q3, DC-B2's rule) — and is left
+    out in the query for everyone else, so the template cannot show one, or that one
+    exists, by mistake.
+    """
+    documents = (DeliveryChallanAttachment.objects
+                 .select_related('uploaded_by__user', 'withdrawn_by__user')
+                 .order_by('uploaded_at', 'pk'))
+    if not include_withdrawn:
+        documents = documents.filter(withdrawn_at__isnull=True)
     return list(
         GoodsReceipt.objects.filter(challan=challan)
         .select_related('recorded_by__user')
-        .prefetch_related(Prefetch('lines', queryset=GoodsReceiptLine.objects.order_by('pk')))
+        .prefetch_related(Prefetch('lines', queryset=GoodsReceiptLine.objects.order_by('pk')),
+                          Prefetch('documents', queryset=documents))
         .order_by('-pk')
     )

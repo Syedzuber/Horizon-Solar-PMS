@@ -1766,9 +1766,31 @@ class DCLineItem(models.Model):
         return f"{self.challan.dc_number} — {self.boq_category}: {self.item_description[:40]}"
 
 
+#: NTF-DCG 4b (ruling A2): what a document attached at receipt is. Required on a receipt
+#: document, never set on a challan-level one (the CHECK below holds both).
+RECEIPT_DOCUMENT_SIGNED_DC = 'signed_dc'
+RECEIPT_DOCUMENT_LR        = 'lr'
+RECEIPT_DOCUMENT_PHOTO     = 'delivery_photo'
+RECEIPT_DOCUMENT_OTHER     = 'other'
+RECEIPT_DOCUMENT_TYPE_CHOICES = [
+    (RECEIPT_DOCUMENT_SIGNED_DC, 'Signed DC copy'),
+    (RECEIPT_DOCUMENT_LR,        'LR or bilty'),
+    (RECEIPT_DOCUMENT_PHOTO,     'Delivery photo'),
+    (RECEIPT_DOCUMENT_OTHER,     'Other'),
+]
+
+
 class DeliveryChallanAttachment(models.Model):
     """The vendor's own challan document, attached by SCM when the challan is created
     (DC-B2). Optional; up to ten per challan.
+
+    NTF-DCG 4b: the same row also holds a document attached AT RECEIPT — a signed DC copy,
+    LR/bilty or delivery photo — by the site engineer's confirm_grn or SCM's override_grn.
+    Such a row has `receipt` set (the GoodsReceipt that submission wrote) and a
+    `document_type`. Everything else — private bucket, no-prices tick, signed link per
+    open, withdraw with reason — is DC-B2's, unchanged. The two kinds never mix on screen:
+    the Challan Documents card and DC-B3's cap of 10 read `receipt IS NULL` only; receipt
+    documents are listed under their receipt.
 
     SITE ENGINEERS READ THESE, so a document may never show a price. Every row records
     the uploader's confirmation that it does not (no_prices_confirmed, held true by a DB
@@ -1803,6 +1825,17 @@ class DeliveryChallanAttachment(models.Model):
     )
     withdrawn_reason = models.TextField(blank=True, default='')  # mandatory once withdrawn
 
+    # NTF-DCG 4b (ruling A1): the receipt this document was attached at; NULL on every
+    # challan-level document. Set once, at create, inside the GRN's transaction — always a
+    # receipt of this same challan (goods_receipts.link_receipt_documents; a CHECK cannot
+    # compare two tables). PROTECT, as GoodsReceipt is append-only anyway.
+    receipt = models.ForeignKey(
+        'GoodsReceipt', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='documents',
+    )
+    document_type = models.CharField(  # A2: receipt documents only; '' on challan-level ones
+        max_length=20, choices=RECEIPT_DOCUMENT_TYPE_CHOICES, blank=True, default='')
+
     class Meta:
         ordering = ['challan', 'uploaded_at', 'pk']
         constraints = [
@@ -1811,6 +1844,15 @@ class DeliveryChallanAttachment(models.Model):
             models.CheckConstraint(
                 condition=models.Q(no_prices_confirmed=True),
                 name='dc_attachment_no_prices_confirmed'),
+            # NTF-DCG 4b: a receipt document always says what it is; a challan-level one
+            # never carries a type. Every row before 4b is challan-level with '', so the
+            # constraint holds on existing data.
+            models.CheckConstraint(
+                condition=((models.Q(receipt__isnull=True) & models.Q(document_type=''))
+                           | (models.Q(receipt__isnull=False)
+                              & models.Q(document_type__in=[
+                                  value for value, _ in RECEIPT_DOCUMENT_TYPE_CHOICES]))),
+                name='dc_attachment_receipt_document_type'),
             # Withdrawal is when, who and why together, or none of them.
             models.CheckConstraint(
                 condition=((models.Q(withdrawn_at__isnull=True)

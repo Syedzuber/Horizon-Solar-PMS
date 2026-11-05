@@ -127,9 +127,11 @@ def lines_for_edit(challan):
 
 
 def live_document_count(challan):
-    """Live challan documents on `challan`; withdrawn ones do not count (ruling Q-D)."""
+    """Live challan documents on `challan`; withdrawn ones do not count (ruling Q-D).
+    NTF-DCG 4b: nor do documents attached at receipt (receipt set) — they have their own
+    limit per GRN submission and never take a place in the challan's ten."""
     return DeliveryChallanAttachment.objects.filter(
-        challan=challan, withdrawn_at__isnull=True).count()
+        challan=challan, withdrawn_at__isnull=True, receipt__isnull=True).count()
 
 
 def vendor_choices(challan):

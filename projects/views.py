@@ -279,6 +279,11 @@ from .grn_damage import (
 # lists the receipts (see that module's docstring for the order).
 from .goods_receipts import (
     NOTHING_TO_RECORD, changed_grn_lines, receipts_for_challan, write_goods_receipt,
+    # NTF-DCG 4b — documents attached at receipt, planned, uploaded, discarded and linked
+    # to the receipt by goods_receipts (DC-B2's machinery underneath).
+    DOCUMENTS_NEED_A_QUANTITY, discard_receipt_documents, link_receipt_documents,
+    plan_receipt_documents, receipt_documents_chosen, upload_receipt_documents,
+    documents_message,
 )
 from .models import GOODS_RECEIPT_CORRECTION, GOODS_RECEIPT_RECEIPT
 # DC-B3 — correcting a challan after creation. Every decision and write is in dc_edit;
@@ -14187,7 +14192,10 @@ def delivery_challan_detail(request, project_id, dc_id):
     # template cannot show a withdrawn document, or that one exists, by mistake. The
     # gate is role-first and SCM/Admin are portfolio viewers, so it costs no query.
     manages_dc_documents = user_can_manage_dc_documents(request.user, project)
-    dc_documents = (DeliveryChallanAttachment.objects.filter(challan=challan)
+    # NTF-DCG 4b: challan-level documents only. A document attached at receipt (receipt
+    # set) is listed under its receipt in the Receipts section, never on this card.
+    dc_documents = (DeliveryChallanAttachment.objects.filter(challan=challan,
+                                                             receipt__isnull=True)
                     .select_related('uploaded_by__user', 'withdrawn_by__user'))
     if not manages_dc_documents:
         dc_documents = dc_documents.filter(withdrawn_at__isnull=True)
@@ -14202,7 +14210,9 @@ def delivery_challan_detail(request, project_id, dc_id):
     # two queries at most, whatever their number. Shown to everyone who can read this
     # page, like the edit history: a receipt holds nothing this page does not already
     # show line by line, and no price (DC lines carry none).
-    goods_receipts = receipts_for_challan(challan)
+    # NTF-DCG 4b (ruling Q3): each receipt's documents come with it; withdrawn ones only
+    # for SCM and Admin, the DC-B2 audience, left out in the query for everyone else.
+    goods_receipts = receipts_for_challan(challan, include_withdrawn=manages_dc_documents)
 
     return render(request, 'projects/delivery_challan_detail.html', {
         'project':           project,
@@ -14577,6 +14587,11 @@ def confirm_grn(request, project_id, dc_id):
     NTF-DCG 4a: only lines this submission changes are saved (a pre-filled line posted
     back unchanged keeps its date and confirmer); none changed is refused as empty; and
     the transaction writes one numbered GoodsReceipt (kind 'receipt') for the saved lines.
+    NTF-DCG 4b: up to five optional documents (signed DC copy, LR/bilty, delivery photo,
+    other), each with its type and under the no-prices tick, are refused or accepted
+    before any upload, uploaded by DC-B2's uploader after the photos, and linked to that
+    receipt inside the transaction; every refusal or rollback discards them too.
+    Documents with no quantity change are refused (ruling Q2).
     Access: Site Engineer only. POST only.
     """
     if request.method != 'POST':
@@ -14642,12 +14657,33 @@ def confirm_grn(request, project_id, dc_id):
         return back
     # G4: nothing recorded or changed on any line. After the other refusals, so each
     # keeps its own message; before the upload, so nothing is stored. Draft kept.
+    # NTF-DCG 4b (ruling Q2): documents ride on a receipt, so documents alone are refused
+    # here too, in their own words — and ahead of the document checks below, so a person
+    # attaching a signed copy late is told the real reason first, not about a tick.
     if not grn_lines:
-        _refuse_grn(request, challan, GRN_DRAFT_CONFIRM, line_items, [NOTHING_TO_RECORD], '')
+        empty = (DOCUMENTS_NEED_A_QUANTITY if receipt_documents_chosen(request)
+                 else NOTHING_TO_RECORD)
+        _refuse_grn(request, challan, GRN_DRAFT_CONFIRM, line_items, [empty], '')
+        return back
+    # NTF-DCG 4b (A2–A5): every document refusal — count, type, tick, storage, the files
+    # themselves — before any upload, so a refusal stores nothing.
+    receipt_documents, document_errors = plan_receipt_documents(request)
+    if document_errors:
+        _refuse_grn(request, challan, GRN_DRAFT_CONFIRM, line_items, document_errors,
+                    'The GRN was not recorded.')
         return back
     try:
         stored_photos = upload_planned_photos(damage_plan, project)
     except DeliveryStorageError as exc:
+        _refuse_grn(request, challan, GRN_DRAFT_CONFIRM, line_items, [str(exc)],
+                    'The GRN was not recorded.')
+        return back
+    # 4b: the documents, by DC-B2's uploader, after the photos. A failure part way has
+    # discarded its own uploads; the photos already stored are discarded here.
+    try:
+        stored_documents = upload_receipt_documents(receipt_documents, project)
+    except DeliveryStorageError as exc:
+        discard_stored(stored_photos)
         _refuse_grn(request, challan, GRN_DRAFT_CONFIRM, line_items, [str(exc)],
                     'The GRN was not recorded.')
         return back
@@ -14697,6 +14733,8 @@ def confirm_grn(request, project_id, dc_id):
                 receipt_date=today, entries=receipt_entries)
             damage = record_damage(damage_plan, challan, project, profile, stored_photos,
                                    receipt=receipt)
+            # 4b (A5): the documents' rows, on the receipt just written.
+            documents = link_receipt_documents(receipt, stored_documents, profile)
 
             # Recalculate DC status ONCE after all line items saved — never inside the loop
             # (calling it inside the loop causes status to oscillate incorrectly).
@@ -14714,16 +14752,18 @@ def confirm_grn(request, project_id, dc_id):
                                              also_tell=damage_issue_scm_recipients())
     except (DamageIssueClosed, ChallanChangedMeanwhile) as exc:
         discard_stored(stored_photos)
+        discard_receipt_documents(stored_documents)
         _refuse_grn(request, challan, GRN_DRAFT_CONFIRM, line_items, [str(exc)],
                     'The GRN was not recorded.')
         return back
     except Exception:
-        # Rolled back, so no photo row records these uploads. Re-raised: a failure, not
-        # a refusal, and the error page and logs must still see it.
+        # Rolled back, so no photo or document row records these uploads. Re-raised: a
+        # failure, not a refusal, and the error page and logs must still see it.
         discard_stored(stored_photos)
+        discard_receipt_documents(stored_documents)
         raise
     messages.success(request, f'GRN confirmed. DC status: {challan.status}.'
-                              f'{damage_message(damage)}')
+                              f'{damage_message(damage)}{documents_message(documents, receipt)}')
     return back
 
 
@@ -14767,6 +14807,7 @@ def override_grn(request, project_id, dc_id):
     asked again of the fresh rows.
     NTF-DCG 4a: as in confirm_grn — changed lines only, empty refused — and the receipt
     is always kind 'correction', carrying the on-behalf reason when a line used it.
+    NTF-DCG 4b: the same optional documents as confirm_grn, linked to the correction.
     Access: SCM role, and project scope. POST only.
     """
     if request.method != 'POST':
@@ -14839,12 +14880,29 @@ def override_grn(request, project_id, dc_id):
                     'The GRN was not changed.')
         return back
     # G4, as in confirm_grn: after every other refusal, before any upload, draft kept.
+    # 4b (Q2), as in confirm_grn: documents alone are refused here, in their own words.
     if not grn_lines:
-        _refuse_grn(request, challan, GRN_DRAFT_OVERRIDE, line_items, [NOTHING_TO_RECORD], '')
+        empty = (DOCUMENTS_NEED_A_QUANTITY if receipt_documents_chosen(request)
+                 else NOTHING_TO_RECORD)
+        _refuse_grn(request, challan, GRN_DRAFT_OVERRIDE, line_items, [empty], '')
+        return back
+    # 4b (A3): the same document refusals as confirm_grn, before any upload.
+    receipt_documents, document_errors = plan_receipt_documents(request)
+    if document_errors:
+        _refuse_grn(request, challan, GRN_DRAFT_OVERRIDE, line_items, document_errors,
+                    'The GRN was not changed.')
         return back
     try:
         stored_photos = upload_planned_photos(damage_plan, project)
     except DeliveryStorageError as exc:
+        _refuse_grn(request, challan, GRN_DRAFT_OVERRIDE, line_items, [str(exc)],
+                    'The GRN was not changed.')
+        return back
+    # 4b: the documents after the photos, as in confirm_grn.
+    try:
+        stored_documents = upload_receipt_documents(receipt_documents, project)
+    except DeliveryStorageError as exc:
+        discard_stored(stored_photos)
         _refuse_grn(request, challan, GRN_DRAFT_OVERRIDE, line_items, [str(exc)],
                     'The GRN was not changed.')
         return back
@@ -14904,6 +14962,8 @@ def override_grn(request, project_id, dc_id):
                 on_behalf_reason=on_behalf_reason if any_first_time else '')
             damage = record_damage(damage_plan, challan, project, profile, stored_photos,
                                    receipt=receipt)
+            # 4b (A5): the documents' rows, on the correction just written.
+            documents = link_receipt_documents(receipt, stored_documents, profile)
 
             # Recalculate DC status ONCE after all line items saved.
             # The ledger records the overriding actor here. On a correction that differs
@@ -14922,17 +14982,19 @@ def override_grn(request, project_id, dc_id):
                                              also_tell=damage_issue_scm_recipients())
     except (DamageIssueClosed, ChallanChangedMeanwhile) as exc:
         discard_stored(stored_photos)
+        discard_receipt_documents(stored_documents)
         _refuse_grn(request, challan, GRN_DRAFT_OVERRIDE, line_items, [str(exc)],
                     'The GRN was not changed.')
         return back
     except Exception:
-        # Rolled back, so no photo row records these uploads. Re-raised: a failure, not
-        # a refusal, and the error page and logs must still see it.
+        # Rolled back, so no photo or document row records these uploads. Re-raised: a
+        # failure, not a refusal, and the error page and logs must still see it.
         discard_stored(stored_photos)
+        discard_receipt_documents(stored_documents)
         raise
 
     messages.success(request, f'GRN overridden. DC status: {challan.status}.'
-                              f'{damage_message(damage)}')
+                              f'{damage_message(damage)}{documents_message(documents, receipt)}')
     return back
 
 

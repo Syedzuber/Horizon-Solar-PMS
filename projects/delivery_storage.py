@@ -45,6 +45,9 @@ DC_DOCUMENTS_MAX_FILES = 10
 #: Storage path segment, between the project id and the uuid filename.
 DC_DOCUMENT_PATH_KIND = 'challan'
 
+#: NTF-DCG 4b: the folder for documents attached at receipt (signed DC copy, LR, photo).
+RECEIPT_DOCUMENT_PATH_KIND = 'grn-document'
+
 #: Per extension: the type stored on the object, what the browser may claim, and the
 #: bytes the file must start with. The claim is a typo guard (any client can forge it);
 #: the leading bytes are what actually look at the file.
@@ -104,18 +107,23 @@ def validate_dc_document(file_obj):
     return stored_mime
 
 
-def upload_dc_document(file_obj, project):
+def upload_dc_document(file_obj, project, *, path_kind=DC_DOCUMENT_PATH_KIND):
     """Store one challan document in the private delivery bucket, under the project.
 
     Returns {original_name, bucket, path, size, mime} — the attachment row's fields.
     Never a URL. Raises DeliveryStorageError when storage is off, the file is refused,
     or the upload fails, so the caller writes no row pointing at a missing object.
+
+    `path_kind` is the folder between the project id and the file: 'challan' for every
+    DC-B2 / DC-B3 caller (the default, unchanged), RECEIPT_DOCUMENT_PATH_KIND for a
+    document attached at receipt (NTF-DCG 4b, ruling Q7) — the same bucket and checks,
+    so the two kinds can be told apart in the bucket without reading the database.
     """
     bucket = delivery_bucket()
     if not bucket:
         raise DeliveryStorageError(DELIVERY_STORAGE_OFF)
     mime = validate_dc_document(file_obj)
-    path = build_design_path(project.project_id, DC_DOCUMENT_PATH_KIND, file_obj.name)
+    path = build_design_path(project.project_id, path_kind, file_obj.name)
     try:
         file_obj.seek(0)
         payload = file_obj.read()

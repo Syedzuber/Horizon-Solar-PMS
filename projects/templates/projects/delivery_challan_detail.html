@@ -25,6 +25,8 @@
     .grn-submit { width: 100%; min-height: 44px; }
     /* DG-B: a line with no damage drops its photo block altogether on a phone. */
     .grn-lines td.grn-photo-off { display: none; }
+    /* NTF-DCG 4b: the receipt documents block, the same 44px tap targets. */
+    .grn-docs .form-control, .grn-docs .form-select, .grn-docs .btn { min-height: 44px; }
   }
   /* DG-B: the photo input is shown only while its line's Damaged box is above 0 — set
      by the script at the end of the page, so without it every input stays visible and
@@ -305,6 +307,7 @@ page, not only on hover (phones have no hover), that it is approximate.
             · <span class="badge {% if receipt.kind == 'correction' %}bg-warning text-dark{% elif receipt.kind == 'imported' %}bg-secondary{% else %}bg-success{% endif %}"{% if receipt.kind == 'imported' %} title="Recorded before receipt numbering began. Earlier GRNs saved every line again on each submission, so this shows each line as it stood, not the separate deliveries."{% endif %}>{{ receipt.get_kind_display }}</span>
             · {% if receipt.recorded_by %}{{ receipt.recorded_by.user.get_full_name|default:receipt.recorded_by.user.username }}{% else %}<span class="text-muted">not recorded</span>{% endif %}
             · {{ receipt.lines.all|length }} line{{ receipt.lines.all|length|pluralize }}
+            {% if receipt.documents.all %}· {{ receipt.documents.all|length }} document{{ receipt.documents.all|length|pluralize }}{% endif %}
           </summary>
           {% if receipt.kind == 'imported' %}
           <div class="small text-muted mt-1">Imported from receipts recorded before numbering began. Approximate: earlier GRNs saved every line again on each submission, so separate deliveries cannot be told apart.</div>
@@ -320,6 +323,46 @@ page, not only on hover (phones have no hover), that it is approximate.
             </li>
             {% endfor %}
           </ul>
+          {% comment %}NTF-DCG 4b (A7): the documents attached at this receipt — type, name,
+          who, when, open link. Withdrawn ones reach the template only for SCM and Admin
+          (receipts_for_challan leaves them out in the query for everyone else), and only
+          they see the Withdraw control. Open and withdraw are DC-B2's own views.{% endcomment %}
+          {% if receipt.documents.all %}
+          <div class="small fw-semibold mt-2">Documents</div>
+          <ul class="list-unstyled small mb-0 receipt-documents">
+            {% for doc in receipt.documents.all %}
+            {% if doc.is_live %}
+            <li class="mb-1">
+              <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+                <div class="text-break">
+                  <span class="badge bg-light text-dark border">{{ doc.get_document_type_display }}</span>
+                  <a href="{% url 'delivery_challan_attachment_open' project.project_id challan.pk doc.pk %}" target="_blank" rel="noopener">{{ doc.original_name }}</a>
+                  <span class="text-muted">({{ doc.size|filesizeformat }}) · {{ doc.uploaded_by.user.get_full_name|default:doc.uploaded_by.user.username }} · {{ doc.uploaded_at|date:"d M Y H:i" }}</span>
+                </div>
+                {% if manages_dc_documents %}
+                <form method="post" action="{% url 'delivery_challan_attachment_withdraw' project.project_id challan.pk doc.pk %}"
+                      class="d-flex gap-1 flex-wrap"
+                      onsubmit="return confirm('Withdraw {{ doc.original_name|escapejs }}? Only SCM and Admin will see it afterwards. The file is kept, not deleted.');">
+                  {% csrf_token %}
+                  <input type="text" name="withdrawn_reason" class="form-control form-control-sm" style="max-width:16rem;"
+                         minlength="10" required placeholder="Reason (at least 10 characters)" aria-label="Reason for withdrawing {{ doc.original_name }}">
+                  <button type="submit" class="btn btn-outline-danger btn-sm">Withdraw</button>
+                </form>
+                {% endif %}
+              </div>
+            </li>
+            {% else %}
+            <li class="mb-1 text-break">
+              <span class="badge bg-secondary">Withdrawn</span>
+              <span class="badge bg-light text-dark border">{{ doc.get_document_type_display }}</span>
+              <a href="{% url 'delivery_challan_attachment_open' project.project_id challan.pk doc.pk %}" target="_blank" rel="noopener">{{ doc.original_name }}</a>
+              — by {{ doc.withdrawn_by.user.get_full_name|default:doc.withdrawn_by.user.username }}, {{ doc.withdrawn_at|date:"d M Y H:i" }}:
+              {{ doc.withdrawn_reason }}
+            </li>
+            {% endif %}
+            {% endfor %}
+          </ul>
+          {% endif %}
         </details>
       </li>
       {% endfor %}
@@ -418,7 +461,7 @@ for SCM and Admin (the view splits them off), and only they see the Withdraw con
     {% if grn_draft.which == 'confirm' %}
     <div class="alert alert-warning small" role="alert">
       Nothing was saved. What you typed is filled in below — photos cannot be kept from a
-      refused submission, so attach them again.
+      refused submission, and neither can documents, so attach the photos and documents again.
     </div>
     {% endif %}
     <form method="post" action="{% url 'confirm_grn' project.project_id challan.pk %}"
@@ -480,6 +523,39 @@ for SCM and Admin (the view splits them off), and only they see the Withdraw con
             {% endfor %}
           </tbody>
         </table>
+      </div>
+      {% comment %}NTF-DCG 4b: documents for the whole receipt, once per form — not per line,
+      so they never mix with the damage photos in each line's card. Five slots
+      (goods_receipts.RECEIPT_DOCUMENTS_MAX_FILES), each a type and one file; the script at
+      the end shows one at a time. No capture attribute (Q4): the phone offers camera,
+      gallery and files. No data-qaqc-photo (Q5): documents upload at full size.{% endcomment %}
+      <div class="border rounded p-2 mb-2 grn-docs" data-grn-docs>
+        <div class="small fw-semibold mb-1">Delivery documents <span class="text-muted fw-normal">(optional)</span></div>
+        <p class="small text-muted mb-2">Signed challan copy, LR/bilty or delivery photo. Site Engineers will see this file — no rates or amounts.</p>
+        {% for n in "12345" %}
+        <div class="row g-2 mb-2" data-grn-doc-slot>
+          <div class="col-12 col-md-4">
+            <select name="receipt_doc_type_{{ n }}" class="form-select form-select-sm" aria-label="Document {{ n }}: what it is">
+              <option value="">What is it?</option>
+              <option value="signed_dc">Signed DC copy</option>
+              <option value="lr">LR or bilty</option>
+              <option value="delivery_photo">Delivery photo</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+          <div class="col-12 col-md-8">
+            <input type="file" name="receipt_doc_{{ n }}" class="form-control form-control-sm"
+                   accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+                   aria-label="Document {{ n }}: file">
+          </div>
+        </div>
+        {% endfor %}
+        <button type="button" class="btn btn-outline-secondary btn-sm d-none" data-grn-doc-add>Add another document</button>
+        <div class="form-text">PDF, JPG or PNG; up to 5 documents, 20 MB each. Choose what each one is.</div>
+        <div class="form-check mt-1">
+          <input class="form-check-input" type="checkbox" name="receipt_docs_no_prices" value="1" id="grnDocsNoPricesC">
+          <label class="form-check-label small" for="grnDocsNoPricesC">These documents show no rates, values or amounts. Site Engineers will see them.</label>
+        </div>
       </div>
       {% comment %}DG-B: the damage Issue. With one open, damage recorded now is added to it;
       without, the description raises it. Shown by the script only when a line records
@@ -675,7 +751,7 @@ document.addEventListener('DOMContentLoaded', function () {
           {% if grn_draft.which == 'override' %}
           <div class="alert alert-warning small" role="alert">
             Nothing was saved. What you typed is filled in below — photos cannot be kept from
-            a refused submission, so attach them again.
+            a refused submission, and neither can documents, so attach the photos and documents again.
           </div>
           {% endif %}
 
@@ -763,6 +839,36 @@ document.addEventListener('DOMContentLoaded', function () {
               </tbody>
             </table>
           </div>
+          {% comment %}NTF-DCG 4b: the same documents block as the SE form, linked to the
+          correction this override writes.{% endcomment %}
+          <div class="border rounded p-2 mb-2 grn-docs" data-grn-docs>
+            <div class="small fw-semibold mb-1">Delivery documents <span class="text-muted fw-normal">(optional)</span></div>
+            <p class="small text-muted mb-2">Signed challan copy, LR/bilty or delivery photo. Site Engineers will see this file — no rates or amounts.</p>
+            {% for n in "12345" %}
+            <div class="row g-2 mb-2" data-grn-doc-slot>
+              <div class="col-12 col-md-4">
+                <select name="receipt_doc_type_{{ n }}" class="form-select form-select-sm" aria-label="Document {{ n }}: what it is">
+                  <option value="">What is it?</option>
+                  <option value="signed_dc">Signed DC copy</option>
+                  <option value="lr">LR or bilty</option>
+                  <option value="delivery_photo">Delivery photo</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div class="col-12 col-md-8">
+                <input type="file" name="receipt_doc_{{ n }}" class="form-control form-control-sm"
+                       accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+                       aria-label="Document {{ n }}: file">
+              </div>
+            </div>
+            {% endfor %}
+            <button type="button" class="btn btn-outline-secondary btn-sm d-none" data-grn-doc-add>Add another document</button>
+            <div class="form-text">PDF, JPG or PNG; up to 5 documents, 20 MB each. Choose what each one is.</div>
+            <div class="form-check mt-1">
+              <input class="form-check-input" type="checkbox" name="receipt_docs_no_prices" value="1" id="grnDocsNoPricesO">
+              <label class="form-check-label small" for="grnDocsNoPricesO">These documents show no rates, values or amounts. Site Engineers will see them.</label>
+            </div>
+          </div>
           {% comment %}DG-B: the damage Issue, as on the SE form.{% endcomment %}
           {% if open_damage_issue %}
           <p class="small text-muted mb-0">Damage you record now is added to the open damage issue
@@ -829,6 +935,30 @@ document.addEventListener('DOMContentLoaded', function () {
       form.addEventListener('input', function () { refresh(form, false); });
       form.addEventListener('change', function () { refresh(form, true); });
       refresh(form, false);
+      /* NTF-DCG 4b: the receipt document slots. Without this script all five show; with
+         it, the first (and any already used) shows, and "Add another document" reveals
+         the next until none is left. Display only: the server checks every slot. */
+      var docs = form.querySelector('[data-grn-docs]');
+      if (docs) {
+        var slots = docs.querySelectorAll('[data-grn-doc-slot]');
+        var add = docs.querySelector('[data-grn-doc-add]');
+        var used = function (slot) {
+          var file = slot.querySelector('input[type="file"]'), kind = slot.querySelector('select');
+          return !!((file && file.files && file.files.length) || (kind && kind.value));
+        };
+        var hidden = function () {
+          return Array.prototype.filter.call(slots, function (s) { return s.classList.contains('d-none'); });
+        };
+        for (var s = 1; s < slots.length; s++) if (!used(slots[s])) slots[s].classList.add('d-none');
+        if (add) {
+          add.classList.toggle('d-none', hidden().length === 0);
+          add.addEventListener('click', function () {
+            var next = hidden();
+            if (next.length) next[0].classList.remove('d-none');
+            add.classList.toggle('d-none', next.length <= 1);
+          });
+        }
+      }
       /* R10: one tap, one submission. No ?key= guard on these forms — a double POST
          that gets through stores its photos twice (a known gap). */
       form.addEventListener('submit', function () {
