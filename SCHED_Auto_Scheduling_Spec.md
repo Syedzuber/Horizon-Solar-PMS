@@ -7,11 +7,11 @@ Source facts: `SCHED_A_FINDINGS.md` (audit, 5 Nov DB restore).
 
 ## Layer 1 — Plain English
 
-When a RESCO site gets a vendor mobilization date, the system fills in the due dates of its execution tasks automatically. The dates come from the site's DC capacity, using the PMs' duration table. The schedule starts at Civil Work and MMS Installation and runs through Testing.
+When a PM sets the due date of a RESCO site's Civil Work and MMS Installation task, the system fills in the due dates of its execution tasks automatically. The dates come from the site's DC capacity, using the PMs' duration table. The schedule runs from the task after Civil through Testing; the Civil date itself always belongs to the PM.
 
 Every due date remembers whether a person or the system set it. The system only ever rewrites dates it set itself. Once a PM edits a date by hand, that date belongs to the PM permanently.
 
-Already-activated sites get dates through backfill: a PM enters planned mobilization dates in bulk for a whole tender, adjusting individual sites where needed. Sites where Civil work has already started use that real start date instead.
+Already-activated sites get dates as soon as their Civil task has a due date and the site has a DC capacity. SCHED-3 gives PMs a bulk screen to set Civil due dates across a tender.
 
 Admin can switch the schedule between calendar days (the default) and working days (Sundays skipped).
 
@@ -70,11 +70,12 @@ Tasks in no block get no system date:
 
 Adding numbers later means adding a seeded row; no code change is needed.
 
-### On `Project` (site) (SCHED-3)
+### On `Project` (site)
 | Field | Type | Notes |
 |---|---|---|
-| `planned_mobilization_date` | date, nullable | Set by the PM / coordinator / Admin. |
-| `planned_mobilization_set_by`, `_set_at` | FK user, datetime | For audit. |
+| `exclude_from_auto_schedule` | bool, default False | Django admin only; changes logged. Turning it on clears the site's system dates. |
+
+(The `planned_mobilization_*` fields were designed and then dropped on 8 Nov; see "Anchor redesign".)
 
 ### Admin setting (SCHED-2)
 `schedule_skip_sundays` (bool, default **False** = calendar days, matching the Day-3 lock). Stored in the existing admin settings model if one exists (SCHED-2 pre-flight checks), otherwise in a new singleton. Public holidays are out of scope for v1.
@@ -101,7 +102,7 @@ Adding numbers later means adding a seeded row; no code change is needed.
 ## Layer 4 — Edge cases and rules
 
 **Anchor**
-- **Effective anchor** = the date Civil Work and MMS Installation first moved to In Progress (from StatusTransition), if any; otherwise `planned_mobilization_date`. With neither, the site is not scheduled.
+- **Anchor** = the due date of the site's unlabelled Civil Work and MMS Installation task. With no date (or Civil N/A), the site is not scheduled. Full rules under "Anchor redesign" below.
 - **Band**:
   - DC kWp ≤ 50
   - > 50 and ≤ 100
@@ -140,6 +141,8 @@ Adding numbers later means adding a seeded row; no code change is needed.
 
 Each trigger reschedules only that site, except the switch, which reschedules all sites.
 
+**Site loses capacity or anchor**: system-set dates (and `schedule_start`) on its not-Done tasks are cleared, logged once. Manual dates stay.
+
 **Other rules**
 - **Scope**: RESCO (OPEX Execution v1) only. CAPEX gets blocks later by seeding rows. Residential is untouched.
 - **Dates**: always `timezone.localdate()`; never `date.today()`.
@@ -166,3 +169,28 @@ Each trigger reschedules only that site, except the switch, which reschedules al
 - After SCHED-1: no visible change. 46 RESCO tasks plus all other dated tasks are marked `manual`.
 - After SCHED-2 with a dry run: the 4 sites with Civil started can be scheduled. A dry-run report shows dates and an overdue count before any write.
 - After SCHED-3: the dates entered decide the overdue exposure, and the PM sees it before saving.
+
+---
+
+## SCHED-2 rulings (8 Nov 2026, after pre-flight)
+
+- **Block 6** = `TESTING_COMMISSIONING` only. `NET_METER_INSTALLATION` stays unscheduled, because it depends on the DISCOM.
+- **Working-day switch** lives on the existing `SystemSettings` screen (`admin_master_switches`), with the confirmation rendered in place. No new URL.
+- **Triggers:** one after-commit call inside `_apply_task_status_change` (covers status updates, self-certified completion, approve, reject, reopen), plus `task_set_not_applicable` (mark and un-mark), `TaskAdmin.save_model` (N/A edits), `project_field_edit` and a new `ProjectAdmin.save_model` (capacity, exclusion flag), and any change to the Civil task's due date (edit screen, In Progress date entry, Django admin). The scheduler is idempotent, so extra triggers are harmless.
+- **Per-site exclusion:** new `Project.exclude_from_auto_schedule` (bool, default False), editable in Django admin only, with changes logged. An excluded site returns `excluded`: nothing is written or cleared. It is set by hand for UKRU001 after deploy, because a 900 kWp site does not fit the 101+ band's 25 days.
+- **Anchor on multi-location sites:** use the unlabelled Civil task only.
+- **Done date** = `Task.completed_at` (latest Done). **First In Progress** = the earliest task StatusTransition to In Progress. Both are converted with `timezone.localtime(...).date()`.
+- **Eligible sites:** OPEX, not deleted, not test, activated, status Active or In Progress, at least one task from the OPEX Execution v1 template, and not excluded.
+- **Known gap, not fixed here:** N/A edits made in Django admin skip the reason and the log. This is logged to SECONDARY_FINDINGS.
+
+## Anchor redesign (8 Nov 2026, supersedes the planned-mobilization-date design)
+
+- **No `planned_mobilization_date` field.** It is removed from SCHED-2 before commit.
+- **Anchor** = due date of the site's unlabelled **Civil Work and MMS Installation** task, whatever its source. No date, or the task is N/A → `needs_anchor`. The `civil_started` anchor source is gone.
+- **Block 1 is never written.** The Civil date belongs to the PM. Block-1 durations only set Civil's `schedule_start` (due date minus the duration, counted backwards), and only when that start is empty or system-set.
+- **Block 2 starts on the next working day after the Civil due date**, with C reset to 0. No half-day carry-over from Civil (ruled 8 Nov).
+  - Worked example: Civil due Tue 10 Nov 2026, band ≤50, calendar days → Modules due 12 Nov, Earthing & DC 13 Nov, Inverter & DBs 14 Nov, AC 15 Nov, Testing 15 Nov.
+- **Late Civil:** if Civil is Done after its due date, blocks 2+ re-anchor from the next working day after its `completed_at` date. An early finish never pulls dates earlier.
+- **Trigger:** setting, changing or clearing the Civil due date reschedules the site after commit. Clearing it clears the site's system dates.
+- **Exclusion:** turning `exclude_from_auto_schedule` on clears the site's system dates on unfinished tasks; turning it off reschedules the site.
+- **SCHED-3** becomes a bulk screen for setting Civil due dates across a tender.

@@ -2,6 +2,7 @@ from django import forms
 from django.contrib import admin, messages
 from django.contrib.admin import helpers
 from django.contrib.admin.widgets import AdminDateWidget
+from django.db import transaction
 from django.template.response import TemplateResponse
 from django.utils import timezone
 from .models import (
@@ -21,12 +22,15 @@ from .models import (
     QaqcVisit, QaqcVisitAnswer,
     NotificationTemplate, NotificationEventSetting, NotificationEventSettingChange,
     ContractorAttendance, ContractorAttendanceRevision,
+    ScheduleBlock, ScheduleBlockTask, log_activity,
 )
 from .forms import check_typed_date
 from .attendance import VOID_NOTE_REQUIRED, AttendanceRefused, void_attendance
 from .permissions import qaqc_engineer_assignment_refusal, user_can_void_attendance_any_day
 from .utils import assign_task_to
-from .scheduling import set_task_due_date
+from .scheduling import (
+    schedule_site_safely, set_task_due_date, task_is_schedule_anchor, task_is_scheduled,
+)
 
 
 class MilestoneInline(admin.TabularInline):
@@ -189,7 +193,43 @@ class ProjectAdmin(admin.ModelAdmin):
         ('Test data', {
             'fields': ('is_test',),
         }),
+        # SCHED-2. Django admin is the only editor of the flag. Not collapsed: an excluded
+        # site silently gets no auto dates, so the flag must be in view of whoever opens
+        # the record wondering why.
+        ('Auto-scheduling', {
+            'fields': ('exclude_from_auto_schedule',),
+        }),
     )
+
+    # Edits that change a site's auto-schedule: capacity picks the band, and the
+    # exclusion switches the scheduler off (clearing its dates) or back on for the site.
+    _SCHEDULE_INPUTS = ('dc_capacity_kw', 'exclude_from_auto_schedule')
+
+    def save_model(self, request, obj, form, change):
+        """Log the exclusion flag and reschedule the site after commit.
+
+        - exclude_from_auto_schedule: each change gets one ActivityLog row (ruling a),
+          since ticking it clears the site's system dates and takes it out of every
+          future scheduler run.
+        - either input on an existing site: the site is rescheduled after the admin's
+          transaction commits (changeform_view wraps the save in one).
+          schedule_site_safely() never raises, so a scheduler failure cannot undo or
+          refuse the edit. On ADD there is nothing to schedule: a new project is not
+          activated.
+        """
+        changed = [f for f in self._SCHEDULE_INPUTS if f in form.changed_data]
+        actor = getattr(request.user, 'profile', None)  # a bare superuser may have none
+        super().save_model(request, obj, form, change)
+        if 'exclude_from_auto_schedule' in changed:
+            log_activity(
+                obj, actor,
+                ('Excluded site from auto-scheduling' if obj.exclude_from_auto_schedule
+                 else 'Included site in auto-scheduling again') + ' (Django admin)',
+                entity_type='Project', entity_id=obj.pk,
+                action_code='auto_schedule_exclusion_changed',
+            )
+        if change and changed:
+            transaction.on_commit(lambda: schedule_site_safely(obj, actor))
 
     def get_queryset(self, request):
         # Show only active projects by default; admin can filter by is_deleted to see deleted ones
@@ -445,6 +485,20 @@ class TaskAdmin(admin.ModelAdmin):
             obj.save(update_fields=['due_date', 'due_date_source'])
         if assignee_changed:
             assign_task_to(obj, new_assignee, notify=False)
+        # SCHED-2 triggers, one reschedule for either:
+        # - is_not_applicable is editable here (task_set_not_applicable's guards do not
+        #   apply; see SECONDARY_FINDINGS), and either direction can change the site's
+        #   schedule, as on the portal;
+        # - a changed due date on the Civil task, the site's schedule anchor (set, moved
+        #   or cleared), as on the edit screen.
+        # After the admin's transaction commits; schedule_site_safely() never raises, so
+        # a scheduler failure cannot undo the save.
+        na_changed = change and 'is_not_applicable' in form.changed_data
+        if ((na_changed and task_is_scheduled(obj))
+                or (date_changed and task_is_schedule_anchor(obj))):
+            project = obj.phase.project
+            sched_actor = getattr(request.user, 'profile', None)  # a bare superuser may have none
+            transaction.on_commit(lambda: schedule_site_safely(project, sched_actor))
 
 
 @admin.register(Milestone)
@@ -660,6 +714,11 @@ class ChecklistItemCompletionAdmin(admin.ModelAdmin):
 @admin.register(SystemSettings)
 class SystemSettingsAdmin(admin.ModelAdmin):
     list_display = ['whatsapp_enabled', 'email_enabled']
+    # SCHED-2. The working-day switch is changed only on the Admin portal's settings
+    # screen, which recalculates every site's system dates in the same action. Flipped
+    # here it would save and recalculate nothing, leaving every existing system date on
+    # the old rule until something happened to reschedule each site.
+    readonly_fields = ['schedule_skip_sundays']
 
     def has_add_permission(self, request):
         # Only allow one row via get_or_create; block direct admin creation
@@ -885,6 +944,55 @@ class TaskTemplateTaskAdmin(_DraftOnlyContentAdmin):
 
     def _template_of(self, obj):
         return obj.phase.template
+
+
+# ---------------------------------------------------------------------------
+# SCHED-2 — the auto-schedule duration table. Admin may view and edit (the prompt's
+# ruling): adding numbers for a task later is a row here, not a release. A change
+# applies from the next scheduler run on each site (a trigger, `schedule_sites`, or
+# the working-day switch); saving here does not reschedule anything by itself.
+# ---------------------------------------------------------------------------
+
+def _template_task_choice_label(template_task):
+    """`OPEX v1 · INSTALLATION · CIVIL_WORK_AND_MMS_INSTALLATION`: labels repeat across
+    templates (CAPEX v1 copies OPEX's), so the picker names the template and the code."""
+    template = template_task.phase.template
+    return f'{template.code} v{template.version_no} · {template_task.phase.code} · {template_task.code}'
+
+
+class _TemplateTaskPickerMixin:
+    """Shows template tasks by template, phase and code in the block admins' pickers."""
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        field = super().formfield_for_foreignkey(db_field, request, **kwargs)
+        if db_field.name == 'template_task':
+            # select_related: the label reads the phase and template of every option.
+            field.queryset = field.queryset.select_related('phase__template').order_by(
+                'phase__template__code', 'phase__template__version_no',
+                'phase__sort_order', 'sort_order')
+            field.label_from_instance = _template_task_choice_label
+        return field
+
+
+class ScheduleBlockTaskInline(_TemplateTaskPickerMixin, admin.TabularInline):
+    model = ScheduleBlockTask
+    extra = 0
+
+
+@admin.register(ScheduleBlock)
+class ScheduleBlockAdmin(admin.ModelAdmin):
+    list_display  = ['template', 'sequence', 'name', 'days_le_50', 'days_51_100',
+                     'days_101_plus', 'is_active']
+    list_filter   = ['template', 'is_active']
+    ordering      = ['template', 'sequence']
+    inlines       = [ScheduleBlockTaskInline]
+
+
+@admin.register(ScheduleBlockTask)
+class ScheduleBlockTaskAdmin(_TemplateTaskPickerMixin, admin.ModelAdmin):
+    list_display  = ['block', 'template_task']
+    list_filter   = ['block__template']
+    list_select_related = ['block', 'template_task']
 
 
 # ---------------------------------------------------------------------------

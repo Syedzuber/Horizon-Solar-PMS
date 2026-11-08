@@ -142,5 +142,58 @@
       </button>
     </div>
   </form>
+
+  {% comment %}
+    SCHED-2 working-day switch. A form of its own, NOT part of "Save changes" above:
+    flipping it recalculates system-set due dates on every RESCO site, so it goes
+    through a preview (dry run, counts shown) and a confirm step. See
+    admin_master_switches for the two POSTs.
+  {% endcomment %}
+  <h2 class="text-base font-semibold text-gray-900 mt-10 mb-1">Auto-schedule working days</h2>
+  <p class="text-sm text-gray-500 mb-4">How RESCO auto-scheduled due dates count days. Manual dates, Done and Not Applicable tasks are never changed.</p>
+  <div class="bg-white rounded-xl border border-gray-200 px-6 py-5">
+    {% if schedule_preview %}
+      <p class="text-sm font-medium text-gray-900">
+        Switch to {% if schedule_preview.target %}working days (Sundays skipped){% else %}calendar days{% endif %}?
+      </p>
+      <p class="text-sm text-gray-700 mt-2" id="schedule-preview-counts">
+        This will recalculate {{ schedule_preview.dates }} system-set date{{ schedule_preview.dates|pluralize }} on {{ schedule_preview.sites }} site{{ schedule_preview.sites|pluralize }}.
+      </p>
+      <div class="mt-4 flex gap-3 justify-end">
+        <a href="{% url 'admin_master_switches' %}"
+           class="px-4 py-2 rounded-lg text-sm font-medium text-gray-700 border border-gray-200">Cancel</a>
+        <form method="post">
+          {% csrf_token %}
+          <input type="hidden" name="schedule_action" value="confirm">
+          <input type="hidden" name="schedule_skip_sundays" value="{% if schedule_preview.target %}1{% else %}0{% endif %}">
+          <button type="submit" class="px-4 py-2 rounded-lg text-sm font-medium text-white" style="background:#1a7a4a;">
+            Confirm and recalculate
+          </button>
+        </form>
+      </div>
+    {% else %}
+      <div class="flex items-center justify-between">
+        <div class="flex items-start gap-3">
+          <div class="mt-0.5 w-8 h-8 rounded-lg flex items-center justify-center bg-teal-50">
+            <i data-lucide="calendar-days" class="w-4 h-4 text-teal-600"></i>
+          </div>
+          <div>
+            <p class="text-sm font-medium text-gray-900">
+              Now: {% if settings.schedule_skip_sundays %}working days (Sundays skipped){% else %}calendar days{% endif %}
+            </p>
+            <p class="text-xs text-gray-500 mt-0.5">You will see how many dates change before anything is saved.</p>
+          </div>
+        </div>
+        <form method="post">
+          {% csrf_token %}
+          <input type="hidden" name="schedule_action" value="preview">
+          <input type="hidden" name="schedule_skip_sundays" value="{% if settings.schedule_skip_sundays %}0{% else %}1{% endif %}">
+          <button type="submit" class="px-4 py-2 rounded-lg text-sm font-medium text-gray-700 border border-gray-200">
+            Switch to {% if settings.schedule_skip_sundays %}calendar days{% else %}working days{% endif %}…
+          </button>
+        </form>
+      </div>
+    {% endif %}
+  </div>
 </div>
 {% endblock %}

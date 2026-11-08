@@ -77,7 +77,10 @@ from .payments import ceo_payment_strip, payment_counts
 from .task_health import OPEN_STATUSES, days_overdue, is_overdue, overdue_q
 # SCHED-1: the single writer of Task.due_date. Every due-date write in this module goes
 # through it so the date carries its source (manual/system) and one log row.
-from .scheduling import set_task_due_date
+from .scheduling import (
+    eligible_sites as schedule_eligible_sites, schedule_site, schedule_site_safely,
+    set_task_due_date, status_change_reschedules, task_is_schedule_anchor, task_is_scheduled,
+)
 # Closeout step 2 (CL-1): the approval closure, called by both approval paths below.
 # Closeout 7b: PP-2's guard on those same paths, and the punch point reads behind the
 # task card, the task-row badge and the PM / SE dashboard lists (PP-6).
@@ -3875,6 +3878,14 @@ def project_field_edit(request, project_id):
                         f"Edited project fields: {', '.join(changed)}",
                         entity_type='Project', entity_id=project.pk,
                     )
+                # SCHED-2 trigger: DC capacity decides the band, so a change reschedules
+                # the site (or clears its system dates when emptied). Registered inside
+                # the atomic block so it runs only once the edit has committed, and
+                # schedule_site_safely() never raises: a scheduler failure cannot undo
+                # or refuse the capacity edit. Non-RESCO sites return not_eligible at
+                # once, with no write.
+                if ProjectFieldEditLog.DC_CAPACITY_KW in changed:
+                    transaction.on_commit(lambda: schedule_site_safely(project, profile))
             if changed:
                 messages.success(request, f"Updated {len(changed)} field{'' if len(changed) == 1 else 's'}.")
             else:
@@ -6783,6 +6794,12 @@ def _apply_task_status_change(task, new_status, profile, request, project):
         set_task_due_date(task, _parsed_due, Task.DUE_DATE_MANUAL, profile,
                           note='Set when moving to In Progress')
         task.save(update_fields=['due_date', 'due_date_source'])
+        # SCHED-2 trigger: the Civil task's due date is the site's schedule anchor, so
+        # setting it here reschedules the site. After commit (the date is saved above,
+        # and inside task_approve's block the callback waits for its commit), and
+        # schedule_site_safely() never raises, so it cannot undo the date or the start.
+        if task_is_schedule_anchor(task):
+            transaction.on_commit(lambda: schedule_site_safely(project, profile))
 
     # Server-side guard: In Progress requires a due date
     if new_status == Task.IN_PROGRESS and not task.due_date:
@@ -6819,6 +6836,13 @@ def _apply_task_status_change(task, new_status, profile, request, project):
                 # only task path that collects any free text at all.
                 remark=block_issue_title,
             )
+        # SCHED-2 trigger (ruling b): blocking a Done task reopens it, so its schedule
+        # block is no longer finished. AFTER COMMIT, never inside the caller's
+        # transaction: inside task_approve's atomic block it waits for that commit and
+        # is dropped if the approval rolls back, and schedule_site_safely() never
+        # raises, so a scheduler failure cannot undo or refuse this status change.
+        if status_change_reschedules(task, task.status, new_status):
+            transaction.on_commit(lambda: schedule_site_safely(project, profile))
 
         block_severity = request.POST.get('block_issue_severity', Issue.HIGH)
         if block_severity not in dict(Issue.SEVERITY_CHOICES):
@@ -6883,6 +6907,11 @@ def _apply_task_status_change(task, new_status, profile, request, project):
             project, profile, phase_rule_hits, task=task,
             reason=request.POST.get('phase_rule_reason', ''), may_explain=may_explain,
         )
+    # SCHED-2 trigger: a block task reaching or leaving Done reschedules the site (a
+    # block can finish late, or be reopened). After commit for the reason given at the
+    # Blocked branch above; this is the same call for the other branch.
+    if status_change_reschedules(task, task.status, new_status):
+        transaction.on_commit(lambda: schedule_site_safely(project, profile))
     if phase_rule_rows:
         _announce_phase_rule_overrides(request, task.task_name, phase_rule_rows, may_explain)
         # Handed to the row and status-block responders, which print the rule wording
@@ -7956,6 +7985,13 @@ def task_set_not_applicable(request, project_id, task_id):
         entity_type='Task', entity_id=task.pk,
         action_code='task_marked_not_applicable' if marking else 'task_unmarked_not_applicable',
     )
+    # SCHED-2 trigger, BOTH directions (pre-flight item 7 ruling): marking N/A can finish a block or
+    # shrink it to zero days; un-marking puts the task back into the plan. After
+    # commit, and schedule_site_safely() never raises, so a scheduler failure cannot
+    # undo the flag change above (this view runs in autocommit, so the callback runs
+    # now, after the update has committed).
+    if task_is_scheduled(task):
+        transaction.on_commit(lambda: schedule_site_safely(project, profile))
     messages.success(
         request,
         f"'{task.task_name}' marked Not Applicable. It no longer counts toward this "
@@ -8139,6 +8175,9 @@ def task_set_due_date(request, project_id, task_id):
     profile = request.user.profile
     is_pm = _pm_owns_project(request, project)
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
+    # SCHED-2: the date before this request, so the anchor trigger below fires only
+    # when the Civil date really changed (set, moved or cleared).
+    due_before = task.due_date
 
     if not is_pm:
         # Map UserProfile.role to Task.assigned_role (BD → BD / Sales)
@@ -8176,6 +8215,13 @@ def task_set_due_date(request, project_id, task_id):
             set_task_due_date(task, None, Task.DUE_DATE_MANUAL, profile)
             task.save()
             messages.success(request, 'Due date cleared.')
+        # SCHED-2 trigger: the Civil task's due date is the site's schedule anchor; a
+        # change reschedules the site (a cleared date clears its system dates). After
+        # commit, and schedule_site_safely() never raises, so a scheduler failure
+        # cannot undo the saved date. This view runs in autocommit, so the callback
+        # runs as soon as it is registered, after the save above.
+        if task.due_date != due_before and task_is_schedule_anchor(task):
+            transaction.on_commit(lambda: schedule_site_safely(project, profile))
         if _is_hx(request):
             return _render_task_row_hx(request, project, task)
         return redirect('project_overview', project_id=project.project_id)
@@ -8204,6 +8250,12 @@ def task_set_due_date(request, project_id, task_id):
         set_task_due_date(task, None, Task.DUE_DATE_MANUAL, profile)
         task.save()
         messages.success(request, 'Due date cleared.')
+
+    # SCHED-2 trigger, the PM path: same rule and same after-commit call as the role
+    # path above. (The cascade branch never runs on a RESCO site: B18 refuses cascade
+    # scheduling there, so `task.due_date` in memory is the saved date.)
+    if task.due_date != due_before and task_is_schedule_anchor(task):
+        transaction.on_commit(lambda: schedule_site_safely(project, profile))
 
     if _is_hx(request):
         # Swap the edited row; every other task the cascade actually moved is
@@ -15236,8 +15288,65 @@ def payment_request_detail(request, project_id, request_id):
 @login_required
 @role_required(['Admin'])
 def admin_master_switches(request):
-    """Screen 1: Master switches for WhatsApp, email, in-app notifications, maintenance mode, cascade scheduling."""
+    """Screen 1: Master switches for WhatsApp, email, in-app notifications, maintenance
+    mode, cascade scheduling, and the auto-schedule working-day switch. Access: Admin
+    role only (role_required above: these settings change the whole system, so no other
+    role may see or post this screen)."""
     settings = SystemSettings.get()
+
+    # SCHED-2 working-day switch: TWO STEPS, never saved by the main form. The first
+    # POST (schedule_action=preview) only dry-runs every eligible site under the new rule
+    # and shows "This will recalculate N system-set dates on M sites"; the second
+    # (schedule_action=confirm) saves the setting and reschedules each site in its own
+    # transaction (schedule_site apply=True), so one failing site neither blocks the
+    # others nor rolls the setting back. Manual dates, Done and N/A tasks are never
+    # touched (the scheduler's own rules); excluded sites are skipped.
+    schedule_action = request.POST.get('schedule_action', '') if request.method == 'POST' else ''
+    if schedule_action in ('preview', 'confirm'):
+        target = request.POST.get('schedule_skip_sundays') == '1'
+        if target == settings.schedule_skip_sundays:
+            messages.info(request, 'The working-day setting is already that way. Nothing changed.')
+            return redirect('admin_master_switches')
+        sites = list(schedule_eligible_sites())
+        if schedule_action == 'preview':
+            dates = changed_sites = 0
+            for site in sites:
+                result = schedule_site(site, apply=False, skip_sundays=target)
+                # Due dates, Civil planned starts and clears all count as dates changed.
+                if result.changes:
+                    dates += result.changes
+                    changed_sites += 1
+            return render(request, 'projects/admin/master_switches.html', {
+                'settings': settings,
+                'schedule_preview': {'target': target, 'dates': dates, 'sites': changed_sites},
+            })
+        actor = request.user.profile
+        settings.schedule_skip_sundays = target
+        settings.save(update_fields=['schedule_skip_sundays'])
+        rule = 'working days (Sundays skipped)' if target else 'calendar days'
+        log_activity(project=None, actor=actor,
+                     action=f"Auto-schedule working-day switch set to {rule}",
+                     entity_type='System', entity_id=None)
+        changed = touched = failed = 0
+        for site in sites:
+            try:
+                result = schedule_site(site, actor=actor, apply=True)
+            except Exception:
+                logger.exception('Auto-schedule failed for site %s during the working-day '
+                                 'switch', site.project_id)
+                failed += 1
+                continue
+            site_changes = result.written + result.started + result.cleared
+            changed += site_changes
+            touched += 1 if site_changes else 0
+        dates = changed
+        messages.success(request, f'Auto-schedule now uses {rule}. Recalculated '
+                                  f'{dates} system-set date{"" if dates == 1 else "s"} on '
+                                  f'{touched} site{"" if touched == 1 else "s"}.')
+        if failed:
+            messages.warning(request, f'{failed} site(s) could not be rescheduled; see the '
+                                      f'server log. Run schedule_sites --all --apply to retry.')
+        return redirect('admin_master_switches')
 
     FIELD_LABELS = {
         'whatsapp_enabled':             'WhatsApp notifications (Interakt)',

@@ -3,7 +3,7 @@ import re
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
 from django.db.models.functions import Floor, Length, Lower
-from django.db.models.lookups import GreaterThanOrEqual
+from django.db.models.lookups import Exact, GreaterThanOrEqual
 from django.contrib.auth.models import User
 from django.utils import timezone
 
@@ -150,6 +150,13 @@ class Project(models.Model):
         default=False, db_index=True,
         help_text="Test or demo data. Hidden from the CEO dashboard.",
     )
+
+    # SCHED-2 ruling a (as amended). A site the per-capacity table does not fit (UKRU001:
+    # one 900 kWp site split over 11 locations) is left to its PM entirely. The scheduler
+    # returns 'excluded', writes nothing, and clears the system dates it set before the
+    # flag was ticked, so no stale auto date is left looking planned. Django admin only;
+    # never set by a migration.
+    exclude_from_auto_schedule = models.BooleanField(default=False)  # True = no auto dates on this site; existing system dates are cleared
 
     class Meta:
         ordering = ['-created_at']
@@ -2841,6 +2848,13 @@ class SystemSettings(models.Model):
         default=3,
         help_text="Minimum visual bar width (days) for external/third-party Gantt tasks so they don't render too thin.",
     )
+    # SCHED-2. False = calendar days (the Day-3 lock). Changed ONLY from the Admin portal's
+    # settings screen, which recalculates every site's system dates in the same action;
+    # read-only in Django admin, where a flip would leave existing dates on the old rule.
+    schedule_skip_sundays         = models.BooleanField(
+        default=False,
+        help_text="When True, the RESCO auto-schedule counts working days and skips Sundays.",
+    )
 
     class Meta:
         verbose_name        = 'System Settings'
@@ -3932,6 +3946,108 @@ class TaskTemplateTask(models.Model):
         # R-7: content of an active or archived version is immutable.
         _require_draft_template(self.phase.template, f"task '{self.label}'")
         return super().delete(*args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# SCHED-2 — the duration table the RESCO auto-schedule reads.
+#
+# A block is a run of template tasks that share one planned start and one due date;
+# its length depends on the site's DC capacity band. The scheduler
+# (scheduling.schedule_site) walks a template's active blocks in `sequence` order.
+#
+# DATA, NOT CODE, ON PURPOSE (spec Layer 2): when the PMs give numbers for a task in no
+# block today (RMS, the generation meter, Net Meter Installation), it is a row added
+# here, not a release. Deliberately NOT under R-7's draft-only rule: these rows are a
+# planning table read at schedule time, never copied onto a project, so editing one
+# changes future runs and nothing already built from the template.
+# ---------------------------------------------------------------------------
+
+def _half_day_multiple(field):
+    """CHECK condition: `field` is a whole number of half days.
+
+    x + x = FLOOR(x + x) rather than x * 2: a DecimalField times an integer literal is
+    a mixed-type expression Django refuses without an output_field, while a decimal plus
+    itself stays a decimal. FLOOR works on SQLite (the test database) and Postgres alike,
+    as in material_line_count_unit_whole.
+    """
+    doubled = models.F(field) + models.F(field)
+    return models.Q(**{f'{field}__gte': 0}) & models.Q(Exact(doubled, Floor(doubled)))
+
+
+# The three per-band length columns, read by the CHECKs below, clean() and the scheduler.
+SCHEDULE_DURATION_FIELDS = ('days_le_50', 'days_51_100', 'days_101_plus')
+
+
+class ScheduleBlock(models.Model):
+    """One step of a template's auto-schedule, with its length per capacity band.
+
+    Lengths are days in steps of 0.5; the scheduler converts them to integer half-day
+    units and never uses floats (spec Layer 5). A block whose tasks are all Not
+    Applicable on a site takes zero days there.
+    """
+
+    template      = models.ForeignKey(
+        TaskTemplate,
+        on_delete=models.CASCADE,  # The blocks are the template's own configuration, like its phases: they go with it
+        related_name='schedule_blocks',
+    )
+    sequence      = models.PositiveIntegerField()  # Order the blocks run in on a site; unique per template
+    name          = models.CharField(max_length=100)
+    days_le_50    = models.DecimalField(max_digits=4, decimal_places=1)  # Days for DC kWp <= 50
+    days_51_100   = models.DecimalField(max_digits=4, decimal_places=1)  # Days for 50 < DC kWp <= 100
+    days_101_plus = models.DecimalField(max_digits=4, decimal_places=1)  # Days for DC kWp > 100
+    is_active     = models.BooleanField(default=True)  # Inactive = skipped by the scheduler; its tasks count as in no block
+
+    class Meta:
+        ordering = ['template', 'sequence']
+        constraints = [
+            models.UniqueConstraint(fields=['template', 'sequence'],
+                                    name='uniq_schedule_block_sequence'),
+            *[models.CheckConstraint(condition=_half_day_multiple(f),
+                                     name=f'schedule_block_{f}_half_days')
+              for f in SCHEDULE_DURATION_FIELDS],
+        ]
+
+    def __str__(self):
+        return f'{self.sequence}. {self.name}'
+
+    def clean(self):
+        """Same rule as the CHECK constraints, said in words on the admin form."""
+        errors = {}
+        for field in SCHEDULE_DURATION_FIELDS:
+            value = getattr(self, field)
+            if value is None:
+                continue
+            if value < 0 or (value * 2) != (value * 2).to_integral_value():
+                errors[field] = 'Use a whole or half number of days (0, 0.5, 1, 1.5, ...).'
+        if errors:
+            raise ValidationError(errors)
+
+
+class ScheduleBlockTask(models.Model):
+    """Puts one template task in one block. A task is in at most one block anywhere,
+    which the one-to-one enforces: two blocks would give it two due dates."""
+
+    block         = models.ForeignKey(ScheduleBlock, on_delete=models.CASCADE, related_name='block_tasks')
+    template_task = models.OneToOneField(
+        TaskTemplateTask,
+        on_delete=models.RESTRICT,  # A scheduled template task cannot be deleted on its own; deleting the whole template (which cascades to this link via its block) still works
+        related_name='schedule_block_task',
+    )
+
+    class Meta:
+        ordering = ['block', 'template_task__sort_order']
+
+    def __str__(self):
+        return f'{self.block} — {self.template_task.code}'
+
+    def clean(self):
+        """The task must come from the block's own template: a block of the OPEX
+        template holding a CAPEX task would schedule nothing and say nothing."""
+        if (self.block_id and self.template_task_id
+                and self.template_task.phase.template_id != self.block.template_id):
+            raise ValidationError({
+                'template_task': 'This task belongs to a different template from the block.'})
 
 
 
