@@ -4277,7 +4277,15 @@ def task_add(request, project_id):
                 # chokepoint, notification and log line as task_assign.
                 assign_task_to(task, cd['assigned_to'], notify=True,
                                actor=request.user.profile, request=request)
-                _log_task_assignment(project, request.user.profile, task, None, cd['assigned_to'])
+                # IN ITS OWN SAVEPOINT. log_activity() swallows a failed INSERT, but
+                # Model.save() has already flagged the enclosing atomic block for
+                # rollback (mark_for_rollback_on_error), so without this the block's
+                # exit silently rolled back the task, its date and its assignment while
+                # the view still reported success (proved by a database-refused INSERT
+                # in tests_sched1_due_date_source). This inner block absorbs that flag:
+                # it rolls back to its savepoint, keeping only the log line out.
+                with transaction.atomic():
+                    _log_task_assignment(project, request.user.profile, task, None, cd['assigned_to'])
             messages.success(request, f"Task '{cd['task_name']}' added successfully.")
             if hx:
                 # New row(s) + updated count swapped OOB into the chosen phase; modal closes.

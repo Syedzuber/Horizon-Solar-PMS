@@ -33,7 +33,7 @@ from unittest.mock import MagicMock, patch
 
 from django.contrib import admin as django_admin
 from django.contrib.auth.models import User
-from django.db import DatabaseError
+from django.db import DatabaseError, connection, transaction
 from django.forms import MultiWidget
 from django.test import Client, TestCase
 from django.urls import reverse
@@ -53,6 +53,55 @@ def _changed_rows(task):
     return list(ActivityLog.objects.filter(entity_type='Task', entity_id=task.pk,
                                            action_code='due_date_changed')
                 .order_by('timestamp', 'pk').values_list('action', flat=True))
+
+
+# Named refusal conditions, as SQL on the inserted row (NEW, identical syntax on
+# Postgres and SQLite). A fixed set because trigger definitions take no bind parameters,
+# so only these known constants are ever interpolated into DDL.
+_REFUSALS = {
+    'due_date_changed': "NEW.action_code = 'due_date_changed'",
+    'task_assigned': "NEW.action_code = 'task_assigned'",
+    # project_field_edit's line carries no action_code; it is matched by its text.
+    'project_fields_edited': "NEW.action LIKE 'Edited project fields%'",
+}
+
+
+def _refuse_log_inserts(test, refusal):
+    """Make the DATABASE refuse every ActivityLog INSERT matching _REFUSALS[refusal].
+
+    A BEFORE INSERT trigger that raises, so the failure is a real failing statement on
+    the connection, not a Python exception from a mock. On Postgres that puts the
+    transaction into the aborted state ("current transaction is aborted, commands
+    ignored until end of transaction block"), which is exactly what a savepoint has to
+    contain. The trigger is DDL inside the test's transaction, so TestCase rolls it
+    back on both backends.
+
+    Asserts the refusal is real before returning: a direct INSERT matching the
+    condition, in its own savepoint, must fail.
+    """
+    condition = _REFUSALS[refusal]
+    table = ActivityLog._meta.db_table
+    name = f'sched1_refuse_log_{refusal}'
+    with connection.cursor() as cursor:
+        if connection.vendor == 'postgresql':
+            cursor.execute(
+                f"CREATE OR REPLACE FUNCTION {name}() RETURNS trigger AS $body$ "
+                f"BEGIN IF {condition} THEN "
+                f"RAISE EXCEPTION 'test trigger: ActivityLog insert refused'; END IF; "
+                f"RETURN NEW; END $body$ LANGUAGE plpgsql")
+            cursor.execute(
+                f"CREATE TRIGGER {name} BEFORE INSERT ON {table} "
+                f"FOR EACH ROW EXECUTE PROCEDURE {name}()")
+        else:
+            cursor.execute(
+                f"CREATE TRIGGER {name} BEFORE INSERT ON {table} WHEN {condition} "
+                f"BEGIN SELECT RAISE(ABORT, 'test trigger: ActivityLog insert refused'); END")
+    probe = {'due_date_changed': dict(action='probe', action_code='due_date_changed'),
+             'task_assigned': dict(action='probe', action_code='task_assigned'),
+             'project_fields_edited': dict(action='Edited project fields: probe')}[refusal]
+    with test.assertRaises(DatabaseError, msg='the trigger did not refuse the INSERT'):
+        with transaction.atomic():
+            ActivityLog.objects.create(**probe)
 
 
 def _expected_recalc_dates(project):
@@ -146,6 +195,22 @@ class SetTaskDueDateUnitTests(rb.ResidentialBaselineBase):
         self.task.refresh_from_db()
         self.assertEqual((self.task.due_date, self.task.due_date_source),
                          (date(2026, 12, 1), MANUAL))
+
+    def test_a_database_refused_log_insert_leaves_the_transaction_usable(self):
+        """The real-failure version of the test above: the database itself refuses the
+        INSERT. Without the savepoint, the save below would fail on Postgres with
+        'current transaction is aborted'."""
+        _refuse_log_inserts(self, 'due_date_changed')
+        with self.assertLogs('projects.scheduling', level='ERROR'):
+            with transaction.atomic():
+                set_task_due_date(self.task, date(2026, 12, 1), MANUAL, self.pm_a)
+                self.task.save()
+                self.assertTrue(Task.objects.filter(pk=self.task.pk,
+                                                    due_date=date(2026, 12, 1)).exists())
+        self.task.refresh_from_db()
+        self.assertEqual((self.task.due_date, self.task.due_date_source),
+                         (date(2026, 12, 1), MANUAL))
+        self.assertEqual(_changed_rows(self.task), [])
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +323,33 @@ class TaskAddTests(rb.ResidentialBaselineBase):
         task = Task.objects.get(task_name='Added undated')
         self.assertEqual((task.due_date, task.due_date_source), (None, None))
         self.assertEqual(_changed_rows(task), [])
+
+    def test_a_database_refused_date_log_does_not_lose_the_task(self):
+        """set_task_due_date()'s log INSERT fails in the database, inside task_add's
+        atomic block. Everything after it in that block (the date save, the assignment,
+        the assignment log) must still run, and the task must be kept."""
+        _refuse_log_inserts(self, 'due_date_changed')
+        with self.assertLogs('projects.scheduling', level='ERROR'):
+            self._add('Added, date log refused', '2026-12-06')
+        task = Task.objects.get(task_name='Added, date log refused')
+        self.assertEqual((task.due_date, task.due_date_source), (date(2026, 12, 6), MANUAL))
+        self.assertEqual(task.assigned_to, self.pm_a)
+        self.assertEqual(_changed_rows(task), [])
+        self.assertTrue(ActivityLog.objects.filter(entity_id=task.pk,
+                                                   action_code='task_assigned').exists())
+
+    def test_a_database_refused_assignment_log_does_not_lose_the_task(self):
+        """task_add's assignment log (_log_task_assignment -> log_activity) fails in the
+        database. It is the last statement in task_add's atomic block, so on Postgres
+        the block's own exit is the next command to meet the aborted transaction."""
+        _refuse_log_inserts(self, 'task_assigned')
+        self._add('Added, assignment log refused', '2026-12-07')
+        task = Task.objects.get(task_name='Added, assignment log refused')
+        self.assertEqual((task.due_date, task.due_date_source), (date(2026, 12, 7), MANUAL))
+        self.assertEqual(task.assigned_to, self.pm_a)
+        self.assertEqual(len(_changed_rows(task)), 1)
+        self.assertFalse(ActivityLog.objects.filter(entity_id=task.pk,
+                                                    action_code='task_assigned').exists())
 
     def test_a_failure_setting_the_date_leaves_no_undated_task(self):
         """The create and the date-set share task_add's atomic block (condition on the

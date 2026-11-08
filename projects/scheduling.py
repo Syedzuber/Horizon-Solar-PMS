@@ -81,10 +81,13 @@ def set_task_due_date(task, new_date, source, actor, note=None, log=True):
 def _log_manual_change(task, old_date, new_date, actor, note):
     """Write the one `due_date_changed` row, in its own savepoint.
 
-    Not log_activity(): that swallows its own exception, so an INSERT failing inside a
-    caller's atomic block would leave the transaction broken on Postgres and the
-    caller's next query would fail. Here the savepoint is rolled back first and the
-    failure is logged, so a failed log row can never abort the date change (ruling A).
+    Not log_activity(): that swallows its own exception, but Model.save() has already
+    flagged the caller's atomic block for rollback (mark_for_rollback_on_error), so the
+    block's exit would silently roll back the caller's work, and on Postgres every query
+    before that exit fails with "current transaction is aborted". Here the exception
+    leaves this savepoint, which rolls back to it and clears the flag, and the failure
+    is logged, so a failed log row can never abort the date change (ruling A). Proved
+    against a database-refused INSERT in tests_sched1_due_date_source.
     """
     verb = 'Updated' if new_date is not None else 'Cleared'
     text = (f'{verb} due date for task: {task.task_name} '

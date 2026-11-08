@@ -2495,18 +2495,39 @@ def log_activity(project, actor, action, entity_type='', entity_id=None, action_
     action_code is an optional stable machine-readable event key. Most existing
     call sites leave it blank; supply it only where a consumer (e.g. the EOD
     digest) needs to filter on the event type instead of string-matching `action`.
+
+    SAFE INSIDE ANY TRANSACTION. Swallowing the exception was never enough on its own:
+    a failed save() has already flagged the caller's atomic block for rollback
+    (Model.save_base -> transaction.mark_for_rollback_on_error), so the block's exit
+    silently rolled back the caller's real work while the view reported success, and
+    on Postgres every query before that exit failed with "current transaction is
+    aborted". The INSERT now runs in its own savepoint: the exception leaves that inner
+    block, which rolls back to it and clears the flag, and only the log row is lost.
+    Proved against a database-refused INSERT in tests_log_activity_safety. Outside any
+    transaction the inner block is simply the INSERT's own transaction.
+
+    Every string is cut to its column's max_length first, because on Postgres an
+    over-long value is a refused INSERT, not a truncation, and an over-long `action`
+    (a long task or site name in an f-string) is the likeliest way to cause one.
     """
     try:
         # import inside function to avoid circular import at module level
         from projects.models import ActivityLog
-        ActivityLog.objects.create(
-            project=project,
-            actor=actor,
-            action=action,
-            entity_type=entity_type,
-            entity_id=entity_id,
-            action_code=action_code,
-        )
+        values = {'action': action, 'entity_type': entity_type, 'action_code': action_code}
+        for name, value in values.items():
+            limit = ActivityLog._meta.get_field(name).max_length
+            if isinstance(value, str) and len(value) > limit:
+                # The sentence gets a visible ellipsis so a reader knows it was cut;
+                # the two keys are cut plain (they are fixed short constants, so this
+                # only ever fires on a caller's bug).
+                values[name] = value[:limit - 1] + '…' if name == 'action' else value[:limit]
+        with transaction.atomic():
+            ActivityLog.objects.create(
+                project=project,
+                actor=actor,
+                entity_id=entity_id,
+                **values,
+            )
     except Exception as e:
         import logging
         logging.getLogger(__name__).error(f"ActivityLog failed: {e}")

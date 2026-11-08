@@ -78,7 +78,7 @@ from .models import (
     BOQ, BOQItem, BOQItemMaster, BOQRevision, Checklist, ChecklistItem,
     ChecklistItemCompletion, ChecklistTaskLink, DCLineItem, DeliveryChallan, Issue,
     PaymentMilestone, PaymentRequest, Project, ProjectDocument, SystemSettings, Task,
-    UserProfile, Vendor, VendorOrder,
+    UserProfile, Vendor, VendorOrder, get_standard_boq_items,
 )
 from .utils import (
     INVOICE_TASK_NAMES, RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL,
@@ -160,15 +160,21 @@ class ResidentialBaselineBase(TestCase):
         # -- Residential BOQ catalogue. Migrations are disabled under test_settings, so
         #    the data migration that seeds the 37 production rows never runs and
         #    get_standard_boq_items() would raise RuntimeError on an empty catalogue.
-        #    Three rows are enough to exercise seed → author → submit for real. --
+        #    Three rows are enough to exercise seed → author → submit for real.
+        #    update_or_create ON CODE, not create: on a migrated Postgres test database
+        #    (real settings) migrations 0047/0057 have already seeded ITM-001..037, and
+        #    a plain create collides on the unique code. Under test_settings the
+        #    catalogue is empty, so this still creates exactly these three rows. On
+        #    Postgres the other 34 seeded rows remain alongside them. --
         for order, (code, desc, cat, unit) in enumerate([
             ('ITM-001', 'Solar Module 540Wp',      'Solar Modules', 'Nos'),
             ('ITM-002', 'Module Mounting Structure', 'Structure',   'Nos'),
             ('ITM-003', 'String Inverter 5kW',     'Inverter',      'Nos'),
         ], start=1):
-            BOQItemMaster.objects.create(
-                code=code, description=desc, category=cat, unit=unit,
-                project_type='Residential', is_active=True, sort_order=order,
+            BOQItemMaster.objects.update_or_create(
+                code=code,
+                defaults=dict(description=desc, category=cat, unit=unit,
+                              project_type='Residential', is_active=True, sort_order=order),
             )
 
         self.project_a = self._make_and_activate(
@@ -505,10 +511,16 @@ class BOQWorkflowTests(ResidentialBaselineBase):
         self.assertEqual(response.status_code, 200)
         boq = BOQ.objects.get(project=self.project_a)
         self.assertEqual(boq.status, 'Draft')
-        self.assertEqual(boq.items.count(), 3)
+        # Against the real catalogue, not a literal 3: under test_settings the catalogue
+        # is the fixture's three rows, but on a migrated Postgres test DB migrations
+        # 0047/0057 have seeded all 37 Residential rows. One BOQ line per catalogue row
+        # is the rule either way.
+        catalogue = get_standard_boq_items()
+        self.assertEqual(boq.items.count(), len(catalogue))
         # serial_no comes from the catalogue's sort_order, not row position.
         self.assertEqual(list(boq.items.order_by('serial_no')
-                              .values_list('serial_no', flat=True)), [1, 2, 3])
+                              .values_list('serial_no', flat=True)),
+                         sorted(row['serial_no'] for row in catalogue))
 
     def _author(self, client, project, action='save_design', qty='12'):
         """Drive the Design authoring POST on boq_detail — the path the UI uses.
@@ -530,7 +542,9 @@ class BOQWorkflowTests(ResidentialBaselineBase):
 
         self._author(client, self.project_a, 'save_design')
         boq.refresh_from_db()
-        self.assertEqual(boq.items.filter(boq_quantity=Decimal('12.00')).count(), 3)
+        # Every line authored: the real catalogue's count (see the test above).
+        self.assertEqual(boq.items.filter(boq_quantity=Decimal('12.00')).count(),
+                         len(get_standard_boq_items()))
         self.assertEqual(boq.status, 'Draft')
 
         response = self._author(client, self.project_a, 'submit_design')

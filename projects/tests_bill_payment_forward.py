@@ -740,9 +740,13 @@ class PoPiActionPinTests(QueueFixture):
     #: (queries, status, Location, messages), measured on HEAD 2c82561 before any 5b
     #: edit. {order} is the Residential order's page; a keyed GET's key is random, so
     #: only its prefix is compared.
+    #: +2 on every action that writes an ActivityLog line (approve_full, approve_partial,
+    #: hold, reject_held, respond, queue_hold, add_payment, mark_paid): log_activity()
+    #: now writes its row inside its own savepoint, one SAVEPOINT and one RELEASE around
+    #: the INSERT (tests_log_activity_safety). Behaviour, status and messages unchanged.
     MEASURED_ON_HEAD = {
-        'approve_full':      (17, 302, '{order}', ['Payment request of ₹20000.00 approved.']),
-        'approve_partial':   (17, 302, '{order}',
+        'approve_full':      (19, 302, '{order}', ['Payment request of ₹20000.00 approved.']),
+        'approve_partial':   (19, 302, '{order}',
                               ['Payment request of ₹20000.00 approved for ₹15000.00.']),
         'approve_no_reason': (7, 302, '{order}',
                               ['Approving ₹15000.00 of the ₹20000.00 requested needs a '
@@ -753,26 +757,26 @@ class PoPiActionPinTests(QueueFixture):
                                 'approved. Nothing was changed.']),
         'approve_get':       (7, 302, '{order}', []),
         'approve_no_flag':   (7, 403, '', []),
-        'hold':              (16, 302, '{order}',
+        'hold':              (18, 302, '{order}',
                               ['Payment request held. SCM has been asked to respond.']),
         'hold_no_reason':    (7, 302, '{order}',
                               ['A hold must say why — the reason is what SCM answers.']),
         'reject_pending':    (10, 302, '{order}',
                               ['This payment request is now "Awaiting approval", and that '
                                'action is no longer available on it.']),
-        'reject_held':       (15, 302, '{order}', ['Payment request rejected.']),
-        'respond':           (18, 302, '{order}',
+        'reject_held':       (17, 302, '{order}', ['Payment request rejected.']),
+        'respond':           (20, 302, '{order}',
                               ['Response recorded. The request is back with the approver.']),
         'respond_approver':  (7, 403, '', []),
-        'queue_hold':        (16, 302, '/payments/?tab=Residential&status=on_hold',
+        'queue_hold':        (18, 302, '/payments/?tab=Residential&status=on_hold',
                               ['Payment request held. SCM has been asked to respond.']),
-        'add_payment':       (15, 302, '{order}',
+        'add_payment':       (17, 302, '{order}',
                               ['Payment of ₹1000 requested against order PO-RES-1.']),
         'add_payment_over':  (13, 400, '',
                               ['The payment (₹80000) is more than the balance still '
                                'available to request (₹70000.00).']),
         'add_payment_get':   (6, 302, '{order}payments/new/?key=', []),
-        'mark_paid':         (11, 302, '/payments/?tab=OPEX',
+        'mark_paid':         (13, 302, '/payments/?tab=OPEX',
                               ['Payment of ₹20000.00 to Kiran Cables marked paid.']),
         'order_page':        (14, 200, '', []),  # AF-2b: back-link permission check (can_open_order_list)
     }
