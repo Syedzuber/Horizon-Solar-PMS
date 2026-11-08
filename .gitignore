@@ -19,3 +19,5 @@ docs/QA QC Check List_Final/
 
 # Session scratch files (prompts say "scratch files go in .scratch/"): never committed.
 .scratch/
+
+*.dump
