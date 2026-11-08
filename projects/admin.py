@@ -1,6 +1,7 @@
 from django import forms
 from django.contrib import admin, messages
 from django.contrib.admin import helpers
+from django.contrib.admin.widgets import AdminDateWidget
 from django.template.response import TemplateResponse
 from django.utils import timezone
 from .models import (
@@ -25,6 +26,7 @@ from .forms import check_typed_date
 from .attendance import VOID_NOTE_REQUIRED, AttendanceRefused, void_attendance
 from .permissions import qaqc_engineer_assignment_refusal, user_can_void_attendance_any_day
 from .utils import assign_task_to
+from .scheduling import set_task_due_date
 
 
 class MilestoneInline(admin.TabularInline):
@@ -243,11 +245,30 @@ class TaskAdminForm(forms.ModelForm):
     would refuse the save that corrects a bad row. A row that already holds a bad
     date still opens here, and saves once its date is corrected or cleared. It does
     not save with the bad date left in place, whatever else was edited.
+
+    DUE_DATE IS A DECLARED FIELD, EXCLUDED FROM THE MODEL FIELDS (SCHED-1). A model
+    field would be copied onto the instance during validation, and the admin save
+    would then write it straight to the column with no source and no log row. Excluded,
+    the form only carries the typed value, and TaskAdmin.save_model() writes it through
+    set_task_due_date(), the single writer of Task.due_date.
     """
+
+    # The admin's own date widget, set by hand: a declared field does not pass through
+    # ModelAdmin.formfield_for_dbfield(), which is what gives model DateFields theirs.
+    due_date = forms.DateField(required=False, label='Due date',
+                               widget=AdminDateWidget)
 
     class Meta:
         model = Task
         fields = '__all__'
+        exclude = ['due_date']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # model_to_dict() skipped due_date with the exclude, so seed the initial value
+        # by hand: the change form shows the stored date, and changed_data compares
+        # against it (TaskAdmin.save_model writes only when it differs).
+        self.initial.setdefault('due_date', self.instance.due_date)
 
     def clean_due_date(self):
         value = self.cleaned_data.get('due_date')
@@ -314,7 +335,25 @@ class TaskAdmin(admin.ModelAdmin):
     # On the ADD form Django omits readonly fields entirely, so a new task takes the model
     # defaults — Task.NOT_STARTED ('Not Started') and is_mirror=False, the same values
     # each would have had.
-    readonly_fields = ['status', 'is_mirror']
+    #
+    # `due_date_source` and `schedule_start` (SCHED-1). The source records who set the
+    # date and is written only by set_task_due_date(); typing it here would let a person
+    # mark their own date `system`, and the SCHED-2 scheduler would then overwrite it.
+    # An admin date edit marks it manual through save_model() below. `schedule_start`
+    # is written only by the scheduler (spec Layer 2).
+    readonly_fields = ['status', 'is_mirror', 'due_date_source', 'schedule_start']
+
+    def get_fields(self, request, obj=None):
+        """Put due_date (and its source) back where the model declares it.
+
+        TaskAdminForm declares due_date as a form-only field, which Django appends after
+        the model fields; without this the date would jump to the bottom of the form.
+        """
+        fields = [f for f in super().get_fields(request, obj)
+                  if f not in ('due_date', 'due_date_source')]
+        at = fields.index('duration_days') + 1 if 'duration_days' in fields else len(fields)
+        fields[at:at] = ['due_date', 'due_date_source']
+        return fields
 
     def has_delete_permission(self, request, obj=None):
         """A Task is never deleted from the admin. There is no soft delete to fall
@@ -372,16 +411,40 @@ class TaskAdmin(admin.ModelAdmin):
         write; this is an explicit, admin-only interception of one field.
 
         notify is False: the admin sends nothing today and must keep doing so.
-        """
-        if 'assigned_to' not in form.changed_data:
-            super().save_model(request, obj, form, change)
-            return
 
-        new_assignee = obj.assigned_to
-        # On add there is no previous value; on change, form.initial holds the pk.
-        obj.assigned_to_id = form.initial.get('assigned_to') if change else None
+        DUE DATE (SCHED-1), the same kind of interception for Task.due_date: an edited
+        date is written through set_task_due_date(), the single writer, so it is marked
+        manual and logs one 'due_date_changed' row. Only when the date changed; an edit
+        that leaves it alone keeps its source. TaskAdminForm keeps due_date off the
+        instance (see its docstring), so obj.due_date still holds the stored value here
+        and the function sees the true old date. On ADD the row is saved undated first,
+        because the log row needs its pk, then dated; ModelAdmin.changeform_view runs
+        the whole save in one transaction, so a failure setting the date leaves no
+        undated task behind.
+        """
+        assignee_changed = 'assigned_to' in form.changed_data
+        date_changed = 'due_date' in form.changed_data
+        if assignee_changed:
+            new_assignee = obj.assigned_to
+            # On add there is no previous value; on change, form.initial holds the pk.
+            obj.assigned_to_id = form.initial.get('assigned_to') if change else None
+        if date_changed:
+            typed = form.cleaned_data.get('due_date')
+            # A bare superuser may have no UserProfile; the row then logs with no
+            # actor rather than failing the save.
+            actor = getattr(request.user, 'profile', None)
+            if change:
+                set_task_due_date(obj, typed, Task.DUE_DATE_MANUAL, actor,
+                                  note='Set in Django admin')
+
         super().save_model(request, obj, form, change)
-        assign_task_to(obj, new_assignee, notify=False)
+
+        if date_changed and not change:
+            set_task_due_date(obj, typed, Task.DUE_DATE_MANUAL, actor,
+                              note='Set in Django admin')
+            obj.save(update_fields=['due_date', 'due_date_source'])
+        if assignee_changed:
+            assign_task_to(obj, new_assignee, notify=False)
 
 
 @admin.register(Milestone)

@@ -75,6 +75,9 @@ from .payments import ceo_payment_strip, payment_counts
 # The one overdue rule. Every overdue count, list and flag in this module takes it from
 # here and adds only its own scope (type, mirror, assignee, project).
 from .task_health import OPEN_STATUSES, days_overdue, is_overdue, overdue_q
+# SCHED-1: the single writer of Task.due_date. Every due-date write in this module goes
+# through it so the date carries its source (manual/system) and one log row.
+from .scheduling import set_task_due_date
 # Closeout step 2 (CL-1): the approval closure, called by both approval paths below.
 # Closeout 7b: PP-2's guard on those same paths, and the punch point reads behind the
 # task card, the task-row badge and the PM / SE dashboard lists (PP-6).
@@ -4261,8 +4264,15 @@ def task_add(request, project_id):
                     task_name=cd['task_name'],
                     task_order=last_order + 1,
                     assigned_role=cd['assigned_role'],
-                    due_date=cd['due_date'],
                 )
+                # CREATE, THEN DATE (SCHED-1): the date goes through set_task_due_date()
+                # so it is marked manual and logged, and the log row needs the pk the
+                # create just gave. Both steps sit in this one atomic block, so a failure
+                # setting the date leaves no undated task behind.
+                if cd['due_date']:
+                    set_task_due_date(task, cd['due_date'], Task.DUE_DATE_MANUAL,
+                                      request.user.profile)
+                    task.save(update_fields=['due_date', 'due_date_source'])
                 # Created assigned: an unassigned task can never change status. Same
                 # chokepoint, notification and log line as task_assign.
                 assign_task_to(task, cd['assigned_to'], notify=True,
@@ -4601,12 +4611,20 @@ def task_duplicate_locations_create(request, project_id, task_id):
                 assigned_role=source.assigned_role,
                 task_type=source.task_type,
                 duration_days=source.duration_days,
-                # None when the source's date failed the range check above.
-                due_date=copied_due_date,
                 # Set explicitly, whatever the source holds: a copy is ordinary work.
                 is_mirror=False,
                 is_payment_milestone=False,
             ))
+            # CREATE, THEN DATE (SCHED-1), inside this same atomic block so a failure
+            # setting the date rolls the copy back with it. The copied date is MANUAL
+            # even when the source's is system: the PM chose to make these tasks, and a
+            # system mark would let the scheduler move a date it never computed for this
+            # row (spec Layer 5). copied_due_date is None when the source's date failed
+            # the range check above, and the copy is then left undated.
+            if copied_due_date:
+                set_task_due_date(created[-1], copied_due_date, Task.DUE_DATE_MANUAL,
+                                  request.user.profile, note=f'Copied from task #{source.pk}')
+                created[-1].save(update_fields=['due_date', 'due_date_source'])
         for index, task in enumerate(created):
             assign_task_to(task, assignee, notify=(index == 0),
                            actor=request.user.profile, request=request)
@@ -6748,8 +6766,15 @@ def _apply_task_status_change(task, new_status, profile, request, project):
             # below, which told the user to set the date they had just set.
             messages.error(request, _due_error)
             return _TASK_STATUS_REFUSED
-        Task.objects.filter(pk=task.pk).update(due_date=_parsed_due)
-        task.due_date = _parsed_due
+        # SCHED-1: through the single writer, so the date is marked manual and logged.
+        # save(update_fields=...) issues the same single-row UPDATE of just these
+        # columns that the queryset update() here used to, and keeps the in-memory row
+        # in step for the guard below. Same race as before: two people starting the
+        # same task at once both write a date and the second one stands; the guard
+        # `not task.due_date` above was read from this request's own row.
+        set_task_due_date(task, _parsed_due, Task.DUE_DATE_MANUAL, profile,
+                          note='Set when moving to In Progress')
+        task.save(update_fields=['due_date', 'due_date_source'])
 
     # Server-side guard: In Progress requires a due date
     if new_status == Task.IN_PROGRESS and not task.due_date:
@@ -8127,21 +8152,21 @@ def task_set_due_date(request, project_id, task_id):
                 return _render_task_row_hx(request, project, task)
             return redirect('project_overview', project_id=project.project_id)
 
-        # Non-PM: save this task's date only, no cascade ripple
+        # Non-PM: save this task's date only, no cascade ripple.
+        # SCHED-1: set_task_due_date() marks the date manual and writes the one
+        # 'due_date_changed' row (ruling A), so no log_activity() line here.
         date_str = request.POST.get('due_date', '').strip()
         if date_str:
             new_date, date_error = check_typed_date(date_str)
             if date_error:
                 messages.error(request, date_error)
             else:
-                task.due_date = new_date
+                set_task_due_date(task, new_date, Task.DUE_DATE_MANUAL, profile)
                 task.save()
-                log_activity(project, profile, f"Updated due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
                 messages.success(request, 'Due date updated.')
         else:
-            task.due_date = None
+            set_task_due_date(task, None, Task.DUE_DATE_MANUAL, profile)
             task.save()
-            log_activity(project, profile, f"Cleared due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
             messages.success(request, 'Due date cleared.')
         if _is_hx(request):
             return _render_task_row_hx(request, project, task)
@@ -8157,19 +8182,20 @@ def task_set_due_date(request, project_id, task_id):
         if date_error:
             messages.error(request, date_error)
         else:
+            # SCHED-1: both branches log through set_task_due_date() (ruling A) — the
+            # cascade logs its starting task as a manual change (ruling B) — so the
+            # log_activity() line that used to follow is gone.
             if project.cascade_scheduling:
                 count, changed_tasks = recalculate_from_task(project, task, new_date, user=request.user)
                 messages.success(request, f'Due date updated. {count} task(s) recalculated.')
             else:
-                task.due_date = new_date
+                set_task_due_date(task, new_date, Task.DUE_DATE_MANUAL, profile)
                 task.save()
                 messages.success(request, 'Due date updated.')
-            log_activity(project, profile, f"Updated due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
     else:
-        task.due_date = None
+        set_task_due_date(task, None, Task.DUE_DATE_MANUAL, profile)
         task.save()
         messages.success(request, 'Due date cleared.')
-        log_activity(project, profile, f"Updated due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
 
     if _is_hx(request):
         # Swap the edited row; every other task the cascade actually moved is

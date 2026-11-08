@@ -418,6 +418,17 @@ class Task(models.Model):
         (EXTERNAL, 'External'),
     ]
 
+    # Who set due_date (SCHED-1). The SCHED-2 scheduler rewrites only 'system' dates;
+    # a 'manual' date belongs to the person who typed it and is never moved by the
+    # system. Written only by scheduling.set_task_due_date().
+    DUE_DATE_MANUAL = 'manual'
+    DUE_DATE_SYSTEM = 'system'
+
+    DUE_DATE_SOURCE_CHOICES = [
+        (DUE_DATE_MANUAL, 'Manual'),
+        (DUE_DATE_SYSTEM, 'System'),
+    ]
+
     phase                = models.ForeignKey(ProjectPhase, related_name='tasks', on_delete=models.CASCADE)
     task_name            = models.CharField(max_length=200)
     task_order           = models.PositiveIntegerField()  # Ascending within phase; drives due-date chain
@@ -433,6 +444,12 @@ class Task(models.Model):
     task_type            = models.CharField(max_length=10, choices=TYPE_CHOICES, default=INTERNAL)
     duration_days        = models.PositiveIntegerField(default=1)  # Calendar days used in due-date chain calculation
     due_date             = models.DateField(blank=True, null=True)
+    # Null while due_date is null. A date with a null source is a row written outside
+    # set_task_due_date() (the demo seed, ruling D); the scheduler treats it as
+    # untouchable, exactly like 'manual'. No CHECK constraint ties the two together
+    # for that reason: the seed would violate it.
+    due_date_source      = models.CharField(max_length=10, choices=DUE_DATE_SOURCE_CHOICES, null=True, blank=True)
+    schedule_start       = models.DateField(blank=True, null=True)  # Planned start, written only by the SCHED-2 scheduler; feeds the Gantt, never shown as a commitment
     completed_at         = models.DateTimeField(blank=True, null=True)  # Set when status transitions to Done
     blocked_since        = models.DateTimeField(blank=True, null=True)  # Set when status transitions TO 'Blocked'; cleared on un-block so re-blocks re-age from zero
     is_payment_milestone = models.BooleanField(default=False)  # When marked Done, triggers payment_notification to Finance

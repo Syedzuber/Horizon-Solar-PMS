@@ -829,6 +829,10 @@ def recalculate_from_task(project, anchor_task, new_date, user=None):
     """
     # import inside function to avoid circular import at module level
     from .models import Task, DueDateChangeLog
+    # Lazy for the same reason: utils keeps every models import inside its functions
+    # (models imports utils from inside its own), and scheduling imports models at
+    # module level, so a top-level import here would break that rule.
+    from .scheduling import set_task_due_date
 
     # Load all tasks in project order so we can walk forward from anchor
     tasks = list(
@@ -843,9 +847,13 @@ def recalculate_from_task(project, anchor_task, new_date, user=None):
 
     changes = []
 
-    # Apply new date to anchor
-    old_anchor = tasks[anchor_idx].due_date
-    tasks[anchor_idx].due_date = new_date
+    # Apply new date to anchor. The anchor's date is the one the PM TYPED, so it is
+    # manual and logged once as a manual change (SCHED-1 ruling B); only the tasks the
+    # walk below computes are system.
+    old_anchor = set_task_due_date(
+        tasks[anchor_idx], new_date, Task.DUE_DATE_MANUAL,
+        user.profile if user else None,
+    )
     if old_anchor != new_date:
         changes.append((tasks[anchor_idx], old_anchor, new_date))
 
@@ -871,12 +879,15 @@ def recalculate_from_task(project, anchor_task, new_date, user=None):
         else:
             new_d = add_calendar_days(prev_internal_due, task.duration_days)
             prev_internal_due = new_d  # advance the internal chain
-        task.due_date = new_d
+        # Computed, so system. Not logged per task: DueDateChangeLog below is this
+        # cascade's per-task trail, and the anchor's manual row covers the action.
+        set_task_due_date(task, new_d, Task.DUE_DATE_SYSTEM, None, log=False)
         if old_d != new_d:
             changes.append((task, old_d, new_d))
 
-    # Single bulk_update for all changed tasks — avoids N individual saves
-    Task.objects.bulk_update(tasks[anchor_idx:], ['due_date'])
+    # Single bulk_update for all changed tasks — avoids N individual saves.
+    # due_date_source rides along so the manual/system marks set above persist.
+    Task.objects.bulk_update(tasks[anchor_idx:], ['due_date', 'due_date_source'])
 
     if user and changes:
         user_profile = user.profile
@@ -903,6 +914,9 @@ def calculate_due_dates(project, user=None):
     """
     # import inside function to avoid circular import at module level
     from .models import Task, log_activity
+    # Lazy for the same reason: scheduling imports models at module level (see
+    # recalculate_from_task above).
+    from .scheduling import set_task_due_date
 
     tasks = (
         Task.objects
@@ -916,10 +930,13 @@ def calculate_due_dates(project, user=None):
     for task in tasks:
         if task.task_type == Task.EXTERNAL:
             # External tasks shadow the current internal chain date
-            task.due_date = previous_internal_due
+            new_due = previous_internal_due
         else:
-            task.due_date = add_calendar_days(previous_internal_due, task.duration_days)
-            previous_internal_due = task.due_date
+            new_due = add_calendar_days(previous_internal_due, task.duration_days)
+            previous_internal_due = new_due
+        # Every date here is computed, so system (SCHED-1). Not logged per task: the
+        # one 'due_dates_recalculated' summary row below is this function's log.
+        set_task_due_date(task, new_due, Task.DUE_DATE_SYSTEM, None, log=False)
         task.save()
         count += 1
 
