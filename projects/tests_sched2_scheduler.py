@@ -85,6 +85,24 @@ def D(day, month=11, year=2026):
     return date(year, month, day)
 
 
+# SCHED-2b made the plan depend on "today": a block open past its due date re-anchors
+# the blocks after it. These tests use a Civil due date of 10 Nov 2026 and were written
+# for a today before it, so the whole suite runs on a fixed today, 9 Nov 2026, instead of
+# changing its answers from 11 Nov on. Tests that need another day patch again over it.
+FROZEN_TODAY = date(2026, 11, 9)
+_REAL_LOCALDATE = timezone.localdate
+
+
+def freeze_today(day):
+    """A patch of django.utils.timezone.localdate that answers `day` when asked for
+    today, and still converts a datetime it is given. Patched on the module, not on
+    projects.scheduling, so the views (typed-date checks, the overdue rule) agree with
+    the scheduler about which day it is."""
+    def localdate(value=None, timezone=None):
+        return day if value is None else _REAL_LOCALDATE(value, timezone)
+    return patch('django.utils.timezone.localdate', side_effect=localdate)
+
+
 class _Apps:
     """Stands in for the `apps` registry the two seed migrations are handed; both only
     call apps.get_model()."""
@@ -115,7 +133,15 @@ def _seed_template_and_blocks():
 
 
 class SchedFixture(TestCase):
-    """Seeded template and blocks, a PM, and a site engineer; sites made per test."""
+    """Seeded template and blocks, a PM, and a site engineer; sites made per test.
+    Today is FROZEN_TODAY for the whole class (see freeze_today)."""
+
+    @classmethod
+    def setUpClass(cls):
+        patcher = freeze_today(FROZEN_TODAY)
+        patcher.start()
+        cls.addClassCleanup(patcher.stop)
+        super().setUpClass()
 
     @classmethod
     def setUpTestData(cls):
@@ -531,15 +557,26 @@ class RuleTests(SchedFixture):
 class OverduePreviewTests(SchedFixture):
 
     def test_the_preview_count_matches_the_shared_rule_after_applying(self):
+        """Civil due and Done on 10 Oct, Modules Done on time on 12 Oct: Earthing & DC
+        (planned 12 -> 13 Oct) is open past due, and its LA task already carries those
+        system dates. Since SCHED-2b only that block goes red: its undated DC cable task
+        gets the block's dates (newly overdue), and the blocks after it are forecast from
+        10 Nov. (Before SCHED-2b an open Civil 30 days late made every later block newly
+        overdue; a block never system-dated is now started after today instead, so the
+        late block here has to be one that already carries system dates.)"""
         today = timezone.localdate()
-        site = self._site('40.00', civil_due=today - timedelta(days=30))
+        self.assertEqual(today, FROZEN_TODAY)
+        site = self._site('40.00', civil_due=D(10, 10))
+        self._done(self._task(site, CIVIL), self._ist(10, month=10))
         # Noise either side of the rule: a manual overdue task outside the blocks
         # (already overdue), a mirror with a past date (counted by neither), a Done
         # block task (never overdue), and an N/A one (never overdue).
         self._set_due(self._task(site, NET_METERING), today - timedelta(days=2))
         Task.objects.filter(pk=self._task(site, COD).pk).update(
             due_date=today - timedelta(days=5), due_date_source=MANUAL)
-        self._done(self._task(site, MODULE), timezone.now() - timedelta(days=20))
+        self._done(self._task(site, MODULE), self._ist(12, month=10))
+        Task.objects.filter(pk=self._task(site, LA).pk).update(
+            due_date=D(13, 10), due_date_source=SYSTEM, schedule_start=D(12, 10))
         Task.objects.filter(pk=self._task(site, TESTING).pk).update(is_not_applicable=True)
 
         def shared_count():
@@ -550,11 +587,11 @@ class OverduePreviewTests(SchedFixture):
         preview = self._plan(site)
         self._apply(site)
         after = shared_count()
-        self.assertEqual(before, 2, 'the Civil date and Net Metering Approval')
+        self.assertEqual(before, 2, 'Net Metering Approval and the system-dated LA task')
         self.assertEqual(preview.overdue_after, after)
         self.assertEqual(preview.overdue_already, before)
         self.assertEqual(preview.overdue_new, after - before)
-        self.assertGreater(preview.overdue_new, 0)
+        self.assertEqual(preview.overdue_new, 1, 'the DC cable task of the late block, only')
 
 
 # ---------------------------------------------------------------------------

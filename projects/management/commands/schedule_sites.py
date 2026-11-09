@@ -12,6 +12,16 @@ that changed.
     python manage.py schedule_sites --tender IPGCLG
     python manage.py schedule_sites --all
     python manage.py schedule_sites --all --apply
+    python manage.py schedule_sites --site 2112 -v 2     # every block, every task
+
+SCHED-2b: a site with a block open past its due date prints a `forecast:` line, and the
+totals count those sites and the dates the forecast moves. Production runs
+`schedule_sites --all --apply` daily at 06:30 IST (01:00 UTC), before the morning report,
+so the forecast moves on by a day each morning. With -v 2 each site also lists its blocks:
+sequence, name, planned start -> due, each task's action, and `forecast` on the block
+that re-anchored the rest (or `first-dated` on a block started after today because it
+had passed its plan before it was ever dated); that is the view to check before any
+--apply.
 
 Also the way to apply a working-day switch flipped outside the Admin screen, and to
 retry a site whose after-commit trigger failed (the failure is in the server log).
@@ -44,6 +54,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         apply = options['apply']
+        verbose = options['verbosity'] >= 2
         if options['site']:
             sites = list(Project.objects.filter(project_id=options['site'], is_deleted=False))
             if not sites:
@@ -64,12 +75,19 @@ class Command(BaseCommand):
         for site in sites:
             result = schedule_site(site, apply=apply)
             self.stdout.write(result.summary_line())
+            if result.forecast is not None:
+                totals['forecast_sites'] += 1
+                self.stdout.write(self._forecast_line(result, apply))
+            if verbose:
+                for line in self._block_lines(result):
+                    self.stdout.write(line)
             outcomes[result.reason or 'scheduled'] += 1
             if result.reason is None:
                 scheduled.append(result)
             totals['write'] += result.written if apply else result.to_write
             totals['start'] += result.started if apply else result.to_start
             totals['clear'] += result.cleared if apply else result.to_clear
+            totals['forecast_moved'] += result.forecast_moved if apply else result.to_forecast
             if result.reason != REASON_NOT_ELIGIBLE:
                 totals['overdue_after'] += result.overdue_after or 0
                 totals['overdue_already'] += result.overdue_already or 0
@@ -83,6 +101,9 @@ class Command(BaseCommand):
         self.stdout.write(f"Tasks overdue after: {totals['overdue_after']} "
                           f"(already overdue {totals['overdue_already']}, "
                           f"newly overdue from scheduling {totals['overdue_new']})")
+        self.stdout.write(f"Sites with an open late block: {totals['forecast_sites']}")
+        self.stdout.write(f"Dates moved by forecast: {totals['forecast_moved']}"
+                          f"{'' if apply else ' (would move)'}")
         listed = '; '.join(f'{r.site.project_id} ({BAND_LABELS[r.band]}, write {r.to_write})'
                            for r in scheduled) or 'none'
         self.stdout.write(f'Scheduled sites: {len(scheduled)} - {listed}')
@@ -93,3 +114,32 @@ class Command(BaseCommand):
         listed = ', '.join(f'{code} ({kwp} kWp)' for code, kwp in large) or 'none'
         self.stdout.write(f'Eligible sites above {LARGE_SITE_KWP} kWp DC '
                           f'(band {BAND_LABELS["101_plus"]}): {len(large)} - {listed}')
+
+    @staticmethod
+    def _forecast_line(result, apply):
+        """The forecast under a site's line: the open late block, its planned due date,
+        and the dates moved (written, with --apply; to write, without)."""
+        late = result.forecast
+        moved = result.forecast_moved if apply else result.to_forecast
+        if late.first_dated is not None:
+            return (f'    forecast: {late.block.name} not yet dated and already past plan; '
+                    f'started {late.first_dated.isoformat()}; {moved} dates '
+                    f'{"written" if apply else "to write"} from it')
+        return (f'    forecast: {late.block.name} open past due {late.due.isoformat()}; '
+                f'{moved} later dates {"moved" if apply else "to move"} to start '
+                f'{result.forecast_start.isoformat()}')
+
+    @staticmethod
+    def _block_lines(result):
+        """-v 2: one line per block. A zero-day block (nothing applicable on the site)
+        shows '-' for its dates."""
+        lines = []
+        for bp in result.blocks:
+            start = bp.start.isoformat() if bp.start else '-'
+            due = bp.due.isoformat() if bp.due else '-'
+            marker = (' forecast' if bp.forecast_after
+                      else ' first-dated' if bp.first_dated else '')
+            actions = '; '.join(f'{tp.task.task_name}={tp.action}' for tp in bp.tasks) or 'no tasks'
+            lines.append(f'      {bp.block.sequence} {bp.block.name:<16} {start} -> {due}'
+                         f'{marker}  [{actions}]')
+        return lines

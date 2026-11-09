@@ -11583,8 +11583,11 @@ def project_overview(request, project_id):
     from .activity_codes import MONEY_ACTIVITY_CODES
     from .permissions import user_can_see_project_money
     sees_money = user_can_see_project_money(request.user, project)
+    # due_dates_forecast_shift (SCHED-2b): the daily scheduler writes one on a late site
+    # every morning, which would push the people's lines out of these 8 slots. The site
+    # timeline still shows them.
     hidden_codes = {'task_unassigned', 'site_drawing_opened', 'dc_document_opened',
-                    'dc_damage_photo_opened'}
+                    'dc_damage_photo_opened', 'due_dates_forecast_shift'}
     if not sees_money:
         hidden_codes |= MONEY_ACTIVITY_CODES
     recent_activity = list(
@@ -15879,9 +15882,12 @@ def admin_audit_log(request):
             timestamp__gte=seven_days_ago,
             entity_type__in=['System', 'User', 'Notification'],
         ).count(),
+        # actor__isnull=False: rows with no actor are the system's (the daily scheduler
+        # writes one per late site per day, SCHED-2b), and grouped together they would
+        # rank as one blank "person". The "today" count above still includes them.
         'most_active': (
             ActivityLog.objects
-            .filter(timestamp__gte=seven_days_ago)
+            .filter(timestamp__gte=seven_days_ago, actor__isnull=False)
             .values('actor__user__first_name', 'actor__user__last_name', 'actor__role')
             .annotate(cnt=Count('id'))
             .order_by('-cnt')

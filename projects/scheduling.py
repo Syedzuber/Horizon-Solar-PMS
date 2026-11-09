@@ -19,6 +19,12 @@ capacity band (spec Layer 4, as changed 9 Nov). It is called by the `schedule_si
 command, by the Admin working-day switch, and after commit by the triggers (a Civil
 date edit, a task reaching or leaving Done, Not Applicable, a capacity or exclusion
 edit) through schedule_site_safely(), which never raises.
+
+SCHED-2b: the forecast. A block still open after its planned due date is forecast to
+finish today, so the later system dates re-anchor to the next working day after today;
+only the late block shows red. "Today" is read once, in schedule_site(), so a daily
+`schedule_sites --all --apply` (06:30 IST, before the morning report) moves the forecast
+on by a day, and tests freeze it there.
 """
 import logging
 from dataclasses import dataclass, field
@@ -171,6 +177,10 @@ SKIP_NA = 'skip:na'
 SKIP_ANCHOR_BLOCK = 'skip:anchor-block'   # any other task put in block 1: never written
 
 SCHEDULED_ACTION_CODE = 'due_dates_scheduled'
+# SCHED-2b: the row for dates moved by the forecast rule. Always written with no actor,
+# trigger runs included (ruling 1, 9 Nov): the calendar moved the dates, not the person
+# whose action happened to run the scheduler, so it must not count as their activity.
+FORECAST_ACTION_CODE = 'due_dates_forecast_shift'
 
 
 @dataclass
@@ -194,6 +204,8 @@ class BlockPlan:
     half_days: int           # this block's length on this site, in half days
     tasks: list = field(default_factory=list)   # TaskPlan rows
     re_anchored_after: object = None            # the block's last Done date, when it finished late
+    forecast_after: object = None               # today, when the block is open past due and re-anchored the rest
+    first_dated: object = None                  # its own new start, when it was past plan and never system-dated
 
 
 @dataclass
@@ -213,10 +225,32 @@ class ScheduleResult:
     written: int = 0                 # due dates actually written (apply only)
     started: int = 0                 # Civil planned starts actually written (apply only)
     cleared: int = 0                 # rows actually cleared, either kind (apply only)
+    forecast: object = None          # the BlockPlan open past due that re-anchored the rest, or the
+                                     # first-dated block that re-anchored itself (SCHED-2b)
+    forecast_start: object = None    # the new day 1: the next working day after today
+    forecast_moved: int = 0          # of `written`, the dates after the forecast block (apply only)
 
     @property
     def writes(self):
         return [tp for bp in self.blocks for tp in bp.tasks if tp.action == ACTION_WRITE]
+
+    @property
+    def forecast_writes(self):
+        """The due-date writes the forecast rules cause: those in the blocks after a late
+        block, or, for a first-dated block, its own and those after it. Empty when no
+        block is open past plan. Found by identity, not ==, because two BlockPlans can
+        hold equal values."""
+        if self.forecast is None:
+            return []
+        index = next(i for i, bp in enumerate(self.blocks) if bp is self.forecast)
+        if self.forecast.first_dated is None:
+            index += 1
+        return [tp for bp in self.blocks[index:] for tp in bp.tasks
+                if tp.action == ACTION_WRITE]
+
+    @property
+    def to_forecast(self):
+        return len(self.forecast_writes)
 
     @property
     def start_writes(self):
@@ -484,6 +518,15 @@ def _plan(project, skip_sundays, today):
     base = next_working_day(restart_after, skip_sundays)
     elapsed = 0   # half days used since `base`: the running total C of spec Layer 4
 
+    # FORECAST, block 1 (SCHED-2b). The Civil task is "complete" here exactly when it is
+    # Done, the same test the late-finish rule above uses, so the two rules never both
+    # apply: an open Civil past its due date re-anchors block 2 to the next working day
+    # after today. The Civil date itself is never changed.
+    if anchor_task.status != Task.DONE and civil_due < today:
+        forecast_base = _forecast_re_anchor(result, plan, base, today, skip_sundays)
+        if forecast_base is not None:
+            base = forecast_base
+
     for block in later_blocks:
         members = by_block[block.pk]
         applicable = [t for t in members if not t.is_not_applicable]
@@ -491,30 +534,52 @@ def _plan(project, skip_sundays, today):
         # exist here) takes zero days: nothing to do, so no time passes for it.
         half_days = _half_days(getattr(block, band_field)) if applicable else 0
         before, elapsed = elapsed, elapsed + half_days
-        if not applicable:
-            start = due = None
-        elif half_days == 0:
-            # A zero-length block that still has work (a 0 in the table) is planned on
-            # the day the previous block was due, never on a day before day 1.
-            start = due = working_day(base, max((before + 1) // 2, 1), skip_sundays)
-        else:
-            # start = day floor(C_prev / 2) + 1, due = day ceil(C / 2): a block that
-            # begins half way through a day starts on that day, and two half-day blocks
-            # can share a due date (spec Layer 4).
-            start = working_day(base, before // 2 + 1, skip_sundays)
-            due = working_day(base, (elapsed + 1) // 2, skip_sundays)
+        start, due = _block_dates(base, before, elapsed, half_days, applicable, skip_sundays)
+
+        # "Complete" is the late-finish rule's test (below); the first-dating rule and
+        # the forecast both apply only to a block that is NOT complete, so no block is
+        # ever moved by two rules.
+        done = [t for t in members if t.status == Task.DONE]
+        complete = bool(done) and all(t.status == Task.DONE or t.is_not_applicable
+                                      for t in members)
+        first_dated = None
+        moved = False
+        if not complete and due is not None and due < today:
+            system_starts = [t.schedule_start for t in members
+                             if t.due_date_source == SYSTEM and t.schedule_start]
+            if not any(t.due_date_source == SYSTEM for t in members):
+                # FIRST DATING (SCHED-2b amendment). A system date is never written in
+                # the past for the first time: an open block that is already past its
+                # plan and has never been given a system date starts on the next working
+                # day after today, C = 0, and the blocks after it chain from it. The
+                # check is "no system date on any of its tasks", so it fires once; from
+                # the next run on the block keeps those dates (the branch below).
+                first_dated = next_working_day(today, skip_sundays)
+                base, before, elapsed, moved = first_dated, 0, half_days, True
+            elif system_starts and max(system_starts) > start:
+                # KEEP ITS SYSTEM DATES ("a block whose tasks already carry system dates
+                # keeps them"). Without this, the run after a first dating would put the
+                # block back on its old, past plan and turn it red the next morning. The
+                # chain re-anchors at the block's stored start, which is only ever later
+                # than the plan here (max, so a plan is never pulled earlier); when the
+                # stored dates ARE the plan nothing changes. If those dates have passed
+                # too, the forecast below treats the block as late, as before.
+                base, before, elapsed, moved = max(system_starts), 0, half_days, True
+            if moved:
+                start, due = _block_dates(base, before, elapsed, half_days, applicable,
+                                          skip_sundays)
         plan = BlockPlan(block=block, start=start, due=due, half_days=half_days)
         for t in members:
             plan.tasks.append(TaskPlan(task=t, action=_task_action(t, start, due),
                                        start=start, due=due))
         result.blocks.append(plan)
+        if first_dated is not None:
+            plan.first_dated = first_dated
+            result.forecast, result.forecast_start = plan, first_dated
 
         # LATE FINISH (spec Layer 4). A finished block whose last Done is after its
         # planned due date pushes every later block: day 1 becomes the next working day
         # after that Done, and the count restarts. An early finish moves nothing.
-        done = [t for t in members if t.status == Task.DONE]
-        complete = bool(done) and all(t.status == Task.DONE or t.is_not_applicable
-                                      for t in members)
         if complete and due is not None:
             done_dates = [_local_date(t.completed_at) for t in done if t.completed_at]
             last_done = max(done_dates) if done_dates else None
@@ -522,8 +587,57 @@ def _plan(project, skip_sundays, today):
                 plan.re_anchored_after = last_done
                 base = next_working_day(last_done, skip_sundays)
                 elapsed = 0
+        # FORECAST (SCHED-2b). An OPEN block (not `complete`, the late-finish rule's own
+        # test, so the two rules never both apply) whose planned due date has passed is
+        # forecast to finish today: every later block re-anchors to the next working day
+        # after today, C = 0. "Due" is the block's due date from this walk, as in the
+        # late-finish rule: the plan, or the system dates it keeps (above). A manual date
+        # in the block never changes whether it is late. The block's own dates stay (its
+        # red is the delay signal), and later manual dates are still never written. At
+        # most one block per site re-anchors: every due date after it is after today.
+        elif due is not None and due < today:
+            forecast_base = _forecast_re_anchor(
+                result, plan, working_day(base, elapsed // 2 + 1, skip_sundays),
+                today, skip_sundays)
+            if forecast_base is not None:
+                base, elapsed = forecast_base, 0
 
     return _with_overdue(result, tasks, today)
+
+
+def _block_dates(base, before, elapsed, half_days, applicable, skip_sundays):
+    """(start, due) of a block that takes the running total C from `before` to
+    `elapsed` half days, counted from day 1 = `base`."""
+    if not applicable:
+        return None, None
+    if half_days == 0:
+        # A zero-length block that still has work (a 0 in the table) is planned on
+        # the day the previous block was due, never on a day before day 1.
+        day = working_day(base, max((before + 1) // 2, 1), skip_sundays)
+        return day, day
+    # start = day floor(C_prev / 2) + 1, due = day ceil(C / 2): a block that begins
+    # half way through a day starts on that day, and two half-day blocks can share a
+    # due date (spec Layer 4).
+    return (working_day(base, before // 2 + 1, skip_sundays),
+            working_day(base, (elapsed + 1) // 2, skip_sundays))
+
+
+def _forecast_re_anchor(result, plan, planned_next_start, today, skip_sundays):
+    """Mark `plan` as the open, late block whose later blocks are re-anchored, and
+    return the new day 1 for them: the next working day after today.
+
+    Returns None (and marks nothing) when that day would not be later than the next
+    block's planned start, because a plan is never pulled earlier (spec Late finish).
+    Today it cannot happen: the block was due before today, so the next working day
+    after today is after any start the plan gives the next block. The check keeps that
+    true if the day arithmetic ever changes.
+    """
+    forecast_start = next_working_day(today, skip_sundays)
+    if forecast_start <= planned_next_start:
+        return None
+    plan.forecast_after = today
+    result.forecast, result.forecast_start = plan, forecast_start
+    return forecast_start
 
 
 def _anchor_block_action(task, anchor_task, civil_start):
@@ -608,10 +722,14 @@ def schedule_site(project, actor=None, apply=False, skip_sundays=None):
         project = Project.objects.select_for_update().get(pk=project.pk)
         result = _plan(project, skip_sundays, today)
         result.applied = True
+        forecast_pks = {tp.task.pk for tp in result.forecast_writes}
         for tp in result.writes:
             set_task_due_date(tp.task, tp.due, SYSTEM, actor, log=False)
             tp.task.schedule_start = tp.start
-            result.written += _save_dates(tp.task)
+            saved = _save_dates(tp.task)
+            result.written += saved
+            if tp.task.pk in forecast_pks:
+                result.forecast_moved += saved
         for tp in result.start_writes:
             tp.task.schedule_start = tp.start
             result.started += _save_start(tp.task)
@@ -622,9 +740,18 @@ def schedule_site(project, actor=None, apply=False, skip_sundays=None):
                 result.cleared += _save_dates(tp.task)
             else:
                 result.cleared += _save_start(tp.task)
-        if result.written or result.started or result.cleared:
+        # One row per kind of change (SCHED-2b ruling 2). When every change in the run
+        # was a forecast move (the daily run's normal case) only the forecast row is
+        # written; when anything else changed too, the usual row (with all the counts)
+        # is written as well. The forecast row has no actor, even in a trigger run
+        # (ruling 1): see FORECAST_ACTION_CODE.
+        changed = result.written + result.started + result.cleared
+        if changed > result.forecast_moved:
             log_activity(project, actor, _log_text(result), entity_type='Project',
                          entity_id=project.pk, action_code=SCHEDULED_ACTION_CODE)
+        if result.forecast_moved:
+            log_activity(project, None, _forecast_log_text(result), entity_type='Project',
+                         entity_id=project.pk, action_code=FORECAST_ACTION_CODE)
     return result
 
 
@@ -668,6 +795,20 @@ def _log_text(result):
         return (f'Auto-scheduled due dates: anchor Civil due {result.anchor.isoformat()}, '
                 f'band {BAND_LABELS[result.band]} kWp; {counts}')
     return f'Auto-schedule cleared system due dates ({result.reason}); {counts}'
+
+
+def _forecast_log_text(result):
+    """The forecast row (SCHED-2b): which block is open past which due date, and how
+    many later dates moved to start on which day; or, for a block given its first
+    system dates after its plan had passed, the day it was started on. At most one of
+    the two happens on a site, because every date after either is after today."""
+    late = result.forecast
+    if late.first_dated is not None:
+        return (f'Forecast: {late.block.name} not yet dated and already past plan; '
+                f'started {late.first_dated.isoformat()}')
+    return (f'Forecast: {late.block.name} open past due {late.due.isoformat()}; '
+            f'{result.forecast_moved} later dates moved to start '
+            f'{result.forecast_start.isoformat()}')
 
 
 def schedule_site_safely(project, actor=None):
