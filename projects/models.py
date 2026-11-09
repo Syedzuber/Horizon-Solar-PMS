@@ -457,6 +457,8 @@ class Task(models.Model):
     # for that reason: the seed would violate it.
     due_date_source      = models.CharField(max_length=10, choices=DUE_DATE_SOURCE_CHOICES, null=True, blank=True)
     schedule_start       = models.DateField(blank=True, null=True)  # Planned start, written only by the SCHED-2 scheduler; feeds the Gantt, never shown as a commitment
+    baseline_start       = models.DateField(blank=True, null=True)  # SCHED-2e pure-plan start; written only by the scheduler, migration 0141 and rebaseline_site; frozen once Civil starts
+    baseline_due         = models.DateField(blank=True, null=True)  # SCHED-2e pure-plan due ("plan:" on the overview); same three writers; due_date is the moving forecast beside it
     completed_at         = models.DateTimeField(blank=True, null=True)  # Set when status transitions to Done
     blocked_since        = models.DateTimeField(blank=True, null=True)  # Set when status transitions TO 'Blocked'; cleared on un-block so re-blocks re-age from zero
     is_payment_milestone = models.BooleanField(default=False)  # When marked Done, triggers payment_notification to Finance

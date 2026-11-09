@@ -79,7 +79,8 @@ from .task_health import OPEN_STATUSES, days_overdue, is_overdue, overdue_q
 # through it so the date carries its source (manual/system) and one log row.
 from .scheduling import (
     eligible_sites as schedule_eligible_sites, schedule_site, schedule_site_safely,
-    set_task_due_date, status_change_reschedules, task_is_schedule_anchor, task_is_scheduled,
+    set_task_due_date, site_plan_summary, status_change_reschedules, task_is_schedule_anchor,
+    task_is_scheduled,
 )
 # Closeout step 2 (CL-1): the approval closure, called by both approval paths below.
 # Closeout 7b: PP-2's guard on those same paths, and the punch point reads behind the
@@ -11817,8 +11818,14 @@ def project_overview(request, project_id):
                 client_rows, GANTT_PHASE_DISPLAY_NAME_MAP, GANTT_TASK_DISPLAY_NAME_MAP,
             )
 
+    # SCHED-2e: "Planned finish · Forecast · N days behind plan" above the task list.
+    # None for any site the scheduler does not work on or that has no baseline, and the
+    # template shows nothing then. One aggregate query.
+    plan_summary = site_plan_summary(project)
+
     return render(request, 'projects/project_overview.html', {
         'project':                     project,
+        'plan_summary':                plan_summary,
         'issue_draft':                 _pop_issue_draft(request, f'project:{project.project_id}'),
         'milestones':                  milestones,
         'milestone_amounts':           milestone_amounts,

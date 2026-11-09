@@ -1539,6 +1539,7 @@ production down, and `is_mirror` was one instance of it, not the class.
 | `0067_seed_residential_template_v1` | `utils.RESIDENTIAL_TEMPLATE_CODE`, `RESIDENTIAL_TEMPLATE_LABEL`, `_get_duration`, `build_residential_phases`, `seed_task_template_version` | **WAS the failure.** Fixed at the helper by `utils.kwargs_for_model_state()`; the migration body is unchanged |
 | `0075_seed_opex_template_v1` | `utils.seed_task_template_version` | Same helper, and it is the caller `is_mirror` was added FOR. Safe today because 0075 is the chain head, so its model state is current — **that stops being true the moment a 0076 adds a field to `TaskTemplateTask`**, and the tolerance now in the helper is what will absorb it |
 | `0069_backfill_checklist_versions` | `models.derive_checklist_code` | **STILL EXPOSED, narrowly.** The function is pure, takes its model class as an argument, and touches exactly one field — `Checklist.code`, added by 0068, one migration earlier. It breaks if `code` is renamed or dropped, or if the function grows a second field read. Neither is imminent; both are silent |
+| `0141_sched2e_backfill_baseline` | `scheduling.load_site_for_plan`, `pure_baselines_for_site` | **ADDED 9 Nov 2026 (SCHED-2e), by ruling.** Called so the backfill is the scheduler's own walk. Both are handed 0141's historical models and rows. They filter on and read only fields that exist from 0137 on, and on an empty database no site qualifies, so the migration-chain test never runs them. **Exposure:** a later change that makes either function read a field added after 0141 would break `migrate` on a database restored from before 0141 that has scheduled sites |
 
 **Also carried by 0069 and worth naming, because it is the same shape one level down:**
 the migration calls `checklist.save(update_fields=[...])` on a **historical** model class,
@@ -1554,6 +1555,8 @@ a rename or removal of `Checklist.code`** — do it in the same session as that 
 before.
 
 **Do not add a fourth.** Three is the whole population and R-22 says prefer zero.
+
+**Update, 9 Nov 2026 (SCHED-2e): 0141 is the fourth.** Zuber ruled that the baseline backfill must use the scheduler's own pure-plan walk rather than a second copy of its arithmetic, so 0141 calls `scheduling.load_site_for_plan()` and `pure_baselines_for_site()` (row above). **The trigger to revisit it is any change to either function that reads a Task, Project, ScheduleBlock or ScheduleBlockTask field added after 0141.** Both docstrings name that constraint.
 
 ---
 

@@ -25,6 +25,12 @@ finish today, so the later system dates re-anchor to the next working day after 
 only the late block shows red. "Today" is read once, in schedule_site(), so a daily
 `schedule_sites --all --apply` (06:30 IST, before the morning report) moves the forecast
 on by a day, and tests freeze it there.
+
+SCHED-2e: the baseline. Task.baseline_start/baseline_due hold the PURE PLAN (_plan with
+pure=True: the same walk without the forecast, late-finish and first-dating shifts).
+Every apply run re-snapshots it until the Civil task has started, then it is frozen;
+rebaseline_site() is the deliberate re-plan. site_plan_summary() gives the overview its
+"Planned finish · Forecast · N days behind plan" line. See the section at the end.
 """
 import logging
 from dataclasses import dataclass, field
@@ -32,11 +38,11 @@ from datetime import timedelta
 from types import SimpleNamespace
 
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Max, Q
 from django.utils import timezone
 
-from .models import (ActivityLog, Project, ScheduleBlock, ScheduleBlockTask, SystemSettings,
-                     Task, log_activity)
+from .models import (SUBJECT_TASK, ActivityLog, Project, ScheduleBlock, ScheduleBlockTask,
+                     StatusTransition, SystemSettings, Task, log_activity)
 from .task_health import is_overdue
 from .utils import is_human_owned
 
@@ -229,6 +235,12 @@ class ScheduleResult:
                                      # first-dated block that re-anchored itself (SCHED-2b)
     forecast_start: object = None    # the new day 1: the next working day after today
     forecast_moved: int = 0          # of `written`, the dates after the forecast block (apply only)
+    # SCHED-2e. Every in-scope task of every block (block 1 included), and the Civil task.
+    # Empty on a not_eligible site: nothing was loaded for it.
+    in_block: list = field(default_factory=list)
+    anchor_task: object = None
+    baseline_frozen: bool = None     # True once Civil has started (apply only)
+    baselined: int = 0               # tasks whose baseline was written (apply only)
 
     @property
     def writes(self):
@@ -429,25 +441,50 @@ def _clear_plan(result, later_tasks, anchor_task):
         result.clears.append(TaskPlan(task=anchor_task, action=ACTION_CLEAR_START))
 
 
-def _plan(project, skip_sundays, today):
-    """Decide the whole schedule for one site. Reads only; writes nothing."""
+def load_site_for_plan(project, task_model=Task, block_model=ScheduleBlock):
+    """The two reads a plan is made from: (tasks, blocks).
+
+    Every task of the site with its template row and phase, in one query: the scheduler
+    reads all of them for the template, the anchor, the blocks and the overdue preview,
+    so per-block queries would only repeat this one. Then the template's active blocks
+    with their task links and codes, prefetched: the code finds the anchor block, and
+    every link maps a template task to its block.
+
+    The model classes are arguments so migration 0141 can pass its HISTORICAL models
+    (R-22): this function only filters on fields that exist from 0137 on.
+    """
+    tasks = list(task_model.objects.filter(phase__project=project)
+                 .select_related('template_task__phase', 'phase'))
+    template_id = _site_template_id(tasks)
+    blocks = (list(block_model.objects.filter(template_id=template_id, is_active=True)
+                   .prefetch_related('block_tasks__template_task').order_by('sequence'))
+              if template_id else [])
+    return tasks, blocks
+
+
+def _plan(project, skip_sundays, today, pure=False, loaded=None):
+    """Decide the whole schedule for one site. Reads only; writes nothing.
+
+    pure=True is the PURE PLAN (SCHED-2e, spec "Baseline amendment"): the same walk with
+    the three today- and status-driven shifts switched off (the late-finish re-anchor,
+    the forecast, and first dating with its keep rule), so it is the chain arithmetic
+    from the Civil due date, the capacity band and the working-day mode alone. That is
+    the baseline. It is this one walk with switches, not a second copy of the
+    arithmetic, so the baseline and the schedule cannot drift apart; for a site where
+    nothing is late the two are identical (tests_sched2e_baseline pins that). A pure
+    plan skips the overdue preview, which it has no use for.
+
+    `loaded` is a (tasks, blocks) pair from load_site_for_plan(), passed when the caller
+    has already read the site (schedule_site plans twice from one read; migration 0141
+    reads with historical models).
+    """
     result = ScheduleResult(site=project)
 
     if not _is_site_eligible(project):
         result.reason = REASON_NOT_ELIGIBLE
         return result
 
-    # Every task of the site with its template row and phase, in one query: the
-    # scheduler reads all of them for the template, the anchor, the blocks and the
-    # overdue preview, so per-block queries would only repeat this one.
-    tasks = list(Task.objects.filter(phase__project=project)
-                 .select_related('template_task__phase', 'phase'))
-    template_id = _site_template_id(tasks)
-    # The template's active blocks with their task links and codes, prefetched: the
-    # code finds the anchor block, and every link maps a template task to its block.
-    blocks = (list(ScheduleBlock.objects.filter(template_id=template_id, is_active=True)
-                   .prefetch_related('block_tasks__template_task').order_by('sequence'))
-              if template_id else [])
+    tasks, blocks = loaded if loaded is not None else load_site_for_plan(project)
     anchor_block = next((b for b in blocks
                          if any(bt.template_task.code == ANCHOR_TASK_CODE
                                 for bt in b.block_tasks.all())), None)
@@ -469,25 +506,27 @@ def _plan(project, skip_sundays, today):
     # The unlabelled Civil task. Normally exactly one; if a site ever had two, the first
     # in task order is the anchor and the other is left alone.
     anchor_task = next((t for t in by_block[anchor_block.pk] if _is_anchor_task(t)), None)
+    result.in_block = [t for b in blocks for t in by_block[b.pk]]
+    result.anchor_task = anchor_task
 
     # Ruling a, as amended: an excluded site gets nothing written, and the system dates
     # it already has are cleared, so they stop looking planned.
     if project.exclude_from_auto_schedule:
         result.reason = REASON_EXCLUDED
         _clear_plan(result, later_tasks, anchor_task)
-        return _with_overdue(result, tasks, today)
+        return result if pure else _with_overdue(result, tasks, today)
 
     result.band = capacity_band(project.dc_capacity_kw)
     if result.band is None:
         result.reason = REASON_NEEDS_CAPACITY
         _clear_plan(result, later_tasks, anchor_task)
-        return _with_overdue(result, tasks, today)
+        return result if pure else _with_overdue(result, tasks, today)
 
     if (anchor_task is None or anchor_task.is_not_applicable
             or anchor_task.due_date is None):
         result.reason = REASON_NEEDS_ANCHOR
         _clear_plan(result, later_tasks, anchor_task)
-        return _with_overdue(result, tasks, today)
+        return result if pure else _with_overdue(result, tasks, today)
 
     band_field = BAND_FIELDS[result.band]
     civil_due = anchor_task.due_date
@@ -510,7 +549,7 @@ def _plan(project, skip_sundays, today):
     # day: the next working day after its Done date instead. An early finish moves
     # nothing; a plan is never pulled earlier.
     restart_after = civil_due
-    if anchor_task.status == Task.DONE and anchor_task.completed_at:
+    if not pure and anchor_task.status == Task.DONE and anchor_task.completed_at:
         done_on = _local_date(anchor_task.completed_at)
         if done_on > civil_due:
             plan.re_anchored_after = done_on
@@ -522,7 +561,7 @@ def _plan(project, skip_sundays, today):
     # Done, the same test the late-finish rule above uses, so the two rules never both
     # apply: an open Civil past its due date re-anchors block 2 to the next working day
     # after today. The Civil date itself is never changed.
-    if anchor_task.status != Task.DONE and civil_due < today:
+    if not pure and anchor_task.status != Task.DONE and civil_due < today:
         forecast_base = _forecast_re_anchor(result, plan, base, today, skip_sundays)
         if forecast_base is not None:
             base = forecast_base
@@ -544,7 +583,7 @@ def _plan(project, skip_sundays, today):
                                       for t in members)
         first_dated = None
         moved = False
-        if not complete and due is not None and due < today:
+        if not pure and not complete and due is not None and due < today:
             system_starts = [t.schedule_start for t in members
                              if t.due_date_source == SYSTEM and t.schedule_start]
             if not any(t.due_date_source == SYSTEM for t in members):
@@ -577,6 +616,9 @@ def _plan(project, skip_sundays, today):
             plan.first_dated = first_dated
             result.forecast, result.forecast_start = plan, first_dated
 
+        # The pure plan (baseline) stops here: neither rule below applies to it.
+        if pure:
+            continue
         # LATE FINISH (spec Layer 4). A finished block whose last Done is after its
         # planned due date pushes every later block: day 1 becomes the next working day
         # after that Done, and the count restarts. An early finish moves nothing.
@@ -602,7 +644,7 @@ def _plan(project, skip_sundays, today):
             if forecast_base is not None:
                 base, elapsed = forecast_base, 0
 
-    return _with_overdue(result, tasks, today)
+    return result if pure else _with_overdue(result, tasks, today)
 
 
 def _block_dates(base, before, elapsed, half_days, applicable, skip_sundays):
@@ -720,7 +762,12 @@ def schedule_site(project, actor=None, apply=False, skip_sundays=None):
         # planning from what the first wrote, instead of both writing from one stale
         # read (spec Layer 5, concurrency).
         project = Project.objects.select_for_update().get(pk=project.pk)
-        result = _plan(project, skip_sundays, today)
+        # One read for both plans: the schedule and the pure plan (the baseline) are made
+        # from the same rows. The baseline step below reads each task's stored baseline
+        # off those rows; the date writes before it never touch those two attributes.
+        loaded = (load_site_for_plan(project) if _is_site_eligible(project) else None)
+        result = _plan(project, skip_sundays, today, loaded=loaded)
+        pure = _plan(project, skip_sundays, today, pure=True, loaded=loaded)
         result.applied = True
         forecast_pks = {tp.task.pk for tp in result.forecast_writes}
         for tp in result.writes:
@@ -740,6 +787,14 @@ def schedule_site(project, actor=None, apply=False, skip_sundays=None):
                 result.cleared += _save_dates(tp.task)
             else:
                 result.cleared += _save_start(tp.task)
+        # SCHED-2e: the baseline. Before Civil starts every run re-snapshots it from the
+        # pure plan; after, only a task that has none yet gets one. Written silently: it
+        # is not a date anyone works to, so it adds no ActivityLog row of its own and does
+        # not count towards `changed` below.
+        result.baseline_frozen, changes = _baseline_changes(result.in_block,
+                                                            result.anchor_task, pure)
+        for task, (start, due) in changes:
+            result.baselined += _save_baseline(task, start, due)
         # One row per kind of change (SCHED-2b ruling 2). When every change in the run
         # was a forecast move (the daily run's normal case) only the forecast row is
         # written; when anything else changed too, the usual row (with all the counts)
@@ -874,3 +929,195 @@ def status_change_reschedules(task, old_status, new_status):
     if old_status == new_status or Task.DONE not in (old_status, new_status):
         return False
     return task_is_scheduled(task)
+
+
+# ---------------------------------------------------------------------------
+# SCHED-2e: the baseline (spec "Baseline" and "Baseline amendment", 9 Nov 2026)
+# ---------------------------------------------------------------------------
+#
+# Task.baseline_start / baseline_due hold the PURE PLAN: the Civil task's own due date
+# (and its counted-back start), and for every other in-block task the chain arithmetic
+# from that date, the capacity band and the working-day mode, with no forecast, no
+# late-finish re-anchor and no first dating. due_date beside it is the forecast.
+#
+# THREE WRITERS ONLY: schedule_site(apply=True) through _save_baseline(), migration 0141,
+# and rebaseline_site() (the management command). Nothing else may set them; TaskAdmin
+# shows them read-only.
+
+BASELINE_RESET_ACTION_CODE = 'baseline_reset'
+
+# Civil "has started" once it is, or ever was, In Progress or Done (ruling, 9 Nov).
+CIVIL_STARTED_STATUSES = (Task.IN_PROGRESS, Task.DONE)
+
+
+def civil_has_started(anchor_task):
+    """True once the Civil task is, or has ever been, In Progress or Done: the moment the
+    baseline freezes. Three signs, cheapest first: its status now, a completed_at left by
+    a past Done, or a StatusTransition row into either status (every task status path
+    writes one), which catches a Civil that started and was then Blocked."""
+    if anchor_task is None:
+        return False
+    if anchor_task.status in CIVIL_STARTED_STATUSES or anchor_task.completed_at:
+        return True
+    # One indexed lookup, asked only for a Not Started or Blocked Civil.
+    return StatusTransition.objects.filter(
+        subject_type=SUBJECT_TASK, subject_id=anchor_task.pk,
+        to_status__in=CIVIL_STARTED_STATUSES).exists()
+
+
+def _baseline_targets(pure):
+    """{task pk: (baseline_start, baseline_due)} for every in-block task, from a pure plan.
+
+    The Civil task: its counted-back start and its own due date. Blocks 2+: the block's
+    pure dates. (None, None) for a site the pure plan does not schedule (excluded, no
+    capacity, no Civil date), for a Not Applicable task (the scheduler never dates one,
+    so it has no plan), and for any other task put in block 1 (never dated either).
+    """
+    targets = {t.pk: (None, None) for t in pure.in_block}
+    if pure.reason is not None or not pure.blocks:
+        return targets
+    anchor_plan = pure.blocks[0]
+    for bp in pure.blocks:
+        for tp in bp.tasks:
+            task = tp.task
+            if task.is_not_applicable:
+                continue
+            if bp is anchor_plan and task is not pure.anchor_task:
+                continue
+            targets[task.pk] = (bp.start, bp.due)
+    return targets
+
+
+def _baseline_changes(in_block, anchor_task, pure, force=False):
+    """(frozen, [(task, (start, due))]): the baseline writes one run makes.
+
+    Before Civil starts (or with force=True, the deliberate re-plan) every task whose
+    stored baseline differs from the pure plan is re-snapshot, so a PM's Civil date
+    change, a capacity edit or the working-day switch carries into it. A forecast-only
+    run changes nothing, because the pure plan ignores the forecast.
+
+    After Civil starts the baseline is frozen, with one exception: a task with no
+    baseline at all takes its pure-plan dates. That covers a task first dated after the
+    freeze (an N/A undone, a site whose capacity arrived after Civil began), and gives it
+    its plan rather than a forecast date, which would hide the slip it already carries.
+    """
+    frozen = False if force else civil_has_started(anchor_task)
+    targets = _baseline_targets(pure)
+    changes = []
+    for task in in_block:
+        new = targets.get(task.pk, (None, None))
+        old = (task.baseline_start, task.baseline_due)
+        if frozen:
+            if old == (None, None) and new != (None, None):
+                changes.append((task, new))
+        elif old != new:
+            changes.append((task, new))
+    return frozen, changes
+
+
+def _save_baseline(task, start, due):
+    """Persist one task's baseline. Returns 1 when written.
+
+    filter().update() of the two baseline columns only, so a concurrent status or date
+    write on the row is never overwritten. Race: both callers (schedule_site and
+    rebaseline_site) hold the site row's select_for_update, and they are the only
+    runtime writers, so two baseline writes for one site never interleave.
+    """
+    return Task.objects.filter(pk=task.pk).update(baseline_start=start, baseline_due=due)
+
+
+def pure_baselines_for_site(project, tasks, blocks, skip_sundays):
+    """{task pk: (start, due)} of the pure plan, from rows the caller already read.
+
+    For migration 0141, which reads with HISTORICAL models (load_site_for_plan with its
+    own model classes) and writes the result itself. This never queries; it reads only
+    attributes that exist from 0137 on, so the live code it runs is arithmetic over the
+    migration's own rows (R-22).
+    """
+    pure = _plan(project, skip_sundays, None, pure=True, loaded=(tasks, blocks))
+    return _baseline_targets(pure)
+
+
+@dataclass
+class RebaselineResult:
+    """What rebaseline_site() found and (with apply=True) wrote."""
+    site: Project
+    anchor: object                   # the Civil due date the plan was counted from
+    changes: list                    # (task, (old_start, old_due), (new_start, new_due))
+    applied: bool = False
+    written: int = 0
+
+
+def rebaseline_site(project, note, apply=False, skip_sundays=None):
+    """The deliberate re-plan: re-snapshot one site's baseline from its pure plan as it
+    stands now, whether or not Civil has started. Dry run unless apply=True.
+
+    Raises ValueError for an empty note, and for a site the pure plan does not schedule:
+    re-planning it would only blank its baseline, which is never what a re-plan means.
+    The apply run writes one ActivityLog row (BASELINE_RESET_ACTION_CODE), no actor, the
+    note in its text, even when nothing changed: the decision itself is the record.
+    """
+    note = (note or '').strip()
+    if not note:
+        raise ValueError('A note is required: say why the plan is being reset.')
+    if skip_sundays is None:
+        skip_sundays = SystemSettings.get().schedule_skip_sundays
+    today = timezone.localdate()
+
+    def plan_changes(site):
+        pure = _plan(site, skip_sundays, today, pure=True)
+        if pure.reason is not None:
+            raise ValueError(f'Site {site.project_id} is not scheduled ({pure.reason}); '
+                             f'there is no plan to reset its baseline to.')
+        _, changes = _baseline_changes(pure.in_block, pure.anchor_task, pure, force=True)
+        return pure, [(t, (t.baseline_start, t.baseline_due), new) for t, new in changes]
+
+    if not apply:
+        pure, changes = plan_changes(project)
+        return RebaselineResult(site=project, anchor=pure.anchor, changes=changes)
+
+    with transaction.atomic():
+        # The site lock, as schedule_site takes it: a trigger run cannot snapshot the
+        # baseline between this plan and its writes.
+        project = Project.objects.select_for_update().get(pk=project.pk)
+        pure, changes = plan_changes(project)
+        result = RebaselineResult(site=project, anchor=pure.anchor, changes=changes,
+                                  applied=True)
+        for task, _, (start, due) in changes:
+            result.written += _save_baseline(task, start, due)
+        log_activity(project, None,
+                     f'Baseline reset: {result.written} task(s) re-planned from Civil due '
+                     f'{pure.anchor.isoformat()}; note: {note}',
+                     entity_type='Project', entity_id=project.pk,
+                     action_code=BASELINE_RESET_ACTION_CODE)
+    return result
+
+
+@dataclass
+class PlanSummary:
+    """A scheduled site's finish against its plan (spec rule 6)."""
+    baseline_finish: object          # latest baseline_due of the in-block tasks
+    forecast_finish: object          # latest due_date of the same tasks
+    days_behind: int                 # calendar days; never negative ("ahead" is not shown in v1)
+
+
+def site_plan_summary(project):
+    """The site's planned and forecast finish, or None when it has no baseline (or is not
+    a site the scheduler works on, so a leftover frozen baseline on an excluded or
+    On Hold site is not shown as a slip).
+
+    One aggregate over the site's in-block tasks: from a template row in an active
+    block, not a mirror, not a location copy (the scheduler's _in_scope), and not N/A,
+    which has no plan and whose date nobody works to.
+    """
+    if not _is_site_eligible(project) or project.exclude_from_auto_schedule:
+        return None
+    block_rows = (ScheduleBlockTask.objects.filter(block__is_active=True)
+                  .values('template_task_id'))
+    agg = (Task.objects.filter(phase__project=project, template_task_id__in=block_rows,
+                               is_mirror=False, location_label='', is_not_applicable=False)
+           .aggregate(baseline=Max('baseline_due'), forecast=Max('due_date')))
+    if agg['baseline'] is None or agg['forecast'] is None:
+        return None
+    return PlanSummary(baseline_finish=agg['baseline'], forecast_finish=agg['forecast'],
+                       days_behind=max((agg['forecast'] - agg['baseline']).days, 0))

@@ -318,6 +318,11 @@ Expected context:
     {% else %}
       <span class="small {% if not task.due_date %}text-muted{% elif task.overdue_days %}text-danger{% endif %}">{{ task.due_date|default:"—" }}</span>
     {% endif %}
+    {% comment %}SCHED-2e: the baseline beside the forecast, in all four branches above, only
+       when they differ. Read off the task row itself, so a swapped row shows it too.{% endcomment %}
+    {% if task.baseline_due and task.baseline_due != task.due_date %}
+      <div class="text-muted" style="font-size:.72rem;">plan: {{ task.baseline_due|date:"j M" }}</div>
+    {% endif %}
     {% comment %}DELAYED / DUE TODAY, the same in all four branches above. All three values
        are set by views._attach_due_health() against one `today` per response; nothing is
        compared to a date here. "Delayed" is task_health's overdue rule, so a Done row, a

@@ -381,7 +381,13 @@ class TaskAdmin(admin.ModelAdmin):
     # mark their own date `system`, and the SCHED-2 scheduler would then overwrite it.
     # An admin date edit marks it manual through save_model() below. `schedule_start`
     # is written only by the scheduler (spec Layer 2).
-    readonly_fields = ['status', 'is_mirror', 'due_date_source', 'schedule_start']
+    #
+    # `baseline_start` and `baseline_due` (SCHED-2e). The plan a site's slip is measured
+    # against; its only writers are the scheduler, migration 0141 and rebaseline_site
+    # (spec "Baseline"). Editable here, anyone with admin access could quietly move the
+    # plan and erase the slip, so a re-plan goes through the command and its logged note.
+    readonly_fields = ['status', 'is_mirror', 'due_date_source', 'schedule_start',
+                       'baseline_start', 'baseline_due']
 
     def get_fields(self, request, obj=None):
         """Put due_date (and its source) back where the model declares it.
