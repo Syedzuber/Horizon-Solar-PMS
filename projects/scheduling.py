@@ -28,7 +28,8 @@ on by a day, and tests freeze it there.
 
 SCHED-2e: the baseline. Task.baseline_start/baseline_due hold the PURE PLAN (_plan with
 pure=True: the same walk without the forecast, late-finish and first-dating shifts).
-Every apply run re-snapshots it until the Civil task has started, then it is frozen;
+Every apply run re-snapshots it until it freezes (Civil started, or its planned due date
+before today, whichever is first);
 rebaseline_site() is the deliberate re-plan. site_plan_summary() gives the overview its
 "Planned finish · Forecast · N days behind plan" line. See the section at the end.
 
@@ -246,7 +247,7 @@ class ScheduleResult:
     # Empty on a not_eligible site: nothing was loaded for it.
     in_block: list = field(default_factory=list)
     anchor_task: object = None
-    baseline_frozen: bool = None     # True once Civil has started (apply only)
+    baseline_frozen: bool = None     # True once Civil started or its planned date passed (apply only)
     baselined: int = 0               # tasks whose baseline was written (apply only)
 
     @property
@@ -803,12 +804,14 @@ def schedule_site(project, actor=None, apply=False, skip_sundays=None):
                 due_dates_changed += saved
             else:
                 result.cleared += _save_start(tp.task)
-        # SCHED-2e: the baseline. Before Civil starts every run re-snapshots it from the
-        # pure plan; after, only a task that has none yet gets one. Written silently: it
-        # is not a date anyone works to, so it adds no ActivityLog row of its own and does
-        # not count towards `changed` below.
+        # SCHED-2e: the baseline. Until it freezes (Civil started, or its planned date
+        # before today) every run re-snapshots it from the pure plan; after, only a task
+        # that has none yet gets one. Written silently: it is not a date anyone works to,
+        # so it adds no ActivityLog row of its own and does not count towards `changed`
+        # below. `today` is this run's one read, the same day the forecast used.
         result.baseline_frozen, changes = _baseline_changes(result.in_block,
-                                                            result.anchor_task, pure)
+                                                            result.anchor_task, pure,
+                                                            today=today)
         for task, (start, due) in changes:
             result.baselined += _save_baseline(task, start, due)
         # One row per kind of change (SCHED-2b ruling 2). When every change in the run
@@ -1064,6 +1067,31 @@ def civil_has_started(anchor_task):
         to_status__in=CIVIL_STARTED_STATUSES).exists()
 
 
+def civil_date_has_passed(anchor_task, today):
+    """True once the Civil due date the plan rests on is before `today` (the local date):
+    the second way the baseline freezes (SCHED-2e amendment, 9 Nov 2026).
+
+    TWO DATES ARE ASKED, BECAUSE THE RUN COMES AFTER THE EDIT. When a PM moves a late
+    Civil date forward (6 Nov to 17 Nov, on 9 Nov), the reschedule that follows already
+    sees 17 Nov on the task. The date the plan was made from is the Civil task's stored
+    baseline_due, which every run before the freeze keeps equal to its due date; once
+    that has passed, the plan stands, whatever the date is moved to. The task's current
+    due date is asked as well, so a Civil date typed straight into the past freezes too.
+
+    `today` None answers False: no day to compare with."""
+    if anchor_task is None or today is None:
+        return False
+    planned, due = anchor_task.baseline_due, anchor_task.due_date
+    return (planned is not None and planned < today) or (due is not None and due < today)
+
+
+def baseline_is_frozen(anchor_task, today):
+    """True once the site's baseline stops re-snapshotting: Civil has started, or its
+    planned due date has passed, whichever comes first (SCHED-2e, amended 9 Nov 2026).
+    The date test runs first because it needs no query."""
+    return civil_date_has_passed(anchor_task, today) or civil_has_started(anchor_task)
+
+
 def _baseline_targets(pure):
     """{task pk: (baseline_start, baseline_due)} for every in-block task, from a pure plan.
 
@@ -1087,20 +1115,24 @@ def _baseline_targets(pure):
     return targets
 
 
-def _baseline_changes(in_block, anchor_task, pure, force=False):
+def _baseline_changes(in_block, anchor_task, pure, force=False, today=None):
     """(frozen, [(task, (start, due))]): the baseline writes one run makes.
 
-    Before Civil starts (or with force=True, the deliberate re-plan) every task whose
+    Before the freeze (or with force=True, the deliberate re-plan) every task whose
     stored baseline differs from the pure plan is re-snapshot, so a PM's Civil date
     change, a capacity edit or the working-day switch carries into it. A forecast-only
     run changes nothing, because the pure plan ignores the forecast.
 
-    After Civil starts the baseline is frozen, with one exception: a task with no
+    The freeze (baseline_is_frozen): Civil has started, or its planned due date is
+    before `today`, whichever comes first. So a PM who pushes a late Civil date forward
+    moves the forecast and not the plan, and the slip shows.
+
+    After the freeze the baseline stays as it is, with one exception: a task with no
     baseline at all takes its pure-plan dates. That covers a task first dated after the
     freeze (an N/A undone, a site whose capacity arrived after Civil began), and gives it
     its plan rather than a forecast date, which would hide the slip it already carries.
     """
-    frozen = False if force else civil_has_started(anchor_task)
+    frozen = False if force else baseline_is_frozen(anchor_task, today)
     targets = _baseline_targets(pure)
     changes = []
     for task in in_block:

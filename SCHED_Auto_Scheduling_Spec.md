@@ -264,8 +264,8 @@ Only three things may write them: the scheduler, the backfill migration, and reb
 
 When the baseline changes
 
-Until Civil starts: every scheduling run that changes the site's dates re-snapshots the baseline. PMs can still correct their plan freely.
-Once Civil goes In Progress or Done: the baseline is frozen. Forecast shifts, late finishes and date edits never change it.
+Until the freeze: every scheduling run that changes the site's dates re-snapshots the baseline. PMs can still correct their plan freely.
+The freeze (amended 9 Nov 2026, see "Baseline freeze amendment" below): once Civil goes In Progress or Done, OR once the Civil due date is before today, whichever comes first, the baseline is frozen. Forecast shifts, late finishes and date edits never change it.
 Exception to the freeze: a task dated for the first time after the freeze takes that date as its baseline.
 Deliberate re-plan: rebaseline_site re-snapshots a site. It requires a note, runs as a dry run unless told to apply, and logs baseline_reset. A PM button for this comes in SCHED-3.
 
@@ -297,20 +297,39 @@ Backfill shows real slip. Sites already pushed forward by the forecast (1901, 19
 
 Unchanged:
 
-The baseline still re-snapshots until Civil starts, then freezes.
+The baseline still re-snapshots until it freezes (Civil starts or, since the freeze amendment, the Civil due date passes).
 Tasks first dated after the freeze still take their own baseline: their pure-plan dates, not the forecast date they were first given (ruled 9 Nov, after the SCHED-2e build).
 rebaseline_site still re-snapshots a site on demand.
 
-Known gap (v1): before Civil starts, a PM who pushes a late Civil date forward re-plans the baseline. The change is still logged as due_date_changed (was/now).
+Known gap (v1), CLOSED by the freeze amendment below: before Civil starts, a PM who pushed a late Civil date forward re-planned the baseline. The change is still logged as due_date_changed (was/now).
 
 ## SCHED-2e build notes (9 Nov 2026)
 
 - **Pure plan.** `scheduling._plan(pure=True)` is the scheduler's own walk with the forecast, late-finish and first-dating shifts switched off. It is not a second copy of the arithmetic. For a site where nothing is late, the pure plan and the real plan are identical; a test pins this.
 - **Civil has started** when its status is In Progress or Done, or it has a `completed_at`, or it has a StatusTransition row into In Progress or Done. The last test catches a Civil that started and was then Blocked.
-- **When the baseline is written.** Every apply run re-snapshots it from the pure plan, writing only tasks whose baseline differs, until Civil starts. It writes no ActivityLog row of its own.
+- **When the baseline is written.** Every apply run re-snapshots it from the pure plan, writing only tasks whose baseline differs, until the freeze (Civil started, or its due date before today). It writes no ActivityLog row of its own.
 - **A task first dated after the freeze takes its pure-plan dates**, not the forecast date it was first given. Otherwise a task dated while the site is already late would carry no slip.
 - **No baseline:** Not Applicable tasks, and any non-Civil task placed in block 1.
-- **Unscheduled sites.** Before Civil starts, a site that becomes unscheduled (excluded, no capacity, no Civil date) has its baseline cleared, the same way its system dates are.
+- **Unscheduled sites.** Before the freeze, a site that becomes unscheduled (excluded, no capacity, no Civil date) has its baseline cleared, the same way its system dates are. After the freeze it keeps its baseline.
 - **Summary scope.** The summary line shows only on eligible, non-excluded sites with a baseline. It ignores Not Applicable tasks.
 - **`rebaseline_site` refuses an unscheduled site.** Re-planning one would only blank its baseline.
 - **Backfill (0141).** Every in-block task on the sites that have system dates gets its pure plan. On local (production restore of 9 Nov 18:37) that is 220 tasks on 20 sites. 1901, 1908, 1902 and 2420 are 3 days behind; the other 16 are on plan.
+
+## Baseline freeze amendment (9 Nov 2026, after SCHED-2d)
+
+Zuber's ruling: the baseline freezes when Civil has started OR when the Civil task's due date is before today (the local date), whichever comes first. Before both, every run re-snapshots it as before. rebaseline_site is unchanged: it re-plans a frozen site on demand.
+
+Why: on 2420 (Civil Not Started, due 6 Nov) a PM moving Civil to 17 Nov on 9 Nov re-planned the baseline with it, and the site read "On plan" although it had slipped 11 days. Now the plan holds and the summary shows the slip.
+
+Which Civil date is asked: the reschedule runs after the PM's edit, so the task already carries the new date. The freeze therefore asks two dates, and either one before today freezes:
+- the Civil task's stored baseline_due, the date the plan was made from (before the freeze every run keeps it equal to the Civil due date);
+- the Civil task's current due date, so a date typed straight into the past freezes too.
+
+"Before today" is strict: on the Civil due date itself the baseline still re-plans; from the next day it is frozen.
+
+Examples (calendar days, today 9 Nov):
+- Civil Not Started, due 6 Nov, PM moves it to 17 Nov: the baseline stays on the 6 Nov plan, the forecast moves 11 days, and the summary shows "11 days behind plan".
+- Civil Not Started, due 20 Nov, PM moves it to 25 Nov: the baseline re-plans from 25 Nov, and the summary shows "On plan".
+- A frozen site whose Civil date is cleared keeps its baseline, as a site whose Civil has started does.
+
+Code: scheduling.civil_date_has_passed() and baseline_is_frozen(); _baseline_changes() takes the run's `today`. Migration 0141 never asks the freeze (it writes the pure plan through pure_baselines_for_site), so its backfill is unaffected.

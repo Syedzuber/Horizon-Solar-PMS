@@ -32,6 +32,7 @@ Run with:
 from decimal import Decimal
 from importlib import import_module
 from io import StringIO
+from types import SimpleNamespace
 
 from django.core.management import CommandError, call_command
 from django.urls import reverse
@@ -39,8 +40,8 @@ from django.urls import reverse
 from .admin import TaskAdmin
 from .models import (ActivityLog, Project, ScheduleBlock, ScheduleBlockTask, SystemSettings,
                      Task, TaskTemplate, TaskTemplatePhase, TaskTemplateTask)
-from .scheduling import (BASELINE_RESET_ACTION_CODE, _plan, civil_has_started,
-                         site_plan_summary)
+from .scheduling import (BASELINE_RESET_ACTION_CODE, _plan, civil_date_has_passed,
+                         civil_has_started, site_plan_summary)
 from .tests_sched2_scheduler import (CIVIL, MODULE, NET_METER_INSTALLATION, TESTING, D,
                                      SchedFixture, freeze_today)
 from .tests_two_step_completion import _client_for, _profile
@@ -177,7 +178,10 @@ class SnapshotTests(BaselineFixture):
         for day, behind in ((11, 1), (12, 2), (13, 3)):
             with self.subTest(today=D(day)):
                 result = self._apply_on(D(day), site)
-                self.assertFalse(result.baseline_frozen)
+                # SCHED-2e amendment: the Civil date (10 Nov) has passed, so the baseline
+                # is now frozen as well. It would hold either way: the pure plan ignores
+                # the forecast.
+                self.assertTrue(result.baseline_frozen)
                 self.assertGreater(result.forecast_moved, 0)
                 self.assertEqual(result.baselined, 0)
                 self.assertEqual(self._baselines(site), planned)
@@ -302,6 +306,90 @@ class FreezeTests(BaselineFixture):
         self.assertEqual(self._baselines(self.site)[module.pk], (D(11), D(12)))
         self.assertEqual({pk: v for pk, v in self._baselines(self.site).items()
                           if pk != module.pk}, others)
+
+
+class DateFreezeTests(BaselineFixture):
+    """SCHED-2e amendment (9 Nov 2026): the baseline also freezes once the Civil due date
+    it rests on is before today, whichever of that and Civil starting comes first. Today
+    is 9 Nov (the class freeze); days are calendar days (the switch's default)."""
+
+    def _pm_moves_civil(self, site, value):
+        """The PM's inline edit through the real view, with the after-commit reschedule
+        run, exactly as a live request does."""
+        civil = self._task(site, CIVIL)
+        with self.captureOnCommitCallbacks(execute=True):
+            response = _client_for(self.pm).post(
+                reverse('task_set_due_date', args=[site.project_id, civil.pk]),
+                {'due_date': value})
+        self.assertIn(response.status_code, (200, 302))
+        self.assertEqual(Task.objects.get(pk=civil.pk).status, Task.NOT_STARTED)
+
+    def test_a_late_civil_moved_forward_keeps_the_plan_and_shows_the_slip(self):
+        """Civil Not Started, due 6 Nov, today 9 Nov; the PM moves it to 17 Nov."""
+        site = self._site('40.00', civil_due=D(6))
+        self._apply_on(D(5), site)                  # planned while 6 Nov was still ahead
+        planned = self._baselines(site)
+        self.assertEqual(planned[self._task(site, CIVIL).pk][1], D(6))
+        self._pm_moves_civil(site, '2026-11-17')
+        self.assertEqual(self._baselines(site), planned, 'the plan must not move')
+        summary = self._summary(site)
+        self.assertEqual(summary.days_behind, 11)   # the Civil date moved 11 days
+        page = _client_for(self.pm).get(
+            reverse('project_overview', args=[site.project_id])).content.decode()
+        self.assertIn('11 days behind plan', page)
+
+    def test_a_civil_date_still_ahead_moved_forward_re_plans(self):
+        """Civil Not Started, due 20 Nov, today 9 Nov; the PM moves it to 25 Nov."""
+        site = self._site('40.00', civil_due=D(20))
+        self._apply(site)
+        before = self._baselines(site)
+        self._pm_moves_civil(site, '2026-11-25')
+        after = self._baselines(site)
+        self.assertNotEqual(after, before)
+        self.assertEqual(after[self._task(site, CIVIL).pk][1], D(25))
+        summary = self._summary(site)
+        self.assertEqual(summary.days_behind, 0)
+        self.assertEqual(summary.baseline_finish, summary.forecast_finish)
+        page = _client_for(self.pm).get(
+            reverse('project_overview', args=[site.project_id])).content.decode()
+        self.assertIn('On plan', page)
+
+    def test_the_freeze_comes_when_the_civil_date_passes(self):
+        site = self._site('40.00', civil_due=D(10))
+        self.assertFalse(self._apply_on(D(10), site).baseline_frozen)   # due today: not yet
+        self.assertTrue(self._apply_on(D(11), site).baseline_frozen)
+
+    def test_both_civil_dates_are_asked(self):
+        civil = SimpleNamespace(baseline_due=None, due_date=None)
+        self.assertFalse(civil_date_has_passed(civil, D(9)))
+        civil.baseline_due, civil.due_date = D(6), D(17)    # plan passed, date moved on
+        self.assertTrue(civil_date_has_passed(civil, D(9)))
+        civil.baseline_due, civil.due_date = D(20), D(5)    # date typed into the past
+        self.assertTrue(civil_date_has_passed(civil, D(9)))
+        civil.baseline_due, civil.due_date = D(20), D(25)
+        self.assertFalse(civil_date_has_passed(civil, D(9)))
+        self.assertFalse(civil_date_has_passed(civil, None))    # migration 0141: no today
+        self.assertFalse(civil_date_has_passed(None, D(9)))
+
+    def test_clearing_a_passed_civil_date_keeps_the_frozen_baseline(self):
+        """Frozen means frozen: a site that drops out of the schedule after its Civil
+        date passed keeps its plan, as one whose Civil has started does."""
+        site = self._site('40.00', civil_due=D(6))
+        self._apply_on(D(5), site)
+        planned = self._baselines(site)
+        self._pm_moves_civil(site, '')
+        self.assertEqual(self._baselines(site), planned)
+        self._pm_moves_civil(site, '2026-11-06')
+        self.assertEqual(self._baselines(site), planned)
+
+    def test_rebaseline_site_still_re_plans_a_date_frozen_site(self):
+        site = self._site('40.00', civil_due=D(6))
+        self._apply_on(D(5), site)
+        self._pm_moves_civil(site, '2026-11-17')
+        call_command('rebaseline_site', '--site', site.project_id, '--note', 'new plan',
+                     '--apply', stdout=StringIO())
+        self.assertEqual(self._baselines(site)[self._task(site, CIVIL).pk][1], D(17))
+        self.assertEqual(self._summary(site).days_behind, 0)
 
 
 # ---------------------------------------------------------------------------
