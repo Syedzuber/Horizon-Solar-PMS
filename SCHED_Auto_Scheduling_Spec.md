@@ -246,3 +246,9 @@ Each trigger reschedules only that site, except the switch, which reschedules al
 - **Readers.** The project overview's 8-line "Recent activity" hides `due_dates_forecast_shift`; the site timeline shows it. The Admin audit log's 7-day "Most active" ranks only rows with an actor; its "today" count still includes system rows.
 - **Daily run.** A Railway cron service runs `python manage.py schedule_sites --all --apply` at `0 1 * * *` UTC (06:30 IST). Zuber configures it; the schedule is not in the repo.
 - **`schedule_sites -v 2`** lists every block of each site: sequence, name, planned start -> due, each task's action, and `forecast` on the late block.
+
+## First-dating rule (9 Nov 2026, SCHED-2b amendment)
+
+- **A system date is never written in the past for the first time.** If a block is open, its planned due date has passed, and none of its tasks has a system date yet, the block starts on the next working day after today.
+- **Once a block is first-dated, its stored dates are kept.** On later runs, the chain re-anchors at the block's stored start, never earlier than the plan. A first-dated block therefore turns red only when its own new dates pass, and the daily run never undoes a first dating.
+- **A block with only manual dates counts as never system-dated.** Its manual tasks stay red; the block's other tasks are first-dated from tomorrow.
