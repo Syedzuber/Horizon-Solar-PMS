@@ -1,0 +1,17 @@
+{% comment %}
+SCHED-2d: the overview's whole task list, redrawn after a reschedule. Fetched by the
+#task-list container (hx-swap="none") on the datesRescheduled HX-Trigger; every phase
+arrives as an out-of-band <tbody> and task count through the same _phase_tasks_oob.html
+the Add-Task and reorder responses use.
+
+NO _hx_messages.html HERE, unlike _task_add_success.html: this GET follows an action
+whose own response has just shown its message, and an empty messages fragment would
+replace it.
+Expects: phases (tasks prefetched, rows attached), gate_task_pk, plus the shared row
+context from _task_row_context().
+{% endcomment %}
+{% for phase in phases %}
+  {% with phase_tasks=phase.tasks.all %}
+    {% include 'projects/partials/_phase_tasks_oob.html' with phase_count=phase_tasks|length %}
+  {% endwith %}
+{% endfor %}

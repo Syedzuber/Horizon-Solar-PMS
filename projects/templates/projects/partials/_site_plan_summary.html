@@ -1,0 +1,20 @@
+{% comment %}
+SCHED-2e's "Planned finish · Forecast · N days behind plan" line, on scheduled sites only
+(plan_summary is None otherwise). Rendered by project_overview and, alone, by
+project_plan_summary, so the page and the refresh draw the same text.
+
+SCHED-2d: it redraws itself (outerHTML) on the datesRescheduled HX-Trigger the action
+views send when their reschedule moved a due date. It is its own swap target, never
+inside a row target. With no plan it is still drawn, empty, so it keeps listening: a
+site's first Civil date makes the line appear without a reload.
+Expects: project, plan_summary.
+{% endcomment %}
+<div id="site-plan-summary"
+     hx-get="{% url 'project_plan_summary' project.project_id %}"
+     hx-trigger="datesRescheduled from:body" hx-swap="outerHTML"
+     {% if plan_summary %}class="small mb-2 {% if plan_summary.days_behind %}text-warning-emphasis{% else %}text-muted{% endif %}"{% endif %}>
+  {% if plan_summary %}
+    <i data-lucide="calendar-clock" style="width:13px;height:13px;vertical-align:-2px;" class="me-1"></i>Planned finish {{ plan_summary.baseline_finish|date:"j M" }} ·
+    {% if plan_summary.days_behind %}Forecast {{ plan_summary.forecast_finish|date:"j M" }} · {{ plan_summary.days_behind }} day{{ plan_summary.days_behind|pluralize }} behind plan{% else %}On plan{% endif %}
+  {% endif %}
+</div>

@@ -414,7 +414,9 @@ class SummaryTests(BaselineFixture):
         unscheduled = self._site(None)                       # no capacity, no Civil date
         self._apply(unscheduled)
         self.assertIsNone(self._summary(unscheduled))
-        self.assertNotIn('site-plan-summary', self._overview(unscheduled))
+        # SCHED-2d: the #site-plan-summary element is always drawn, empty when there is
+        # no plan, so it can listen for a reschedule; what must be absent is the line.
+        self.assertNotIn('Planned finish', self._overview(unscheduled))
 
         excluded = self._site('40.00', civil_due=D(10))
         self._apply(excluded)
@@ -422,11 +424,11 @@ class SummaryTests(BaselineFixture):
         Project.objects.filter(pk=excluded.pk).update(exclude_from_auto_schedule=True)
         self._apply(excluded)
         self.assertIsNone(self._summary(excluded))
-        self.assertNotIn('site-plan-summary', self._overview(excluded))
+        self.assertNotIn('Planned finish', self._overview(excluded))
 
         scheduled = self._site('40.00', civil_due=D(10))
         self._apply(scheduled)
-        self.assertIn('site-plan-summary', self._overview(scheduled))
+        self.assertIn('Planned finish', self._overview(scheduled))
 
     def test_the_baseline_is_read_only_in_the_admin(self):
         self.assertIn('baseline_start', TaskAdmin.readonly_fields)

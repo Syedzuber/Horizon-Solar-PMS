@@ -31,7 +31,14 @@ pure=True: the same walk without the forecast, late-finish and first-dating shif
 Every apply run re-snapshots it until the Civil task has started, then it is frozen;
 rebaseline_site() is the deliberate re-plan. site_plan_summary() gives the overview its
 "Planned finish · Forecast · N days behind plan" line. See the section at the end.
+
+SCHED-2d: an apply run records how many due dates it changed in a per-request collector,
+and @reports_reschedules turns that into an HX-Trigger (datesRescheduled) so the overview
+redraws its rows and plan summary. See the section after schedule_site_safely().
 """
+import contextvars
+import functools
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -770,11 +777,18 @@ def schedule_site(project, actor=None, apply=False, skip_sundays=None):
         pure = _plan(project, skip_sundays, today, pure=True, loaded=loaded)
         result.applied = True
         forecast_pks = {tp.task.pk for tp in result.forecast_writes}
+        # SCHED-2d: due dates that really changed, for the page's "N due dates updated
+        # automatically". Not `written`: a write can carry the same due date with only a
+        # new planned start or source, which changes nothing a person sees in the row.
+        due_dates_changed = 0
         for tp in result.writes:
+            due_before = tp.task.due_date
             set_task_due_date(tp.task, tp.due, SYSTEM, actor, log=False)
             tp.task.schedule_start = tp.start
             saved = _save_dates(tp.task)
             result.written += saved
+            if saved and due_before != tp.due:
+                due_dates_changed += 1
             if tp.task.pk in forecast_pks:
                 result.forecast_moved += saved
         for tp in result.start_writes:
@@ -784,7 +798,9 @@ def schedule_site(project, actor=None, apply=False, skip_sundays=None):
             tp.task.schedule_start = None
             if tp.action == ACTION_CLEAR:
                 set_task_due_date(tp.task, None, SYSTEM, actor, log=False)
-                result.cleared += _save_dates(tp.task)
+                saved = _save_dates(tp.task)
+                result.cleared += saved
+                due_dates_changed += saved
             else:
                 result.cleared += _save_start(tp.task)
         # SCHED-2e: the baseline. Before Civil starts every run re-snapshots it from the
@@ -807,6 +823,9 @@ def schedule_site(project, actor=None, apply=False, skip_sundays=None):
         if result.forecast_moved:
             log_activity(project, None, _forecast_log_text(result), entity_type='Project',
                          entity_id=project.pk, action_code=FORECAST_ACTION_CODE)
+    # SCHED-2d: told to the request only once the block above has committed, so a run
+    # that failed and rolled back never makes the page refresh to show dates it lacks.
+    _record_dates_rescheduled(project, due_dates_changed)
     return result
 
 
@@ -881,6 +900,86 @@ def schedule_site_safely(project, actor=None):
         logger.exception('Auto-schedule failed for site %s',
                          getattr(project, 'project_id', project))
         return None
+
+
+# ---------------------------------------------------------------------------
+# SCHED-2d: telling the page that a site's dates were rescheduled
+# ---------------------------------------------------------------------------
+#
+# A trigger's reschedule runs in on_commit, and in every HTMX path that callback has run
+# before the view returns (no ATOMIC_REQUESTS; proved by a TransactionTestCase trace in
+# the SCHED-2d pre-flight). So the view can learn, at response time, how many due dates
+# its own action moved, and send `HX-Trigger: {"datesRescheduled": {...}}`; the overview
+# then re-fetches its task rows and plan summary instead of the person reloading.
+
+DATES_RESCHEDULED_EVENT = 'datesRescheduled'
+
+# {site pk: due dates changed} for the current request, or None outside one. A contextvar
+# and not a module global: a threaded worker serves several requests at once, and each
+# must see only its own reschedules. None by default, so the admin, the commands and the
+# Admin working-day switch (which call schedule_site with no collector active) record
+# nothing and need nothing reset.
+_dates_rescheduled = contextvars.ContextVar('sched_dates_rescheduled', default=None)
+
+
+def _record_dates_rescheduled(project, count):
+    """Add `count` changed due dates for `project` to this request's collector, if one is
+    active. NEVER RAISES: it runs after the scheduler has committed, and a failure here
+    must cost only the page refresh, never the dates or the person's action."""
+    try:
+        holder = _dates_rescheduled.get()
+        if holder is None or not count:
+            return
+        holder[project.pk] = holder.get(project.pk, 0) + count
+    except Exception:
+        logger.exception('Recording rescheduled dates failed for site %s',
+                         getattr(project, 'project_id', project))
+
+
+def _add_dates_rescheduled_trigger(response, changed):
+    """Merge datesRescheduled into the response's HX-Trigger, keeping any event the view
+    already sends (project_field_edit sends fieldEditDone). An existing header is either
+    JSON or a comma-separated list of event names; both become JSON keys.
+
+    One request reschedules one site in practice (the page's own); if it ever moved
+    several, the count is their total and `site` the first, which is all the notice
+    needs."""
+    existing = response.get('HX-Trigger')
+    events = {}
+    if existing:
+        try:
+            parsed = json.loads(existing)
+            events = parsed if isinstance(parsed, dict) else {}
+        except ValueError:
+            events = {name.strip(): None for name in existing.split(',') if name.strip()}
+    events[DATES_RESCHEDULED_EVENT] = {'site': next(iter(changed)),
+                                       'count': sum(changed.values())}
+    response['HX-Trigger'] = json.dumps(events)
+
+
+def reports_reschedules(view):
+    """View decorator: collect the due dates this request's reschedules changed, and on
+    an HTMX request that changed any, add the datesRescheduled HX-Trigger.
+
+    Only HTMX responses get it: a redirect or a full page already shows the new dates,
+    and the browser never hands a redirect's headers to htmx anyway. The collector is
+    reset after every request, whatever happens, so one request's count never leaks into
+    the next one the same thread serves. Adding the header never raises."""
+    @functools.wraps(view)
+    def wrapper(request, *args, **kwargs):
+        token = _dates_rescheduled.set({})
+        try:
+            response = view(request, *args, **kwargs)
+            changed = _dates_rescheduled.get()
+        finally:
+            _dates_rescheduled.reset(token)
+        if changed and request.headers.get('HX-Request') == 'true':
+            try:
+                _add_dates_rescheduled_trigger(response, changed)
+            except Exception:
+                logger.exception('Adding the datesRescheduled trigger failed')
+        return response
+    return wrapper
 
 
 def task_is_scheduled(task):

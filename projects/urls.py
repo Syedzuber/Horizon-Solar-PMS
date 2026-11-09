@@ -355,6 +355,10 @@ urlpatterns = [
     # Project overview — all roles with access to the project
     # ---------------------------------------------------------------------------
     path('projects/<str:project_id>/overview/', views.project_overview, name='project_overview'),
+    # project_task_rows (SCHED-2d) — anyone who can see the site; GET only: every phase's rows as OOB tbodies, fetched on datesRescheduled
+    path('projects/<str:project_id>/tasks/rows/', views.project_task_rows, name='project_task_rows'),
+    # project_plan_summary (SCHED-2d) — anyone who can see the site; GET only: the plan summary line alone, fetched on datesRescheduled
+    path('projects/<str:project_id>/plan-summary/', views.project_plan_summary, name='project_plan_summary'),
 
     # ---------------------------------------------------------------------------
     # Vendor orders (O2) — SCM records a Residential order and its first payment;

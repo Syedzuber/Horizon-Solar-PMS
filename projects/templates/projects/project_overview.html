@@ -1109,15 +1109,22 @@ label (get_status_display) — never a two-state branch.
 {% if project.status == 'Draft' %}
   <div class="alert alert-secondary small">Tasks will appear here after the project is activated.</div>
 {% else %}
-  {% comment %}SCHED-2e: the site's finish against its baseline, scheduled sites only
-     (plan_summary is None otherwise). Outside every HTMX swap target, so it changes on a
-     page load, not when a row is swapped.{% endcomment %}
-  {% if plan_summary %}
-  <div id="site-plan-summary" class="small mb-2 {% if plan_summary.days_behind %}text-warning-emphasis{% else %}text-muted{% endif %}">
-    <i data-lucide="calendar-clock" style="width:13px;height:13px;vertical-align:-2px;" class="me-1"></i>Planned finish {{ plan_summary.baseline_finish|date:"j M" }} ·
-    {% if plan_summary.days_behind %}Forecast {{ plan_summary.forecast_finish|date:"j M" }} · {{ plan_summary.days_behind }} day{{ plan_summary.days_behind|pluralize }} behind plan{% else %}On plan{% endif %}
-  </div>
-  {% endif %}
+  {% comment %}SCHED-2e: the site's finish against its baseline, scheduled sites only.
+     SCHED-2d: its own partial, which redraws itself on datesRescheduled; outside every
+     row swap target.{% endcomment %}
+  {% include 'projects/partials/_site_plan_summary.html' %}
+  {% comment %}SCHED-2d: THE LIST REDRAWS ITSELF AFTER A RESCHEDULE. An action whose
+     reschedule moved a due date (Civil date, In Progress date, a completion, capacity)
+     answers with the datesRescheduled HX-Trigger; this container then GETs every phase's
+     rows, which arrive as out-of-band <tbody> swaps (hx-swap="none" leaves the container
+     itself alone). No reload, so the scroll position is kept; the rows have no expanded
+     state to lose. hx-disinherit="*" keeps hx-get/hx-swap here from leaking into the
+     forms in the rows. Sortable re-binds each new tbody on htmx:load.
+     Known narrow case (SECONDARY_FINDINGS, SCHED-2d): a non-PM's In Progress date box,
+     opened but not yet filled in, closes when the rows are redrawn.{% endcomment %}
+  <div id="task-list"
+       hx-get="{% url 'project_task_rows' project.project_id %}"
+       hx-trigger="datesRescheduled from:body" hx-swap="none" hx-disinherit="*">
   {% for phase in phases %}
   <div class="card shadow-sm mb-3">
     <div class="card-header d-flex justify-content-between align-items-center py-2">
@@ -1155,6 +1162,7 @@ label (get_status_display) — never a two-state branch.
   {% empty %}
   <div class="alert alert-secondary small">No phases found.</div>
   {% endfor %}
+  </div>
 {% endif %}
 
 {# ── 7. Project Issues ─────────────────────────────────────────────────────── #}
@@ -1445,6 +1453,8 @@ Not gated on is_assigned_pm — a Design Head who is not the PM uses it for #4.
   </div>
 </div>
 
+{# SCHED-2d: the corner box the datesRescheduled listener puts its 4-second notice in. #}
+<div id="datesRescheduledNotice" class="position-fixed bottom-0 end-0 p-3" style="z-index:1080;" aria-live="polite"></div>
 {% comment %}
 Post-activation field-edit modal (capacity / contract value / target commissioning
 date). Content is loaded via hx-get into #fieldEditModalContent; the form inside posts
@@ -1777,6 +1787,30 @@ at the top of this page unmodified, exactly as it does on task_detail.
     if (!el) return;
     var inst = bootstrap.Modal.getInstance(el);
     if (inst) inst.hide();
+  });
+
+  /* ── SCHED-2d: "N due dates updated automatically" ──────────────────── */
+  /* Shown for about 4 seconds when an action's reschedule moved due dates (the
+     datesRescheduled HX-Trigger; #task-list and #site-plan-summary refetch on the same
+     event). Same alert look and fade as base.html's #hxMessages flashes, but in its own
+     fixed corner box: the action's response swaps #hxMessages out-of-band AFTER this
+     event fires (htmx raises HX-Trigger events before the swap), which would wipe a
+     notice put there, and the box stays in view wherever the list is scrolled.
+     textContent only: the count is a number from the server, never markup. */
+  document.body.addEventListener('datesRescheduled', function (evt) {
+    var box = document.getElementById('datesRescheduledNotice');
+    var n = evt.detail && evt.detail.count;
+    if (!box || !n) return;
+    var el = document.createElement('div');
+    el.className = 'alert alert-info shadow-sm small mb-2';
+    el.setAttribute('role', 'status');
+    el.textContent = n + ' due date' + (n === 1 ? '' : 's') + ' updated automatically';
+    box.appendChild(el);
+    setTimeout(function () {
+      el.style.transition = 'opacity .5s ease';
+      el.style.opacity    = '0';
+      setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 500);
+    }, 3500);
   });
 
   /* ── Submit-for-approval modal (2.1) ──────────────────────────────────── */

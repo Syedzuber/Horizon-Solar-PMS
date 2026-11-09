@@ -79,8 +79,8 @@ from .task_health import OPEN_STATUSES, days_overdue, is_overdue, overdue_q
 # through it so the date carries its source (manual/system) and one log row.
 from .scheduling import (
     eligible_sites as schedule_eligible_sites, schedule_site, schedule_site_safely,
-    set_task_due_date, site_plan_summary, status_change_reschedules, task_is_schedule_anchor,
-    task_is_scheduled,
+    reports_reschedules, set_task_due_date, site_plan_summary, status_change_reschedules,
+    task_is_schedule_anchor, task_is_scheduled,
 )
 # Closeout step 2 (CL-1): the approval closure, called by both approval paths below.
 # Closeout 7b: PP-2's guard on those same paths, and the punch point reads behind the
@@ -3820,6 +3820,7 @@ def _render_field_edit_modal_hx(request, project, form):
 
 
 @login_required
+@reports_reschedules
 def project_field_edit(request, project_id):
     """Post-activation edit of a project's capacity / contract value / target
     commissioning date. Separate from project_edit (Draft-only, full form): this path
@@ -4948,6 +4949,71 @@ def _render_phase_tasks_hx(request, project, phase, status=200):
         'phase_count':         len(phase_tasks),
         **_task_row_context(request, project),
     }, status=status)
+
+
+@login_required
+@require_GET
+def project_task_rows(request, project_id):
+    """Every phase's task rows, as out-of-band <tbody> swaps, for the overview to redraw
+    its task list after a reschedule (SCHED-2d). Access: anyone who can see the site, the
+    same people the overview admits. GET only; reads, never writes.
+
+    Fetched by the list container on the `datesRescheduled` HX-Trigger, which the action
+    views send when their reschedule moved a due date. The rows come from the same row
+    template, row context and attach helpers as the full page and the other row
+    responders, so a refreshed row is the row a reload would draw.
+
+    Carries no flash messages on purpose: the action's own response has just put its
+    message in #hxMessages, and an (empty) messages fragment here would wipe it.
+    """
+    project = _active_project(project_id)
+    # Only someone who can see the site may read its rows: the overview's own gate.
+    # Everyone else gets the same 404 the overview gives (0.2 lockdown).
+    if not user_can_view_project(request.user, project):
+        raise Http404
+    phases = []
+    if project.status != 'Draft':
+        # The overview's own phase query: phases in order, each task with its template
+        # task joined, because the delivery-consignment attach reads its code on every
+        # row and would otherwise cost a query per delivery mirror.
+        phases = list(
+            ProjectPhase.objects.filter(project=project)
+            .prefetch_related(Prefetch(
+                'tasks', queryset=Task.objects.select_related('template_task')))
+            .order_by('phase_order')
+        )
+        # All rows at once, against one `today`, as the overview does: each helper is a
+        # fixed number of queries for the batch, not per phase.
+        tasks = [t for phase in phases for t in phase.tasks.all()]
+        _attach_delivery_consignments(tasks)
+        _attach_due_health(tasks, timezone.localdate())
+        _attach_open_punch_points(tasks, project)
+        _attach_phase_rule_flags(tasks, project, request)
+    return render(request, 'projects/partials/_task_list_rows.html', {
+        'project': project,
+        'phases':  phases,
+        **_task_row_context(request, project),
+    })
+
+
+@login_required
+@require_GET
+def project_plan_summary(request, project_id):
+    """The overview's "Planned finish · Forecast · N days behind plan" line alone, for it
+    to redraw itself after a reschedule (SCHED-2d). Access: anyone who can see the site.
+    GET only; reads, never writes.
+
+    The full page includes the same partial, so the two cannot drift. When the site has
+    no plan the partial is an empty element that still listens, so a site's first Civil
+    date makes the line appear without a reload."""
+    project = _active_project(project_id)
+    # Same gate and same refusal as project_task_rows above and the overview itself.
+    if not user_can_view_project(request.user, project):
+        raise Http404
+    return render(request, 'projects/partials/_site_plan_summary.html', {
+        'project':      project,
+        'plan_summary': site_plan_summary(project),
+    })
 
 
 def _reorder_log_text(phase, moves):
@@ -7022,6 +7088,7 @@ def _apply_task_status_change(task, new_status, profile, request, project):
 
 
 @login_required
+@reports_reschedules
 def task_status_update(request, project_id, task_id):
     """
     Update a task's status from the project-overview task row. Enforces a transition
@@ -7114,6 +7181,7 @@ def task_status_update(request, project_id, task_id):
 
 
 @login_required
+@reports_reschedules
 def task_detail_status_update(request, project_id, task_id):
     """
     Status update submitted from the task detail page.
@@ -7275,6 +7343,7 @@ def _approval_response(request, project, task):
 
 
 @login_required
+@reports_reschedules
 def task_submit_for_approval(request, project_id, task_id):
     """
     Submit an OPEX task for approval. Records who submitted it, when, and what they
@@ -7480,6 +7549,7 @@ def task_submit_for_approval(request, project_id, task_id):
 
 
 @login_required
+@reports_reschedules
 def task_approve(request, project_id, task_id):
     """
     Approve a submitted OPEX task and complete it. Writes approved_by/approved_at
@@ -8155,6 +8225,7 @@ def task_assign_design_head(request, project_id, task_id):
 
 
 @login_required
+@reports_reschedules
 def task_set_due_date(request, project_id, task_id):
     """
     Set the due date on a task.
