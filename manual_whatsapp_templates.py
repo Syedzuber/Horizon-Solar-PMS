@@ -4,7 +4,11 @@ Runs all six approved Interakt templates through send_notification() to YOUR pho
 then prints a single status board: SENT / FAILED / SKIPPED + error detail per template.
 
 HOW TO RUN:
-    python manage.py shell < test_whatsapp_templates.py
+    python manage.py shell < manual_whatsapp_templates.py
+
+NAMED manual_* ON PURPOSE (renamed from test_whatsapp_templates.py, 9 Nov 2026): the sends
+below run at import time, and `manage.py test` with no app label imports every test*.py
+it finds from the repo root. Do not rename it back to test_*.
 
 BEFORE RUNNING — three things or every row will mislead you:
   1. Set TEST_USERNAME below to a UserProfile whose phone_number is YOUR phone
