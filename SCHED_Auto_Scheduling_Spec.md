@@ -60,10 +60,14 @@ Seeded for the OPEX Execution v1 template:
 | 3 | Earthing & DC | LA and Earthing Installation; DC Cable Laying with Conduit | 1.5 | 2.5 | 5 |
 | 4 | Inverter & DBs | DCDB and ACDB Installation; Inverter Installation | 1 | 1 | 1 |
 | 5 | AC cable | AC Cable Laying | 0.5 | 0.5 | 2 |
-| 6 | Testing | *Testing-phase tasks — mapping confirmed by Zuber in SCHED-2 pre-flight* | 0.5 | 1 | 1 |
+| 6 | RMS & Gen meter | RMS Installation; Solar Generation Meter Installation | 0.5 | 0.5 | 0.5 |
+| 7 | Testing | Testing & Commissioning | 0.5 | 1 | 1 |
+| 8 | Net meter | Net Meter Installation | 0.5 | 1 | 1 |
+
+Blocks 1–5 and Testing are seeded by migration 0138 (Testing at 6). Migration 0139 (SCHED-2c, see "Meter blocks") moves Testing to 7 and adds blocks 6 and 8.
 
 Tasks in no block get no system date:
-- RMS Installation and Solar Generation Meter Installation (until the PMs give numbers)
+- pre-installation approvals (Net Metering Approval, CEIG Approval)
 - post-installation approvals
 - Closeout
 - the mirror tasks (COD, As-Built, HOTO)
@@ -174,7 +178,7 @@ Each trigger reschedules only that site, except the switch, which reschedules al
 
 ## SCHED-2 rulings (8 Nov 2026, after pre-flight)
 
-- **Block 6** = `TESTING_COMMISSIONING` only. `NET_METER_INSTALLATION` stays unscheduled, because it depends on the DISCOM.
+- ~~**Block 6** = `TESTING_COMMISSIONING` only. `NET_METER_INSTALLATION` stays unscheduled, because it depends on the DISCOM.~~ **Superseded 9 Nov:** see "Meter blocks". Testing moves to block 7, RMS & Gen meter is block 6, and Net Meter is block 8.
 - **Working-day switch** lives on the existing `SystemSettings` screen (`admin_master_switches`), with the confirmation rendered in place. No new URL.
 - **Triggers:** one after-commit call inside `_apply_task_status_change` (covers status updates, self-certified completion, approve, reject, reopen), plus `task_set_not_applicable` (mark and un-mark), `TaskAdmin.save_model` (N/A edits), `project_field_edit` and a new `ProjectAdmin.save_model` (capacity, exclusion flag), and any change to the Civil task's due date (edit screen, In Progress date entry, Django admin). The scheduler is idempotent, so extra triggers are harmless.
 - **Per-site exclusion:** new `Project.exclude_from_auto_schedule` (bool, default False), editable in Django admin only, with changes logged. An excluded site returns `excluded`: nothing is written or cleared. It is set by hand for UKRU001 after deploy, because a 900 kWp site does not fit the 101+ band's 25 days.
@@ -194,3 +198,41 @@ Each trigger reschedules only that site, except the switch, which reschedules al
 - **Trigger:** setting, changing or clearing the Civil due date reschedules the site after commit. Clearing it clears the site's system dates.
 - **Exclusion:** turning `exclude_from_auto_schedule` on clears the site's system dates on unfinished tasks; turning it off reschedules the site.
 - **SCHED-3** becomes a bulk screen for setting Civil due dates across a tender.
+
+## Meter blocks (9 Nov 2026)
+
+- **RMS Installation + Solar Generation Meter Installation** form one block: **0.5 day in every band**, placed after AC cable and before Testing.
+- **Net Meter Installation** gets its own block **after Testing & Commissioning**: 0.5 / 1 / 1 days (≤50 / 51–100 / 101+).
+- New block order:
+  1. Civil
+  2. Modules
+  3. Earthing & DC
+  4. Inverter & DBs
+  5. AC cable
+  6. RMS & Gen meter
+  7. Testing
+  8. Net meter
+- Worked example, Civil due Tue 10 Nov 2026, calendar days. Each date is a due date; a range shows the planned start → due date.
+
+| Block | ≤50 | 51–100 | 101+ |
+|---|---|---|---|
+| Modules | 11 → 12 Nov | 11 → 14 Nov | 11 → 15 Nov |
+| Earthing & DC | 12 → 13 Nov | 15 → 17 Nov | 16 → 20 Nov |
+| Inverter & DBs | 14 Nov | 17 → 18 Nov | 21 Nov |
+| AC cable | 15 Nov | 18 Nov | 22 → 23 Nov |
+| RMS & Gen meter | 15 Nov | 19 Nov | 24 Nov |
+| Testing | 16 Nov | 19 → 20 Nov | 24 → 25 Nov |
+| Net meter | 16 Nov | 20 → 21 Nov | 25 → 26 Nov |
+
+- **Net Meter depends on the DISCOM.** Expect it to go red more often than the other blocks; this was accepted by Zuber.
+
+## Live refresh (9 Nov 2026)
+
+- When an action reschedules a site, the task list updates without a manual page reload. A short notice tells the user how many dates were updated automatically.
+
+## Forecast shift (SCHED-2b, 9 Nov 2026)
+
+- When a block is open (not all Done or N/A) and its due date has passed, the later **system** dates re-anchor so the next block starts on the next working day after today. A daily run at 06:30 IST, before the morning report, keeps this current.
+- The late block's own dates never move, and manual dates never move. Dates are never pulled earlier.
+- Each change is logged as `due_dates_forecast_shift`, one row per site.
+- Scheduler log rows must not count as user activity for digests, "latest activity" or "gone quiet". This rule binds the future common dashboard.

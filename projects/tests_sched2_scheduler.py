@@ -21,8 +21,11 @@ written; block 2 starts on the next working day after the Civil date with C rese
                     split into already overdue and newly overdue
     5  Switch       the Admin working-day switch previews, then recalculates on confirm
 
-Fixtures are real: the OPEX v1 template and the six blocks come from the 0075 and 0138
-seed functions, and every site is activated through opex_site_activate.
+Fixtures are real: the OPEX v1 template and the eight blocks come from the 0075, 0138
+and 0139 seed functions, and every site is activated through opex_site_activate.
+
+SCHED-2c (spec "Meter blocks", 9 Nov): block 6 is RMS & Gen meter (0.5 day in every band),
+Testing moved to 7, and block 8 is Net meter (0.5 / 1 / 1).
 
 Run with:
     python manage.py test projects.tests_sched2_scheduler --settings=solarpms.test_settings
@@ -67,13 +70,15 @@ INVERTER = 'INVERTER_INSTALLATION'
 TESTING = 'TESTING_COMMISSIONING'
 NET_METERING = 'NET_METERING_APPROVAL'      # a PM task in no block
 NET_METER_INSTALLATION = 'NET_METER_INSTALLATION'
-RMS = 'RMS_INSTALLATION'                    # a Site Engineer task in no block
+RMS = 'RMS_INSTALLATION'
+GEN_METER = 'SOLAR_GENERATION_METER_INSTALLATION'
 COD = 'COD'                                 # a mirror
 
 SCHEDULED = 'due_dates_scheduled'
 
-# Blocks 2-6 hold 7 tasks: Modules 1, Earthing & DC 2, Inverter & DBs 2, AC 1, Testing 1.
-LATER_TASKS = 7
+# Blocks 2-8 hold 10 tasks: Modules 1, Earthing & DC 2, Inverter & DBs 2, AC 1,
+# RMS & Gen meter 2, Testing 1, Net meter 1.
+LATER_TASKS = 10
 
 
 def D(day, month=11, year=2026):
@@ -94,13 +99,18 @@ class _Apps:
 
 
 def _seed_template_and_blocks():
-    """The OPEX v1 template (0075) and the six blocks (0138), through the migrations'
-    own functions, so the fixture is the production table and not a copy of it."""
+    """The OPEX v1 template (0075), the six blocks (0138) and the meter blocks (0139),
+    through the migrations' own functions, so the fixture is the production table and not
+    a copy of it."""
     import_module('projects.migrations.0075_seed_opex_template_v1').seed_opex_v1(_Apps(), None)
-    # On a migrated database (test_settings_postgres) 0138 has already run; 0075 skips
-    # itself when its template exists, and the blocks follow the same rule here.
-    if not ScheduleBlock.objects.filter(template__code='OPEX', template__version_no=1).exists():
+    # On a migrated database (test_settings_postgres) 0138 and 0139 have already run; 0075
+    # skips itself when its template exists, and the blocks follow the same rule here.
+    opex_blocks = ScheduleBlock.objects.filter(template__code='OPEX', template__version_no=1)
+    if not opex_blocks.exists():
         import_module('projects.migrations.0138_sched2_seed_schedule_blocks').seed_schedule_blocks(
+            _Apps(), None)
+    if not opex_blocks.filter(name='Net meter').exists():
+        import_module('projects.migrations.0139_sched2c_meter_blocks').add_meter_blocks(
             _Apps(), None)
 
 
@@ -170,11 +180,17 @@ class SchedFixture(TestCase):
 # ---------------------------------------------------------------------------
 
 class ArithmeticTests(SchedFixture):
-    """(start, due) per block; block 1 is (Civil planned start, Civil due date)."""
+    """(start, due) per block, blocks 1-8; block 1 is (Civil planned start, Civil due date).
+
+    Rule (scheduling._plan): day 1 is the next working day after the Civil due date
+    (Wed 11 Nov); C is the running total of half days; a block that takes C from p to c
+    starts on day floor(p / 2) + 1 and is due on day ceil(c / 2). The calendar-day rows
+    are the spec's "Meter blocks" worked example."""
 
     def test_the_dates_are_the_weekdays_used_below(self):
         self.assertEqual(D(10).weekday(), 1, '10 Nov 2026 must be a Tuesday')
         self.assertEqual(D(15).weekday(), 6, '15 Nov 2026 must be a Sunday')
+        self.assertEqual(D(22).weekday(), 6, '22 Nov 2026 must be a Sunday')
         self.assertEqual(D(8).weekday(), 6, '8 Nov 2026 must be a Sunday')
 
     def test_le_50_band_in_calendar_days(self):
@@ -184,14 +200,28 @@ class ArithmeticTests(SchedFixture):
         self.assertEqual((result.anchor, result.anchor_source), (D(10), ANCHOR_CIVIL_DUE_DATE))
         self.assertEqual(self._dates(result), [
             (D(7), D(10)), (D(11), D(12)), (D(12), D(13)),
-            (D(14), D(14)), (D(15), D(15)), (D(15), D(15)),
+            (D(14), D(14)), (D(15), D(15)),
+            (D(15), D(15)),   # 6 RMS & Gen meter  C 9 -> 10
+            (D(16), D(16)),   # 7 Testing          C 10 -> 11
+            (D(16), D(16)),   # 8 Net meter        C 11 -> 12
         ])
 
     def test_le_50_band_with_sundays_skipped(self):
+        """Working days from 11 Nov, Sun 15 skipped: day 1 = 11, 2 = 12, 3 = 13, 4 = 14,
+        5 = 16, 6 = 17.
+            Modules        C 0-3    start day 1 = 11, due day 2 = 12
+            Earthing & DC  C 3-6    start day 2 = 12, due day 3 = 13
+            Inverter & DBs C 6-8    start day 4 = 14, due day 4 = 14
+            AC cable       C 8-9    start day 5 = 16, due day 5 = 16
+            RMS & Gen      C 9-10   start day 5 = 16, due day 5 = 16
+            Testing        C 10-11  start day 6 = 17, due day 6 = 17
+            Net meter      C 11-12  start day 6 = 17, due day 6 = 17
+        Civil: 3.5 days -> 4 working days ending 10 Nov, back over Sun 8 -> 6 Nov."""
         result = self._plan(self._site('40.00', civil_due=D(10)), skip_sundays=True)
         self.assertEqual(self._dates(result), [
             (D(6), D(10)), (D(11), D(12)), (D(12), D(13)),
-            (D(14), D(14)), (D(16), D(16)), (D(16), D(16)),
+            (D(14), D(14)), (D(16), D(16)),
+            (D(16), D(16)), (D(17), D(17)), (D(17), D(17)),
         ])
         later = [d for pair in self._dates(result)[1:] for d in pair]
         self.assertNotIn(6, {d.weekday() for d in later}, 'no planned date on a Sunday')
@@ -201,7 +231,10 @@ class ArithmeticTests(SchedFixture):
         self.assertEqual(result.band, BAND_51_100)
         self.assertEqual(self._dates(result), [
             (D(4), D(10)), (D(11), D(14)), (D(15), D(17)),
-            (D(17), D(18)), (D(18), D(18)), (D(19), D(19)),
+            (D(17), D(18)), (D(18), D(18)),
+            (D(19), D(19)),   # 6 RMS & Gen meter  C 16 -> 17
+            (D(19), D(20)),   # 7 Testing          C 17 -> 19
+            (D(20), D(21)),   # 8 Net meter        C 19 -> 21
         ])
 
     def test_101_plus_band_in_calendar_days(self):
@@ -209,15 +242,31 @@ class ArithmeticTests(SchedFixture):
         self.assertEqual(result.band, BAND_101_PLUS)
         self.assertEqual(self._dates(result), [
             (D(31, 10), D(10)), (D(11), D(15)), (D(16), D(20)),
-            (D(21), D(21)), (D(22), D(23)), (D(24), D(24)),
+            (D(21), D(21)), (D(22), D(23)),
+            (D(24), D(24)),   # 6 RMS & Gen meter  C 26 -> 27
+            (D(24), D(25)),   # 7 Testing          C 27 -> 29
+            (D(25), D(26)),   # 8 Net meter        C 29 -> 31
         ])
 
     def test_101_plus_band_with_sundays_skipped(self):
+        """Working days from 11 Nov, Suns 15 and 22 skipped: day 1 = 11 ... 4 = 14,
+        5 = 16 ... 10 = 21, 11 = 23, 12 = 24, 13 = 25, 14 = 26, 15 = 27, 16 = 28.
+            Modules        C 0-10   start day 1 = 11,  due day 5 = 16
+            Earthing & DC  C 10-20  start day 6 = 17,  due day 10 = 21
+            Inverter & DBs C 20-22  start day 11 = 23, due day 11 = 23
+            AC cable       C 22-26  start day 12 = 24, due day 13 = 25
+            RMS & Gen      C 26-27  start day 14 = 26, due day 14 = 26
+            Testing        C 27-29  start day 14 = 26, due day 15 = 27
+            Net meter      C 29-31  start day 15 = 27, due day 16 = 28
+        Civil: 11 days -> 11 working days ending 10 Nov, back over Suns 8 and 1 -> 29 Oct."""
         result = self._plan(self._site('250.00', civil_due=D(10)), skip_sundays=True)
         self.assertEqual(self._dates(result), [
             (D(29, 10), D(10)), (D(11), D(16)), (D(17), D(21)),
-            (D(23), D(23)), (D(24), D(25)), (D(26), D(26)),
+            (D(23), D(23)), (D(24), D(25)),
+            (D(26), D(26)), (D(26), D(27)), (D(27), D(28)),
         ])
+        later = [d for pair in self._dates(result)[1:] for d in pair]
+        self.assertNotIn(6, {d.weekday() for d in later}, 'no planned date on a Sunday')
 
     def test_block_2_after_a_saturday_civil_date_skips_the_sunday(self):
         site = self._site('40.00', civil_due=D(14))
@@ -244,7 +293,7 @@ class ArithmeticTests(SchedFixture):
         Task.objects.filter(pk=self._task(site, CIVIL).pk).update(is_not_applicable=True)
         self.assertEqual(self._plan(site).reason, REASON_NEEDS_ANCHOR)
 
-    def test_apply_writes_blocks_2_to_6_and_only_the_civil_start(self):
+    def test_apply_writes_blocks_2_to_8_and_only_the_civil_start(self):
         site = self._site('40.00', civil_due=D(10))
         result = self._apply(site, actor=self.pm)
         self.assertEqual((result.written, result.started), (LATER_TASKS, 1))
@@ -255,13 +304,20 @@ class ArithmeticTests(SchedFixture):
             task = self._task(site, code)
             self.assertEqual((task.schedule_start, task.due_date, task.due_date_source),
                              (D(12), D(13), SYSTEM))
+        for code in (RMS, GEN_METER):
+            task = self._task(site, code)
+            self.assertEqual((task.schedule_start, task.due_date, task.due_date_source),
+                             (D(15), D(15), SYSTEM), code)
         testing = self._task(site, TESTING)
-        self.assertEqual((testing.schedule_start, testing.due_date), (D(15), D(15)))
-        self.assertIsNone(self._task(site, NET_METER_INSTALLATION).due_date,
-                          'Net Meter Installation is in no block')
+        self.assertEqual((testing.schedule_start, testing.due_date), (D(16), D(16)))
+        net_meter = self._task(site, NET_METER_INSTALLATION)
+        self.assertEqual((net_meter.schedule_start, net_meter.due_date, net_meter.due_date_source),
+                         (D(16), D(16), SYSTEM))
+        self.assertIsNone(self._task(site, NET_METERING).due_date,
+                          'Net Metering Approval is in no block')
         self.assertEqual(self._logs(site), [
             'Auto-scheduled due dates: anchor Civil due 2026-11-10, band <=50 kWp; '
-            '7 written, 1 start set, 0 cleared'])
+            '10 written, 1 start set, 0 cleared'])
 
 
 # ---------------------------------------------------------------------------
@@ -339,13 +395,14 @@ class RuleTests(SchedFixture):
         module.refresh_from_db()
         self.assertEqual(module.due_date_source, SYSTEM, 'the unlabelled task is scheduled')
 
-    def test_a_late_civil_re_anchors_blocks_2_to_6(self):
+    def test_a_late_civil_re_anchors_blocks_2_to_8(self):
         """Civil due 10 Nov, Done 13 Nov: block 2 restarts on 14 Nov, C = 0."""
         self._done(self._task(self.site, CIVIL), self._ist(13))
         result = self._plan(self.site)
         self.assertEqual(result.blocks[0].re_anchored_after, D(13))
         self.assertEqual(self._dates(result)[1:], [
             (D(14), D(15)), (D(15), D(16)), (D(17), D(17)), (D(18), D(18)), (D(18), D(18)),
+            (D(19), D(19)), (D(19), D(19)),
         ])
 
     def test_the_done_date_is_the_local_ist_date(self):
@@ -363,18 +420,19 @@ class RuleTests(SchedFixture):
         self.assertIsNone(result.blocks[0].re_anchored_after)
         self.assertEqual(self._dates(result)[1:], planned[1:])
 
-    def test_a_late_block_2_re_anchors_blocks_3_to_6(self):
+    def test_a_late_block_2_re_anchors_blocks_3_to_8(self):
         """Modules due 12 Nov, Done 14 Nov: block 3 restarts on 15 Nov, C = 0."""
         self._done(self._task(self.site, MODULE), self._ist(14))
         result = self._plan(self.site)
         self.assertEqual(result.blocks[1].re_anchored_after, D(14))
         self.assertEqual(self._dates(result)[2:], [
-            (D(15), D(16)), (D(16), D(17)), (D(17), D(17)), (D(18), D(18)),
+            (D(15), D(16)), (D(16), D(17)), (D(17), D(17)), (D(18), D(18)), (D(18), D(18)),
+            (D(19), D(19)),
         ])
 
     def test_an_all_not_applicable_block_takes_zero_days(self):
         """Block 3 all N/A: C after block 2 is 3 half days, so block 4 starts on day 2
-        (12 Nov) and is due day 3 (13 Nov); blocks 5 and 6 follow."""
+        (12 Nov) and is due day 3 (13 Nov); blocks 5 to 8 follow."""
         Task.objects.filter(pk__in=[self._task(self.site, LA).pk,
                                     self._task(self.site, DC_CABLE).pk]).update(
             is_not_applicable=True)
@@ -382,6 +440,7 @@ class RuleTests(SchedFixture):
         self.assertEqual(result.blocks[2].half_days, 0)
         self.assertEqual(self._dates(result)[1:], [
             (D(11), D(12)), (None, None), (D(12), D(13)), (D(13), D(13)), (D(14), D(14)),
+            (D(14), D(14)), (D(15), D(15)),
         ])
 
     def test_removing_capacity_clears_only_system_dates_and_the_civil_start(self):
@@ -393,7 +452,7 @@ class RuleTests(SchedFixture):
 
         result = self._apply(self.site)
         self.assertEqual(result.reason, REASON_NEEDS_CAPACITY)
-        self.assertEqual(result.cleared, 6, '7 system dates less the manual and the Done, '
+        self.assertEqual(result.cleared, 9, '10 system dates less the manual and the Done, '
                                             'plus the Civil start')
         inverter.refresh_from_db()
         self.assertEqual((inverter.due_date, inverter.due_date_source, inverter.schedule_start),
@@ -407,7 +466,7 @@ class RuleTests(SchedFixture):
         self.assertEqual((civil.due_date, civil.schedule_start), (D(10), None))
         self.assertEqual(self._logs(self.site)[-1],
                          'Auto-schedule cleared system due dates (needs_capacity); '
-                         '0 written, 0 start set, 6 cleared')
+                         '0 written, 0 start set, 9 cleared')
 
     def test_clearing_the_civil_date_clears_the_sites_system_dates(self):
         self._apply(self.site)
@@ -453,7 +512,7 @@ class RuleTests(SchedFixture):
         self.assertEqual(again.changes, 0)
         self.assertEqual(self._logs(self.site)[-1],
                          'Auto-schedule cleared system due dates (excluded); '
-                         '0 written, 0 start set, 8 cleared')
+                         '0 written, 0 start set, 11 cleared')
         self.assertEqual(len(self._logs(self.site)), 2, 'the excluded re-run logs nothing')
 
     def test_ineligible_sites_are_not_scheduled(self):
@@ -581,7 +640,7 @@ class CivilDateTriggerTests(TriggerFixture):
             self._edit_date(self.civil, '2026-11-10')
         self.assertEqual(self._logs(self.site), [
             'Auto-scheduled due dates: anchor Civil due 2026-11-10, band <=50 kWp; '
-            '7 written, 1 start set, 0 cleared'])
+            '10 written, 1 start set, 0 cleared'])
         self.assertEqual(self._task(self.site, MODULE).due_date, D(12))
         with self.captureOnCommitCallbacks(execute=True):
             self._edit_date(self.civil, '')
@@ -665,8 +724,10 @@ class StatusTriggerTests(TriggerFixture):
             self.assertScheduledOnce(mock)
 
     def test_not_applicable_on_a_task_in_no_block_does_not_schedule(self):
-        rms = self._task(self.site, RMS)
-        url = reverse('task_set_not_applicable', args=[self.site.project_id, rms.pk])
+        # Net Metering Approval: since SCHED-2c every Site Engineer task of the
+        # template is in a block, so the task in no block is a PM one.
+        net_metering = self._task(self.site, NET_METERING)
+        url = reverse('task_set_not_applicable', args=[self.site.project_id, net_metering.pk])
         mock = self._queued('projects.views.schedule_site_safely', lambda: _client_for(
             self.pm).post(url, {'not_applicable': '1', 'not_applicable_reason': 'scope'}))
         mock.assert_not_called()
@@ -838,28 +899,30 @@ class WorkingDaySwitchTests(SchedFixture):
             {'schedule_action': action, 'schedule_skip_sundays': '1' if skip else '0'})
 
     def test_the_preview_counts_and_changes_nothing(self):
-        """Skipping Sundays moves the Civil start (7 -> 6 Nov) and blocks 5 and 6
-        (Sun 15 Nov -> Mon 16 Nov): three dates."""
+        """Skipping Sundays moves the Civil start (7 -> 6 Nov), AC cable and both tasks of
+        RMS & Gen meter (Sun 15 -> Mon 16 Nov), and Testing and Net meter (16 -> 17 Nov):
+        six dates."""
         response = self._post('preview', True)
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'This will recalculate 3 system-set dates on 1 site.')
+        self.assertContains(response, 'This will recalculate 6 system-set dates on 1 site.')
         self.assertFalse(SystemSettings.get().schedule_skip_sundays)
-        self.assertEqual(self._task(self.site, TESTING).due_date, D(15))
+        self.assertEqual(self._task(self.site, TESTING).due_date, D(16))
 
     def test_confirm_saves_the_setting_and_recalculates(self):
         response = self._post('confirm', True)
         self.assertEqual(response.status_code, 302)
         self.assertTrue(SystemSettings.get().schedule_skip_sundays)
-        self.assertEqual(self._task(self.site, TESTING).due_date, D(16))
+        self.assertEqual(self._task(self.site, TESTING).due_date, D(17))
+        self.assertEqual(self._task(self.site, RMS).due_date, D(16))
         self.assertEqual(self._task(self.site, CIVIL).schedule_start, D(6))
         self.assertEqual(len(self._logs(self.site)), 2)
         messages = [str(m) for m in get_messages(response.wsgi_request)]
         self.assertIn('Auto-schedule now uses working days (Sundays skipped). '
-                      'Recalculated 3 system-set dates on 1 site.', messages)
+                      'Recalculated 6 system-set dates on 1 site.', messages)
         # Back again: calendar days, the original dates.
         self._post('confirm', False)
         self.assertFalse(SystemSettings.get().schedule_skip_sundays)
-        self.assertEqual(self._task(self.site, TESTING).due_date, D(15))
+        self.assertEqual(self._task(self.site, TESTING).due_date, D(16))
 
     def test_the_main_save_does_not_touch_the_switch(self):
         _client_for(self.admin).post(reverse('admin_master_switches'),
@@ -870,7 +933,7 @@ class WorkingDaySwitchTests(SchedFixture):
         response = self._post('confirm', True, profile=self.pm)
         self.assertNotEqual(response.status_code, 200)
         self.assertFalse(SystemSettings.get().schedule_skip_sundays)
-        self.assertEqual(self._task(self.site, TESTING).due_date, D(15))
+        self.assertEqual(self._task(self.site, TESTING).due_date, D(16))
 
 
 # ---------------------------------------------------------------------------
@@ -892,8 +955,25 @@ class ScheduleBlockModelTests(SchedFixture):
             (4, 'Inverter & DBs', '1.0', '1.0', '1.0',
              ['DCDB_AND_ACDB_INSTALLATION', INVERTER]),
             (5, 'AC cable', '0.5', '0.5', '2.0', ['AC_CABLE_LAYING']),
-            (6, 'Testing', '0.5', '1.0', '1.0', [TESTING]),
+            (6, 'RMS & Gen meter', '0.5', '0.5', '0.5', [RMS, GEN_METER]),
+            (7, 'Testing', '0.5', '1.0', '1.0', [TESTING]),
+            (8, 'Net meter', '0.5', '1.0', '1.0', [NET_METER_INSTALLATION]),
         ])
+
+    def test_the_meter_migration_refuses_a_second_run_and_reverses_cleanly(self):
+        """0139 fails loudly when Testing is no longer at 6 (already applied), and its
+        reverse restores the six-block table exactly."""
+        migration = import_module('projects.migrations.0139_sched2c_meter_blocks')
+        with self.assertRaisesMessage(RuntimeError, 'Expected the Testing block'):
+            migration.add_meter_blocks(_Apps(), None)
+        migration.remove_meter_blocks(_Apps(), None)
+        self.assertEqual(
+            list(ScheduleBlock.objects.filter(template__code='OPEX').order_by('sequence')
+                 .values_list('sequence', 'name')),
+            [(1, 'Civil & MMS'), (2, 'Modules'), (3, 'Earthing & DC'), (4, 'Inverter & DBs'),
+             (5, 'AC cable'), (6, 'Testing')])
+        self.assertFalse(ScheduleBlockTask.objects.filter(
+            template_task__code__in=[RMS, GEN_METER, NET_METER_INSTALLATION]).exists())
 
     def test_a_length_that_is_not_a_half_day_multiple_is_refused(self):
         from django.core.exceptions import ValidationError
