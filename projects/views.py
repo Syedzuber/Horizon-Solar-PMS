@@ -23,6 +23,7 @@ from django.shortcuts import render, redirect, get_object_or_404
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.html import format_html
+from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
@@ -11289,6 +11290,10 @@ def set_milestone_amounts(request, project_id):
 # ---------------------------------------------------------------------------
 
 @login_required
+# never_cache: Back from task detail (after marking N/A, approving, or any other action
+# there that reschedules the site) must refetch this page, not show the browser's copy
+# with the old due dates. Sends Cache-Control: no-cache, no-store, must-revalidate.
+@never_cache
 def project_overview(request, project_id):
     """
     Combined project page: info card, status blocks, documents, and phase/task list.
