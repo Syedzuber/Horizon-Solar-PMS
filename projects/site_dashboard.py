@@ -275,6 +275,13 @@ def _block_copy_q():
     return Q(template_task_id__in=block_rows, is_mirror=False) & ~Q(location_label='')
 
 
+# Public names for the two Execution tests, so another module (tenders_gantt, DASH-B3)
+# reads the SAME rule without importing a private name. Aliases only: no behaviour of
+# their own, and the private names stay for the code and tests already using them.
+in_block_q = _in_block_q
+block_copy_q = _block_copy_q
+
+
 def _site_is_eligible_q():
     """scheduling._is_site_eligible() as column terms. Visible sites are already
     not deleted and not test (D9), so only the remaining terms are needed, but all are

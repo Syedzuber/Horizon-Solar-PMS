@@ -470,6 +470,15 @@ def _dates_as_of(now):
     return {'text': text, 'stale': False}
 
 
+# Public names for the display rules the Tenders Gantt (DASH-B3, views_tenders_gantt)
+# reuses, so that page shows the same highlight, schedule line and stamp as this one
+# without importing private names. Aliases only; relative_time and QUIET_DAYS are public
+# already.
+segments_for_card = _segments
+schedule_line = _schedule_line
+dates_as_of = _dates_as_of
+
+
 @login_required
 @never_cache
 def site_dashboard(request):

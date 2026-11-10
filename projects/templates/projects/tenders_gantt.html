@@ -1,0 +1,297 @@
+{% extends "base.html" %}
+{% block title %}Tenders Gantt — SolarPMS{% endblock %}
+
+{% block extra_head %}
+{% comment %}DASH-B3. Bootstrap 5.3.3 comes from base.html; this page adds page-scoped CSS (every
+   rule under .tg) and Alpine 3.14.8 for open/closed state only, pinned as on the Site
+   Dashboard. Every bar is drawn server-side (tenders_gantt.py): only numbers formatted in
+   Python reach a style attribute. No fetch, no XHR, no JSON payload. Layout follows the
+   approved prototype "Horizon Site Dashboards" v3, Tenders tab.{% endcomment %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<style>
+  [x-cloak] { display: none !important; }
+  .tg {
+    --s:#ffffff; --s2:#edf1eb; --ink:#16231b; --mut:#56655c; --fnt:#7a887f; --line:#d9e0d7;
+    --brand:#1a7a4a; --brand2:#7cb847; --gold:#f0a829; --navy:#243a6b; --ok:#1f8a4c;
+    --warn:#a86400; --crit:#c23b2a; --okbg:#e2f2e7; --warnbg:#fcefd6; --critbg:#fae3df; --infobg:#e5eaf5;
+    --lw: 300px;
+    color: var(--ink); padding-bottom: 48px; min-width: 0;
+  }
+  .tg :focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+  .tg .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--fnt); font-weight: 600; }
+  .tg h1 { font-size: 1.6rem; font-weight: 600; margin: 0; }
+  .tg .sub { color: var(--mut); margin: 2px 0 0; font-size: .9rem; }
+  .tg .sub.stale { color: var(--warn); font-weight: 600; }
+  .tg .head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  .tg .head a { color: var(--brand); font-weight: 600; text-decoration: none; font-size: .9rem; }
+  .tg .num { font-variant-numeric: tabular-nums; }
+  .tg .code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-weight: 600; font-size: 12.5px; color: var(--ink); text-decoration: none; }
+  .tg a.code:hover { text-decoration: underline; }
+
+  /* Tender cards (G9): a link each; the selected one is pressed. */
+  .tg .tcards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; margin-bottom: 14px; }
+  .tg .tcard { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; background: var(--s); border: 1px solid var(--line);
+    border-radius: 10px; color: inherit; text-decoration: none; min-width: 0; }
+  .tg .tcard:hover { background: #f6f8f5; }
+  .tg .tcard[aria-pressed="true"] { background: var(--infobg); box-shadow: inset 0 -3px 0 var(--navy); }
+  .tg .tc-h { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tg .tc-h b { font-weight: 700; }
+  .tg .tc-n, .tg .tc-cap, .tg .tc-c { font-size: 12px; color: var(--mut); }
+  .tg .tc-c b { color: var(--ink); font-weight: 600; }
+  .tg .tc-c .crit { color: var(--crit); }
+  .tg .tc-c .warn { color: var(--warn); }
+  .tg .tbar { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: var(--s2); }
+  .tg .tbar i { display: block; height: 100%; }
+  .tg .tleg { display: flex; flex-wrap: wrap; gap: 2px 8px; font-size: 11px; color: var(--mut); }
+  .tg .tleg span { white-space: nowrap; }
+  .tg .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 3px; vertical-align: 0; }
+  .tg .k0 { background: #3d7ea6; } .tg .k1 { background: #8e6cb0; } .tg .k2 { background: #4a9c8c; }
+  .tg .k3 { background: var(--brand); } .tg .k4 { background: #c0562b; } .tg .k5 { background: var(--navy); }
+  .tg .k6 { background: #b9c3bb; } .tg .k7 { background: var(--gold); }
+
+  /* Controls (G10) */
+  .tg .ctrls { display: flex; gap: 8px 14px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+  .tg .ctrls form { display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; }
+  .tg .ctrls input[type=search] { width: 220px; min-width: 0; }
+  .tg .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--s); }
+  .tg .seg a { padding: 5px 10px; color: var(--mut); text-decoration: none; font-size: .85rem; }
+  .tg .seg a[aria-current="true"] { background: var(--ink); color: var(--s); }
+  .tg .tog { font-size: .85rem; color: var(--mut); text-decoration: none; padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--s); }
+  .tg .tog[aria-pressed="true"] { color: var(--ink); border-color: var(--ink); }
+  .tg .tog[aria-pressed="true"]::before { content: "✓ "; }
+  .tg .btn-x { font-size: .85rem; padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--s); color: var(--ink); }
+
+  /* Legend (G12) */
+  .tg .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11.5px; color: var(--mut); margin-bottom: 10px; align-items: center; }
+  .tg .legend > span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .tg .lg { position: relative; display: inline-block; width: 26px; height: 8px; }
+  .tg .lg > i { position: absolute; top: 0; height: 8px; left: 0; width: 26px; border-radius: 2px; }
+
+  /* The chart (G2, G13): the box scrolls both ways inside itself; the page never does. */
+  .tg .gbox { overflow: auto; max-height: 78vh; max-width: 100%; background: var(--s); border: 1px solid var(--line); border-radius: 10px; }
+  .tg .gc { position: relative; width: calc(var(--lw) + var(--tw)); }
+  .tg .gx { display: flex; width: calc(var(--lw) + var(--tw)); }
+  .tg .gl { position: sticky; left: 0; z-index: 2; flex: none; width: var(--lw); background: var(--s);
+    border-right: 1px solid var(--line); padding: 6px 8px; min-width: 0; }
+  .tg .gk { position: relative; flex: none; width: var(--tw); }
+  .tg .gt { position: sticky; top: 0; z-index: 4; background: var(--s); border-bottom: 1px solid var(--line); }
+  .tg .gt .gl { z-index: 5; font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--fnt); font-weight: 600; display: flex; align-items: flex-end; }
+  .tg .gt .gk { height: 44px; }
+  .tg .mo, .tg .wk { position: absolute; font-size: 11px; color: var(--mut); white-space: nowrap; overflow: hidden; border-left: 1px solid var(--line); padding-left: 4px; }
+  .tg .mo { top: 2px; height: 20px; font-weight: 600; }
+  .tg .wk { top: 24px; height: 18px; font-size: 10px; color: var(--fnt); }
+  .tg .tdl { position: absolute; bottom: 2px; transform: translateX(-50%); font-size: 10.5px; font-weight: 700; color: #8a5a00;
+    background: #fff4dc; border: 1px solid var(--gold); border-radius: 4px; padding: 0 4px; white-space: nowrap; z-index: 1; }
+  .tg .today { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--gold); z-index: 1; pointer-events: none; }
+
+  /* One site (G11) */
+  .tg .gr { border-bottom: 1px solid var(--line); }
+  .tg .gr > .gx > .gl { display: flex; gap: 6px; align-items: flex-start; }
+  .tg .tgl { flex: none; width: 22px; height: 22px; border: 1px solid var(--line); border-radius: 6px; background: var(--s); color: var(--mut);
+    font-size: 11px; line-height: 1; padding: 0; transition: transform .15s; }
+  .tg .tgl[aria-expanded="true"] { transform: rotate(90deg); }
+  .tg .gi { min-width: 0; flex: 1; font-size: 12px; line-height: 1.35; }
+  .tg .gi > span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tg .no { color: var(--fnt); font-size: 11px; margin-right: 2px; }
+  .tg .nm { font-weight: 600; }
+  .tg .mt, .tg .ct { color: var(--mut); font-size: 11.5px; }
+  .tg .ct { display: none !important; }
+  .tg .tag { display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 0 5px;
+    border-radius: 4px; background: var(--infobg); color: var(--navy); margin-left: 4px; vertical-align: 1px; }
+  .tg .sc { font-weight: 600; font-size: 11.5px; margin-right: 6px; }
+  .tg .sc.behind { color: var(--crit); } .tg .sc.onplan { color: var(--ok); } .tg .sc.none { color: var(--warn); } .tg .sc.mut { color: var(--fnt); }
+  .tg .pill { font-size: 10.5px; padding: 0 6px; border-radius: 99px; background: var(--s2); color: var(--ink); margin-right: 6px; }
+  .tg .when { font-size: 11px; color: var(--mut); }
+  .tg .when.ok { color: var(--ok); font-weight: 600; } .tg .when.warn { color: var(--warn); font-weight: 600; }
+  .tg .gr > .gx > .gk { display: flex; flex-direction: column; justify-content: center; gap: 3px; padding: 6px 0; }
+
+  /* Lanes and pieces (G4-G7). Every piece is an <i> with left/width as % of the track. */
+  .tg .ln { position: relative; height: 5px; background: rgba(22,35,27,.04); }
+  .tg .ln > i { position: absolute; top: 0; height: 100%; border-radius: 2px; }
+  .tg .ln > .a { background: var(--brand); }
+  .tg .ln > .f { background: #b9dcc7; }
+  .tg .ln > .p { border: 1px dashed #6f7d74; background: transparent; }
+  .tg .ln > .e { background: var(--navy); }
+  .tg .ln > .r { background: var(--crit); }
+  .tg .ln > .pl { top: auto; bottom: -3px; height: 2px; background: var(--ink); border-radius: 0; opacity: .8; }
+  .tg .ln.hx > .a, .tg .ln.hx > .p, .tg .ln.hx > .f { background: repeating-linear-gradient(135deg, var(--crit) 0 3px, var(--critbg) 3px 6px); }
+  .tg .ln > .cs { border-top-left-radius: 0; border-bottom-left-radius: 0; box-shadow: inset 2px 0 0 var(--gold); }
+  .tg .ln > .ce { border-top-right-radius: 0; border-bottom-right-radius: 0; box-shadow: inset -2px 0 0 var(--gold); }
+  .tg .ln > .dm { width: 7px; height: 7px; top: 50%; margin: -3.5px 0 0 -3.5px; transform: rotate(45deg); border: 1.5px solid var(--ink); background: var(--s); border-radius: 0; }
+  .tg .ln > .mm { top: -5px; height: auto; transform: translateX(-50%); font-style: normal; font-size: 9px; font-weight: 800; color: var(--warn); }
+  .tg .ln > .mm::before { content: "M"; }
+  .tg .ln > .cl { outline: 1px solid var(--gold); }
+  .tg .gk > .tg-t { position: absolute; top: 50%; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; transform: rotate(45deg); background: var(--gold); border: 1px solid #8a5a00; z-index: 1; }
+  .tg .note { position: absolute; top: -6px; margin-left: 6px; font-size: 10px; font-weight: 600; color: var(--warn); background: var(--warnbg); border-radius: 3px; padding: 0 4px; white-space: nowrap; line-height: 16px; }
+
+  /* Expanded rows (G5): one line per lane, its dates in words on the left. */
+  .tg .gd { background: #fafbf9; border-top: 1px dashed var(--line); }
+  .tg .dl .gl { background: #fafbf9; font-size: 11.5px; line-height: 1.3; padding: 4px 8px 4px 36px; }
+  .tg .dl.bl .gl { padding-left: 50px; }
+  .tg .dn { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tg .dl.bl .dn { font-weight: 500; }
+  .tg .dt { display: block; color: var(--mut); white-space: normal; }
+  .tg .dl .gk { display: flex; align-items: center; }
+  .tg .dl .ln { width: 100%; height: 8px; }
+
+  /* Groups (G8) */
+  .tg .grp { display: flex; align-items: center; gap: 8px; width: 100%; background: var(--s2); border: 0; text-align: left; padding: 8px 10px; color: inherit; font-size: .9rem; }
+  .tg .gg .gl { padding: 0; background: var(--s2); }
+  .tg .gg .gk { background: var(--s2); }
+  .tg .grp .tgl { pointer-events: none; }
+  .tg .drafts { margin-top: 12px; }
+  .tg .drafts .grp { border: 1px dashed var(--line); border-radius: 10px; }
+  .tg .dlist { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; }
+  .tg .drow { padding: 6px 12px; background: var(--s); border: 1px solid var(--line); border-radius: 8px; font-size: 12.5px; color: var(--mut);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tg .empty { padding: 24px; text-align: center; color: var(--mut); }
+
+  /* Phone (G13): the left column narrows to code, city, schedule line and time. */
+  @media (max-width: 640px) {
+    .tg { --lw: 136px; }
+    .tg h1 { font-size: 1.35rem; }
+    .tg .nm, .tg .mt, .tg .pill, .tg .tag, .tg .no { display: none !important; }
+    .tg .ct { display: block !important; }
+    .tg .gi > span.l3 { white-space: normal; }
+    .tg .sc { display: block; }
+    .tg .ctrls form, .tg .ctrls input[type=search] { width: 100%; }
+    .tg .dl .gl, .tg .dl.bl .gl { padding-left: 8px; }
+    .tg .tcards { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (prefers-reduced-motion: reduce) { .tg .tgl { transition: none; } }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="tg" style="--tw: {{ track_px }}px;" x-data="{ all: false }">
+  <div class="head">
+    <div>
+      <div class="eyebrow">RESCO tenders</div>
+      <h1>Tenders Gantt</h1>
+      <p class="sub{% if dates_as_of.stale %} stale{% endif %}" data-dates-as-of>{{ dates_as_of.text }}</p>{# SCHED-R stamp, the Site Dashboard's own rule #}
+    </div>
+    <a href="{% url 'site_dashboard' %}">Site Dashboard →</a>
+  </div>
+
+  {% comment %}Tender cards (G9): counted from the sites the chart can show under the current
+     search. A card is a link adding ?tender=; on the selected card it removes it.{% endcomment %}
+  {% if tender_cards %}
+  <div class="tcards" id="tender-cards">
+    {% for t in tender_cards %}{% with c=t.card %}
+    <a class="tcard" href="{{ t.href }}" aria-pressed="{% if t.active %}true{% else %}false{% endif %}"
+       data-tender="{{ c.code }}" data-active="{{ c.active }}" data-draft="{{ c.draft }}"
+       title="{% if t.active %}Show every tender{% else %}Show only {{ c.code }}{% endif %}">
+      <span class="tc-h"><b>{{ c.code }}</b>{% if c.name != c.code %} <span class="tc-n">{{ c.name }}</span>{% endif %}</span>
+      <span class="tc-cap num">DC {% if c.dc_kwp %}{{ c.dc_kwp }} kWp{% else %}not set{% endif %} · AC {% if c.ac_kw %}{{ c.ac_kw }} kW{% else %}not set{% endif %}</span>
+      <span class="tc-c num"><b>{{ c.active }}</b> active · <b>{{ c.draft }}</b> draft{% if c.behind %} · <b class="crit">{{ c.behind }}</b> behind plan{% endif %}{% if c.civil %} · <b class="warn">{{ c.civil }}</b> need Civil date{% endif %}{% if c.quiet %} · <b class="warn">{{ c.quiet }}</b> gone quiet{% endif %}</span>
+      <span class="tbar" role="img" aria-label="{% for label, slug, n, w in c.buckets %}{{ label }} {{ n }}{% if not forloop.last %}, {% endif %}{% endfor %}">{% for label, slug, n, w in c.buckets %}<i class="{{ slug }}" style="width:{{ w }}%"></i>{% endfor %}</span>
+      <span class="tleg">{% for label, slug, n, w in c.buckets %}<span><i class="sw {{ slug }}"></i>{{ label }} {{ n }}</span>{% endfor %}</span>
+    </a>
+    {% endwith %}{% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="ctrls">
+    <form method="get" role="search" aria-label="Search sites">
+      <input type="search" name="q" value="{{ params.q }}" class="form-control form-control-sm"
+             placeholder="Search code, name, city, PM" aria-label="Search sites" maxlength="100">
+      {% if params.tender %}<input type="hidden" name="tender" value="{{ params.tender }}">{% endif %}
+      {% if params.sort != 'latest' %}<input type="hidden" name="sort" value="{{ params.sort }}">{% endif %}
+      {% if params.zoom != 'month' %}<input type="hidden" name="zoom" value="{{ params.zoom }}">{% endif %}
+      {% if params.plan %}<input type="hidden" name="plan" value="{{ params.plan }}">{% endif %}
+      {% if params.group %}<input type="hidden" name="group" value="{{ params.group }}">{% endif %}
+      <button type="submit" class="btn btn-sm btn-brand">Search</button>
+      {% if filtered %}<a href="{{ clear_href }}" class="btn btn-sm btn-outline-secondary">Clear</a>{% endif %}
+    </form>
+    <div class="seg" role="group" aria-label="Sort order">
+      {% for s in sort_links %}<a href="{{ s.href }}" aria-current="{% if s.active %}true{% else %}false{% endif %}">{{ s.label }}</a>{% endfor %}
+    </div>
+    <div class="seg" role="group" aria-label="Zoom">
+      {% for z in zoom_links %}<a href="{{ z.href }}" aria-current="{% if z.active %}true{% else %}false{% endif %}">{{ z.label }}</a>{% endfor %}
+    </div>
+    <a class="tog" href="{{ plan_toggle.href }}" aria-pressed="{% if plan_toggle.on %}true{% else %}false{% endif %}">Show plan</a>
+    <a class="tog" href="{{ group_toggle.href }}" aria-pressed="{% if group_toggle.on %}true{% else %}false{% endif %}">Group sites needing a Civil date</a>
+    <button type="button" class="btn-x" @click="all = !all; $dispatch('gantt-all', all)" x-text="all ? 'Collapse all' : 'Expand all'">Expand all</button>
+  </div>
+
+  <div class="legend" aria-label="Legend">
+    <span><span class="lg ln"><i class="a"></i></span>Done / under way</span>
+    <span><span class="lg ln"><i class="f"></i></span>Still to do</span>
+    <span><span class="lg ln"><i class="p"></i></span>Planned only</span>
+    <span><span class="lg ln"><i class="e"></i></span>Execution forecast</span>
+    <span><span class="lg ln"><i class="pl" style="bottom:3px"></i></span>Plan (baseline)</span>
+    <span><span class="lg ln"><i class="r"></i></span>Late / behind plan</span>
+    <span><span class="lg ln hx"><i class="a"></i></span>Blocked</span>
+    <span><span class="lg ln" style="width:12px"><i class="dm" style="left:50%"></i></span>Single PM date</span>
+    <span><b style="color:var(--warn);font-size:10px">M</b>PM-typed date in block</span>
+    <span><span class="lg" style="width:12px"><i style="left:2px;top:0;width:8px;height:8px;transform:rotate(45deg);background:var(--gold);border-radius:0"></i></span>Target commissioning</span>
+  </div>
+
+  <div class="gbox" id="gantt-box">
+    <div class="gc">
+      <div class="gx gt">
+        <div class="gl">Site</div>
+        <div class="gk" aria-hidden="true">
+          {% for label, left, width in months %}<span class="mo" style="left:{{ left }}%;width:{{ width }}%">{{ label }}</span>{% endfor %}
+          {% for label, left in weeks %}<span class="wk" style="left:{{ left }}%">{{ label }}</span>{% endfor %}
+          <span class="tdl" style="left:{{ today_pct }}%">Today {{ today|date:"j M" }}</span>
+        </div>
+      </div>
+
+      {% for r in rows %}
+        {% include "projects/_tenders_gantt_row.html" %}
+      {% empty %}
+        {% if not civil_rows %}<div class="gx"><div class="gl empty">{% if filtered %}No sites match.{% else %}No tender sites in execution.{% endif %}</div><div class="gk"></div></div>{% endif %}
+      {% endfor %}
+
+      {% comment %}G8: sites needing a Civil date, collapsed, same sort inside. The "Group"
+         toggle off puts them back into the list above. Rendered open (civil_open) when the
+         list above is empty, so a viewer whose sites all need a Civil date sees them.{% endcomment %}
+      {% if civil_rows %}
+      <div x-data="{ open: {% if civil_open %}true{% else %}false{% endif %} }" id="civil-group">
+        <div class="gx gg">
+          <div class="gl">
+            <button type="button" class="grp" @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="{% if civil_open %}true{% else %}false{% endif %}" aria-controls="civil-rows">
+              <span class="tgl" :aria-expanded="open ? 'true' : 'false'" aria-expanded="{% if civil_open %}true{% else %}false{% endif %}" aria-hidden="true">▸</span>
+              <span><b class="num">{{ civil_rows|length }}</b> site{{ civil_rows|length|pluralize }} need{{ civil_rows|length|pluralize:"s," }} a Civil date</span>
+            </button>
+          </div>
+          <div class="gk"></div>
+        </div>
+        <div id="civil-rows" x-show="open"{% if not civil_open %} x-cloak{% endif %}>
+          {% for r in civil_rows %}{% include "projects/_tenders_gantt_row.html" %}{% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      <div class="today" id="gantt-today" style="left:calc(var(--lw) + var(--tw) * {{ today_frac }})" aria-hidden="true"></div>
+    </div>
+  </div>
+
+  {% comment %}G8: drafts, collapsed, newest first, one line each, no bars. Rendered open
+     (drafts_open) when the list and the Civil group are both empty.{% endcomment %}
+  {% if drafts %}
+  <div class="drafts" x-data="{ open: {% if drafts_open %}true{% else %}false{% endif %} }" id="drafts">
+    <button type="button" class="grp" @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="{% if drafts_open %}true{% else %}false{% endif %}" aria-controls="draft-rows">
+      <span class="tgl" :aria-expanded="open ? 'true' : 'false'" aria-expanded="{% if drafts_open %}true{% else %}false{% endif %}" aria-hidden="true">▸</span>
+      <span><b class="num">{{ drafts|length }}</b> draft site{{ drafts|length|pluralize }}</span>
+    </button>
+    <div class="dlist" id="draft-rows" x-show="open"{% if not drafts_open %} x-cloak{% endif %}>
+      {% for d in drafts %}
+      <div class="drow"><span class="code">{{ d.code }}</span>{% if d.name %} · {{ d.name }}{% endif %}{% if d.city %} · {{ d.city }}{% endif %} · {{ d.tender }} · {{ d.pm }} · DC {% if d.dc %}{{ d.dc }} kWp{% else %}not set{% endif %} · AC {% if d.ac %}{{ d.ac }} kW{% else %}not set{% endif %} · created {{ d.created|date:"j M Y" }}</div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+<script>
+  // G2's one script: open the chart scrolled so today sits near the left of the track.
+  (function () {
+    var box = document.getElementById('gantt-box');
+    var line = document.getElementById('gantt-today');
+    var head = box && box.querySelector('.gt .gl');
+    if (!box || !line || !head) { return; }
+    box.scrollLeft = Math.max(0, line.offsetLeft - head.offsetWidth - 120);
+  })();
+</script>
+{% endblock %}

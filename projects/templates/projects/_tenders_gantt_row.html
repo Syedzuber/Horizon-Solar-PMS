@@ -1,0 +1,24 @@
+{% comment %}DASH-B3: one active site on the Tenders Gantt (views_tenders_gantt.Row). Collapsed: the
+   six RESCO lanes. Expanded (Alpine): every lane with its dates in words, Execution opened
+   into its blocks. Tracks are aria-hidden: the left column says everything in text (G5).{% endcomment %}
+<div class="gr" x-data="{ open: false }" @gantt-all.window="open = $event.detail" data-site="{{ r.code }}">
+  <div class="gx">
+    <div class="gl">
+      <button type="button" class="tgl" @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="false" aria-controls="gd-{{ r.id }}" aria-label="Lanes and blocks of {{ r.code }}">▸</button>
+      <div class="gi">
+        <span><span class="no num">{{ r.number }}</span> <a class="code" href="{% url 'project_overview' r.project_id %}">{{ r.code }}</a> <span class="nm">{{ r.name }}</span>{% if r.large %}<span class="tag">Large</span>{% endif %}</span>
+        <span class="ct">{{ r.city }}</span>
+        <span class="mt">{{ r.tender }} · {{ r.pm }} · DC {% if r.dc %}{{ r.dc }} kWp{% else %}not set{% endif %} · AC {% if r.ac %}{{ r.ac }} kW{% else %}not set{% endif %}</span>
+        <span class="l3">{% if r.schedule %}<span class="sc {{ r.schedule.1 }}">{{ r.schedule.0 }}</span>{% endif %}{% if r.highlight %}<span class="pill">{{ r.highlight }}</span>{% endif %}<span class="when {{ r.latest_tone }}">{{ r.latest }}</span></span>
+      </div>
+    </div>
+    <div class="gk" aria-hidden="true">
+      {% for lane, bars in r.lanes %}<div class="ln{% if lane.hatch %} hx{% endif %}" data-lane="{{ lane.key }}">{% for b in bars %}<i class="{{ b.cls }}" style="left:{{ b.left }}%{% if b.width %};width:{{ b.width }}%{% endif %}"></i>{% endfor %}{% if lane.note %}<span class="note" style="left:{{ today_pct }}%">{{ lane.note }}</span>{% endif %}</div>{% endfor %}
+      {% if r.target %}<i class="tg-t" style="left:{{ r.target.left }}%"></i>{% endif %}
+    </div>
+  </div>
+  <div class="gd" id="gd-{{ r.id }}" x-show="open" x-cloak>
+    {% for lane, bars in r.detail %}<div class="gx dl{% if lane.block %} bl{% endif %}" data-detail="{{ lane.key }}"><div class="gl"><span class="dn">{{ lane.label }}</span><span class="dt">{{ lane.text }}</span></div><div class="gk" aria-hidden="true"><div class="ln{% if lane.hatch %} hx{% endif %}">{% for b in bars %}<i class="{{ b.cls }}" style="left:{{ b.left }}%{% if b.width %};width:{{ b.width }}%{% endif %}"></i>{% endfor %}</div></div></div>{% endfor %}
+    {% if r.target_text %}<div class="gx dl"><div class="gl"><span class="dt">◆ {{ r.target_text }}</span></div><div class="gk"></div></div>{% endif %}
+  </div>
+</div>

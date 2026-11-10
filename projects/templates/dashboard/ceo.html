@@ -188,6 +188,8 @@
     {% if tender_header %}
     {# kWp covers only sites with a capacity; "(N of M sites)" says so whenever some have none (S2). One formatter for every kWp on this page (S8). #}
     <p class="text-muted small mb-0">{{ tender_header.tenders }} tender{{ tender_header.tenders|pluralize }} · {{ tender_header.sites }} site{{ tender_header.sites|pluralize }} · {{ tender_header.kwp_text }} · {{ tender_header.activated }} activated</p>
+    {# DASH-B3: CEO, Admin and System Admin (this page's roles) all pass user_can_view_site_dashboard, so the link never leads to a 403. #}
+    <a href="{% url 'tenders_gantt' %}" class="small fw-semibold">Gantt view →</a>
     {# D2 hides CAPEX from Tenders; this line keeps it from vanishing silently. #}
     {% if capex_hidden %}
     <p class="text-muted mb-0" style="font-size:.75rem;">Not shown: CAPEX · {{ capex_hidden }} project{{ capex_hidden|pluralize }}</p>

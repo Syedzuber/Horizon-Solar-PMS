@@ -14,6 +14,7 @@ from . import notify_views   # T2 notification template Admin screens — separa
 from . import attendance_views  # ATT-B1 contractor attendance screens — separate module, same pattern
 from . import views_tender_documents  # TD-B2 tender documents manage page — separate module, same pattern
 from . import views_site_dashboard  # DASH-B2 Site Dashboard page — separate module, same pattern
+from . import views_tenders_gantt  # DASH-B3 Tenders Gantt page — separate module, same pattern
 
 urlpatterns = [
     # ---------------------------------------------------------------------------
@@ -47,6 +48,9 @@ urlpatterns = [
     # DASH-B2 Site Dashboard — PM, Project Coordinator, CEO, Finance, SCM, Admin, System
     # Admin, Design Head (permissions.user_can_view_site_dashboard); everyone else 403.
     path('dashboard/sites/',         views_site_dashboard.site_dashboard, name='site_dashboard'),
+    # DASH-B3 Tenders Gantt — the Site Dashboard's audience and site scope, OPEX sites with
+    # a Program only (permissions.user_can_view_site_dashboard); everyone else 403.
+    path('dashboard/tenders/gantt/', views_tenders_gantt.tenders_gantt, name='tenders_gantt'),
 
     # ---------------------------------------------------------------------------
     # User management — Admin only
