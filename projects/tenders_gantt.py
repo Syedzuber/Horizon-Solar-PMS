@@ -52,11 +52,13 @@ from .site_dashboard import (EXECUTION_LANE_NAME, LANE_DONE, LANE_EMPTY, REASON_
 from .views_site_dashboard import (QUIET_DAYS, REASON_LINES, RESCO_SEGMENTS,
                                    segments_for_card)
 
-#: The two zooms (G10) and the width of one day in each, in pixels (R2).
+#: The three zooms (G10, DASH-B3b Z1) in button order, and the width of one day in each,
+#: in pixels (R2). Zoom only widens the track: every bar is a % of the range.
 ZOOM_MONTH = 'month'
 ZOOM_WEEK = 'week'
-ZOOMS = (ZOOM_MONTH, ZOOM_WEEK)
-DAY_PX = {ZOOM_MONTH: 5, ZOOM_WEEK: 18}
+ZOOM_DAY = 'day'
+ZOOMS = (ZOOM_MONTH, ZOOM_WEEK, ZOOM_DAY)
+DAY_PX = {ZOOM_MONTH: 5, ZOOM_WEEK: 18, ZOOM_DAY: 28}
 
 #: The timeline always shows at least this much before and after today (R1) ...
 RANGE_BEFORE = timedelta(days=30)
@@ -249,6 +251,35 @@ def week_labels(timeline):
         left, _, _, _ = span(timeline, day, day)
         out.append((f'W{day.isocalendar()[1]}', _pct(left)))
         day += timedelta(days=7)
+    return out
+
+
+@dataclass(frozen=True)
+class DayCell:
+    """One date in the Day-zoom header (DASH-B3b Z3), and its Sunday shade when it is one."""
+    day: date
+    initial: str               # weekday initial drawn above the date number: M T W T F S S
+    left: str                  # left edge as % of the track, for the header cell
+    frac: str                  # the same edge as a fraction (0..1), for the shade's calc()
+    is_sunday: bool            # red cell and a faint full-height column (Z6: display only)
+    is_today: bool             # gold-boxed cell
+
+
+WEEKDAY_INITIALS = 'MTWTFSS'   # indexed by date.weekday(), Monday = 0
+
+
+def day_cells(timeline, today):
+    """[DayCell] for every date in the range, built from the range alone (no query).
+
+    Sunday is marked whatever the Admin "skip Sundays" scheduling switch says (Z6): the
+    shading tells the reader which day of the week it is, not whether work is planned."""
+    out = []
+    for offset in range(timeline.days):
+        day = timeline.start + timedelta(days=offset)
+        frac = offset / timeline.days
+        out.append(DayCell(day=day, initial=WEEKDAY_INITIALS[day.weekday()],
+                           left=_pct(frac * 100), frac=f'{frac:.5f}',
+                           is_sunday=day.weekday() == 6, is_today=day == today))
     return out
 
 

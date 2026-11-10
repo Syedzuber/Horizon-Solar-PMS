@@ -906,3 +906,11 @@ Incidental issues noticed during audits. Logged, not fixed. Each entry: file/lin
 - **All 94 MPUVL active sites need a Civil date and have gone quiet** (no human update in 7+ days), so the MPUVL card reads 94 / 94 / 94 and its sites sit in the collapsed "needs a Civil date" group; chandan's 33 sites are all there, so his main list is empty until he opens the group or turns grouping off.
 - **The timeline range is per viewer.** It stretches to the dates of the sites that viewer sees, so chandan's chart is narrower than Admin's on the same day. Positions are percentages of that range, so nothing is misdrawn; two people comparing screenshots will see different month widths.
 - **A finished Execution lane ends at its actual last Done date, not the forecast finish.** G4 names the forecast finish for the bar's end; once every block task is Done the forecast equals history, and the actual end is the truer date. No site on the restore has finished Execution, so this is untested on real data (covered only by construction).
+
+
+## From DASH-B3b — Day zoom on the Tenders Gantt (2026-11-10)
+
+- **"Today" can overlap the month name in the first days of a month.** At Day zoom the gold "Today" label sits in the month band (Zuber's ruling), centred on today, and the month name sits at the month's first day. From about the 1st to the 3rd of a month the two overlap; the gold label is drawn on top, so the month name is hidden for those days. Cosmetic; not fixed.
+- **Sunday shading is display only (Z6).** It is drawn whatever the Admin "skip Sundays" scheduling switch says. With the switch set so Sundays are working days, planned bars run across shaded Sundays; the shade means "this is a Sunday", not "no work".
+- **Size at the R1 maximum.** An 18-month range (579 days) gives a 16,212 px Day track and about +40 KB of HTML (579 header cells, 83 Sunday shades); the 10 Nov restore as Admin is 4,284 px and +12 KB. Gridlines add no markup (one CSS background per track).
+- **Correction to the DASH-B3 MPUVL entry above.** "chandan's main list is empty until he opens the group" no longer holds: since the pre-commit fix in `03f1313`, the Civil-date group renders open by default when the main list is empty.

@@ -27,6 +27,7 @@ Run with:
     python manage.py test projects.tests_tenders_gantt --settings=solarpms.test_settings
 """
 import dataclasses
+import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -40,7 +41,8 @@ from django.utils import timezone
 from .models import (PaymentRequest, Program, Project, Task, UserProfile, Vendor, VendorOrder,
                      VendorOrderSite)
 from .tenders_gantt import (ACTUAL, DAY_PX, DUE_MARK, FORECAST, LATE, MANUAL_MARK, PLAN_LINE,
-                            ZOOM_MONTH, ZOOM_WEEK, Piece, Timeline, build_gantt,
+                            ZOOM_DAY, ZOOM_MONTH, ZOOM_WEEK, Piece, Timeline, build_gantt,
+                            day_cells,
                             offset_days, offset_px, place, point, span, timeline_for,
                             track_px, _block_lane, Dates)
 from .tests_sched2_scheduler import CIVIL, MODULE, NET_METERING, freeze_today
@@ -650,3 +652,118 @@ class QueryBudgetTests(GanttFixture):
 
 
 FROZEN_DUE = date(2026, 11, 20)
+
+
+# ---------------------------------------------------------------------------
+# 7. Day zoom (DASH-B3b Z1-Z6)
+# ---------------------------------------------------------------------------
+
+#: A Day-zoom header cell, with its classes captured: "dd", "dd su", "dd td", "dd su td".
+DAY_CELL = re.compile(r'<span class="(dd(?: su)?(?: td)?)" style="left:([0-9.]+)%"><b>([MTWFS])</b>(\d+)</span>')
+SUNDAY_SHADE = re.compile(r'<i class="sun" style="left:calc\(var\(--lw\) \+ var\(--tw\) \* ([0-9.]+)\)"')
+
+
+class DayCellTests(SimpleTestCase):
+    """day_cells() alone: built from the range, no query."""
+
+    def test_one_cell_per_date_with_initials_sundays_and_today(self):
+        tl = Timeline(start=date(2026, 11, 1), end=date(2026, 11, 30))
+        cells = day_cells(tl, date(2026, 11, 10))
+        self.assertEqual(len(cells), 30)
+        self.assertEqual([c.day for c in cells][:2], [date(2026, 11, 1), date(2026, 11, 2)])
+        self.assertEqual(''.join(c.initial for c in cells[:7]), 'SMTWTFS')   # 1 Nov is a Sunday
+        self.assertEqual([c.day.day for c in cells if c.is_sunday], [1, 8, 15, 22, 29])
+        self.assertEqual([c.day for c in cells if c.is_today], [date(2026, 11, 10)])
+        # Left edge of day n is n / days of the track, the same rule as every bar (R2).
+        self.assertEqual((cells[9].left, cells[9].frac), ('30.000', '0.30000'))
+        self.assertEqual(cells[9].left, f'{span(tl, cells[9].day, cells[9].day)[0]:.3f}')
+
+    def test_today_outside_the_range_marks_no_cell(self):
+        tl = Timeline(start=date(2026, 11, 1), end=date(2026, 11, 30))
+        self.assertFalse(any(c.is_today for c in day_cells(tl, date(2026, 12, 5))))
+
+
+class DayZoomTests(GanttFixture):
+
+    def setUp(self):
+        self.site = self._behind()
+
+    def test_one_header_cell_per_day_and_the_track_is_28_px_a_day(self):
+        response = self._get(self.ceo, '?zoom=day')
+        tl = response.context['timeline']
+        html = response.content.decode()
+        cells = DAY_CELL.findall(html)
+        self.assertEqual(len(cells), tl.days)
+        self.assertEqual(html.count('<span class="dd'), tl.days)
+        self.assertEqual([int(c[3]) for c in cells[:3]], [1, 2, 3])          # month-aligned start
+        self.assertEqual(response.context['track_px'], tl.days * 28)
+        self.assertEqual(DAY_PX[ZOOM_DAY], 28)
+        self.assertContains(response, f'class="tg zd" style="--tw: {tl.days * 28}px; --dp: 28px;"')
+        self.assertContains(response, '<a href="?zoom=day" aria-current="true">Day</a>')
+        # Z3: no week labels at Day zoom; "Today" stays in the header (the month band).
+        self.assertEqual(response.context['weeks'], [])
+        self.assertNotContains(response, 'class="wk"')
+        self.assertContains(response, 'class="tdl"', count=1)
+
+    def test_sunday_cells_and_shades_match_the_sundays_in_range(self):
+        response = self._get(self.ceo, '?zoom=day')
+        tl = response.context['timeline']
+        days = [tl.start + timedelta(days=i) for i in range(tl.days)]
+        sundays = [d for d in days if d.weekday() == 6]
+        self.assertTrue(sundays)
+        html = response.content.decode()
+        sunday_cells = [c for c in DAY_CELL.findall(html) if ' su' in c[0]]
+        self.assertEqual(len(sunday_cells), len(sundays))
+        self.assertTrue(all(c[2] == 'S' for c in sunday_cells))
+        self.assertEqual([int(c[3]) for c in sunday_cells], [d.day for d in sundays])
+        # One shade per Sunday, each at its own Sunday's left edge.
+        shades = SUNDAY_SHADE.findall(html)
+        self.assertEqual(len(shades), len(sundays))
+        self.assertEqual(shades, [f'{(d - tl.start).days / tl.days:.5f}' for d in sundays])
+
+    def test_todays_cell_is_marked_once(self):
+        response = self._get(self.ceo, '?zoom=day')
+        today = response.context['today']
+        marked = [c for c in DAY_CELL.findall(response.content.decode()) if c[0].endswith(' td')]
+        self.assertEqual(len(marked), 1)
+        self.assertEqual(int(marked[0][3]), today.day)
+        self.assertEqual(marked[0][2], 'MTWTFSS'[today.weekday()])
+
+    def test_unknown_zoom_still_gives_month(self):
+        for query in ('?zoom=DAY', '?zoom=days', '?zoom=', '?zoom=hour'):
+            with self.subTest(query=query):
+                response = self._get(self.ceo, query)
+                self.assertEqual(response.context['params']['zoom'], ZOOM_MONTH)
+                self.assertEqual(response.context['day_cells'], [])
+                self.assertNotContains(response, 'class="dd')
+
+    def test_bars_are_identical_at_every_zoom(self):
+        # Z2: zoom widens the track only; every row (lanes, blocks, target) is the same.
+        rows = {zoom: self._get(self.ceo, f'?zoom={zoom}').context['rows']
+                for zoom in (ZOOM_MONTH, ZOOM_WEEK, ZOOM_DAY)}
+        self.assertTrue(rows[ZOOM_MONTH])
+        self.assertEqual(rows[ZOOM_DAY], rows[ZOOM_MONTH])
+        self.assertEqual(rows[ZOOM_WEEK], rows[ZOOM_MONTH])
+
+    def test_the_same_number_of_queries_as_month(self):
+        client = _client(self.ceo)
+        client.get(URL)                                   # warm the session
+        counts = {}
+        for zoom in (ZOOM_MONTH, ZOOM_DAY):
+            with CaptureQueriesContext(connection) as captured:
+                self.assertEqual(client.get(f'{URL}?zoom={zoom}').status_code, 200)
+            counts[zoom] = len(captured.captured_queries)
+        self.assertEqual(counts[ZOOM_DAY], counts[ZOOM_MONTH])
+
+    def test_month_and_week_carry_no_day_zoom_markup_apart_from_the_button(self):
+        for query in ('', '?zoom=week'):
+            with self.subTest(query=query):
+                response = self._get(self.ceo, query)
+                html = response.content.decode()
+                for absent in ('class="dd', 'class="sun"', ' zd"', '--dp', '.tg.zd', '.tg .dd'):
+                    self.assertNotIn(absent, html)
+                self.assertContains(response, 'class="tg" style="--tw: ')
+                # Button order Month, Week, Day (Z1).
+                seg = re.search(r'aria-label="Zoom">\s*(.*?)\s*</div>', html, re.S).group(1)
+                self.assertEqual(re.findall(r'href="([^"]*)" aria-current="(?:true|false)">(\w+)<', seg),
+                                 [('?', 'Month'), ('?zoom=week', 'Week'), ('?zoom=day', 'Day')])

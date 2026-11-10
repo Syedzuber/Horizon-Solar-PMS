@@ -26,9 +26,9 @@ from .decorators import _forbidden, login_required
 from .permissions import user_can_view_site_dashboard
 from .scheduling import REASON_NEEDS_ANCHOR
 from .site_dashboard import ORDER_LATEST, ORDER_URGENT, ORDERS, sort_cards
-from .tenders_gantt import (DAY_PX, ZOOM_MONTH, ZOOM_WEEK, ZOOMS, build_gantt, draw,
-                            month_labels, place, short_date, tender_cards, today_fraction,
-                            track_px, week_labels)
+from .tenders_gantt import (DAY_PX, ZOOM_DAY, ZOOM_MONTH, ZOOM_WEEK, ZOOMS, build_gantt,
+                            day_cells, draw, month_labels, place, short_date, tender_cards,
+                            today_fraction, track_px, week_labels)
 from .views_site_dashboard import (QUIET_DAYS, dates_as_of, relative_time, schedule_line)
 
 #: Longest search string kept; anything longer is cut, never refused.
@@ -38,7 +38,7 @@ SEARCH_MAX = 100
 FRESH = timedelta(hours=6)
 
 SORT_LABELS = {ORDER_LATEST: 'Latest activity', ORDER_URGENT: 'Most urgent'}
-ZOOM_LABELS = {ZOOM_MONTH: 'Month', ZOOM_WEEK: 'Week'}
+ZOOM_LABELS = {ZOOM_MONTH: 'Month', ZOOM_WEEK: 'Week', ZOOM_DAY: 'Day'}
 
 #: The parameters' defaults. Only a non-default value goes into a link.
 DEFAULTS = {'q': '', 'tender': None, 'sort': ORDER_LATEST, 'zoom': ZOOM_MONTH,
@@ -246,6 +246,9 @@ def tenders_gantt(request):
         'filtered': bool(params['q'] or params['tender'] is not None),
         'months': month_labels(timeline),
         'weeks': week_labels(timeline) if params['zoom'] == ZOOM_WEEK else [],
+        # Day zoom only (DASH-B3b Z3): one header cell per date and a shade per Sunday.
+        # Empty at Month and Week, which is also what keeps their HTML unchanged.
+        'day_cells': day_cells(timeline, today) if params['zoom'] == ZOOM_DAY else [],
         'track_px': track_px(timeline, params['zoom']),
         'day_px': DAY_PX[params['zoom']],
         'today': today,

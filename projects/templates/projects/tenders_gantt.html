@@ -160,10 +160,29 @@
   }
   @media (prefers-reduced-motion: reduce) { .tg .tgl { transition: none; } }
 </style>
-{% endblock %}
+{% if day_cells %}{% comment %}DASH-B3b Day zoom (Z3-Z4), emitted only at zoom=day so the Month and
+   Week pages stay byte-for-byte as before. --dp is one day in px (DAY_PX), set on .tg.zd.{% endcomment %}
+<style>
+  /* Z4: day gridlines as one repeating background per track, period = one day, starting
+     at the track's left edge, which is the range's first day. No element per day. */
+  .tg.zd .gx > .gk { background-image: repeating-linear-gradient(to right, transparent 0 calc(var(--dp) - 1px),
+    rgba(22,35,27,.07) calc(var(--dp) - 1px) var(--dp)); }
+  .tg.zd .gt .gk { height: 56px; }
+  .tg.zd .tdl { top: 2px; bottom: auto; }  /* "Today" stays in the month band */
+  /* Z3: weekday initial over the date number; Sundays red; today boxed in gold. */
+  .tg .dd { position: absolute; top: 24px; width: var(--dp); height: 30px; text-align: center; font-size: 11px; line-height: 14px;
+    color: var(--mut); padding-top: 1px; font-variant-numeric: tabular-nums; }
+  .tg .dd b { display: block; font-size: 9.5px; font-weight: 600; color: var(--fnt); }
+  .tg .dd.su, .tg .dd.su b { color: var(--crit); }
+  .tg .dd.su { background: rgba(194,59,42,.06); }
+  .tg .dd.td { background: #fff4dc; box-shadow: inset 0 0 0 1.5px var(--gold); border-radius: 4px; color: #8a5a00; font-weight: 700; }
+  /* Z3/Z6: a faint full-height column per Sunday; display only, not the scheduling rule. */
+  .tg .sun { position: absolute; top: 0; bottom: 0; width: var(--dp); background: rgba(194,59,42,.06); z-index: 1; pointer-events: none; }
+</style>
+{% endif %}{% endblock %}
 
 {% block content %}
-<div class="tg" style="--tw: {{ track_px }}px;" x-data="{ all: false }">
+<div class="tg{% if day_cells %} zd{% endif %}" style="--tw: {{ track_px }}px;{% if day_cells %} --dp: {{ day_px }}px;{% endif %}" x-data="{ all: false }">
   <div class="head">
     <div>
       <div class="eyebrow">RESCO tenders</div>
@@ -233,7 +252,7 @@
         <div class="gl">Site</div>
         <div class="gk" aria-hidden="true">
           {% for label, left, width in months %}<span class="mo" style="left:{{ left }}%;width:{{ width }}%">{{ label }}</span>{% endfor %}
-          {% for label, left in weeks %}<span class="wk" style="left:{{ left }}%">{{ label }}</span>{% endfor %}
+          {% for label, left in weeks %}<span class="wk" style="left:{{ left }}%">{{ label }}</span>{% endfor %}{% for d in day_cells %}<span class="dd{% if d.is_sunday %} su{% endif %}{% if d.is_today %} td{% endif %}" style="left:{{ d.left }}%"><b>{{ d.initial }}</b>{{ d.day.day }}</span>{% endfor %}
           <span class="tdl" style="left:{{ today_pct }}%">Today {{ today|date:"j M" }}</span>
         </div>
       </div>
@@ -264,7 +283,7 @@
       </div>
       {% endif %}
 
-      <div class="today" id="gantt-today" style="left:calc(var(--lw) + var(--tw) * {{ today_frac }})" aria-hidden="true"></div>
+      <div class="today" id="gantt-today" style="left:calc(var(--lw) + var(--tw) * {{ today_frac }})" aria-hidden="true"></div>{% for d in day_cells %}{% if d.is_sunday %}<i class="sun" style="left:calc(var(--lw) + var(--tw) * {{ d.frac }})" aria-hidden="true"></i>{% endif %}{% endfor %}
     </div>
   </div>
 
