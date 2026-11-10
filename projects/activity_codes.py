@@ -26,3 +26,31 @@ MONEY_ACTIVITY_CODES = frozenset({
     'payment_request_paid',       # payments.mark_payment_paid
     'milestone_amounts_set',      # views.set_milestone_amounts (Residential)
 })
+
+# NON_ACTIVITY_CODES (DASH-B1, decision D3) — codes whose rows are NOT something a person
+# did on the site, so they never count as a site's "latest activity" or fill its feed on
+# the common dashboard. Read through site_dashboard.is_human_activity(), which also drops
+# every code ending in `_opened` (pure reads) and keeps BLANK codes: ~80 older call sites
+# write no code, and their rows (activations, file uploads, coordinator changes) are
+# human actions.
+#
+# EXCLUDED BY CODE, NOT BY ACTOR. A trigger run of the scheduler writes
+# `due_dates_scheduled` WITH the triggering person as actor, so "actor is set" does not
+# mean a person did this; the code is the only reliable test.
+#
+# The four scheduler codes are spelt out rather than imported from scheduling.py, to keep
+# this module import-free (see the docstring); tests_site_dashboard pins them equal to
+# scheduling's constants, so a renamed code fails the suite instead of silently counting.
+#
+# TODO: export_dashboard_prototype keeps its own IGNORED_CODES, which lacks the four
+# scheduler codes; switch it to this set. Deferred: DASH-B1 may not edit the export.
+NON_ACTIVITY_CODES = frozenset({
+    'user_login',                       # signals.log_user_login (project=None)
+    'user_logout',                      # signals.log_user_logout (project=None)
+    'due_dates_scheduled',              # scheduling.SCHEDULED_ACTION_CODE
+    'due_dates_forecast_shift',         # scheduling.FORECAST_ACTION_CODE, never an actor
+    'baseline_reset',                   # scheduling.BASELINE_RESET_ACTION_CODE
+    'auto_schedule_exclusion_changed',  # admin.ProjectAdmin: scheduling bookkeeping
+    'notify_template_seeded',           # seed_notification_templates (project=None)
+    'cad_pdf_extraction_failed',        # design_artifact_upload: a failure note after the upload's own row
+})

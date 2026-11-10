@@ -4259,3 +4259,131 @@ def visible_tender_documents(user, project, *, site_view_checked=False):
     if user_is_tender_doc_management(user, project):
         return documents
     return documents.filter(visibility=TENDER_DOC_SITE_TEAM)
+
+
+# ---------------------------------------------------------------------------
+# DASH-B1 — the common Site Dashboard: whose sites, and who sees the payment figure
+# ---------------------------------------------------------------------------
+
+# Roles that see EVERY live site on the common dashboard (DASH-B1 decision D1). The same
+# five roles that already see every project through user_can_view_project(): CEO,
+# Finance, SCM and Admin via PORTFOLIO_VIEW_ROLES, System Admin via its own branch (D-4).
+# Its own set, not PORTFOLIO_VIEW_ROLES widened, for the reason MONEY_PORTFOLIO_ROLES
+# gives: that set's comment documents the dashboards that query everything, and adding
+# System Admin to it would also widen every other reader of it.
+DASHBOARD_PORTFOLIO_ROLES = frozenset({'CEO', 'Finance', 'SCM', 'Admin', 'System Admin'})
+
+# Roles that see only the sites they manage. Ownership itself is never compared here: it
+# comes from manageable_projects_q(), the queryset form of user_can_manage_project().
+DASHBOARD_MANAGER_ROLES = frozenset({'PM', 'Project Coordinator'})
+
+
+def sites_visible_on_dashboard(user):
+    """Return the Project queryset the common Site Dashboard shows `user` (DASH-B1).
+
+    THE ONE PLACE the dashboard's site scope is decided; the data layer
+    (site_dashboard.build_site_cards) starts from this and filters nothing by role itself.
+
+        PM, Project Coordinator   the sites user_can_manage_project() is True for
+        CEO, Finance, SCM, Admin,  every site
+        System Admin, Design Head
+        anyone else               none (Site Engineer, Design, BD, no profile)
+
+    THEN D9, applied here once for every role: test sites (is_test), soft-deleted sites
+    and Cancelled sites never appear. Drafts DO appear, at the bottom of every sort.
+
+    A QA/QC ENGINEER'S SITES ARE NOT ADDED. A PM who is the QA/QC engineer on a site
+    someone else manages does not see that site here (ruling 4, 9 Nov); QA/QC grants
+    visibility of the site's own pages, not a seat on the portfolio dashboard.
+
+    Returned as `pk__in` a subquery rather than the ownership Q with .distinct(): the
+    coordinators leg is an M2M, so filtering on it directly can duplicate rows, and a
+    .distinct() queryset breaks the grouped annotations the data layer adds on top. The
+    subquery keeps one row per project whatever the caller does next.
+    """
+    # Import inside the function to avoid a circular import at module level: this module
+    # imports no models (see the note on its only top-level import), the same reason
+    # managed_project_ids_by_profile() imports Project at call time.
+    from .models import Project
+
+    profile = getattr(user, 'profile', None)
+    # A user with no UserProfile (a createsuperuser account) has no role and manages
+    # nothing, so it sees no sites, the same answer every helper above gives it.
+    if profile is None:
+        return Project.objects.none()
+
+    live = (Project.objects.filter(is_deleted=False, is_test=False)
+            .exclude(status='Cancelled'))
+
+    # Portfolio roles and the Design Head see every live site: their remit is the whole
+    # portfolio, exactly as user_can_view_project() already answers for them. Design Head
+    # is the UserProfile.is_design_head flag (deputy excluded), read the way
+    # _project_visibility() reads it, so the two cannot disagree about who the Head is.
+    if profile.role in DASHBOARD_PORTFOLIO_ROLES or getattr(profile, 'is_design_head', False):
+        return live
+
+    # PM and Project Coordinator see only the sites they manage: assigned PM or
+    # coordinator, through manageable_projects_q() so the ownership rule stays the one
+    # user_can_manage_project() applies. Everyone else is blocked below: a Site Engineer
+    # works from their own task dashboard (D1), and Design and BD have dashboards of their
+    # own that this one does not replace.
+    if profile.role in DASHBOARD_MANAGER_ROLES:
+        managed = Project.objects.filter(manageable_projects_q(profile)).values('pk')
+        return live.filter(pk__in=managed)
+
+    return Project.objects.none()
+
+
+def user_sees_payment_totals(user):
+    """True when `user` may see the per-site open payment-request figure on the common
+    dashboard (DASH-B1 decision D8): CEO, Finance, SCM, Admin and System Admin.
+
+    The figure is INDICATIVE — PaymentRequest.project is only the lowest site on an order —
+    so it is a portfolio reader's number. A PM or coordinator does not get it even on the
+    sites they manage (D8): they read their sites' real payments on the project page,
+    where user_can_see_project_money() admits them. This is NOT a money-visibility rule;
+    the activity feed's money rows still follow user_can_see_project_money() (ruling 3).
+
+    Reads MONEY_PORTFOLIO_ROLES, the AF-1 portfolio money audience, rather than a new set:
+    D8's five roles are exactly that set, so who sees money everywhere and who sees this
+    figure cannot drift apart. Not project-scoped, so it costs no query.
+    """
+    profile = getattr(user, 'profile', None)
+    # No profile: no role, so no portfolio money audience; blocked like every other
+    # money check in this module.
+    if profile is None:
+        return False
+    # Only the portfolio money roles; PMs, coordinators, Design Head and everyone else are
+    # blocked because the per-site figure is an approximation meant for portfolio readers.
+    return profile.role in MONEY_PORTFOLIO_ROLES
+
+
+def user_sees_money_activity_on_dashboard(user):
+    """True when `user` sees EVERY money row in the common dashboard's activity feeds
+    (DASH-B1 ruling 3): CEO, Finance, SCM, Admin and System Admin.
+
+    The dashboard-wide half of user_can_see_project_money(): that predicate answers True
+    for a MONEY_PORTFOLIO_ROLES role before it asks about the project, and this helper is
+    exactly that role term, so the feed and the project page's Recent activity card admit
+    the same people. site_dashboard._money_rows_q() reads it once per card build.
+
+    FALSE DOES NOT MEAN "NO MONEY ROWS". A PM or coordinator gets False here but still sees
+    money rows on the sites they manage: _money_rows_q() adds that leg through
+    manageable_projects_q(), the queryset form of user_can_manage_project(), which is the
+    other half of user_can_see_project_money().
+
+    The Design Head gets False and, managing no site, sees no money row anywhere, although
+    the dashboard shows them every site (sites_visible_on_dashboard). Their remit is the
+    design pipeline, not purchasing; seeing a site is not seeing its money, the same answer
+    user_can_see_project_money() gives them on the project page. Not project-scoped, so it
+    costs no query.
+    """
+    profile = getattr(user, 'profile', None)
+    # No profile: no role and no managed site, so no money audience; blocked like every
+    # other money check in this module.
+    if profile is None:
+        return False
+    # Only the portfolio money roles see money rows on every site. PM and coordinator are
+    # left to the managed-site leg in _money_rows_q(); Design Head, Site Engineer, Design
+    # and BD are blocked because they work on sites, not on their purchasing (AF-1).
+    return profile.role in MONEY_PORTFOLIO_ROLES
