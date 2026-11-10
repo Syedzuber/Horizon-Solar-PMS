@@ -11,7 +11,7 @@ WHERE EVERY FIGURE COMES FROM (E1)
     programs_on_cards()  the tender filter's options
 The view's only queries of its own are the QA/QC strip's (qaqc_views'
 qaqc_engineer_dashboard_context: one query for someone checking no site, a fixed few
-otherwise; PM and coordinator viewers only, ruling 3). Search, type,
+otherwise; PM and coordinator viewers only, ruling 3) and one for "Dates as of" (below). Search, type,
 tender and the KPI filter are applied in Python to the cards already built, and the KPI
 tiles are counted from the SAME filtered cards, so a tile and the list it filters always
 agree.
@@ -21,12 +21,15 @@ search box is a GET form and every tile and sort button is a link. Alpine holds 
 whether a card, the drafts group or the QA/QC group is open. No fetch, no XHR, no polling.
 An unknown or malformed parameter is ignored (an unknown sort falls back to the default).
 
-TODO: "Dates as of <time>" (E8) is not shown. Nothing records a schedule_sites run (a run
-that changes no date writes nothing), and ActivityLog rows are not a stand-in (ruling 1,
-10 Nov). Deferred to the session that adds a run record written by
-`schedule_sites --all --apply`.
+"DATES AS OF" (E8, SCHED-R). The line under the title reads SystemSettings.
+schedule_last_run_at, which only a finished `schedule_sites --all --apply` writes (the
+06:30 IST Railway cron). Amber when it is older than the most recent 06:30 at least 30
+minutes past (so before 07:00 yesterday's run still counts), or was never written.
+ActivityLog rows are not a stand-in (ruling 1, 10 Nov): a run that changes no date logs
+nothing. One query of its own (_dates_as_of).
 """
 from dataclasses import dataclass
+from datetime import timedelta
 from decimal import Decimal
 from urllib.parse import urlencode
 
@@ -35,6 +38,7 @@ from django.utils import timezone
 from django.views.decorators.cache import never_cache
 
 from .decorators import _forbidden, login_required
+from .models import SystemSettings
 from .permissions import (DASHBOARD_MANAGER_ROLES, user_can_view_site_dashboard,
                           user_sees_payment_totals)
 from .qaqc_views import qaqc_engineer_dashboard_context
@@ -47,6 +51,14 @@ from .site_dashboard import (EXECUTION_LANE_NAME, LANE_DONE, LANE_EMPTY, LANE_IN
 
 #: A site with no human update for this many days counts as "Gone quiet" (E5).
 QUIET_DAYS = 7
+
+#: (hour, minute) IST the Railway `schedule-sites` cron runs (`0 1 * * *` UTC). A
+#: "Dates as of" stamp older than the most recent slot at least DAILY_RUN_GRACE in the
+#: past is drawn amber (SCHED-R, R3 as amended 10 Nov).
+DAILY_RUN_TIME = (6, 30)
+
+#: Railway may start a cron service some minutes late; the slot is not owed until then.
+DAILY_RUN_GRACE = timedelta(minutes=30)
 
 #: Longest search string kept; anything longer is cut, never refused.
 SEARCH_MAX = 100
@@ -432,6 +444,32 @@ def _kpis(live, params, sees_payments):
     return tiles
 
 
+def _dates_as_of(now):
+    """E8 / SCHED-R: the "Dates as of" line under the title, from the stamp the daily
+    `schedule_sites --all --apply` run writes. Returns {'text', 'stale'}; stale draws amber.
+    """
+    # One query, and a read only: values().first() rather than SystemSettings.get(), whose
+    # get_or_create would INSERT the row from a GET page if it were ever missing. No
+    # context processor loads SystemSettings, so there is nothing to reuse.
+    row = SystemSettings.objects.filter(pk=1).values('schedule_last_run_at').first()
+    stamp = row['schedule_last_run_at'] if row else None
+    if stamp is None:
+        return {'text': 'Dates not yet refreshed by the daily run', 'stale': True}
+    local = timezone.localtime(stamp)
+    text = f'Dates as of {_short_date(local)}, {local:%H:%M}'
+    # Compare against the most recent daily slot whose grace has expired, not simply
+    # today's 06:30: before 07:00 IST today's run is not yet owed (or Railway is still
+    # starting it), so a normal run yesterday stays grey overnight and through the run.
+    current = timezone.localtime(now)
+    due = current.replace(hour=DAILY_RUN_TIME[0], minute=DAILY_RUN_TIME[1],
+                          second=0, microsecond=0)
+    if current < due + DAILY_RUN_GRACE:
+        due -= timedelta(days=1)
+    if local < due:
+        return {'text': f'{text} — the daily refresh has not run today', 'stale': True}
+    return {'text': text, 'stale': False}
+
+
 @login_required
 @never_cache
 def site_dashboard(request):
@@ -493,6 +531,7 @@ def site_dashboard(request):
                          or params['filter']),
         'sees_payments': sees_payments,
         'today': today,
+        'dates_as_of': _dates_as_of(now),
         'scope_label': ('Sites you manage' if profile.role in DASHBOARD_MANAGER_ROLES
                         else 'All live sites'),
         **qaqc,

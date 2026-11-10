@@ -2857,6 +2857,12 @@ class SystemSettings(models.Model):
         default=False,
         help_text="When True, the RESCO auto-schedule counts working days and skips Sundays.",
     )
+    # SCHED-R. The record of the last successful daily run. Written ONLY at the end of
+    # `schedule_sites --all --apply` (the Railway cron, 06:30 IST); a dry run, a site or
+    # tender run, an after-commit trigger and the Admin working-day switch never write it,
+    # so the Site Dashboard's "Dates as of" means "the daily refresh ran then".
+    schedule_last_run_at          = models.DateTimeField(null=True, blank=True)  # null = never run since SCHED-R
+    schedule_last_run_sites       = models.PositiveIntegerField(null=True, blank=True)  # sites that run checked, incl. not eligible
 
     class Meta:
         verbose_name        = 'System Settings'

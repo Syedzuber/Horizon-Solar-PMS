@@ -724,7 +724,10 @@ class SystemSettingsAdmin(admin.ModelAdmin):
     # screen, which recalculates every site's system dates in the same action. Flipped
     # here it would save and recalculate nothing, leaving every existing system date on
     # the old rule until something happened to reschedule each site.
-    readonly_fields = ['schedule_skip_sundays']
+    # SCHED-R: the last daily run's stamp is written only by `schedule_sites --all --apply`;
+    # editable here, a hand-set time would make the Site Dashboard claim a refresh that
+    # never ran.
+    readonly_fields = ['schedule_skip_sundays', 'schedule_last_run_at', 'schedule_last_run_sites']
 
     def has_add_permission(self, request):
         # Only allow one row via get_or_create; block direct admin creation

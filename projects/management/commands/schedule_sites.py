@@ -25,12 +25,17 @@ had passed its plan before it was ever dated); that is the view to check before 
 
 Also the way to apply a working-day switch flipped outside the Admin screen, and to
 retry a site whose after-commit trigger failed (the failure is in the server log).
+
+SCHED-R: a run of `--all --apply` that finishes stamps SystemSettings.schedule_last_run_at
+and schedule_last_run_sites, which the Site Dashboard shows as "Dates as of". Nothing
+else writes them.
 """
 from collections import Counter
 
 from django.core.management.base import BaseCommand, CommandError
+from django.utils import timezone
 
-from projects.models import Project
+from projects.models import Project, SystemSettings
 from projects.scheduling import (
     BAND_LABELS, REASON_NOT_ELIGIBLE, candidate_sites, eligible_sites,
     schedule_site,
@@ -114,6 +119,25 @@ class Command(BaseCommand):
         listed = ', '.join(f'{code} ({kwp} kWp)' for code, kwp in large) or 'none'
         self.stdout.write(f'Eligible sites above {LARGE_SITE_KWP} kWp DC '
                           f'(band {BAND_LABELS["101_plus"]}): {len(large)} - {listed}')
+
+        # SCHED-R: stamp the run the Site Dashboard's "Dates as of" reads. Only a full
+        # applied run counts as "the daily refresh"; a dry run, a --site or --tender run
+        # refreshed nothing (or only part), so they leave the stamp alone. It is the last
+        # statement, so a site that raised above has already ended the run unstamped.
+        if options['all'] and apply:
+            self._record_run(len(sites))
+
+    @staticmethod
+    def _record_run(site_count):
+        """SCHED-R: write when this full run finished and how many sites it checked."""
+        # filter().update() rather than get()+save(): no read-modify-write of the other
+        # switches, so a concurrent Admin edit of email/WhatsApp is never overwritten.
+        # Two overlapping runs race on these two columns; last writer wins, which is
+        # harmless (both ran, the stamp shows one of them). pk=1 is the row
+        # SystemSettings.get() uses; get() runs first so a fresh DB still gets its row.
+        SystemSettings.get()
+        SystemSettings.objects.filter(pk=1).update(
+            schedule_last_run_at=timezone.now(), schedule_last_run_sites=site_count)
 
     @staticmethod
     def _forecast_line(result, apply):

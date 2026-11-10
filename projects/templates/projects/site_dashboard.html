@@ -162,6 +162,7 @@
   <div class="head">
     <div class="eyebrow">{{ scope_label }}</div>
     <h1>Site Dashboard</h1>
+    <p class="sub"{% if dates_as_of.stale %} style="color: var(--sd-warn); font-weight: 600;"{% endif %} data-dates-as-of>{{ dates_as_of.text }}</p>{# SCHED-R: last daily schedule_sites run, IST; amber when not today #}
     <p class="sub">{% if params.sort == 'urgent' %}Most behind plan first, then most open problems.{% else %}Most recent update first.{% endif %} Drafts sit at the bottom. Click a site for detail.</p>
   </div>
 
