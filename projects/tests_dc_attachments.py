@@ -171,16 +171,21 @@ class CreateWithDocumentsTests(DcAttachmentBase):
         self.assertEqual(self.uploads(), [])
 
     def test_pdf_jpg_and_png_are_stored_with_their_canonical_types(self):
-        response = self.post([_file('dc.pdf', PDF, 'application/pdf'),
-                              _file('dc-photo.jpg', JPG, 'image/jpeg'),
-                              _file('dc-scan.png', PNG, 'image/png')])
+        # Upload names whose stems cannot occur in the stored path. The path is
+        # 'DCA-SITE/challan/<32 hex>.<ext>', so a stem made only of hex letters ('dc')
+        # turned up inside a random uuid on roughly 1 run in 8 and failed the
+        # stem-not-in-path check below. These stems hold non-hex letters and a hyphen
+        # ('challan-', never 'challan/'), so they can only appear if the name leaks.
+        response = self.post([_file('challan-original.pdf', PDF, 'application/pdf'),
+                              _file('challan-photo.jpg', JPG, 'image/jpeg'),
+                              _file('challan-scan.png', PNG, 'image/png')])
         challan = DeliveryChallan.objects.get(dc_number='NEW-1')
         self.assertRedirects(response, reverse('delivery_challan_detail',
                                                args=[self.site.project_id, challan.pk]),
                              fetch_redirect_response=False)
         rows = list(challan.attachments.order_by('pk'))
         self.assertEqual([r.original_name for r in rows],
-                         ['dc.pdf', 'dc-photo.jpg', 'dc-scan.png'])
+                         ['challan-original.pdf', 'challan-photo.jpg', 'challan-scan.png'])
         self.assertEqual([r.mime for r in rows],
                          ['application/pdf', 'image/jpeg', 'image/png'])
         for row in rows:
