@@ -475,7 +475,9 @@ class ScheduleParityTests(DashFixture):
         self.assertIsNone(self._got_plan(card))
         self.assertIsNone(card.schedule.days_behind)
         self.assertEqual(card.schedule.reason, REASON_EXCLUDED)
-        self.assertIsNone(card.execution)
+        # DASH-B2 ruling 2: an excluded OPEX site still has its Execution lane (no plan).
+        self.assertEqual(card.execution.name, EXECUTION_LANE_NAME)
+        self.assertEqual(card.execution.work_total, self._block_task_count(site))
 
     def test_unscheduled_site_has_no_plan(self):
         site = self._site()
@@ -541,12 +543,71 @@ class ScheduleParityTests(DashFixture):
         self.assertEqual(next(l for l in card.lanes if l.name == civil.phase.phase_name).work_total,
                          lane_before + 2)
 
-    def test_unscheduled_site_reports_phases_as_they_are(self):
+    def _block_task_count(self, site):
+        """The applicable Execution tasks of `site`: the scheduler's scope, in a block."""
+        block_ids = set(scheduling.ScheduleBlockTask.objects.filter(block__is_active=True)
+                        .values_list('template_task_id', flat=True))
+        return sum(1 for t in Task.objects.filter(phase__project=site)
+                   if scheduling._in_scope(t) and t.template_task_id in block_ids
+                   and not t.is_not_applicable)
+
+    def test_unscheduled_opex_site_has_an_execution_lane_too(self):
+        """DASH-B2 ruling 2: every non-draft OPEX site splits Execution out, scheduled or
+        not, by the same by-task rule; lanes + Execution still hold every task once."""
         site = self._site()
         card = self._card(self.ceo, site)
-        self.assertIsNone(card.execution)
-        self.assertEqual(sum(l.work_total for l in card.lanes),
+        self.assertEqual(card.schedule.reason, REASON_NEEDS_ANCHOR)
+        self.assertEqual(card.execution.name, EXECUTION_LANE_NAME)
+        self.assertEqual(card.execution.work_total, self._block_task_count(site))
+        self.assertEqual(sum(l.work_total for l in card.lanes) + card.execution.work_total,
                          Task.objects.filter(phase__project=site, is_not_applicable=False).count())
+        # The template's Execution tasks are all in Installation and Testing & Commissioning,
+        # so both lanes are left empty, as on a scheduled site.
+        for name in ('Installation', 'Testing & Commissioning'):
+            self.assertEqual(next(l for l in card.lanes if l.name == name).state, LANE_EMPTY)
+
+    def test_residential_capex_and_draft_sites_report_phases_as_they_are(self):
+        residential = self._bare()
+        self._plain_task(self._phase(residential, 'Install', 1), 1)
+        capex = self._bare(project_type='CAPEX')
+        draft = self._bare(project_type='OPEX', status='Draft')
+        cards = {c.id: c for c in build_site_cards(_fresh(self.ceo.user))}
+        for site in (residential, capex, draft):
+            with self.subTest(site=site.project_type, status=site.status):
+                self.assertIsNone(cards[site.pk].execution)
+                self.assertIsNone(cards[site.pk].execution_segment)
+        self.assertEqual(cards[residential.pk].lanes[0].work_total, 1)
+
+    def test_location_copies_feed_the_execution_segment_state_and_dates_only(self):
+        """DASH-B2 ruling 2 (UKRU001): a location copy of a block task is outside the
+        Execution lane, but the pipeline's Execution segment takes its state and actual
+        dates from it. Every count stays where it was."""
+        site = self._site(exclude_from_auto_schedule=True)
+        civil = self._task(site, CIVIL)
+        before = self._card(self.ceo, site)
+        self.assertEqual(before.execution_segment, before.execution)
+        copy = self._plain_task(civil.phase, 90, task_name='Civil copy',
+                                template_task=civil.template_task, location_label='Roof B')
+        when = self._ist(8)
+        self._done(copy, when)
+        card = self._card(self.ceo, site)
+        lane, segment = card.execution, card.execution_segment
+        # The lane is untouched: the copy is not an Execution task.
+        self.assertEqual((lane.work_total, lane.state, lane.actual_start),
+                         (before.execution.work_total, before.execution.state, None))
+        # The segment reads the copy for state and dates, and nothing else.
+        self.assertEqual(segment.state, LANE_IN_PROGRESS)
+        self.assertEqual(segment.actual_start, when)
+        self.assertIsNone(segment.actual_end)
+        for name in ('total', 'done', 'percent', 'work_total', 'work_done', 'overdue', 'blocked'):
+            self.assertEqual(getattr(segment, name), getattr(lane, name), name)
+        # The copy stays in its phase lane and in the site's progress.
+        self.assertEqual(next(l for l in card.lanes if l.name == civil.phase.phase_name).work_total,
+                         next(l for l in before.lanes if l.name == civil.phase.phase_name).work_total + 1)
+        Task.objects.filter(phase__project=site, template_task__isnull=False, is_mirror=False,
+                            location_label='').update(status=Task.DONE, completed_at=when)
+        segment = self._card(self.ceo, site).execution_segment
+        self.assertEqual((segment.state, segment.actual_end), (LANE_DONE, when))
 
     def test_a_manual_date_inside_a_block_is_counted_normally_and_flagged(self):
         """Edge case 7."""
@@ -706,6 +767,18 @@ class CardFieldTests(DashFixture):
                                                 recorded_by=self.pm,
                                                 unlisted_contractor_name=f'Crew {crew}', **void)
         self.assertEqual(self._card(self.ceo, site).attendance_today, 10)
+
+    def test_next_tasks_flag_external_tasks(self):
+        """DASH-B2 E7: the card tags an External task in its "Next due" list."""
+        site = self._bare()
+        phase = self._phase(site, 'Install', 1)
+        self._plain_task(phase, 1, task_name='Ours', task_type=Task.INTERNAL,
+                         due_date=FROZEN_TODAY + timedelta(days=1))
+        self._plain_task(phase, 2, task_name='Theirs', task_type=Task.EXTERNAL,
+                         due_date=FROZEN_TODAY + timedelta(days=2))
+        card = self._card(self.ceo, site)
+        self.assertEqual([(t.name, t.external) for t in card.next_tasks],
+                         [('Ours', False), ('Theirs', True)])
 
 
 # ---------------------------------------------------------------------------

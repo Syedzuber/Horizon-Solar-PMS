@@ -13,6 +13,7 @@ from . import site_drawings_views  # DR-2 site drawings card and drawing open �
 from . import notify_views   # T2 notification template Admin screens — separate module, same pattern
 from . import attendance_views  # ATT-B1 contractor attendance screens — separate module, same pattern
 from . import views_tender_documents  # TD-B2 tender documents manage page — separate module, same pattern
+from . import views_site_dashboard  # DASH-B2 Site Dashboard page — separate module, same pattern
 
 urlpatterns = [
     # ---------------------------------------------------------------------------
@@ -43,6 +44,9 @@ urlpatterns = [
     path('dashboard/ceo/overdue-tasks/', views.dashboard_ceo_overdue_tasks,
          name='dashboard_ceo_overdue_tasks'),
     path('dashboard/bd/',            views.dashboard_bd,            name='dashboard_bd'),
+    # DASH-B2 Site Dashboard — PM, Project Coordinator, CEO, Finance, SCM, Admin, System
+    # Admin, Design Head (permissions.user_can_view_site_dashboard); everyone else 403.
+    path('dashboard/sites/',         views_site_dashboard.site_dashboard, name='site_dashboard'),
 
     # ---------------------------------------------------------------------------
     # User management — Admin only

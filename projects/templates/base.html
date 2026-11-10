@@ -65,6 +65,13 @@
         <i class="bi bi-house-door me-1"></i>Home
       </a>
     {% endif %}
+    {# Site Dashboard (DASH-B2 E10) — gated by permissions.user_can_view_site_dashboard() via #}
+    {# the site_dashboard_nav context processor, the same helper the view calls.           #}
+    {% if can_view_site_dashboard %}
+      <a href="{% url 'site_dashboard' %}" class="nav-link text-white small" title="Site Dashboard">
+        <i class="bi bi-grid-3x2-gap me-1"></i>Site Dashboard
+      </a>
+    {% endif %}
     {% if user.profile.role == 'Admin' or user.profile.role == 'PM' or user.profile.role == 'CEO' %}
       <a href="{% url 'program_list' %}" class="nav-link text-white small" title="Programs">
         <i class="bi bi-diagram-3 me-1"></i>Programs

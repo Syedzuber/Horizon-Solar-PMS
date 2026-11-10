@@ -1,0 +1,118 @@
+{% comment %}One Site Dashboard card (DASH-B2 E6 collapsed, E7 expanded). `v` is a
+   views_site_dashboard.CardView. Collapsed by default; a click (or Enter / Space: it is a
+   button) opens it. Every text value is auto-escaped; nothing here is marked safe.{% endcomment %}
+<div class="site{% if v.health %} h-{{ v.health }}{% endif %}" x-data="{ open: false }" data-site="{{ v.card.code }}">
+  <button type="button" class="row cols" @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="false"
+          aria-controls="site-{{ v.card.id }}-detail">
+    <span class="c-site">
+      <span class="blk"><span class="code">{{ v.card.code }}</span><span class="tag{% if v.card.project_type == 'CAPEX' %} capex{% endif %}">{{ v.type_label }}</span></span>
+      <span class="place">{{ v.place|default:"—" }}</span>
+      <span class="meta">{{ v.tender }} · {{ v.card.city|default:"—" }} · {{ v.card.pm_name|default:"No PM" }}</span>
+      <span class="meta cap">DC <b>{% if v.dc %}{{ v.dc }} kWp{% else %}<span class="na">not set</span>{% endif %}</b> · AC <b>{% if v.ac %}{{ v.ac }} kW{% else %}<span class="na">not set</span>{% endif %}</b></span>
+    </span>
+
+    <span class="c-pipe">
+      {% if v.segments %}
+        <span class="pipe" style="grid-template-columns: repeat({{ v.segments|length }}, minmax(0, 1fr));">
+          {% for s in v.segments %}
+            <span class="blk" title="{{ s.title }}"><span class="s {{ s.state }}"></span><span class="lb{% if s.current %} on{% endif %}">{{ s.label }}</span></span>
+          {% endfor %}
+        </span>
+      {% else %}
+        <span class="meta"><em>No phases</em></span>
+      {% endif %}
+    </span>
+
+    <span class="c-prog prog">
+      <span class="p num">{{ v.card.progress }}%</span>
+      <span class="t"><i style="width: {{ v.card.progress }}%"></i></span>
+      <span class="meta">{{ v.finish_line }}</span>
+      {% if v.schedule_line %}<span class="sched {{ v.schedule_line.1 }}">{{ v.schedule_line.0 }}</span>{% endif %}
+    </span>
+
+    <span class="c-flags">
+      <span class="flags">
+        {% if not v.card.overdue and not v.card.blocked and not v.card.open_issues %}<span class="pill ok">✓ Clear</span>{% endif %}
+        {% if v.card.overdue %}<span class="pill crit">{{ v.card.overdue }} overdue</span>{% endif %}
+        {% if v.card.blocked %}<span class="pill crit">{{ v.card.blocked }} blocked</span>{% endif %}
+        {% if v.card.open_issues %}<span class="pill warn">{{ v.card.open_issues }} issue{{ v.card.open_issues|pluralize }}</span>{% endif %}
+        {% if v.card.large_site %}<span class="pill mut" title="Above 300 kWp DC: the 101+ band durations may not fit">Large site</span>{% endif %}
+        {% if v.payment %}<span class="pill info" data-money="payment">{{ v.payment }} pay</span>{% endif %}
+      </span>
+      {% if v.attendance == 'count' %}
+        <span class="att">Attendance today: {{ v.card.attendance_today }} {{ v.card.attendance_today|pluralize:"person,people" }}</span>
+      {% elif v.attendance == 'none' %}
+        <span class="att no">No attendance today</span>
+      {% endif %}
+    </span>
+
+    <span class="c-act">
+      {% if v.card.latest %}
+        <span class="when{% if v.quiet %} stale{% endif %}">{{ v.latest_when }} · {{ v.card.latest.who }}</span>
+        <span class="what">{{ v.card.latest.what }}</span>
+      {% else %}
+        <span class="when stale">No updates logged yet</span>
+      {% endif %}
+    </span>
+
+    <i data-lucide="chevron-down" class="chev" aria-hidden="true"></i>
+  </button>
+
+  <div class="detail" id="site-{{ v.card.id }}-detail" x-show="open" x-cloak>
+    <div>
+      <h3>Recent updates</h3>
+      <ul class="feed">
+        {% for when, row in v.feed %}
+          <li><span class="tm">{{ when }}</span><span><span class="who">{{ row.who }}</span> · {{ row.what }}</span></li>
+        {% empty %}
+          <li><span></span><span>No updates logged yet</span></li>
+        {% endfor %}
+      </ul>
+    </div>
+
+    <div>
+      <h3>Next due</h3>
+      <dl class="kv">
+        {% for t in v.card.next_tasks %}
+          <dt>{{ t.name }}{% if t.external %} <span class="tag ext">External</span>{% endif %}</dt>
+          <dd class="num{% if t.due < today %} late{% endif %}">{{ t.due|date:"j M" }}</dd>
+        {% empty %}
+          <dt>No open dated tasks</dt><dd></dd>
+        {% endfor %}
+      </dl>
+    </div>
+
+    <div>
+      <h3>Schedule</h3>
+      <dl class="kv">
+        {% if v.scheduled %}
+          <dt>Civil date</dt><dd>{{ v.card.schedule.anchor|date:"j M Y" }}</dd>
+          <dt>Band</dt><dd>{{ v.band }} kWp</dd>
+          <dt>Planned finish</dt><dd>{{ v.card.schedule.baseline_finish|date:"j M Y"|default:"—" }}</dd>
+          <dt>Forecast finish</dt><dd{% if v.card.schedule.days_behind %} class="late"{% endif %}>{{ v.card.schedule.forecast_finish|date:"j M Y"|default:"—" }}</dd>
+          <dt>Days behind</dt><dd>{% if v.card.schedule.days_behind %}{{ v.card.schedule.days_behind }}{% else %}—{% endif %}</dd>
+          <dt>PM-typed dates</dt><dd>{{ v.card.schedule.manual_dates }}</dd>
+        {% else %}
+          <dt>Auto-schedule</dt><dd>{% if v.schedule_line %}{{ v.schedule_line.0 }}{% else %}Not scheduled{% endif %}</dd>
+          <dt>Target</dt><dd>{{ v.card.target_date|date:"j M Y"|default:"Not set" }}</dd>
+        {% endif %}
+      </dl>
+    </div>
+
+    <div>
+      <h3>Site, materials{% if sees_payments %} &amp; money{% endif %}</h3>
+      <dl class="kv">
+        <dt>Project ID</dt><dd class="mono">{{ v.card.project_id }}</dd>
+        <dt>DC capacity</dt><dd>{% if v.dc %}{{ v.dc }} kWp{% else %}Not set{% endif %}</dd>
+        <dt>AC capacity</dt><dd>{% if v.ac %}{{ v.ac }} kW{% else %}Not set{% endif %}</dd>
+        <dt>PM</dt><dd>{{ v.card.pm_name|default:"Not assigned" }}</dd>
+        <dt>Activated</dt><dd>{{ v.card.activated_at|date:"j M Y"|default:"—" }}</dd>
+        <dt>DCs received · partial · expected</dt><dd class="num">{{ v.card.dc_counts.received }} · {{ v.card.dc_counts.partial }} · {{ v.card.dc_counts.expected }}</dd>
+        {% if sees_payments %}<dt>Payment requests open</dt><dd class="num" data-money="payment">{{ v.payment|default:"None" }}</dd>{% endif %}
+        <dt>Attendance today</dt><dd>{% if v.card.attendance_today is not None %}{{ v.card.attendance_today }} {{ v.card.attendance_today|pluralize:"person,people" }}{% else %}Not logged{% endif %}</dd>
+      </dl>
+    </div>
+
+    <div class="open-site"><a href="{% url 'project_overview' v.card.project_id %}">Open site →</a></div>
+  </div>
+</div>

@@ -29,7 +29,7 @@ THE FIGURES, defined ONCE below by name (ruling 2):
     blocked          card_blocked_q()    human-owned, N/A out, any task type
     lane state/dates lane_work_q()       every applicable task, any type, mirrors IN
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 from django.db.models import (BooleanField, Case, Count, F, Max, Min, OuterRef, Q,
@@ -64,7 +64,8 @@ LARGE_SITE_KWP = 300
 FEED_LEN = 5
 NEXT_LEN = 3
 
-#: The lane holding the Execution tasks of a scheduled site (D5).
+#: The lane holding the Execution tasks of an OPEX site (D5; every non-draft OPEX site
+#: since DASH-B2 ruling 2, 10 Nov, scheduled or not).
 EXECUTION_LANE_NAME = 'Execution'
 
 #: Lane states, from the lane's applicable tasks of any type (ruling 2, option B).
@@ -179,6 +180,7 @@ class ActivityRow:
 class NextTask:
     name: str
     due: object
+    external: bool = False     # Task.EXTERNAL: the card tags it "External" (DASH-B2 E7)
 
 
 @dataclass(frozen=True)
@@ -216,7 +218,7 @@ class SiteCard:
     target_date: object
     current_phase: object      # phase name per utils.current_phase(); None for a Draft
     lanes: tuple               # Lane per phase, in phase order
-    execution: object          # Lane for the Execution tasks of a scheduled site, else None
+    execution: object          # Lane for the Execution tasks of a non-draft OPEX site, else None
     progress: int              # percent() over the whole site, = dashboard_pm internal_percent
     overdue: int
     blocked: int
@@ -230,6 +232,11 @@ class SiteCard:
     schedule: Schedule
     quiet_days: int            # days since the latest activity, else since activation/creation
     urgency: tuple = field(default=())   # (days behind or 0, overdue+blocked+issues, latest at)
+    # The pipeline's Execution SEGMENT (DASH-B2 ruling 2): `execution` with its state and
+    # actual dates also read from the location copies of block tasks; None when
+    # `execution` is None. Display only: the copies stay in their phase lane and in every
+    # count, and the scheduler's scope is unchanged.
+    execution_segment: object = None
 
 
 @dataclass(frozen=True)
@@ -255,6 +262,17 @@ def _in_block_q():
     block_rows = (ScheduleBlockTask.objects.filter(block__is_active=True)
                   .values('template_task_id'))
     return Q(template_task_id__in=block_rows, is_mirror=False, location_label='')
+
+
+def _block_copy_q():
+    """Q() for a LOCATION COPY of an Execution task (DASH-B2 ruling 2): a block task's
+    template row, not a mirror, but a location_label. The scheduler leaves copies out
+    (scheduling._in_scope), so they are never in _in_block_q(); the card reads them only
+    for the Execution SEGMENT's state and actual dates. UKRU001's 25 copies all carry a
+    block template row (checked on the 9 Nov restore before this was written)."""
+    block_rows = (ScheduleBlockTask.objects.filter(block__is_active=True)
+                  .values('template_task_id'))
+    return Q(template_task_id__in=block_rows, is_mirror=False) & ~Q(location_label='')
 
 
 def _site_is_eligible_q():
@@ -293,7 +311,8 @@ def build_site_cards(user, today=None):
         phases_by_site.setdefault(row['project_id'], []).append(row)
 
     # 3. ONE grouped aggregate over every task of every visible site, one row per
-    #    (phase, in Execution or not). Everything per lane and per site is summed from
+    #    (phase, in Execution or not, location copy of an Execution task or not; the two
+    #    flags never both hold). Everything per lane and per site is summed from
     #    these rows in Python: progress, overdue, blocked, state, dates, the current phase
     #    and the manual-date flag. The actual start of a task is its first move to In
     #    Progress or Done in the StatusTransition ledger, taken as a correlated subquery
@@ -308,8 +327,10 @@ def build_site_cards(user, today=None):
     task_rows = (
         Task.objects.filter(phase__project_id__in=visible_pks)
         .annotate(in_block=Case(When(_in_block_q(), then=Value(True)),
-                                default=Value(False), output_field=BooleanField()))
-        .values('phase_id', 'in_block')
+                                default=Value(False), output_field=BooleanField()),
+                  block_copy=Case(When(_block_copy_q(), then=Value(True)),
+                                  default=Value(False), output_field=BooleanField()))
+        .values('phase_id', 'in_block', 'block_copy')
         .annotate(
             total=Count('pk', filter=card_progress_q()),
             done=Count('pk', filter=card_progress_q() & done),
@@ -335,7 +356,7 @@ def build_site_cards(user, today=None):
     )
     by_phase = {}
     for row in task_rows:
-        by_phase.setdefault(row['phase_id'], {})[row['in_block']] = row
+        by_phase.setdefault(row['phase_id'], []).append(row)
 
     # 4-7. Per-site counts, each one grouped query.
     open_issues = dict(
@@ -402,11 +423,12 @@ def build_site_cards(user, today=None):
                                                F('task_order').asc(), F('pk').asc()]))
                  .filter(rn__lte=NEXT_LEN)
                  .order_by('phase__project_id', 'rn')
-                 .values('phase__project_id', 'task_name', 'due_date'))
+                 .values('phase__project_id', 'task_name', 'due_date', 'task_type'))
     next_tasks = {}
     for row in next_rows:
         next_tasks.setdefault(row['phase__project_id'], []).append(
-            NextTask(name=row['task_name'], due=row['due_date']))
+            NextTask(name=row['task_name'], due=row['due_date'],
+                     external=row['task_type'] == Task.EXTERNAL))
 
     # 10-13. The schedule (D6), from columns: no scheduler call per site.
     plans = _plan_summaries(visible_pks)
@@ -571,29 +593,37 @@ def _card(site, today, phases, by_phase, open_issues, dc_counts, attendance, pay
     scheduled = reason == REASON_SCHEDULED
     is_draft = site.status == 'Draft'
 
-    # D5: on a SCHEDULED site the Execution tasks leave their phases and are summed once
-    # as the Execution lane; on any other site every phase is reported as it is.
-    lanes, execution_rows, all_rows = [], [], []
+    # D5, widened by DASH-B2 ruling 2 (10 Nov): on EVERY non-draft OPEX site, scheduled or
+    # not, the Execution tasks leave their phases and are summed once as the Execution
+    # lane, so every RESCO card draws the same six-segment pipeline. The test is the same
+    # by-task rule either way (_in_block_q), so a site's Execution does not change shape
+    # the day its Civil date arrives. Residential, CAPEX and drafts report every phase as
+    # it is (a draft OPEX site has no tasks yet).
+    split = site.project_type == ELIGIBLE_PROJECT_TYPE and not is_draft
+    lanes, execution_rows, copy_rows, all_rows = [], [], [], []
     current = last_human = None
     for phase in phases:
-        groups = by_phase.get(phase['id'], {})
-        all_rows.extend(groups.values())
-        if scheduled:
-            lane_rows = [groups[False]] if False in groups else []
-            if True in groups:
-                execution_rows.append(groups[True])
+        groups = by_phase.get(phase['id'], [])
+        all_rows.extend(groups)
+        if split:
+            lane_rows = [r for r in groups if not r['in_block']]
+            execution_rows.extend(r for r in groups if r['in_block'])
+            # Location copies stay in their phase lane (above) and in every count; they
+            # are only read again for the Execution segment's state and dates.
+            copy_rows.extend(r for r in groups if r['block_copy'])
         else:
-            lane_rows = list(groups.values())
+            lane_rows = list(groups)
         lanes.append(_lane(phase['phase_name'], lane_rows))
         # utils.current_phase(): the first phase with an open human-owned applicable task,
         # else the last phase holding any; asked of the phase's whole task set, Execution
         # tasks included, because that function knows nothing of Execution.
-        human = sum(r['human'] for r in groups.values())
+        human = sum(r['human'] for r in groups)
         if human:
             last_human = phase['phase_name']
-            if current is None and sum(r['human_open'] for r in groups.values()):
+            if current is None and sum(r['human_open'] for r in groups):
                 current = phase['phase_name']
-    execution = _lane(EXECUTION_LANE_NAME, execution_rows) if scheduled else None
+    execution = _lane(EXECUTION_LANE_NAME, execution_rows) if split else None
+    segment = _execution_segment(execution, execution_rows, copy_rows) if split else None
 
     total_pct = sum(r['total'] for r in all_rows)
     done_pct = sum(r['done'] for r in all_rows)
@@ -639,7 +669,22 @@ def _card(site, today, phases, by_phase, open_issues, dc_counts, attendance, pay
         latest=latest, feed=tuple(feed), next_tasks=tuple(next_tasks), schedule=schedule,
         quiet_days=(today - quiet_from).days,
         urgency=(behind or 0, overdue + blocked + issues, latest.at if latest else None),
+        execution_segment=segment,
     )
+
+
+def _execution_segment(execution, execution_rows, copy_rows):
+    """The pipeline's Execution segment (DASH-B2 ruling 2): the Execution lane, with its
+    STATE and ACTUAL DATES read from the block tasks AND their location copies, so a
+    multi-location site (UKRU001) shows Execution under way once any location has started.
+    Every count (total, done, percent, work_*, overdue, blocked) stays the lane's own:
+    the copies are already counted in their phase lane and in the site totals, and the
+    scheduler's scope does not include them. The lane itself when there are no copies."""
+    if not copy_rows:
+        return execution
+    both = _lane(EXECUTION_LANE_NAME, execution_rows + copy_rows)
+    return replace(execution, state=both.state, actual_start=both.actual_start,
+                   actual_end=both.actual_end)
 
 
 # ---------------------------------------------------------------------------

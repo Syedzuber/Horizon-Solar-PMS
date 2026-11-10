@@ -3,7 +3,8 @@ from .forms import TYPED_DATE_FLOOR, typed_date_ceiling
 from .models import Notification
 from .permissions import (
     user_can_manage_stock_locations, user_can_view_payment_queue,
-    user_can_view_purchases_workspace, user_can_view_vendor_list,
+    user_can_view_purchases_workspace, user_can_view_site_dashboard,
+    user_can_view_vendor_list,
 )
 
 
@@ -79,6 +80,18 @@ def purchases_nav(request):
     if not request.user.is_authenticated:
         return {'can_view_purchases_workspace': False}
     return {'can_view_purchases_workspace': user_can_view_purchases_workspace(request.user)}
+
+
+def site_dashboard_nav(request):
+    """Whether to show the Site Dashboard nav entry (DASH-B2 E10).
+
+    The answer comes from permissions.user_can_view_site_dashboard(), the same helper
+    views_site_dashboard.site_dashboard calls, so the link and the view cannot disagree.
+    Visibility only. No query: the helper reads the profile the request already holds.
+    """
+    if not request.user.is_authenticated:
+        return {'can_view_site_dashboard': False}
+    return {'can_view_site_dashboard': user_can_view_site_dashboard(request.user)}
 
 
 #: Who is SHOWN the Aging button on the approvals list (D-A61). Not who may open the page:

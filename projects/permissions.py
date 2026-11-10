@@ -4334,6 +4334,31 @@ def sites_visible_on_dashboard(user):
     return Project.objects.none()
 
 
+def user_can_view_site_dashboard(user):
+    """True when `user` may open the Site Dashboard page (DASH-B2 decision E3): PM,
+    Project Coordinator, CEO, Finance, SCM, Admin, System Admin and the Design Head.
+
+    Exactly the people sites_visible_on_dashboard() answers with a real scope, read from
+    the same two role sets and the same is_design_head flag, so the page never opens for
+    someone it would always show empty. The nav link (base.html, through the
+    context_processors.site_dashboard_nav processor) and the view both call this helper,
+    so they cannot disagree.
+    Everyone else gets the 403 every wrong-role dashboard gives (role_required's
+    _forbidden): a Site Engineer works from their own task dashboard (D1); Design and BD
+    have dashboards of their own that this one does not replace. Not project-scoped, so
+    it costs no query.
+    """
+    profile = getattr(user, 'profile', None)
+    # No profile: no role, so no dashboard; blocked like every other helper here.
+    if profile is None:
+        return False
+    # Portfolio roles and the Design Head see every live site; PM and coordinator see the
+    # sites they manage. Anyone else has no scope on this dashboard, so is refused.
+    return (profile.role in DASHBOARD_PORTFOLIO_ROLES
+            or profile.role in DASHBOARD_MANAGER_ROLES
+            or bool(getattr(profile, 'is_design_head', False)))
+
+
 def user_sees_payment_totals(user):
     """True when `user` may see the per-site open payment-request figure on the common
     dashboard (DASH-B1 decision D8): CEO, Finance, SCM, Admin and System Admin.

@@ -1,0 +1,279 @@
+{% extends "base.html" %}
+{% block title %}Site Dashboard — SolarPMS{% endblock %}
+
+{% block extra_head %}
+{% comment %}DASH-B2. Bootstrap 5.3.3 comes from base.html; this page adds page-scoped CSS (every
+   rule under .sd), Alpine 3.14.8 for open/closed state only, and Lucide pinned to an exact
+   version (ruling 4). Layout follows the approved prototype "Horizon Site Dashboards" v3,
+   Site Dashboard tab. No fetch, no XHR, no polling: every filter is a link or a GET form.{% endcomment %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<style>
+  [x-cloak] { display: none !important; }
+  .sd {
+    --sd-surface:#ffffff; --sd-surface-2:#edf1eb; --sd-ink:#16231b; --sd-muted:#56655c;
+    --sd-faint:#7a887f; --sd-line:#d9e0d7; --sd-brand:#1a7a4a; --sd-brand-2:#7cb847;
+    --sd-gold:#f0a829; --sd-navy:#243a6b; --sd-ok:#1f8a4c; --sd-warn:#a86400; --sd-crit:#c23b2a;
+    --sd-ok-bg:#e2f2e7; --sd-warn-bg:#fcefd6; --sd-crit-bg:#fae3df; --sd-info-bg:#e5eaf5;
+    color: var(--sd-ink); padding-bottom: 48px;
+  }
+  .sd .num { font-variant-numeric: tabular-nums; }
+  .sd .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+  .sd :focus-visible { outline: 2px solid var(--sd-gold); outline-offset: 2px; }
+  .sd .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--sd-faint); font-weight: 600; }
+  .sd h1 { font-size: 1.6rem; font-weight: 600; margin: 0; }
+  .sd .sub { color: var(--sd-muted); margin: 2px 0 0; font-size: .9rem; }
+  .sd .head { margin-bottom: 16px; }
+
+  /* KPI strip (E5): tiles wrap at any width; a filter tile is a link. */
+  /* Each tile draws its own right and bottom rule, so a part-filled last row leaves white
+     space rather than the grey a 1px-gap grid would show through. */
+  .sd .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    background: var(--sd-surface); border: 1px solid var(--sd-line); border-radius: 12px; overflow: hidden; margin-bottom: 16px; }
+  .sd .kpi { background: var(--sd-surface); padding: 12px 14px; display: flex; flex-direction: column; gap: 2px;
+    color: inherit; text-decoration: none; min-width: 0; box-shadow: 1px 0 0 var(--sd-line), 0 1px 0 var(--sd-line); }
+  .sd a.kpi:hover { background: var(--sd-surface-2); }
+  .sd a.kpi[aria-pressed="true"] { background: var(--sd-info-bg); box-shadow: inset 0 -3px 0 var(--sd-navy); }
+  .sd .kpi .v { font-size: 1.75rem; font-weight: 600; line-height: 1; }
+  .sd .kpi .l { font-size: 12px; color: var(--sd-muted); }
+  .sd .kpi .d { font-size: 11px; color: var(--sd-faint); }
+  .sd .kpi.crit .v { color: var(--sd-crit); }
+  .sd .kpi.warn .v { color: var(--sd-warn); }
+
+  /* Controls */
+  .sd .listhead { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+  .sd .ctrl { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; min-width: 0; }
+  .sd .ctrl .form-control, .sd .ctrl .form-select { width: auto; min-width: 0; }
+  .sd .ctrl input[type=search] { width: 220px; }
+  .sd .seg { display: inline-flex; border: 1px solid var(--sd-line); border-radius: 8px; overflow: hidden; background: var(--sd-surface); }
+  .sd .seg a { padding: 6px 11px; color: var(--sd-muted); text-decoration: none; font-size: .875rem; }
+  .sd .seg a[aria-current="true"] { background: var(--sd-ink); color: var(--sd-surface); }
+
+  /* Site list: five columns on a desktop, two on a tablet, one on a phone (E9). */
+  .sd .cols { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,2fr) 120px 140px minmax(0,1.3fr) 20px; gap: 16px; align-items: center; }
+  .sd .colhead { padding: 0 16px 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--sd-faint); font-weight: 600; }
+  .sd .sites { display: flex; flex-direction: column; gap: 6px; }
+  .sd .site { background: var(--sd-surface); border: 1px solid var(--sd-line); border-radius: 10px; position: relative; }
+  .sd .site.h-crit { box-shadow: inset 4px 0 0 var(--sd-crit); }
+  .sd .site.h-warn { box-shadow: inset 4px 0 0 var(--sd-warn); }
+  .sd .site.h-quiet { box-shadow: inset 4px 0 0 #9aa69f; }
+  .sd .row { width: 100%; background: none; border: 0; text-align: left; padding: 12px 16px; cursor: pointer; border-radius: 10px; color: inherit; margin: 0; }
+  .sd .row:hover { background: #f6f8f5; }
+  .sd .row > span, .sd .row .blk { display: block; min-width: 0; }
+  .sd .code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-weight: 600; font-size: 13px; }
+  .sd .place { font-weight: 600; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sd .meta { font-size: 12px; color: var(--sd-muted); display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sd .tag { display: inline-block; font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+    padding: 1px 6px; border-radius: 4px; background: var(--sd-surface-2); color: var(--sd-muted); vertical-align: 1px; margin-left: 4px; }
+  .sd .tag.draft { background: var(--sd-warn-bg); color: var(--sd-warn); }
+  .sd .tag.capex { background: var(--sd-info-bg); color: var(--sd-navy); }
+  .sd .tag.ext { background: var(--sd-info-bg); color: var(--sd-navy); text-transform: none; letter-spacing: 0; }
+  .sd .cap b { font-weight: 600; color: var(--sd-ink); }
+  .sd .cap .na { color: var(--sd-warn); font-weight: 600; }
+
+  .sd .pipe { display: grid; gap: 3px; }
+  .sd .pipe .s { display: block; height: 8px; border-radius: 2px; background: var(--sd-surface-2); border: 1px solid var(--sd-line); }
+  .sd .pipe .s.ns { background: var(--sd-surface); border-color: #b9c3bb; }
+  .sd .pipe .s.done { background: var(--sd-ok); border-color: var(--sd-ok); }
+  .sd .pipe .s.active { background: repeating-linear-gradient(90deg, var(--sd-brand-2) 0 60%, #d8eac4 60% 100%); border-color: var(--sd-brand-2); }
+  .sd .pipe .s.late { background: var(--sd-warn); border-color: var(--sd-warn); }
+  .sd .pipe .s.blocked { background: repeating-linear-gradient(135deg, var(--sd-crit) 0 3px, var(--sd-crit-bg) 3px 6px); border-color: var(--sd-crit); }
+  .sd .pipe .lb { display: block; font-size: 10px; color: var(--sd-faint); text-align: center; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sd .pipe .lb.on { color: var(--sd-ink); font-weight: 600; }
+  .sd .prog .p { font-weight: 600; font-size: 1.25rem; line-height: 1; display: block; }
+  .sd .prog .t { display: block; height: 4px; background: var(--sd-surface-2); border-radius: 2px; margin: 5px 0 4px; overflow: hidden; }
+  .sd .prog .t i { display: block; height: 100%; background: var(--sd-brand); }
+  .sd .sched { font-size: 11.5px; font-weight: 600; display: block; line-height: 1.3; }
+  .sd .sched.behind { color: var(--sd-crit); }
+  .sd .sched.onplan { color: var(--sd-ok); }
+  .sd .sched.none { color: var(--sd-warn); }
+  .sd .sched.mut { color: var(--sd-faint); }
+  .sd .flags { display: flex; gap: 4px; flex-wrap: wrap; }
+  .sd .pill { font-size: 11.5px; padding: 2px 7px; border-radius: 99px; white-space: nowrap; font-weight: 500; }
+  .sd .pill.crit { background: var(--sd-crit-bg); color: var(--sd-crit); }
+  .sd .pill.warn { background: var(--sd-warn-bg); color: var(--sd-warn); }
+  .sd .pill.ok { background: var(--sd-ok-bg); color: var(--sd-ok); }
+  .sd .pill.mut { background: var(--sd-surface-2); color: var(--sd-muted); }
+  .sd .pill.info { background: var(--sd-info-bg); color: var(--sd-navy); }
+  .sd .att { display: block; font-size: 11.5px; color: var(--sd-muted); margin-top: 4px; }
+  .sd .att.no { color: var(--sd-warn); }
+  .sd .when { font-size: 12px; font-weight: 600; display: block; }
+  .sd .when.stale { color: var(--sd-warn); }
+  .sd .what { font-size: 12.5px; color: var(--sd-muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .sd .chev { width: 16px; height: 16px; transition: transform .15s; color: var(--sd-faint); }
+  .sd [aria-expanded="true"] .chev { transform: rotate(180deg); }
+
+  /* Expanded card (E7) */
+  .sd .detail { border-top: 1px dashed var(--sd-line); padding: 14px 16px 16px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 20px; }
+  .sd .detail h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--sd-faint); margin: 0 0 8px; font-weight: 600; }
+  .sd .feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .sd .feed li { display: grid; grid-template-columns: 70px minmax(0,1fr); gap: 8px; font-size: 12.5px; }
+  .sd .feed .tm { color: var(--sd-faint); font-size: 11.5px; }
+  .sd .feed .who { font-weight: 600; }
+  .sd .kv { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 5px 10px; font-size: 12.5px; margin: 0; }
+  .sd .kv dt { color: var(--sd-muted); font-weight: 400; }
+  .sd .kv dd { margin: 0; text-align: right; font-weight: 500; }
+  .sd .kv .late { color: var(--sd-crit); }
+  .sd .open-site { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
+  .sd .open-site a { color: var(--sd-brand); font-weight: 600; text-decoration: none; }
+  .sd .open-site a:hover { text-decoration: underline; }
+  .sd .empty { padding: 28px; text-align: center; color: var(--sd-muted); background: var(--sd-surface); border: 1px dashed var(--sd-line); border-radius: 10px; }
+
+  /* Collapsed groups: drafts (E4) and the QA/QC strip (ruling 3) */
+  .sd .grp { display: flex; align-items: center; gap: 10px; width: 100%; background: var(--sd-surface-2); border: 1px dashed var(--sd-line);
+    border-radius: 10px; padding: 10px 16px; cursor: pointer; text-align: left; margin-top: 10px; color: inherit; }
+  .sd .grp b { font-size: 1rem; font-weight: 600; }
+  .sd .grp .meta { flex: 1; }
+  .sd .draftlist { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+  .sd .draftrow { display: grid; grid-template-columns: minmax(0,1.2fr) minmax(0,1fr) minmax(0,1.4fr); gap: 16px; padding: 9px 16px;
+    background: var(--sd-surface); border: 1px solid var(--sd-line); border-radius: 8px; font-size: 13px; align-items: center; }
+  .sd .qaqc-body { margin-top: 10px; }
+
+  @media (max-width: 1100px) {
+    .sd .cols { grid-template-columns: minmax(0,1fr) minmax(0,1fr) 20px; }
+    .sd .row .c-site  { grid-column: 1; grid-row: 1; }
+    .sd .row .c-pipe  { grid-column: 2; grid-row: 1; }
+    .sd .row .chev    { grid-column: 3; grid-row: 1; }
+    .sd .row .c-prog  { grid-column: 1; grid-row: 2; }
+    .sd .row .c-flags { grid-column: 2; grid-row: 2; }
+    .sd .row .c-act   { grid-column: 1 / 3; grid-row: 3; }
+    .sd .colhead { display: none; }
+    .sd .detail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 640px) {
+    .sd .cols { grid-template-columns: minmax(0,1fr); gap: 10px; }
+    .sd .row { padding-right: 40px; }
+    .sd .row .c-site, .sd .row .c-pipe, .sd .row .c-prog,
+    .sd .row .c-flags, .sd .row .c-act { grid-column: 1; grid-row: auto; }
+    .sd .row .chev { position: absolute; top: 14px; right: 14px; }
+    .sd .detail { grid-template-columns: minmax(0, 1fr); }
+    .sd .draftrow { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+    .sd .ctrl, .sd .ctrl form { width: 100%; }
+    .sd .ctrl input[type=search] { width: 100%; }
+    .sd .ctrl .form-select { flex: 1 1 140px; }
+    .sd h1 { font-size: 1.4rem; }
+  }
+  @media (prefers-reduced-motion: reduce) { .sd .chev { transition: none; } }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="sd">
+  <div class="head">
+    <div class="eyebrow">{{ scope_label }}</div>
+    <h1>Site Dashboard</h1>
+    <p class="sub">{% if params.sort == 'urgent' %}Most behind plan first, then most open problems.{% else %}Most recent update first.{% endif %} Drafts sit at the bottom. Click a site for detail.</p>
+  </div>
+
+  {% comment %}KPI strip (E5). Counted from the same cards the list below is cut from. A filter
+     tile is a link that adds ?filter=; on the active tile the link removes it again.{% endcomment %}
+  <div class="kpis" id="kpis">
+    {% for t in kpis %}
+      {% if t.key %}
+        <a class="kpi {{ t.tone }}" href="{{ t.href }}" aria-pressed="{% if t.active %}true{% else %}false{% endif %}"
+           data-filter="{{ t.key }}" data-sites="{{ t.sites }}"
+           title="{% if t.active %}Clear this filter{% else %}Show only these {{ t.sites }} site{{ t.sites|pluralize }}{% endif %}">
+          <span class="v num">{{ t.value }}</span><span class="l">{{ t.label }}</span>{% if t.detail %}<span class="d">{{ t.detail }}</span>{% endif %}
+        </a>
+      {% else %}
+        <div class="kpi">
+          <span class="v num">{{ t.value }}</span><span class="l">{{ t.label }}</span>{% if t.detail %}<span class="d">{{ t.detail }}</span>{% endif %}
+        </div>
+      {% endif %}
+    {% endfor %}
+  </div>
+
+  <div class="listhead">
+    <form method="get" class="ctrl" role="search" aria-label="Filter sites">
+      <input type="search" name="q" value="{{ params.q }}" class="form-control form-control-sm"
+             placeholder="Search code, name, city, PM" aria-label="Search sites" maxlength="100">
+      <select name="type" class="form-select form-select-sm" aria-label="Project type" onchange="this.form.requestSubmit()">
+        <option value="">All types</option>
+        {% for value, label in type_labels.items %}
+          <option value="{{ value }}"{% if params.type == value %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      <select name="tender" class="form-select form-select-sm" aria-label="Tender" onchange="this.form.requestSubmit()">
+        <option value="">All tenders</option>
+        {% for pk, code, name in programs %}
+          <option value="{{ pk }}"{% if params.tender == pk %} selected{% endif %}>{{ code }}{% if name != code %} · {{ name }}{% endif %}</option>
+        {% endfor %}
+      </select>
+      {% if params.sort != 'latest' %}<input type="hidden" name="sort" value="{{ params.sort }}">{% endif %}
+      {% if params.filter %}<input type="hidden" name="filter" value="{{ params.filter }}">{% endif %}
+      <button type="submit" class="btn btn-sm btn-brand">Search</button>
+      {% if filtered %}<a href="{{ clear_href }}" class="btn btn-sm btn-outline-secondary">Clear</a>{% endif %}
+    </form>
+    <div class="ctrl">
+      <span class="eyebrow">Sort</span>
+      <div class="seg" role="group" aria-label="Sort order">
+        {% for s in sort_links %}<a href="{{ s.href }}" aria-current="{% if s.active %}true{% else %}false{% endif %}">{{ s.label }}</a>{% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <div class="cols colhead" aria-hidden="true">
+    <div>Site</div><div>Phase pipeline</div><div>Progress · plan</div><div>Attention</div><div>Last update</div><div></div>
+  </div>
+
+  <div class="sites" id="sites">
+    {% for v in cards %}
+      {% include "projects/_site_dashboard_card.html" %}
+    {% empty %}
+      <div class="empty">{% if filtered %}No sites in execution match these filters.{% else %}No sites in execution to show.{% endif %}</div>
+    {% endfor %}
+  </div>
+
+  {% comment %}Drafts (E4): always after every active site, in one collapsed group, newest
+     created first (site_dashboard.sort_cards). Not drawn while a KPI filter is on.{% endcomment %}
+  {% if drafts %}
+  <div x-data="{ open: false }" id="drafts">
+    <button type="button" class="grp" @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="false" aria-controls="draft-list">
+      <b class="num">{{ drafts|length }}</b>
+      <span class="meta">draft site{{ drafts|length|pluralize }} awaiting activation · newest first</span>
+      <i data-lucide="chevron-down" class="chev" aria-hidden="true"></i>
+    </button>
+    <div class="draftlist" id="draft-list" x-show="open" x-cloak>
+      {% for v in drafts %}
+        <div class="draftrow">
+          <div>
+            <span class="code">{{ v.card.code }}</span><span class="tag">{{ v.type_label }}</span> <span class="tag draft">Draft</span>
+            <span class="meta">{% if v.place %}{{ v.place }} · {% endif %}{{ v.card.city }}</span>
+            <span class="meta cap">DC <b>{% if v.dc %}{{ v.dc }} kWp{% else %}<span class="na">not set</span>{% endif %}</b> · AC <b>{% if v.ac %}{{ v.ac }} kW{% else %}<span class="na">not set</span>{% endif %}</b></span>
+          </div>
+          <div class="meta">{{ v.tender }} · {{ v.card.pm_name|default:"No PM" }}<br>Created {{ v.card.created_at|date:"j M Y" }}</div>
+          <div>
+            {% if v.card.latest %}
+              <span class="when">{{ v.latest_when }} · {{ v.card.latest.who }}</span>
+              <span class="what">{{ v.card.latest.what }}</span>
+            {% else %}
+              <span class="what">No updates logged yet</span>
+            {% endif %}
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% comment %}QA/QC strip (ruling 3): PM and coordinator viewers only, collapsed, below the
+     site list. The PM dashboard's own computation (qaqc_engineer_dashboard_context) and
+     partial, unchanged, so the two pages show the same sites and visit buttons.{% endcomment %}
+  {% if qaqc_sites or awaiting_my_reverification %}
+  <div x-data="{ open: false }" id="qaqc-group">
+    <button type="button" class="grp" @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="false" aria-controls="qaqc-body">
+      <b class="num">{{ qaqc_sites|length }}</b>
+      <span class="meta">QA/QC site{{ qaqc_sites|length|pluralize }} you check{% if awaiting_my_reverification %} · {{ awaiting_my_reverification|length }} awaiting your re-verification{% endif %}</span>
+      <i data-lucide="chevron-down" class="chev" aria-hidden="true"></i>
+    </button>
+    <div class="qaqc-body" id="qaqc-body" x-show="open" x-cloak>
+      {% include "dashboard/_qaqc_engineer_sections.html" %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+<script>
+  // Draw the Lucide icons once; Alpine only toggles visibility, so nothing is re-rendered.
+  if (window.lucide && typeof window.lucide.createIcons === 'function') { window.lucide.createIcons(); }
+</script>
+{% endblock %}
