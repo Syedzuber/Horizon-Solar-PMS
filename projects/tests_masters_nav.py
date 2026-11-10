@@ -12,6 +12,7 @@ Run with:
     python manage.py test projects.tests_masters_nav --settings=solarpms.test_settings
 """
 from django.contrib.auth.models import AnonymousUser, User
+from django.test import override_settings
 from django.test import Client, TestCase
 from django.urls import reverse
 
@@ -37,6 +38,9 @@ def _profile(username, role):
     return profile
 
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class MastersNavTests(TestCase):
 
     @classmethod

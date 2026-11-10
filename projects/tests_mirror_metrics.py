@@ -43,6 +43,7 @@ import json
 from datetime import date, timedelta
 
 from django.contrib.auth.models import User
+from django.test import override_settings
 from django.test import TestCase, Client
 from django.urls import reverse
 from django.utils import timezone
@@ -502,6 +503,9 @@ def _is_ignorable_key(key):
     return False
 
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class MirrorExclusionSweepTests(TestCase):
     """One project, one phase, one non-mirror + six identical mirrors.
 
@@ -651,6 +655,9 @@ class MirrorExclusionSweepTests(TestCase):
 #     categories rather than one.
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class ProgressWorkloadDifferentialSweepTests(TestCase):
     """Renders each dashboard TWICE — with 0 mirrors and with 6 — and diffs the
     two context walks key by key.

@@ -26,6 +26,7 @@ from unittest import skipUnless
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth.models import User
+from django.test import override_settings
 from django.db import connection
 from django.test import Client, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
@@ -351,6 +352,9 @@ class ListTests(RaiseFixture):
         self.assertFalse(rows[settled.pk])
 
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class DashboardOrdersLinkTests(RaiseFixture):
 
     def test_the_residential_card_links_to_the_list_with_its_count(self):

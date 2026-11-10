@@ -45,6 +45,7 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.db import connection
+from django.test import override_settings
 from django.db.models import Count
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
@@ -577,6 +578,9 @@ class _WrongDate(date):
         return date(2000, 1, 1)
 
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class CallerDateTests(RowFlagsFixture):
     """One task, due yesterday by timezone.localdate(). Each routed page counts it while
     views.date.today() answers the year 2000."""
@@ -717,6 +721,9 @@ class CeoOverdueListFixture(s7.Builders):
         return response
 
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class CeoOverdueListTests(CeoOverdueListFixture):
 
     # Which projects each context shows: Tenders is RESCO only (D2 hides CAPEX there).
@@ -839,6 +846,9 @@ class CeoOverdueListTests(CeoOverdueListFixture):
 # 9 — urgency counts a task once
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class UrgencyCountTests(RowFlagsFixture):
     """The Site Engineer holds three tasks on the site: one Blocked and late, one
     Blocked with no date, one late and not blocked. Two are blocked, two are overdue,

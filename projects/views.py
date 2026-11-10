@@ -123,6 +123,7 @@ from .notify_registry import NOTIFICATION_EVENTS  # T2: the send-records Event f
 from .decorators import (
     login_required, role_required, get_user_dashboard,
     get_post_login_url, LANDING_ROLES,
+    retired_for_site_dashboard,  # DASH-B4: the four old dashboards and /landing/ redirect
 )
 from .permissions import (
     user_can_manage_project, user_can_view_project, manageable_projects_q,
@@ -519,10 +520,14 @@ def logout_view(request):
 
 
 @login_required
+@retired_for_site_dashboard()  # DASH-B4 ruling 4: every user of this page lands on the Site Dashboard
 @role_required(list(LANDING_ROLES))
 def landing(request):
     """
-    Two-card context chooser shown after login to CEO / Finance / SCM.
+    Two-card context chooser, formerly shown after login to CEO / Finance / SCM.
+    Access: CEO, Finance, SCM — and since DASH-B4 each of them is redirected to the Site
+    Dashboard before this body runs (retired_for_site_dashboard); the body stays only for
+    the old tests until the deletion commit.
 
     Each card links to the user's own role dashboard with ?context= set. The
     counts use the identical portfolio scope the three dashboards use
@@ -806,6 +811,7 @@ def tasks_drill_down(request, filter_type):
 
 
 @login_required
+@retired_for_site_dashboard()  # DASH-B4 R2: PM and coordinator go to the Site Dashboard
 @role_required(['PM', 'Project Coordinator'])
 def dashboard_pm(request):
     """
@@ -1094,6 +1100,10 @@ def dashboard_pm(request):
     # no effective engineer (go-ahead Q4) and they did not record the round (Q5) - the
     # endpoint asks both again.
     awaiting_points = awaiting_reverification(managed_project_ids)
+    # TODO: DASH-B4 moved this re-verify eligibility rule into
+    # dashboard_strips.pm_awaiting_reverification() for the Site Dashboard. This copy stays
+    # only until dashboard_pm is deleted (after a quiet week, separate commit); change the
+    # rule there, not here.
     for point in awaiting_points:
         rounds = point.rectify_rounds
         point.latest_round = rounds[0] if rounds else None
@@ -1625,6 +1635,7 @@ def dashboard_design(request):
 
 
 @login_required
+@retired_for_site_dashboard()  # DASH-B4 R2: Finance goes to the Site Dashboard
 @role_required(['Finance'])
 def dashboard_finance(request):
     """Finance dashboard. One card per project, milestone + payment-request status. Finance role only."""
@@ -1659,6 +1670,9 @@ def dashboard_finance(request):
     )
 
     # Top-level summary counts — single query each, scoped to active portfolio
+    # TODO: DASH-B4 moved the Milestones Awaiting count into
+    # dashboard_strips.milestones_awaiting_count() for the Site Dashboard. This copy stays
+    # only until dashboard_finance is deleted (separate commit); change it there.
     total_milestones_awaiting = PaymentMilestone.objects.filter(
         project__status__in=['Active', 'In Progress'],
         status=PaymentMilestone.PENDING,
@@ -1764,6 +1778,7 @@ def dashboard_finance(request):
 
 
 @login_required
+@retired_for_site_dashboard()  # DASH-B4 R2: SCM goes to the Site Dashboard
 @role_required(['SCM'])
 def dashboard_scm(request):
     """
@@ -1780,6 +1795,11 @@ def dashboard_scm(request):
     # portfolio-wide behaviour this dashboard had before the context feature.
     ctx = _read_context(request)
 
+    # TODO: DASH-B4 moved the three tile counts below (BOQ awaiting, deliveries today,
+    # overdue DCs) into dashboard_strips.scm_tile_counts(), the stall/stage computation
+    # further down into dashboard_strips.scm_pipeline(), and the Open Delivery Issues query
+    # into dashboard_strips.scm_open_delivery_issues(), all for the Site Dashboard. These
+    # copies stay only until dashboard_scm is deleted (separate commit); change them there.
     # BOQ awaiting SCM acknowledgment (Q3 — confirmed working, left unchanged)
     boq_awaiting = BOQ.objects.filter(
         status='Submitted', **_context_filter(ctx, 'project__'),
@@ -3236,7 +3256,14 @@ def _get_ceo_dashboard_context(context=None):
     return ctx
 
 
+def _ceo_context_requested(request):
+    """DASH-B4 ruling 5: dashboard_ceo keeps serving its Residential and Tenders views
+    (workload, Top People, KPIs, the tender sections) — only the bare URL is retired."""
+    return request.GET.get('context') in VALID_CONTEXTS
+
+
 @login_required
+@retired_for_site_dashboard(serve_if=_ceo_context_requested)  # DASH-B4 R2: bare URL only
 @role_required(['CEO', 'Admin', 'System Admin'])
 def dashboard_ceo(request):
     """CEO portfolio overview; the figures and their query count are _get_ceo_dashboard_context's.

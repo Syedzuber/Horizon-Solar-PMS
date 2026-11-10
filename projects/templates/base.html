@@ -60,16 +60,12 @@
   </div>
   {# flex-wrap (Approvals S2a walkthrough, 27 Sep): links wrap at phone width instead of pushing the page sideways. #}
   <div class="d-flex flex-wrap align-items-center justify-content-end row-gap-1 column-gap-3">
+    {# Home — the user's own dashboard (context_processors.home_url). Since DASH-B4 (R5) that  #}
+    {# is the Site Dashboard for every role that may open it, so its separate nav link was    #}
+    {# removed as a duplicate.                                                                #}
     {% if home_url %}
       <a href="{{ home_url }}" class="nav-link text-white small" title="Home">
         <i class="bi bi-house-door me-1"></i>Home
-      </a>
-    {% endif %}
-    {# Site Dashboard (DASH-B2 E10) — gated by permissions.user_can_view_site_dashboard() via #}
-    {# the site_dashboard_nav context processor, the same helper the view calls.           #}
-    {% if can_view_site_dashboard %}
-      <a href="{% url 'site_dashboard' %}" class="nav-link text-white small" title="Site Dashboard">
-        <i class="bi bi-grid-3x2-gap me-1"></i>Site Dashboard
       </a>
     {% endif %}
     {% if user.profile.role == 'Admin' or user.profile.role == 'PM' or user.profile.role == 'CEO' %}

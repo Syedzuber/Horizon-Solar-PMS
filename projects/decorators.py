@@ -1,8 +1,14 @@
 import logging
 from functools import wraps
+from django.conf import settings
 from django.shortcuts import redirect, render
 from django.contrib import messages
 from django.http import HttpResponseForbidden
+
+# permissions.py imports nothing from this module (its only top-level import is Q), so
+# this is not circular. user_can_view_site_dashboard is THE answer to "does this user
+# land on the Site Dashboard" (DASH-B4 R1), the same helper that page itself calls.
+from .permissions import user_can_view_site_dashboard
 
 logger = logging.getLogger(__name__)
 
@@ -17,30 +23,42 @@ logger = logging.getLogger(__name__)
 # already-authenticated caller.
 NO_PROFILE_URL = '/login/'
 
+#: The common Site Dashboard (DASH-B2). Since DASH-B4 it is the landing page and the
+#: Home link of everyone user_can_view_site_dashboard() admits.
+SITE_DASHBOARD_URL = '/dashboard/sites/'
+
 # Maps every role to its landing dashboard URL.
 # Used by login_view and role_required to redirect users after auth.
+#
+# DASH-B4 (R1): the seven Site Dashboard roles map to SITE_DASHBOARD_URL. get_user_dashboard()
+# asks user_can_view_site_dashboard() first, so for them this table is never read; it is
+# kept true so a reader of the table is not misled. The Design Head is a flag on a 'Design'
+# profile, not a role, so only the helper can send them there.
 ROLE_DASHBOARD = {
-    'Admin':         '/dashboard/admin/',
-    'System Admin':  '/sub-admin/projects/',
-    'PM':            '/dashboard/pm/',
-    # Coordinators reuse the PM dashboard (scoped to their coordinated projects).
-    # Without this entry the role fell back silently to the Admin dashboard — a
+    'Admin':         SITE_DASHBOARD_URL,
+    'System Admin':  SITE_DASHBOARD_URL,
+    'PM':            SITE_DASHBOARD_URL,
+    # Coordinators share the PM's home (scoped to their coordinated projects). Without
+    # this entry the role fell back silently to the Admin dashboard — a
     # role-inappropriate-data-exposure risk, not a cosmetic bug.
-    'Project Coordinator': '/dashboard/pm/',
+    'Project Coordinator': SITE_DASHBOARD_URL,
     'Site Engineer': '/dashboard/site-engineer/',
     'Design':        '/dashboard/design/',
-    'Finance':       '/dashboard/finance/',
-    'SCM':           '/dashboard/scm/',
-    'CEO':           '/dashboard/ceo/',
+    'Finance':       SITE_DASHBOARD_URL,
+    'SCM':           SITE_DASHBOARD_URL,
+    'CEO':           SITE_DASHBOARD_URL,
     'BD':            '/dashboard/bd/',
 }
 
 
-# Roles that see the two-context landing screen (EPC Residential / Tenders)
-# after login instead of dropping straight onto their dashboard. These are the
-# only three roles whose dashboards commingle Residential projects with OPEX /
-# CAPEX tender sites, so they are the only ones that need to pick a context.
-# This is a display concern only — it grants and removes no access.
+# Roles that get the EPC Residential / Tenders context switcher (views._context_nav) on
+# the old CEO, Finance and SCM dashboards. A display concern only — it grants and removes
+# no access.
+#
+# DASH-B4: no longer a post-login destination. These three roles land on the Site
+# Dashboard like every other R1 role, and /landing/ itself redirects there. The tuple
+# stays because the CEO page's Residential and Tenders views are kept (ruling 5) and
+# still draw the switcher, and because landing's @role_required reads it.
 LANDING_ROLES = ('CEO', 'Finance', 'SCM')
 
 LANDING_URL = '/landing/'
@@ -68,6 +86,15 @@ def get_user_dashboard(user, context=None):
         logger.warning("No UserProfile for user %s — no dashboard to resolve", user.username)
         return NO_PROFILE_URL
 
+    # DASH-B4 R1: PM, Project Coordinator, CEO, Finance, SCM, Admin, System Admin and the
+    # Design Head belong on the Site Dashboard. Asked of the page's own access helper, so
+    # Home, the 403 page's "Return to your dashboard" and every back link can never point
+    # one of them at a page that refuses them, and the Design Head (a flag, not a role)
+    # is caught where the role table above cannot see them. Every other role (Site
+    # Engineer, designer, BD) keeps its own dashboard.
+    if user_can_view_site_dashboard(user):
+        return SITE_DASHBOARD_URL
+
     if context and role in LANDING_ROLES:
         return f'{url}?context={context}'
     return url
@@ -75,24 +102,62 @@ def get_user_dashboard(user, context=None):
 
 def get_post_login_url(user):
     """
-    Where to send a user immediately after authenticating.
+    Where to send a user immediately after authenticating. Used by login_view, which
+    also serves `/` through the /login/ redirect.
 
-    CEO / Finance / SCM land on the context chooser; every other role keeps the
-    exact previous behaviour (straight to their role dashboard). Used only by login_view.
+    DASH-B4 (R1): the role's own dashboard for everyone, which is the Site Dashboard for
+    every role user_can_view_site_dashboard() admits. The CEO / Finance / SCM context
+    chooser (/landing/) is no longer a stop on the way in.
 
     0.2 lockdown: profile-less resolves to NO_PROFILE_URL for the same reason
     get_user_dashboard() does. role_required() no longer redirects on denial at all — it
     returns 403 — so this helper is now only ever a post-login destination.
     """
     try:
-        role = user.profile.role
+        user.profile.role
     except Exception:
         logger.warning("No UserProfile for user %s — no post-login destination", user.username)
         return NO_PROFILE_URL
-
-    if role in LANDING_ROLES:
-        return LANDING_URL
     return get_user_dashboard(user)
+
+
+def retired_for_site_dashboard(serve_if=None):
+    """
+    DASH-B4 (R2): send a Site Dashboard user who opens a retired dashboard URL to the Site
+    Dashboard with a 302, so bookmarks, stored notification links and old back links keep
+    working. Applied to dashboard_pm, dashboard_scm, dashboard_finance, dashboard_ceo and
+    landing, ABOVE their @role_required and below @login_required:
+
+        Site Dashboard roles (R1)  302 to SITE_DASHBOARD_URL, whichever old URL it is
+        everyone else              falls through to @role_required: today's 403 unchanged
+
+    serve_if(request) -> True keeps the old page for that request. Only dashboard_ceo
+    uses it: its Residential and Tenders views stay (ruling 5) and only the bare URL goes.
+
+    THE SWITCH. settings.RETIRED_DASHBOARDS_REDIRECT, from the RETIRED_DASHBOARDS_REDIRECT
+    environment variable (default True), so it can be turned off on Railway with no code
+    change. The old views' own tests set it False (@override_settings) so they keep
+    exercising the pages until the deletion commit removes those views, those tests and
+    this switch together (ruling 3). Read per request, so override_settings takes effect.
+    Turning it off restores the old pages only; login and Home still go to the Site
+    Dashboard (get_user_dashboard).
+    """
+    def decorator(view_func):
+        @wraps(view_func)
+        def wrapper(request, *args, **kwargs):
+            # Only a user the Site Dashboard admits is moved there (the same helper the
+            # page calls), so the redirect never lands on a 403. Anyone it refuses keeps
+            # whatever the old view's own decorator answers today.
+            # getattr default True: a settings module without the line (a test settings
+            # file that does not import settings.py) still redirects, as production does.
+            if (getattr(settings, 'RETIRED_DASHBOARDS_REDIRECT', True)
+                    and request.user.is_authenticated
+                    and user_can_view_site_dashboard(request.user)
+                    and not (serve_if is not None and serve_if(request))):
+                return redirect(SITE_DASHBOARD_URL)
+            return view_func(request, *args, **kwargs)
+        return wrapper
+    return decorator
 
 
 def login_required(view_func):

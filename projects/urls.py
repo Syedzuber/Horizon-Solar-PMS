@@ -23,12 +23,16 @@ urlpatterns = [
     path('login/',  views.login_view,  name='login'),
     path('logout/', views.logout_view, name='logout'),
 
-    # Context chooser (EPC Residential / Tenders) — CEO, Finance and SCM land
-    # here after login. Display filter only; grants no access of any kind.
+    # Context chooser (EPC Residential / Tenders) — CEO, Finance and SCM. DASH-B4: no
+    # longer a post-login stop; every one of them is 302'd to the Site Dashboard.
     path('landing/', views.landing, name='landing'),
 
     # ---------------------------------------------------------------------------
     # Dashboards — each restricted to its own role via @role_required
+    # DASH-B4 (R2): pm, finance, scm and bare ceo 302 every Site Dashboard role to
+    # /dashboard/sites/ (decorators.retired_for_site_dashboard); other roles get 403 as
+    # before. dashboard/ceo/?context=residential|tenders still serves CEO / Admin / System
+    # Admin (ruling 5). Kept registered so bookmarks and stored links keep working.
     # ---------------------------------------------------------------------------
     path('dashboard/admin/',         views.dashboard_admin,         name='dashboard_admin'),
     path('dashboard/pm/',            views.dashboard_pm,            name='dashboard_pm'),

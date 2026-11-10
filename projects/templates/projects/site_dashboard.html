@@ -128,6 +128,30 @@
   .sd .draftrow { display: grid; grid-template-columns: minmax(0,1.2fr) minmax(0,1fr) minmax(0,1.4fr); gap: 16px; padding: 9px 16px;
     background: var(--sd-surface); border: 1px solid var(--sd-line); border-radius: 8px; font-size: 13px; align-items: center; }
   .sd .qaqc-body { margin-top: 10px; }
+  .sd .draftrow a.code { color: var(--sd-brand); text-decoration: none; }
+  .sd .draftrow a.code:hover { text-decoration: underline; }
+
+  /* DASH-B4 "More" row (rulings 16, 17): one labelled group of links per role. */
+  .sd .more { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: -6px 0 16px; padding: 10px 14px;
+    background: var(--sd-surface); border: 1px solid var(--sd-line); border-radius: 12px; }
+  .sd .more .grpl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+  .sd .more a { font-size: 12.5px; padding: 3px 9px; border: 1px solid var(--sd-line); border-radius: 99px;
+    color: var(--sd-ink); text-decoration: none; background: var(--sd-surface); white-space: nowrap; }
+  .sd .more a:hover { background: var(--sd-surface-2); }
+  .sd .more a .n { font-weight: 600; margin-left: 3px; }
+  .sd .stage-line { grid-column: 1 / -1; font-size: 12px; color: var(--sd-muted); margin: 0; }
+  .sd .open-site { gap: 16px; }
+
+  /* Partials carried from the retired dashboards (DASH-B4): the approvals card
+     (_pending_card_pm.html) and SCM grouped procurement (_scm_opex_groups.html) were
+     styled by pm.html's and scm.html's own <style> blocks, so those rules come along. */
+  .sd .card-collapse-btn .collapse-icon { transition: transform .2s ease; display: inline-block; }
+  .sd .card-collapse-btn[aria-expanded="true"] .collapse-icon { transform: rotate(180deg); }
+  .sd .urgency-badge { min-width: 2rem; height: 2rem; font-size: .85rem; line-height: 2rem; text-align: center; border-radius: 50%; }
+  .sd .scm-card-amber { border-left: 3px solid #ffc107 !important; }
+  .sd .stage-badge { font-size: .72rem; padding: .18rem .45rem; border-radius: .3rem; font-weight: 600; white-space: nowrap; }
+  .sd .stage-label { font-size: .65rem; text-transform: uppercase; letter-spacing: .04em; color: #6c757d; margin-bottom: .18rem; }
+  .sd .strip-body { margin-top: 10px; }
 
   @media (max-width: 1100px) {
     .sd .cols { grid-template-columns: minmax(0,1fr) minmax(0,1fr) 20px; }
@@ -184,6 +208,25 @@
     {% endfor %}
   </div>
 
+  {% comment %}DASH-B4 "More" row (rulings 16, 17): the pages the retired dashboards linked to,
+     grouped by role. Each link is built only when its page would let this viewer in
+     (views_site_dashboard._more_links), so none leads to a 403.{% endcomment %}
+  {% if more_groups %}
+  <nav class="more" id="more" aria-label="More pages">
+    {% for g in more_groups %}
+      <div class="grpl" data-group="{{ g.label }}">
+        <span class="eyebrow">{{ g.label }}</span>
+        {% for l in g.links %}<a href="{{ l.href }}">{{ l.label }}{% if l.count is not None %}<span class="n num">{{ l.count }}</span>{% endif %}</a>{% endfor %}
+      </div>
+    {% endfor %}
+  </nav>
+  {% endif %}
+
+  {% comment %}Approvals waiting on you (DASH-B4 ruling 18): the PM dashboard's card and
+     partial, unchanged. approvals_waiting is None for someone who approves nothing, and
+     the partial then draws nothing.{% endcomment %}
+  {% include "projects/approvals/_pending_card_pm.html" %}
+
   <div class="listhead">
     <form method="get" class="ctrl" role="search" aria-label="Filter sites">
       <input type="search" name="q" value="{{ params.q }}" class="form-control form-control-sm"
@@ -238,7 +281,8 @@
       {% for v in drafts %}
         <div class="draftrow">
           <div>
-            <span class="code">{{ v.card.code }}</span><span class="tag">{{ v.type_label }}</span> <span class="tag draft">Draft</span>
+            {# DASH-B4 ruling 18: the code opens the site, where Activate lives for every type (the PM dashboard's View button). #}
+            <a class="code" href="{% url 'project_overview' v.card.project_id %}">{{ v.card.code }}</a><span class="tag">{{ v.type_label }}</span> <span class="tag draft">Draft</span>
             <span class="meta">{% if v.place %}{{ v.place }} · {% endif %}{{ v.card.city }}</span>
             <span class="meta cap">DC <b>{% if v.dc %}{{ v.dc }} kWp{% else %}<span class="na">not set</span>{% endif %}</b> · AC <b>{% if v.ac %}{{ v.ac }} kW{% else %}<span class="na">not set</span>{% endif %}</b></span>
           </div>
@@ -250,6 +294,8 @@
             {% else %}
               <span class="what">No updates logged yet</span>
             {% endif %}
+            {# DASH-B4 ruling 6: PM/coordinator, RESCO with design started (the form 404s before); the form explains a closed window. #}
+            {% if v.design_change %}<a class="meta" href="{% url 'design_change_request_form' project_id=v.card.project_id %}" data-design-change>Request design change</a>{% endif %}
           </div>
         </div>
       {% endfor %}
@@ -269,6 +315,52 @@
     </button>
     <div class="qaqc-body" id="qaqc-body" x-show="open" x-cloak>
       {% include "dashboard/_qaqc_engineer_sections.html" %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% comment %}Awaiting re-verification (DASH-B4 ruling 18): PM and coordinator viewers only,
+     collapsed. The PM dashboard's list (dashboard_strips.pm_awaiting_reverification); the
+     row reads Re-verify only where this user may do it, else Open.{% endcomment %}
+  {% if pm_reverify %}
+  <div x-data="{ open: false }" id="pm-reverify-group">
+    <button type="button" class="grp" @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="false" aria-controls="pm-reverify-body">
+      <b class="num">{{ pm_reverify|length }}</b>
+      <span class="meta">punch point{{ pm_reverify|length|pluralize }} awaiting re-verification on your sites</span>
+      <i data-lucide="chevron-down" class="chev" aria-hidden="true"></i>
+    </button>
+    <div class="strip-body" id="pm-reverify-body" x-show="open" x-cloak>
+      {% include "projects/_site_dashboard_reverify.html" %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% comment %}SCM grouped procurement (DASH-B4 ruling 11): SCM viewers only, collapsed. The
+     SCM dashboard's partial and helper (design_views.scm_opex_tender_rows), unchanged.{% endcomment %}
+  {% if opex_tender_rows %}
+  <div x-data="{ open: false }" id="scm-procurement-group">
+    <button type="button" class="grp" @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="false" aria-controls="scm-procurement-body">
+      <b class="num">{{ opex_tender_rows|length }}</b>
+      <span class="meta">tender{{ opex_tender_rows|length|pluralize }} · grouped procurement and post-QC pool</span>
+      <i data-lucide="chevron-down" class="chev" aria-hidden="true"></i>
+    </button>
+    <div class="strip-body" id="scm-procurement-body" x-show="open" x-cloak>
+      {% include "projects/design/_scm_opex_groups.html" %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% comment %}SCM open delivery issues (DASH-B4 ruling 13): SCM viewers only, collapsed. The
+     SCM dashboard's table (dashboard_strips.scm_open_delivery_issues, newest 20).{% endcomment %}
+  {% if scm_delivery_issues %}
+  <div x-data="{ open: false }" id="scm-issues-group">
+    <button type="button" class="grp" @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="false" aria-controls="scm-issues-body">
+      <b class="num">{{ scm_delivery_issues|length }}</b>
+      <span class="meta">open delivery issue{{ scm_delivery_issues|length|pluralize }} · newest first</span>
+      <i data-lucide="chevron-down" class="chev" aria-hidden="true"></i>
+    </button>
+    <div class="strip-body" id="scm-issues-body" x-show="open" x-cloak>
+      {% include "projects/_site_dashboard_delivery_issues.html" %}
     </div>
   </div>
   {% endif %}

@@ -27,6 +27,7 @@ Run with:
 from datetime import timedelta
 
 from django.contrib.auth.models import User
+from django.test import override_settings
 from django.db.models import Q
 from django.urls import reverse
 from django.utils import timezone
@@ -153,6 +154,9 @@ class QaqcEngineerProjectsQTests(QaqcFixture):
 # The card
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class HeldElsewhereCardTests(HeldTaskFixture):
 
     def test_coordinator_engineer_sees_their_held_paperwork_task(self):
@@ -221,6 +225,9 @@ class HeldElsewhereCardTests(HeldTaskFixture):
 # The counts and the drill-down
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class HeldElsewhereCountTests(HeldTaskFixture):
 
     def _summary(self, profile):
@@ -295,6 +302,9 @@ class HeldElsewhereCountTests(HeldTaskFixture):
 # Query cost
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class DashboardQueryCountTests(HeldTaskFixture):
 
     def _count(self, profile):

@@ -14,6 +14,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from django.contrib.auth.models import User
+from django.test import override_settings
 from django.db import connection
 from django.test import Client, TestCase
 from django.test.utils import CaptureQueriesContext
@@ -379,6 +380,9 @@ class ActivatedProgressTests(StageFixtures):
             'installation_complete': 2, 'commissioned': 1})
 
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class PipelineRenderTests(StageFixtures):
 
     @classmethod

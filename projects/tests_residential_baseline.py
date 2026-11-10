@@ -391,6 +391,9 @@ class ActivationInvariantTests(ResidentialBaselineBase):
 # 2.2 — Dashboard reachability AND content
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class DashboardReachabilityTests(ResidentialBaselineBase):
     """Each role reaches its dashboard AND gets a non-empty result set.
 

@@ -34,6 +34,7 @@ from decimal import Decimal
 from importlib import import_module
 
 from django.contrib.auth.models import User
+from django.test import override_settings
 from django.test import Client, TestCase
 from django.urls import reverse
 
@@ -566,6 +567,9 @@ class ResidentialIsUnchangedTests(OpexActivationBase):
 # 4.8 — THE COUNTERS, ON A GENUINELY ATTACHED SITE
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class CountersOnARealSiteTests(OpexActivationBase):
     """The test that proves 1.3b is no longer inert.
 

@@ -24,6 +24,7 @@ from decimal import Decimal
 from io import StringIO
 
 from django.core.management import call_command
+from django.test import override_settings
 from django.db import IntegrityError, transaction
 from django.test import TestCase
 from django.urls import reverse
@@ -250,6 +251,9 @@ class ResidentialRaiseUnchangedTests(RaiseFixture):
 # The readers of PaymentRequest.project — O6 rewrote them, and none may 500
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class NullAnchorReaderTests(ScopeFixture):
     """Every reader of PaymentRequest.project named in O2d's pre-flight. Until O6 each
     filtered on `project` and silently EXCLUDED a NULL-anchor payment; O6 rewrote them to

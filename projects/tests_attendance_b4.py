@@ -386,10 +386,12 @@ class CommandTests(B4Fixture):
         self.assertIn('Hello Ravi Kumar Singh,', text)
         self.assertIn('By 10:30 AM today no contractor attendance has been logged', text)
         self.assertIn('B4-C – https://pms.example.test/projects/B4-C/attendance/', text)
-        self.assertIn('https://pms.example.test/dashboard/pm/', html)
+        # DASH-B4 R1: the link is get_user_dashboard(), which is the Site Dashboard for a
+        # PM and for SCM since the old PM and SCM dashboards were retired.
+        self.assertIn('https://pms.example.test/dashboard/sites/', html)
         self.assertEqual(self._rows(channel='email', status='sent').count(), 3)
         self.assertEqual(self._rows(channel='in_app', status='sent').count(), 3)
-        self.assertEqual(Notification.objects.get(recipient=self.scm).link, '/dashboard/scm/')
+        self.assertEqual(Notification.objects.get(recipient=self.scm).link, '/dashboard/sites/')
 
     def test_a_second_run_the_same_day_sends_nothing(self, post):
         """Edge case 8."""

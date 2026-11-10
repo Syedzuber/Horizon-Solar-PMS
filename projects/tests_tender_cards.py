@@ -15,6 +15,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from django.contrib.auth.models import User
+from django.test import override_settings
 from django.db import connection
 from django.test import Client, TestCase
 from django.test.utils import CaptureQueriesContext
@@ -276,6 +277,9 @@ class QueryBudgetTests(TestCase):
         self.assertEqual(large, (4, 2, 2))
 
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class RenderTests(TenderCardFixtures):
     """g) the section renders under Tenders only, and replaces the per-site cards there."""
 

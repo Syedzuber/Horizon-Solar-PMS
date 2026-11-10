@@ -13,6 +13,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.auth.models import User
+from django.test import override_settings
 from django.test import Client, TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -37,6 +38,9 @@ def _project(project_id, is_deleted=False):
         target_commissioning_date=timezone.localdate() + timedelta(days=90))
 
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class ScmDeletedProjectChallanTests(TestCase):
 
     @classmethod

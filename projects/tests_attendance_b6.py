@@ -22,6 +22,7 @@ Run with:
 from datetime import datetime, time, timedelta
 
 from django.db import connection
+from django.test import override_settings
 from django.test import Client
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
@@ -463,6 +464,9 @@ class SummaryTests(B6Fixture):
 # SCM dashboard link
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class DashboardLinkTests(B6Fixture):
 
     def test_counts_are_todays_live_entries_on_live_sites(self):

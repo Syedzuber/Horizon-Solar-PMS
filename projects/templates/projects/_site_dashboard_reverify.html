@@ -1,0 +1,23 @@
+{% comment %}DASH-B4 ruling 18: the PM dashboard's "Awaiting re-verification" list (Closeout 7b,
+   PP-6), moved here from dashboard/pm.html, whose copy is inline and goes when that page is
+   deleted. Context: `pm_reverify`, from dashboard_strips.pm_awaiting_reverification(), each
+   point carrying latest_round and pm_may_reverify. The button reads "Re-verify" only where
+   this user may do it themselves (no engineer can act, and they did not record the round),
+   otherwise "Open" for sight of it; the endpoint asks both again.{% endcomment %}
+<div class="card shadow-sm border-0" id="awaiting-reverification">
+  <ul class="list-group list-group-flush">
+    {% for point in pm_reverify %}
+    <li class="list-group-item d-flex flex-wrap justify-content-between align-items-start gap-2 small">
+      <div class="flex-grow-1" style="min-width:12rem;">
+        <div class="fw-semibold">{{ point.task.phase.project.project_id }} · {{ point.task.task_name }}</div>
+        <div class="text-muted">{{ point.reason|truncatechars:140 }}</div>
+        {% if point.latest_round %}
+          <div class="text-muted">Rectified by {{ point.latest_round.actor.user.get_full_name|default:point.latest_round.actor.user.username }}, {{ point.latest_round.acted_at|date:"d M Y" }}{% if point.site_has_engineer %} · with the site's QA/QC engineer{% endif %}</div>
+        {% endif %}
+      </div>
+      <a href="{% url 'task_detail' point.task.phase.project.project_id point.task_id %}#punch-point-{{ point.pk }}"
+         class="btn btn-sm {% if point.pm_may_reverify %}btn-brand{% else %}btn-outline-secondary{% endif %}">{% if point.pm_may_reverify %}Re-verify{% else %}Open{% endif %}</a>
+    </li>
+    {% endfor %}
+  </ul>
+</div>

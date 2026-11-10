@@ -28,6 +28,7 @@ from decimal import Decimal
 from unittest import skipUnless
 
 from django.contrib.messages import get_messages
+from django.test import override_settings
 from django.db import connection
 from django.test import TestCase, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
@@ -503,6 +504,9 @@ class NotificationTests(QueueFixture):
 # Who may see the queue, and the nav
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class AccessTests(QueueFixture):
 
     def test_scm_pm_and_design_are_403(self):

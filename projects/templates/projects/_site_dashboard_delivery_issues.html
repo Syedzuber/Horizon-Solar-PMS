@@ -1,0 +1,41 @@
+{% comment %}DASH-B4 ruling 13: the SCM dashboard's "Open Delivery Issues" table, moved here from
+   dashboard/scm.html, whose copy goes when that page is deleted. Context:
+   `scm_delivery_issues`, from dashboard_strips.scm_open_delivery_issues() (newest 20, one
+   query). The issue and DC links are the ones SCM acted from.{% endcomment %}
+<div class="card shadow-sm border-0">
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>Issue</th>
+          <th>DC</th>
+          <th>Project</th>
+          <th style="width:7rem;">Severity</th>
+          <th style="width:7rem;">Status</th>
+          <th style="width:6rem;">Raised</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for issue in scm_delivery_issues %}
+        <tr>
+          <td><a href="{% url 'issue_detail' issue.pk %}" class="text-decoration-none fw-semibold">{{ issue.title }}</a></td>
+          <td class="small text-muted">
+            {% if issue.delivery_challan %}
+              <a href="{% url 'delivery_challan_detail' issue.project.project_id issue.delivery_challan.pk %}" class="text-decoration-none">DC-{{ issue.delivery_challan.dc_number }}</a>
+            {% else %}—{% endif %}
+          </td>
+          <td class="small">{{ issue.project.project_id }}</td>
+          <td>
+            {% if issue.severity == 'Critical' %}<span class="badge bg-danger">Critical</span>
+            {% elif issue.severity == 'High' %}<span class="badge bg-warning text-dark">High</span>
+            {% elif issue.severity == 'Medium' %}<span class="badge bg-primary">Medium</span>
+            {% else %}<span class="badge bg-secondary">Low</span>{% endif %}
+          </td>
+          <td>{% if issue.status == 'Open' %}<span class="badge bg-danger">Open</span>{% else %}<span class="badge bg-primary">In Progress</span>{% endif %}</td>
+          <td class="small text-muted">{{ issue.raised_at|date:"d M" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>

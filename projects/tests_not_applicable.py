@@ -38,6 +38,7 @@ import json
 from datetime import date, timedelta
 
 from django.contrib.auth.models import User
+from django.test import override_settings
 from django.test import TestCase, Client
 from django.urls import reverse
 from django.utils import timezone
@@ -216,6 +217,9 @@ class ReasonRequiredTests(NotApplicableBase):
 # c — reversible, and the reason history is APPENDED not overwritten
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class ReversibilityTests(NotApplicableBase):
 
     def test_unmarking_restores_it_to_open_work_and_keeps_both_reasons(self):
@@ -342,6 +346,9 @@ class PredicateTests(NotApplicableBase):
 # g — ONE TEST PER READER. Open-work / overdue readers first.
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class OverdueReaderTests(NotApplicableBase):
     """Every reader that asks "not Done" and would otherwise absorb an N/A task.
 
@@ -504,6 +511,9 @@ class OverdueReaderTests(NotApplicableBase):
 # g — DENOMINATORS. 8 Done + 2 N/A must read 100%.
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class DenominatorTests(NotApplicableBase):
     """N/A leaves the denominator as well as the numerator.
 

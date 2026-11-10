@@ -29,6 +29,7 @@ from datetime import datetime, time, timedelta
 from unittest import mock
 
 from django.db import IntegrityError, transaction
+from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 
@@ -562,6 +563,9 @@ class PhotoFlagPageTests(B3Fixture):
 # Queue page and dashboard link
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class QueueTests(B3Fixture):
 
     def test_one_group_per_site_and_name_oldest_first(self):

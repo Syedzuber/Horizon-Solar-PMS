@@ -42,6 +42,7 @@ from pathlib import Path
 from unittest import mock
 
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import override_settings
 from django.db import IntegrityError, transaction
 from django.test import TestCase
 from django.urls import reverse
@@ -680,6 +681,9 @@ class ReadinessHelperTests(VisitFixture):
 # 11 — PM dashboard line and the site card
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class DashboardAndCardTests(VisitFixture):
 
     def _dashboard(self, profile):

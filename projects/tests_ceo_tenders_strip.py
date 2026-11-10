@@ -21,6 +21,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from django.test import TestCase
+from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 
@@ -220,6 +221,9 @@ class PaidMonthBoundaryTests(StripFixture):
 # d) Residential keeps its cards; the Refresh link (T6)
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class ResidentialAndRefreshTests(StripFixture):
 
     def test_residential_still_renders_the_old_four_cards(self):

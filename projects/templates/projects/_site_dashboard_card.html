@@ -9,6 +9,8 @@
       <span class="place">{{ v.place|default:"—" }}</span>
       <span class="meta">{{ v.tender }} · {{ v.card.city|default:"—" }} · {{ v.card.pm_name|default:"No PM" }}</span>
       <span class="meta cap">DC <b>{% if v.dc %}{{ v.dc }} kWp{% else %}<span class="na">not set</span>{% endif %}</b> · AC <b>{% if v.ac %}{{ v.ac }} kW{% else %}<span class="na">not set</span>{% endif %}</b></span>
+      {# DASH-B4 ruling 8: the PM dashboard's QA/QC visit line, on a RESCO site with an engineer or a visit (qaqc_views.last_visit_lines). #}
+      {% if v.qaqc_line %}<span class="meta" data-qaqc-line>{{ v.qaqc_line }}</span>{% endif %}
     </span>
 
     <span class="c-pipe">
@@ -32,10 +34,16 @@
 
     <span class="c-flags">
       <span class="flags">
-        {% if not v.card.overdue and not v.card.blocked and not v.card.open_issues %}<span class="pill ok">✓ Clear</span>{% endif %}
+        {% if v.clear %}<span class="pill ok">✓ Clear</span>{% endif %}
+        {# DASH-B4 ruling 9: today or the forecast finish is past the target date (views_site_dashboard._past_target). #}
+        {% if v.past_target %}<span class="pill crit" title="{{ v.past_target.1 }}" data-past-target>{{ v.past_target.0 }}</span>{% endif %}
+        {# DASH-B4 ruling 12: SCM viewers only — the worst stalled procurement stage and its days. #}
+        {% if v.scm.pill %}<span class="pill {{ v.scm.pill.1 }}" data-stalled>{{ v.scm.pill.0 }}</span>{% endif %}
         {% if v.card.overdue %}<span class="pill crit">{{ v.card.overdue }} overdue</span>{% endif %}
         {% if v.card.blocked %}<span class="pill crit">{{ v.card.blocked }} blocked</span>{% endif %}
         {% if v.card.open_issues %}<span class="pill warn">{{ v.card.open_issues }} issue{{ v.card.open_issues|pluralize }}</span>{% endif %}
+        {# DASH-B4 ruling 8: outstanding punch points, the count COD refuses on (punch_points.open_punch_point_counts). #}
+        {% if v.punch_points %}<span class="pill warn" data-punch-points>{{ v.punch_points }} punch point{{ v.punch_points|pluralize }}</span>{% endif %}
         {% if v.card.large_site %}<span class="pill mut" title="Above 300 kWp DC: the 101+ band durations may not fit">Large site</span>{% endif %}
         {% if v.payment %}<span class="pill info" data-money="payment">{{ v.payment }} pay</span>{% endif %}
       </span>
@@ -113,6 +121,13 @@
       </dl>
     </div>
 
-    <div class="open-site"><a href="{% url 'project_overview' v.card.project_id %}">Open site →</a></div>
+    {# DASH-B4 ruling 12: SCM viewers only — BOQ, order, delivery and issues stages with their ages. #}
+    {% if v.scm %}<p class="stage-line" data-stage-line>{{ v.scm.stages }}</p>{% endif %}
+
+    <div class="open-site">
+      {# DASH-B4 ruling 6: PM and coordinator viewers, RESCO sites with design started; the form explains a closed window. #}
+      {% if v.design_change %}<a href="{% url 'design_change_request_form' project_id=v.card.project_id %}" data-design-change>Request design change</a>{% endif %}
+      <a href="{% url 'project_overview' v.card.project_id %}">Open site →</a>
+    </div>
   </div>
 </div>

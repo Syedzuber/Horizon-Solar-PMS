@@ -14,6 +14,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from django.contrib.auth.models import User
+from django.test import override_settings
 from django.db import connection
 from django.test import Client, TestCase
 from django.test.utils import CaptureQueriesContext
@@ -488,6 +489,9 @@ FOOTER = ('Rework and change requests are counted separately. Change requests ar
           'counted against the designer.')
 
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class RenderTests(People):
     """T2) the card renders under Tenders only, with the confirmed text."""
 

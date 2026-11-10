@@ -31,6 +31,7 @@ Run with:
 import inspect
 
 from django.contrib.auth.models import User
+from django.test import override_settings
 from django.urls import reverse
 
 from . import permissions, punch_points, qaqc_views
@@ -70,6 +71,9 @@ class RolesFixture(RectifyFixture):
 # CL-9 / CL-K — the whole loop as a PM, and as a Project Coordinator
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class FullCycleTests(RolesFixture):
 
     def _cycle(self, engineer):

@@ -50,6 +50,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from django.contrib.auth.models import User
+from django.test import override_settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client, TestCase
 from django.urls import reverse
@@ -481,6 +482,9 @@ class RoleGateScopingTests(AccessIsolationBase):
 # Findings 8 and 9 — the two missing dashboard gates
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class DashboardGateTests(AccessIsolationBase):
 
     def test_a_site_engineer_is_refused_the_ceo_dashboard(self):

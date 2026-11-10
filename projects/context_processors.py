@@ -88,6 +88,11 @@ def site_dashboard_nav(request):
     The answer comes from permissions.user_can_view_site_dashboard(), the same helper
     views_site_dashboard.site_dashboard calls, so the link and the view cannot disagree.
     Visibility only. No query: the helper reads the profile the request already holds.
+
+    TODO: unused by every template since DASH-B4 (R5) removed the nav entry: the Home link
+    (home_url, via decorators.get_user_dashboard) now opens the Site Dashboard for the same
+    users. Kept because unregistering it means editing settings.TEMPLATES, outside DASH-B4's
+    scope; remove it and its settings line in the old-dashboard deletion commit.
     """
     if not request.user.is_authenticated:
         return {'can_view_site_dashboard': False}

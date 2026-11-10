@@ -29,6 +29,7 @@ and under the real settings (Postgres, migrations applied):
 from datetime import timedelta
 
 from django.contrib.auth.models import User
+from django.test import override_settings
 from django.db import connection
 from django.test import Client, TestCase
 from django.test.utils import CaptureQueriesContext
@@ -158,6 +159,9 @@ class DashboardFixture(TestCase):
 # The card: whose steps, labels, zero state, days waiting
 # ===========================================================================
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class CardTests(DashboardFixture):
 
     def test_the_card_shows_only_the_viewers_steps(self):

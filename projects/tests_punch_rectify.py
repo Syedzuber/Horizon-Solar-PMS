@@ -30,6 +30,7 @@ Run with:
     python manage.py test projects.tests_punch_rectify --settings=solarpms.test_settings
 """
 from django.db import connection
+from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
@@ -497,6 +498,9 @@ class CodTests(RectifyFixture):
 # 9 — PP-6: the dashboards and the row badge, at a fixed number of queries
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class DashboardTests(RectifyFixture):
 
     def _count(self, url, by):

@@ -40,6 +40,7 @@ number: no template changed in 1.6 and none needed to. These are context values.
 from datetime import date
 
 from django.urls import reverse
+from django.test import override_settings
 
 from .models import Task
 from .reports import build_user_status_rows
@@ -137,6 +138,9 @@ def _profile_ceo():
 # 1 — Every PROGRESS number counts all 23
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class ProgressCountsEveryTaskTests(ProgressVsWorkloadBase):
     """A site is not finished because the humans finished."""
 
@@ -192,6 +196,9 @@ class ProgressCountsEveryTaskTests(ProgressVsWorkloadBase):
 # 2 — Every WORKLOAD number counts only the 15 entered
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class WorkloadCountsOnlyEnteredTasksTests(ProgressVsWorkloadBase):
     """A mirror is nobody's task, so it is nobody's workload."""
 
@@ -272,6 +279,9 @@ class WorkloadCountsOnlyEnteredTasksTests(ProgressVsWorkloadBase):
 # 3 — The CEO card invariant: the two terms move together
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class CeoCardInvariantTests(ProgressVsWorkloadBase):
     """Pending + Completed == the project's task total, whichever category the
     pair landed in.
@@ -359,6 +369,9 @@ class UserStatusRowSumUnmovedTests(ProgressVsWorkloadBase):
 # 5 — THE TEST THIS SESSION EXISTS TO CREATE
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class PmAndOverviewAgreeTests(ProgressVsWorkloadBase):
     """`dashboard_pm`'s percentage and `project_overview`'s phase bars describe
     the same project and must not disagree.
@@ -417,6 +430,9 @@ class PmAndOverviewAgreeTests(ProgressVsWorkloadBase):
 # 6 — Residential has no mirrors, so both categories give the same answer
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class ResidentialIsUnaffectedTests(OpexActivationBase):
     """The regression half. `attach_residential_template()` copies `is_mirror`
     from the template task, and no RESIDENTIAL template row carries it — so on a

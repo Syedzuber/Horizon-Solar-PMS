@@ -27,6 +27,7 @@ from decimal import Decimal
 from unittest import mock
 
 from django.contrib.auth.models import User
+from django.test import override_settings
 from django.contrib.messages import get_messages
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client, TestCase
@@ -1491,6 +1492,9 @@ class PreDispatchResubmitTests(PreDispatchFixture):
         self.assertEqual(pre.vendor, self.other_vendor)
 
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class PreDispatchCardAndAgingTests(PreDispatchFixture):
 
     def test_a_pre_dispatch_request_is_on_the_pm_card_and_the_aging_page(self):

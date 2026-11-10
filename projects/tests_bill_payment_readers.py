@@ -33,6 +33,7 @@ from decimal import Decimal
 from unittest import mock
 
 from django.db import IntegrityError, connection, transaction
+from django.test import override_settings
 from django.db.models import ProtectedError
 from django.test.utils import CaptureQueriesContext
 from django.urls import NoReverseMatch, reverse
@@ -139,6 +140,9 @@ class ModelTests(BillPaymentFixture):
 # Tabs, tiles and counts
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class TabTests(BillPaymentFixture):
 
     def test_each_bill_payment_is_on_its_bill_sites_tab_only(self):
@@ -215,6 +219,9 @@ class SearchTests(BillPaymentFixture):
 # Every Finance page renders with one present, and shows the bill
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class PageTests(BillPaymentFixture):
 
     def test_every_queue_tab_and_chip_renders_and_shows_the_bill(self):
@@ -437,6 +444,9 @@ class TestSiteTests(BillPaymentFixture):
 # PO/PI pages cost what they did
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class PoPiQueryCountTests(QueueFixture):
     """QueueFixture's PO/PI payments only. Every figure was measured on HEAD ced1991,
     before 5a, with this fixture and a warmed client (the first request's session and

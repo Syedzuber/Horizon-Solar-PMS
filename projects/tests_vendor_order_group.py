@@ -34,6 +34,7 @@ from importlib import import_module
 from unittest.mock import MagicMock, patch
 
 from django.apps import apps as django_apps
+from django.test import override_settings
 from django.contrib.messages import WARNING
 from django.test import RequestFactory, TestCase
 from django.urls import reverse
@@ -488,6 +489,9 @@ class GroupRefusalTests(GroupRaiseFixture):
 # The page itself
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class GroupRaisePageTests(GroupRaiseFixture):
 
     def test_the_page_is_a_payment_request_in_four_sections_in_order(self):

@@ -1,8 +1,8 @@
 """
 DASH-B2 — the Site Dashboard page, built on the DASH-B1 data layer (site_dashboard.py).
 
-Reached from its own nav link. It is NOT the landing page and replaces no dashboard yet:
-retiring the old ones is DASH-B4, after Zuber confirms nothing is missing.
+Reached from the nav's Home link and after login (DASH-B4, below); the separate "Site
+Dashboard" nav link was removed as a duplicate of Home (R5).
 
 WHERE EVERY FIGURE COMES FROM (E1)
     build_site_cards()   every card, in a fixed number of queries whatever the site count
@@ -27,21 +27,51 @@ schedule_last_run_at, which only a finished `schedule_sites --all --apply` write
 minutes past (so before 07:00 yesterday's run still counts), or was never written.
 ActivityLog rows are not a stand-in (ruling 1, 10 Nov): a run that changes no date logs
 nothing. One query of its own (_dates_as_of).
+
+DASH-B4: THE LANDING PAGE. PM, coordinator, CEO, Finance, SCM, Admin, System Admin and the
+Design Head land here after login, and the PM / SCM / Finance / CEO dashboards redirect
+here (decorators.retired_for_site_dashboard). What those pages offered that people act on
+is carried, each piece scoped to the roles that had it (Zuber's rulings, 10 Nov):
+
+    every viewer        "More" row (_more_links), Past target pill, QA/QC last visit and
+                        open punch points on cards, the approvals-waiting card (None, and
+                        so nothing drawn, for someone who approves nothing)
+    PM, coordinator     awaiting re-verification group, "Request design change" links on
+                        RESCO cards and draft rows whose design has started (the form is a
+                        404 before that); draft rows link to the site for every viewer
+    SCM                 three tiles, Stalled pill + stage line, grouped procurement and
+                        open delivery issues groups
+    Finance             Milestones awaiting tile
+
+Every addition is a fixed number of queries whatever the number of sites
+(tests_dash_b4 pins 3 against 30 sites per role), except grouped procurement, which is a
+few queries per OPEX tender (ruling 11); none is per site.
 """
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from urllib.parse import urlencode
 
 from django.shortcuts import render
+from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.cache import never_cache
 
+from .approval_queries import pending_approvals_card
+from .attendance_views import attendance_unmapped_group_count, vendor_attendance_today_counts
+from .dashboard_strips import (milestones_awaiting_count, pm_awaiting_reverification,
+                               scm_open_delivery_issues, scm_pipeline, scm_tile_counts)
 from .decorators import _forbidden, login_required
-from .models import SystemSettings
-from .permissions import (DASHBOARD_MANAGER_ROLES, user_can_view_site_dashboard,
-                          user_sees_payment_totals)
-from .qaqc_views import qaqc_engineer_dashboard_context
+from .design_views import scm_opex_tender_rows
+from .models import DesignAssignment, PaymentRequest, SystemSettings
+from .payments import payment_counts
+from .permissions import (DASHBOARD_MANAGER_ROLES, user_can_map_attendance,
+                          user_can_raise_group_order, user_can_view_ceo_dashboard_lists,
+                          user_can_view_payment_queue, user_can_view_site_dashboard,
+                          user_can_view_vendor_attendance, user_sees_payment_totals)
+from .punch_points import open_punch_point_counts
+from .qaqc_views import last_visit_lines, qaqc_engineer_dashboard_context
 from .scheduling import (BAND_LABELS, ELIGIBLE_PROJECT_TYPE, REASON_EXCLUDED,
                          REASON_NEEDS_ANCHOR, REASON_NEEDS_CAPACITY, REASON_NOT_ELIGIBLE)
 from .site_dashboard import (EXECUTION_LANE_NAME, LANE_DONE, LANE_EMPTY, LANE_IN_PROGRESS,
@@ -184,6 +214,13 @@ class CardView:
     attendance: object         # 'count', 'none' or None (no line); see _attendance_line
     scheduled: bool            # the site is in the auto-schedule (its Schedule block shows the plan)
     quiet: bool                # gone quiet: no human update for QUIET_DAYS or more
+    # DASH-B4 additions; the defaults are what a card shows when the view passes no extras.
+    past_target: object = None     # (pill text, tooltip) when today or the forecast is past the target date
+    qaqc_line: object = None       # "Last QA/QC visit: …" on a RESCO site with an engineer or a visit
+    punch_points: int = 0          # outstanding punch points (Open or Rectified)
+    scm: object = None             # SCM viewers only: {'pill': (text, level) or None, 'stages': text}
+    design_change: bool = False    # PM/coordinator viewer and a RESCO site: offer the change-request link
+    clear: bool = True             # nothing in the Attention column, so "✓ Clear" shows
 
 
 def _segment_state(lane):
@@ -315,7 +352,135 @@ def _short_date(value):
     return f'{value.day} {value:%b}'
 
 
-def _view(card, now, sees_payments):
+def _past_target(card, today):
+    """DASH-B4 ruling 9: the old PM / Finance "Delayed Nd" badge, kept as a "Past target"
+    pill on any project type. (text, tooltip) when the later of today and the forecast
+    finish is past the site's target date, else None.
+
+    No query: target_date and the forecast are already on the card (one grouped build,
+    site_dashboard.build_site_cards). Drafts and Commissioned sites carry none: a draft has
+    not started, and a commissioned site's lateness is history, not something to act on,
+    which is also why the old dashboards (Active / In Progress only) never showed it there.
+    """
+    target = card.target_date
+    if target is None or card.is_draft or card.status == 'Commissioned':
+        return None
+    forecast = (card.schedule.forecast_finish
+                if card.schedule.reason == REASON_SCHEDULED else None)
+    latest = max(today, forecast) if forecast is not None else today
+    if latest <= target:
+        return None
+    days = (latest - target).days
+    if today > target:
+        why = f'Target {_short_date(target)} has passed'
+    else:
+        why = f'Forecast finish {_short_date(forecast)} is after target {_short_date(target)}'
+    return (f'Past target +{days}d', why)
+
+
+def _qaqc_line(days):
+    """The PM dashboard's QA/QC visit wording (Closeout step 7, V-10), from the value
+    qaqc_views.last_visit_lines gives: None means an engineer but no submitted visit."""
+    if days is None:
+        return 'No QA/QC visit yet'
+    if days == 0:
+        return 'Last QA/QC visit: today'
+    return f'Last QA/QC visit: {days} day{"s" if days != 1 else ""} ago'
+
+
+#: The SCM stage words, as the old SCM dashboard's badges spelled them.
+_STALL_STAGE_WORDS = {'boq': 'BOQ', 'order': 'order', 'delivery': 'delivery',
+                      'issues': 'issues'}
+
+
+def _scm_view(row):
+    """DASH-B4 ruling 12: one "Stalled" pill and one stage line from a
+    dashboard_strips.scm_pipeline() row. The pill names the worst stalled stage and its
+    days (red beats amber, as the old badge chose); the line spells all four stages."""
+    stall = row['stall']
+    pill = None
+    if stall is not None:
+        stage, days, level = stall
+        pill = (f'Stalled · {_STALL_STAGE_WORDS[stage]} {days}d',
+                'crit' if level == 'red' else 'warn')
+
+    def aged(word, status, age):
+        if status is None:
+            return f'{word}: none'
+        return f'{word}: {status}' + (f' {age}d' if age is not None else '')
+
+    issues = (f'Issues: {row["issue_count"]} open'
+              + (f', oldest {row["issue_age"]}d' if row['issue_age'] is not None else '')
+              if row['issue_count'] else 'Issues: clear')
+    stages = ' · '.join((aged('BOQ', row['boq_status'], row['boq_age']),
+                         aged('Order', row['order_status'], row['order_age']),
+                         aged('Delivery', row['delivery_status'], row['delivery_age']),
+                         issues))
+    return {'pill': pill, 'stages': stages}
+
+
+@dataclass(frozen=True)
+class CardExtras:
+    """Per-viewer inputs to the DASH-B4 card additions, built once per request by
+    _card_extras() and handed to every _view() call. All maps are keyed by project pk."""
+    today: object
+    qaqc_lines: dict
+    punch_points: dict
+    scm: dict               # empty unless the viewer is SCM
+    design_started: frozenset  # RESCO pks with a DesignAssignment; empty unless PM / coordinator viewer
+
+
+def _card_extras(cards, profile, today):
+    """The DASH-B4 card additions for `cards` (the non-draft ones), in a fixed number of
+    queries whatever their number:
+
+        qaqc_lines      qaqc_views.last_visit_lines: 2 queries, none without a RESCO card
+        punch_points    punch_points.open_punch_point_counts: 1 grouped query
+        scm             dashboard_strips.scm_pipeline: 4 queries, SCM viewers only
+        design_started  1 query, PM / coordinator viewers with a RESCO card only
+
+    last_visit_lines reads .pk and .project_type from what it is given, so each card is
+    passed as a two-attribute stand-in rather than refetched as a Project.
+    """
+    live = [c for c in cards if not c.is_draft]
+    stand_ins = [SimpleNamespace(pk=c.id, project_type=c.project_type) for c in live]
+    # The stall pill and stage line are SCM's procurement signals (ruling 12): only an SCM
+    # viewer pays the four queries or sees them. Every other role reads the DC counts
+    # already on the card.
+    scm = ({pk: _scm_view(row)
+            for pk, row in scm_pipeline([(c.id, c.project_id) for c in live], today).items()}
+           if profile.role == 'SCM' else {})
+    # Ruling 6: PM and coordinator raise design change requests, so only they are offered
+    # the link; the form (design_change_request_form) re-checks authority and explains a
+    # closed window itself. It answers 404 for a site whose design has not started (no
+    # DesignAssignment), so the link is drawn only where one exists: one grouped query over
+    # the RESCO cards drawn (drafts included), never one per site. Everyone else pays none.
+    design_started = frozenset()
+    resco = [c.id for c in cards if c.project_type == ELIGIBLE_PROJECT_TYPE]
+    if profile.role in DASHBOARD_MANAGER_ROLES and resco:
+        design_started = frozenset(DesignAssignment.objects.filter(project_id__in=resco)
+                                   .values_list('project_id', flat=True))
+    return CardExtras(
+        today=today,
+        qaqc_lines=last_visit_lines(stand_ins, today),
+        punch_points=open_punch_point_counts([c.id for c in live]),
+        scm=scm,
+        design_started=design_started,
+    )
+
+
+def _view(card, now, sees_payments, extras=None):
+    past_target = qaqc_line = scm = None
+    punch = 0
+    design_change = False
+    if extras is not None:
+        past_target = _past_target(card, extras.today)
+        if card.id in extras.qaqc_lines:
+            qaqc_line = _qaqc_line(extras.qaqc_lines[card.id])
+        punch = extras.punch_points.get(card.id, 0)
+        scm = extras.scm.get(card.id)
+        # RESCO sites with design under way, for a PM / coordinator viewer (_card_extras).
+        design_change = card.id in extras.design_started
     return CardView(
         card=card,
         type_label=TYPE_LABELS.get(card.project_type, card.project_type),
@@ -337,6 +502,15 @@ def _view(card, now, sees_payments):
         attendance=_attendance_line(card),
         scheduled=card.schedule.reason == REASON_SCHEDULED,
         quiet=FILTERS['quiet'](card),
+        past_target=past_target,
+        qaqc_line=qaqc_line,
+        punch_points=punch,
+        scm=scm,
+        design_change=design_change,
+        # "✓ Clear" only when the Attention column has nothing else in it, so a card never
+        # reads Clear beside a Past target, punch point or Stalled pill.
+        clear=not (card.overdue or card.blocked or card.open_issues or past_target or punch
+                   or (scm and scm['pill'])),
     )
 
 
@@ -470,6 +644,154 @@ def _dates_as_of(now):
     return {'text': text, 'stale': False}
 
 
+def _link(label, href, count=None):
+    return {'label': label, 'href': href, 'count': count}
+
+
+def _more_links(user, profile):
+    """DASH-B4 rulings 16 and 17: the "More" row under the KPI tiles, as
+    [{'label': group, 'links': [...]}] with empty groups left out. It is how the pages the
+    retired dashboards linked to stay one click away. Every link is gated by the check its
+    own page makes, so no link here leads to a 403:
+
+        Tasks    every viewer: tasks_drill_down has its own branch for each Site Dashboard
+                 role (PM / coordinator, Design for the Head, the portfolio roles), pinned by
+                 tests_dash_b4. New project: PM only, as project_create's
+                 @role_required(['PM']). Design dashboard: the Design Head, whose old home it
+                 was; dashboard_design admits the Design role.
+        SCM      user_can_map_attendance / user_can_view_vendor_attendance (SCM and Admin),
+                 with the counts the SCM dashboard showed (one query each, only when shown)
+        Finance  user_can_view_payment_queue, with the approved-to-pay count from
+                 payments.payment_counts(), the function the queue's own tabs count with
+        Admin    Admin: the three Admin-only screens the old Admin home linked
+                 (@role_required(['Admin'])); System Admin: the sub-admin portal
+                 (system_admin_required)
+        CEO      user_can_view_ceo_dashboard_lists, the same CEO / Admin / System Admin set
+                 as dashboard_ceo's decorator: its kept Residential and Tenders views
+                 (ruling 5) and the overdue-task list
+    """
+    role = profile.role
+    groups = []
+
+    tasks = [_link('Due today', reverse('tasks_due_today')),
+             _link('Due in 7 days', reverse('tasks_due_soon')),
+             _link('Overdue', reverse('tasks_overdue'))]
+    # Only a PM may create a project (project_create's decorator); a coordinator would get
+    # a 403, which is why the old dashboard hid the button from them too.
+    if role == 'PM':
+        tasks.append(_link('New project', reverse('project_create')))
+    # The Design Head's own work queue, QC links and catalogue live on the Design dashboard,
+    # their home before DASH-B4 (ruling 16). Only the Head lands here; a plain designer
+    # never sees this page. Deputies are not Site Dashboard users.
+    if getattr(profile, 'is_design_head', False) and role == 'Design':
+        tasks.append(_link('Design dashboard', reverse('dashboard_design')))
+    groups.append({'label': 'Tasks', 'links': tasks})
+
+    scm = []
+    # Contractor mapping and vendor attendance: SCM and Admin only (ATT-B3 / ATT-B6); every
+    # other role is refused by those pages, so their links and counts are not built.
+    if user_can_map_attendance(user):
+        scm.append(_link('Contractors to map', reverse('attendance_to_map'),
+                         attendance_unmapped_group_count()))
+    if user_can_view_vendor_attendance(user):
+        today_counts = vendor_attendance_today_counts()
+        scm.append(_link(
+            f'Vendor attendance · {today_counts["sites"]} site'
+            f'{"s" if today_counts["sites"] != 1 else ""} · {today_counts["people"]} '
+            f'{"person" if today_counts["people"] == 1 else "people"}',
+            reverse('vendor_attendance')))
+    if scm:
+        groups.append({'label': 'SCM', 'links': scm})
+
+    # The payments queue: Finance, CEO, Admin, System Admin and payment approvers, as the
+    # queue itself admits (and the nav's Payments link). The count is approved-to-pay, the
+    # old Finance dashboard's "Payment Requests Pending" figure.
+    if user_can_view_payment_queue(user):
+        to_pay = payment_counts()[PaymentRequest.APPROVED].count
+        groups.append({'label': 'Finance', 'links': [
+            _link('Payments queue · to pay', reverse('payment_queue'), to_pay)]})
+
+    admin = []
+    # Admin-only screens (@role_required(['Admin'])): user management, the audit log and the
+    # Admin Panel. Nobody else may open them, so nobody else is shown them.
+    if role == 'Admin':
+        admin += [_link('Manage users', reverse('user_list')),
+                  _link('Activity log', reverse('admin_audit_log')),
+                  _link('Admin panel', reverse('admin_master_switches'))]
+    # The sub-admin portal is System Admin's alone (system_admin_required), and was their
+    # home before DASH-B4.
+    if role == 'System Admin':
+        admin.append(_link('Sub-admin portal', reverse('subadmin_projects')))
+    if admin:
+        groups.append({'label': 'Admin', 'links': admin})
+
+    # The CEO page's kept views and its overdue list: CEO, Admin and System Admin, the
+    # roles dashboard_ceo and dashboard_ceo_overdue_tasks admit (CEO_DASHBOARD_ROLES).
+    if user_can_view_ceo_dashboard_lists(user):
+        ceo = reverse('dashboard_ceo')
+        groups.append({'label': 'CEO', 'links': [
+            _link('Portfolio analytics (Residential)', f'{ceo}?context=residential'),
+            _link('Tenders overview', f'{ceo}?context=tenders'),
+            _link('Overdue tasks list', reverse('dashboard_ceo_overdue_tasks'))]})
+    return groups
+
+
+def _role_strips(request, profile, today):
+    """DASH-B4: the strips carried from the retired dashboards, scoped by role. Returns
+    the template context they need; a strip's key is absent (or empty) for anyone outside
+    its roles, and the template draws nothing for it.
+
+        approvals_waiting           every viewer; pending_approvals_card() returns None for
+                                    someone who approves nothing (ruling 18). 1-2 queries
+        pm_reverify                 PM and coordinator (ruling 18). 4 queries
+        scm_tiles, opex_tender_rows,
+        scm_delivery_issues         SCM only (rulings 10, 11, 13). 3 + per-tender + 1
+        milestones_awaiting         Finance only (ruling 14). 1 query
+    """
+    role = profile.role
+    strips = {'approvals_waiting': pending_approvals_card(request.user)}
+    # PM and coordinator only: the list is the Rectified points on the sites they manage,
+    # and the Re-verify button is theirs where no QA/QC engineer can act (go-ahead Q4).
+    # Portfolio roles manage no site; the Design Head cannot hold the PM's re-verify.
+    if role in DASHBOARD_MANAGER_ROLES:
+        strips['pm_reverify'] = pm_awaiting_reverification(profile)
+    # SCM only (ruling 10, 11, 13): these are SCM's procurement queues, which only the SCM
+    # dashboard carried. Admin reads the same pages through their own links.
+    if role == 'SCM':
+        strips['scm_tiles'] = scm_tile_counts(today)
+        # Per-tender queries, accepted (ruling 11); built from SiteGroup and
+        # DesignAssignment, so OPEX tenders appear although their sites stay Draft.
+        strips['opex_tender_rows'] = scm_opex_tender_rows()
+        # The partial's "Raise payment request" button; the target view re-checks it.
+        strips['can_raise_group_order'] = user_can_raise_group_order(request.user)
+        strips['scm_delivery_issues'] = scm_open_delivery_issues()
+    # Finance only (ruling 14): client milestones are Finance's to invoice and receive.
+    if role == 'Finance':
+        strips['milestones_awaiting'] = milestones_awaiting_count()
+    return strips
+
+
+def _role_tiles(strips):
+    """The SCM and Finance tiles (rulings 10, 14), appended after the E5 tiles. Plain
+    counts with no filter: they are portfolio queues, not a property of the cards listed,
+    so they are not cut by the search or the KPI filters (drawn as non-link tiles)."""
+    tiles = []
+    scm = strips.get('scm_tiles')
+    if scm is not None:
+        tiles += [
+            {'label': 'BOQ awaiting ack.', 'value': scm['boq_awaiting'],
+             'detail': 'submitted, not acknowledged'},
+            {'label': 'Deliveries today', 'value': scm['deliveries_today'],
+             'detail': 'DCs expected today'},
+            {'label': 'Overdue DCs', 'value': scm['overdue_dcs'],
+             'detail': 'past expected date'},
+        ]
+    if 'milestones_awaiting' in strips:
+        tiles.append({'label': 'Milestones awaiting', 'value': strips['milestones_awaiting'],
+                      'detail': 'client milestones pending'})
+    return tiles
+
+
 # Public names for the display rules the Tenders Gantt (DASH-B3, views_tenders_gantt)
 # reuses, so that page shows the same highlight, schedule line and stamp as this one
 # without importing private names. Aliases only; relative_time and QUIET_DAYS are public
@@ -526,10 +848,19 @@ def site_dashboard(request):
     qaqc = (qaqc_engineer_dashboard_context(profile)
             if profile.role in DASHBOARD_MANAGER_ROLES else {})
 
+    # DASH-B4: the card additions are built over every card the page draws (the listed
+    # ones and the drafts), once, whatever filter is on.
+    extras = _card_extras(listed + drafts, profile, today)
+    strips = _role_strips(request, profile, today)
+
     return render(request, 'projects/site_dashboard.html', {
-        'cards': [_view(c, now, sees_payments) for c in sort_cards(listed, params['sort'])],
-        'drafts': [_view(c, now, sees_payments) for c in sort_cards(drafts, params['sort'])],
-        'kpis': kpis,
+        'cards': [_view(c, now, sees_payments, extras)
+                  for c in sort_cards(listed, params['sort'])],
+        'drafts': [_view(c, now, sees_payments, extras)
+                   for c in sort_cards(drafts, params['sort'])],
+        'kpis': kpis + _role_tiles(strips),
+        'more_groups': _more_links(request.user, profile),
+        **strips,
         'params': params,
         'programs': programs,
         'type_labels': TYPE_LABELS,

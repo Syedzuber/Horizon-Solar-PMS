@@ -51,6 +51,7 @@ from decimal import Decimal
 from importlib import import_module
 
 from django.contrib.auth.models import User
+from django.test import override_settings
 from django.db.models import Prefetch
 from django.test import Client, TestCase
 from django.urls import reverse
@@ -325,6 +326,9 @@ class CurrentPhaseFixture(TestCase):
 # 1 — the invariant this session exists to create
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class AgreementTests(CurrentPhaseFixture):
     """All four call sites return the same phase, in every state that matters.
 
@@ -586,6 +590,9 @@ class EmptyCaseTests(CurrentPhaseFixture):
 # 6 — a project with no phases
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class NoPhasesTests(CurrentPhaseFixture):
     """All four copies already agreed on this: None. Kept exactly.
 

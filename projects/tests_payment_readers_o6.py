@@ -27,6 +27,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.db import connection
+from django.test import override_settings
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -109,6 +110,9 @@ class PaymentCountsTests(ReadersFixture):
         self.assertEqual(payment_counts(['OPEX'])[PaymentRequest.ON_HOLD].count, 1)
 
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class ThreeWayAgreementTests(ReadersFixture):
     """dashboard_finance, the CEO tile and the queue, same data, same numbers — including
     the site-less payment, the Draft OPEX site and the partial approval."""
@@ -162,6 +166,9 @@ class ThreeWayAgreementTests(ReadersFixture):
 # A2 / A3 — one amount rule
 # ---------------------------------------------------------------------------
 
+# DASH-B4: this class exercises a retired dashboard page itself, so the redirect to the
+# Site Dashboard is switched off for it. Remove it with the old views (deletion commit).
+@override_settings(RETIRED_DASHBOARDS_REDIRECT=False)
 class AmountRuleTests(ReadersFixture):
 
     def test_the_dashboard_tiles_show_both_figures_when_they_differ(self):
