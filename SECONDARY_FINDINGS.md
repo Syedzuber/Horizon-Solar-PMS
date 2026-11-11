@@ -958,3 +958,21 @@ Incidental issues noticed during audits. Logged, not fixed. Each entry: file/lin
 - **The receipt-document shrink is a sibling of `_qaqc_photo_script.html`'s `downscale()`** (TODO in the template): 2048 px / 0.85, white background for PNG, no EXIF read. Merge into the partial with per-input size and quality attributes later (Zuber, 11 Nov).
 - **Pre-selecting "Delivery photo" in slot 1** means a PDF picked into slot 1 without changing the type is posted as a "Delivery photo" PDF. That still needs the tick (any PDF does) and does not satisfy the photo rule, so nothing wrong is recorded silently, but the type label is wrong unless the SE changes it. **Resolved (Zuber, 11 Nov):** `plan_receipt_documents` now refuses a PDF typed "Delivery photo" on both forms ("A PDF can't be a delivery photo — choose Signed challan copy, LR or bilty, or Other."), joined with the other document refusals, draft kept.
 - **The walkthrough's delivery stub (`seed_walkthrough.delivery_storage_stub`) belongs in `_walkthrough_support.seed_sandbox()`** beside `bill_storage_stub` (same TODO as that one). On the walked database the two receipt photos are listed, but opening them fails ("bucket not found"), as the bill PDFs do.
+
+## From GRN-V0 — throwaway unboxing-video prototype (2026-11-11)
+
+- **Signed upload URLs live 2 hours and cannot be shortened with storage3 2.31.0** (A3, design note for the real GRN-V). `create_signed_upload_url(path, options)` takes only the path and an `upsert` flag; the expiry is the storage server's default. Within those 2 hours, anyone holding the URL can write once to that one path: without upsert, a second write is refused. For GRN-V:
+  - sign at the moment of upload, never when the page is drawn;
+  - treat the URL as a credential (never logged, never stored);
+  - the orphan sweep must allow for an object arriving up to 2 hours after signing.
+- **Chrome can say it records MP4/H.264 and then write an audio-only MP4.** Seen in the GRN-V0 local check:
+  - Setup: headless Chrome 156.0.8078.81 on Windows, fake camera, no GPU.
+  - `MediaRecorder.isTypeSupported('video/mp4;codecs=avc1,mp4a.40.2')` was true, and the camera track reported 640×480.
+  - The stored file had one `soun` track and no `vide` track. Its metadata loaded, so a "metadata loaded" playback check passed it.
+  - It is intermittent: two of three fresh browser sessions wrote audio-only MP4s, and the third wrote a normal one. Every WebM had a picture.
+  - The prototype now passes playback only when the stored file reports a picture size, logged as `played=WxH`.
+  - Not seen on a real phone. The field test's `playback_failed` count will show whether Android Chrome does it.
+  - GRN-V must verify a video track before accepting a recording, and may want to fall back to WebM when the MP4 has none.
+- **A second recording started about 2 s after the first failed once with `NotFoundError: Requested device not found`.** This was Chrome's fake camera in the local check: the camera had not been released yet. The page logs it as `recorder_error`. If the field test shows it on phones, GRN-V should retry `getUserMedia` once after a short pause.
+- **No resumable upload.** The prototype PUTs the whole file in one request, so a dropped mobile connection restarts from zero. For GRN-V, check whether Supabase's resumable (TUS) endpoint accepts signed-upload tokens before choosing.
+- **The prototype's ActivityLog lines outlive `delete_video_proto`.** V0-8 deletes only the stored videos. The lines (`action_code` `video_proto_upload` / `video_proto_upload_failed`, no project) appear in the Admin portal activity log as "Video test ok/failed: …". To remove them after the test, delete ActivityLog rows with those two codes. That is a deliberate data change, not part of the cleanup command.

@@ -41,6 +41,16 @@ SUPABASE_BILLS_BUCKET = config('SUPABASE_BILLS_BUCKET', default='')
 # call time.
 SUPABASE_DELIVERY_BUCKET = config('SUPABASE_DELIVERY_BUCKET', default='')
 
+# GRN-V0 — THROWAWAY unboxing-video prototype (projects/video_proto.py), for a one-week
+# field test on SE phones. Delete these three lines with the prototype.
+#   VIDEO_PROTO_ENABLED  off by default; off means every prototype URL answers 404.
+#   VIDEO_PROTO_TESTERS  comma-separated usernames who may record; the Admin role always may.
+#   VIDEO_PROTO_BUCKET   a bucket of its own, PRIVATE; never the delivery bucket. Empty, or
+#                        the same name as any SUPABASE_*_BUCKET above, means uploads are refused.
+VIDEO_PROTO_ENABLED = config('VIDEO_PROTO_ENABLED', default=False, cast=bool)
+VIDEO_PROTO_TESTERS = config('VIDEO_PROTO_TESTERS', default='', cast=Csv())
+VIDEO_PROTO_BUCKET  = config('VIDEO_PROTO_BUCKET', default='')
+
 # How long (days) to keep soft-deleted files before purge_deleted_files hard-deletes them
 FILE_RETENTION_DAYS        = config('FILE_RETENTION_DAYS', default=90, cast=int)
 

@@ -15,6 +15,7 @@ from . import attendance_views  # ATT-B1 contractor attendance screens — separ
 from . import views_tender_documents  # TD-B2 tender documents manage page — separate module, same pattern
 from . import views_site_dashboard  # DASH-B2 Site Dashboard page — separate module, same pattern
 from . import views_tenders_gantt  # DASH-B3 Tenders Gantt page — separate module, same pattern
+from . import video_proto  # GRN-V0 throwaway video prototype — delete with the prototype
 
 urlpatterns = [
     # ---------------------------------------------------------------------------
@@ -686,4 +687,22 @@ urlpatterns = [
          name='approval_link_order'),
     path('approvals/links/<int:link_pk>/remove/',    approval_views.approval_unlink_order,
          name='approval_unlink_order'),
+
+    # ---------------------------------------------------------------------------
+    # GRN-V0 — THROWAWAY unboxing-video prototype (video_proto.py). Every route answers
+    # 404 while VIDEO_PROTO_ENABLED is off; otherwise Admin role + VIDEO_PROTO_TESTERS only.
+    # No menu link. Delete these routes with the prototype after the field test.
+    # ---------------------------------------------------------------------------
+    # Recording page — Admin role or a named tester
+    path('video-proto/',             video_proto.video_proto_page,        name='video_proto_page'),
+    # Signed upload URL for the caller's own folder — Admin role or a named tester, POST JSON
+    path('video-proto/sign-upload/', video_proto.video_proto_sign_upload, name='video_proto_sign_upload'),
+    # Signed 300 s read URL for the caller's own upload — Admin role or a named tester, POST JSON
+    path('video-proto/sign-read/',   video_proto.video_proto_sign_read,   name='video_proto_sign_read'),
+    # One ActivityLog line per try — Admin role or a named tester, POST JSON
+    path('video-proto/log/',         video_proto.video_proto_log,         name='video_proto_log'),
+    # Results table — Admin role or a named tester (Q1), read-only
+    path('video-proto/results/',     video_proto.video_proto_results,     name='video_proto_results'),
+    # Play one stored video through a fresh signed link — Admin role or a named tester
+    path('video-proto/play/',        video_proto.video_proto_play,        name='video_proto_play'),
 ]

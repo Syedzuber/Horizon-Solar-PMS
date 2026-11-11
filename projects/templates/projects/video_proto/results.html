@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Video test results{% endblock %}
+
+{% block content %}
+{% comment %}
+GRN-V0 — THROWAWAY prototype results (video_proto.video_proto_results). Read-only: every
+ActivityLog line the recording page wrote, successes and failures together. Each Play link
+goes through video_proto_play, which signs a fresh 300-second link at the click.
+{% endcomment %}
+<div class="container-fluid py-3">
+  <h1 class="h4 mb-1">Video test results</h1>
+  <p class="text-muted small mb-3">Newest first. MB = 1,000,000 bytes. The field-test bar is 10 MB per minute or less; rows above it are marked.</p>
+
+  <div class="d-flex flex-wrap gap-2 mb-3">
+    <span class="badge text-bg-success">Uploaded and played back: {{ ok_count }}</span>
+    <span class="badge text-bg-secondary">Failed: {{ failed_count }}</span>
+    {% for stage, count in stage_counts.items %}
+    <span class="badge {% if count %}text-bg-danger{% else %}text-bg-light border{% endif %}">{{ stage }}: {{ count }}</span>
+    {% endfor %}
+  </div>
+
+  {% if rows %}
+  <div class="table-responsive">
+    <table class="table table-sm table-striped align-middle small">
+      <thead>
+        <tr>
+          <th>When</th><th>Tester</th><th>Result</th><th>Source</th><th>Format</th>
+          <th>Resolution</th><th>Stored picture</th><th class="text-end">Duration</th><th class="text-end">Size MB</th>
+          <th class="text-end">MB/min</th><th class="text-end">Upload s</th><th class="text-end">Mbps</th>
+          <th class="text-end">Sent MB</th><th class="text-end">Elapsed s</th><th>Error</th><th>Video</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td class="text-nowrap">{{ row.when|date:"d M H:i" }}</td>
+          <td>{{ row.tester }}</td>
+          <td>{% if row.ok %}<span class="badge text-bg-success">ok</span>{% else %}<span class="badge text-bg-danger">{{ row.stage }}</span>{% endif %}</td>
+          <td>{{ row.source }}</td>
+          <td class="text-break">{{ row.mime|default:"—" }}</td>
+          <td>{{ row.res|default:"—" }}{% if row.fps %} @ {{ row.fps }}{% endif %}</td>
+          <td>{{ row.played|default:"—" }}</td>
+          <td class="text-end">{% if row.duration is not None %}{{ row.duration|floatformat:1 }} s{% else %}—{% endif %}</td>
+          <td class="text-end">{% if row.mb is not None %}{{ row.mb|floatformat:1 }}{% else %}—{% endif %}</td>
+          <td class="text-end{% if row.over_budget %} text-danger fw-semibold{% endif %}">{% if row.mb_per_min is not None %}{{ row.mb_per_min|floatformat:1 }}{% else %}—{% endif %}</td>
+          <td class="text-end">{% if row.upload_seconds is not None %}{{ row.upload_seconds|floatformat:1 }}{% else %}—{% endif %}</td>
+          <td class="text-end">{% if row.mbps is not None %}{{ row.mbps|floatformat:2 }}{% else %}—{% endif %}</td>
+          <td class="text-end">{% if row.sent_mb is not None %}{{ row.sent_mb|floatformat:1 }}{% else %}—{% endif %}</td>
+          <td class="text-end">{% if row.elapsed is not None %}{{ row.elapsed|floatformat:0 }}{% else %}—{% endif %}</td>
+          <td class="text-break" style="max-width: 18rem;">{{ row.error }}</td>
+          <td>{% if row.path %}<a href="{% url 'video_proto_play' %}?path={{ row.path|urlencode }}" target="_blank" rel="noopener">Play</a>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="text-muted">No tries yet.</p>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,419 @@
+{% extends "base.html" %}
+{% block title %}Video test{% endblock %}
+
+{% block content %}
+{% comment %}
+GRN-V0 — THROWAWAY unboxing-video prototype (projects/video_proto.py). Deleted after the
+one-week field test. No menu links to this page.
+
+The script below is vanilla JS that calls fetch/XHR. That is an explicit, documented
+exception to the "no XHR from Alpine" rule, for this one prototype page only. The video
+goes from the phone straight to Supabase through a signed upload URL; this server only
+signs URLs and writes one log line per try.
+{% endcomment %}
+<div id="vp-root" class="container py-3" style="max-width: 720px;"
+     data-sign-upload="{% url 'video_proto_sign_upload' %}"
+     data-sign-read="{% url 'video_proto_sign_read' %}"
+     data-log="{% url 'video_proto_log' %}">
+  {% csrf_token %}
+  <h1 class="h4 mb-1">Video test</h1>
+  <p class="text-muted small mb-3">A one-week test of recording a short video on your phone and uploading it. Nothing here is attached to any delivery.</p>
+
+  {% if not storage_ready %}
+  <div class="alert alert-warning">Video storage is not configured, so uploads will be refused.</div>
+  {% endif %}
+  <div id="vp-insecure" class="alert alert-danger d-none">The camera only works over HTTPS. Open this page on the live site.</div>
+
+  <div class="card mb-3">
+    <div class="card-body">
+      <h2 class="h6">Record</h2>
+      <div class="d-flex flex-wrap gap-2 mb-2">
+        <button type="button" class="btn btn-brand" data-vp-record="rec">{{ presets.rec.label }}</button>
+        <button type="button" class="btn btn-outline-secondary" data-vp-record="rec720">{{ presets.rec720.label }}</button>
+        <button type="button" class="btn btn-danger d-none" id="vp-stop">Stop</button>
+      </div>
+      <div class="small text-muted mb-2">Recording stops by itself after {{ max_seconds }} seconds. Format: <span id="vp-format">—</span></div>
+      <div id="vp-countdown" class="fw-semibold mb-2 d-none"></div>
+      <video id="vp-preview" class="w-100 bg-dark rounded d-none" muted playsinline autoplay></video>
+    </div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-body">
+      <h2 class="h6">Or upload a video from your gallery</h2>
+      <input type="file" id="vp-file" class="form-control mb-2" accept="video/*">
+      <div id="vp-file-note" class="small text-muted mb-2">MP4, WebM, MOV or 3GP, up to 30 MB.</div>
+      <button type="button" class="btn btn-outline-secondary" id="vp-file-upload" disabled>Upload this file</button>
+    </div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-body">
+      <div id="vp-result" class="fw-semibold mb-2">No video yet.</div>
+      <div id="vp-progress-wrap" class="d-none mb-2">
+        <div class="progress mb-1" role="progressbar" aria-label="Upload progress">
+          <div class="progress-bar bg-success" id="vp-progress" style="width: 0%"></div>
+        </div>
+        <div class="small text-muted" id="vp-progress-text"></div>
+      </div>
+      <button type="button" class="btn btn-outline-primary btn-sm d-none mb-2" id="vp-retry">Upload again</button>
+      <table class="table table-sm mb-2">
+        <tbody>
+          <tr><th class="fw-normal text-muted">Format</th><td id="vp-n-mime">—</td></tr>
+          <tr><th class="fw-normal text-muted">Resolution</th><td id="vp-n-res">—</td></tr>
+          <tr><th class="fw-normal text-muted">Duration</th><td id="vp-n-dur">—</td></tr>
+          <tr><th class="fw-normal text-muted">Size</th><td id="vp-n-size">—</td></tr>
+          <tr><th class="fw-normal text-muted">MB per minute</th><td id="vp-n-mbpm">—</td></tr>
+          <tr><th class="fw-normal text-muted">Upload time</th><td id="vp-n-up">—</td></tr>
+          <tr><th class="fw-normal text-muted">Upload speed</th><td id="vp-n-mbps">—</td></tr>
+        </tbody>
+      </table>
+      <div id="vp-log-note" class="small text-muted"></div>
+      <video id="vp-playback" class="w-100 rounded d-none mt-2" controls playsinline></video>
+    </div>
+  </div>
+</div>
+
+{{ presets|json_script:"vp-presets" }}
+{{ recorder_types|json_script:"vp-recorder-types" }}
+{{ accepted_types|json_script:"vp-accepted-types" }}
+<script>
+(function () {
+  'use strict';
+  var root = document.getElementById('vp-root');
+  var PRESETS = JSON.parse(document.getElementById('vp-presets').textContent);
+  var RECORDER_TYPES = JSON.parse(document.getElementById('vp-recorder-types').textContent);
+  var ACCEPTED = JSON.parse(document.getElementById('vp-accepted-types').textContent);
+  var MAX_BYTES = {{ max_bytes }};
+  var MAX_SECONDS = {{ max_seconds }};
+  var EXTENSION_TYPES = {mp4: 'video/mp4', m4v: 'video/mp4', webm: 'video/webm',
+                         mov: 'video/quicktime', '3gp': 'video/3gpp'};
+  var csrf = root.querySelector('[name=csrfmiddlewaretoken]').value;
+  function $(id) { return document.getElementById(id); }
+
+  var uploading = false;
+  var lastTry = null;        // the last file and its numbers, kept for "Upload again"
+  var pickedFile = null;     // the gallery file waiting for "Upload this file"
+
+  // A1: warn before leaving while a video is going up.
+  window.addEventListener('beforeunload', function (event) {
+    if (uploading) { event.preventDefault(); event.returnValue = ''; }
+  });
+
+  if (!window.isSecureContext) { $('vp-insecure').classList.remove('d-none'); }
+
+  // ---- small helpers -------------------------------------------------------------
+  function mb(bytes) { return (bytes / 1e6).toFixed(1) + ' MB'; }
+  function secs(s) { return Math.round(s) + ' s'; }
+  function now() { return performance.now(); }
+  function show(id, on) { $(id).classList.toggle('d-none', !on); }
+  function setText(id, text) { $(id).textContent = text; }
+  function baseType(type) { return (type || '').split(';')[0].trim().toLowerCase(); }
+
+  // Record, file and retry controls are all off while recording or uploading; Stop only
+  // shows while recording.
+  function lockControls(on) {
+    root.querySelectorAll('[data-vp-record], #vp-file, #vp-retry').forEach(function (b) { b.disabled = on; });
+    $('vp-file-upload').disabled = on || !pickedFile;
+  }
+
+  function postJSON(url, body) {
+    return fetch(url, {
+      method: 'POST', credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf},
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (data) {
+        return {ok: r.ok, code: r.status, data: data};
+      });
+    });
+  }
+
+  function pickRecorderType() {
+    for (var i = 0; i < RECORDER_TYPES.length; i++) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported(RECORDER_TYPES[i])) { return RECORDER_TYPES[i]; }
+    }
+    return '';   // none listed: let the browser choose, and report what it chose
+  }
+
+  function resetNumbers() {
+    ['vp-n-mime', 'vp-n-res', 'vp-n-dur', 'vp-n-size', 'vp-n-mbpm', 'vp-n-up', 'vp-n-mbps'].forEach(function (id) { setText(id, '—'); });
+    setText('vp-log-note', '');
+    show('vp-playback', false); $('vp-playback').removeAttribute('src');
+    show('vp-retry', false);
+  }
+
+  function showFileNumbers(t) {
+    setText('vp-n-mime', t.mime || '—');
+    setText('vp-n-res', t.width && t.height ? t.width + '×' + t.height + (t.fps ? ' @ ' + Math.round(t.fps) + ' fps' : '') : '—');
+    setText('vp-n-dur', t.duration ? t.duration.toFixed(1) + ' s' : '—');
+    setText('vp-n-size', mb(t.blob.size));
+    setText('vp-n-mbpm', t.duration ? (t.blob.size / 1e6 / (t.duration / 60)).toFixed(1) + ' MB/min' : '—');
+  }
+
+  // One log line per try (V0-2, Q3). A log that fails to save does not change the result.
+  function logTry(t, outcome, stage, extra) {
+    var body = {
+      outcome: outcome, stage: stage || '', source: t.source, mime: t.mime || '',
+      width: t.width || null, height: t.height || null, fps: t.fps || null,
+      duration: t.duration || null, bytes: t.blob ? t.blob.size : null, path: t.path || '',
+      played_width: t.playedWidth || null, played_height: t.playedHeight || null
+    };
+    Object.keys(extra || {}).forEach(function (k) { body[k] = extra[k]; });
+    return postJSON(root.dataset.log, body).then(function (r) {
+      setText('vp-log-note', r.ok ? 'Result saved for the test.' : 'The result could not be saved (' + (r.data.error || r.code) + ').');
+    }).catch(function () { setText('vp-log-note', 'The result could not be saved (no connection).'); });
+  }
+
+  // ---- recording (V0-3) ----------------------------------------------------------
+  var recorder = null, stopTimer = null, tickTimer = null;
+
+  root.querySelectorAll('[data-vp-record]').forEach(function (button) {
+    button.addEventListener('click', function () { startRecording(button.dataset.vpRecord); });
+  });
+  $('vp-stop').addEventListener('click', function () { if (recorder && recorder.state !== 'inactive') { recorder.stop(); } });
+
+  function startRecording(source) {
+    var p = PRESETS[source];
+    var t = {source: source, mime: '', blob: null};
+    resetNumbers();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
+      setText('vp-result', 'This browser cannot record video here. Try Chrome, or upload from the gallery.');
+      logTry(t, 'failed', 'recorder_error', {error: 'getUserMedia or MediaRecorder missing'});
+      return;
+    }
+    lockControls(true);
+    setText('vp-result', 'Starting the camera…');
+    navigator.mediaDevices.getUserMedia({
+      video: {facingMode: {ideal: 'environment'}, width: {ideal: p.width}, height: {ideal: p.height}, frameRate: {ideal: p.fps}},
+      audio: true
+    }).then(function (stream) {
+      record(stream, p, t);
+    }).catch(function (err) {
+      lockControls(false);
+      var blocked = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
+      setText('vp-result', blocked
+        ? 'Camera or microphone was blocked. Tap the icon left of the web address, open Permissions, allow Camera and Microphone, then try again.'
+        : 'The camera could not start (' + (err && err.name || 'error') + '). Try again.');
+      logTry(t, 'failed', blocked ? 'permission_denied' : 'recorder_error',
+             {error: (err && (err.name + ': ' + err.message)) || 'unknown'});
+    });
+  }
+
+  function record(stream, p, t) {
+    var chosen = pickRecorderType();
+    var track = stream.getVideoTracks()[0];
+    var s = track && track.getSettings ? track.getSettings() : {};
+    t.width = s.width; t.height = s.height; t.fps = s.frameRate;
+    var options = {videoBitsPerSecond: p.video_bps, audioBitsPerSecond: p.audio_bps};
+    if (chosen) { options.mimeType = chosen; }
+    try {
+      recorder = new MediaRecorder(stream, options);
+    } catch (err) {
+      stream.getTracks().forEach(function (tr) { tr.stop(); });
+      lockControls(false);
+      setText('vp-result', 'The recorder could not start. Try again.');
+      logTry(t, 'failed', 'recorder_error', {error: err.name + ': ' + err.message});
+      return;
+    }
+    t.mime = recorder.mimeType || chosen;
+    setText('vp-format', t.mime || 'browser default');
+    var chunks = [], started = now(), failed = false;
+    recorder.ondataavailable = function (e) { if (e.data && e.data.size) { chunks.push(e.data); } };
+    recorder.onerror = function (e) {
+      failed = true;
+      logTry(t, 'failed', 'recorder_error', {error: (e.error && e.error.name) || 'recorder error'});
+    };
+    recorder.onstop = function () {
+      clearTimeout(stopTimer); clearInterval(tickTimer);
+      stream.getTracks().forEach(function (tr) { tr.stop(); });
+      show('vp-stop', false); show('vp-countdown', false); show('vp-preview', false);
+      $('vp-preview').srcObject = null;
+      lockControls(false);
+      if (failed) { setText('vp-result', 'Recording failed — try again.'); return; }
+      // Wall-clock duration: a recorded WebM carries no duration in its header.
+      t.duration = (now() - started) / 1000;
+      t.blob = new Blob(chunks, {type: baseType(t.mime) || 'video/webm'});
+      showFileNumbers(t);
+      checkAndUpload(t);
+    };
+    $('vp-preview').srcObject = stream;
+    show('vp-preview', true); show('vp-stop', true); show('vp-countdown', true);
+    recorder.start(1000);
+    setText('vp-result', 'Recording…');
+    var tick = function () {
+      var left = Math.max(0, MAX_SECONDS - Math.floor((now() - started) / 1000));
+      setText('vp-countdown', 'Recording — ' + Math.floor(left / 60) + ':' + ('0' + (left % 60)).slice(-2) + ' left');
+    };
+    tick();
+    tickTimer = setInterval(tick, 250);
+    stopTimer = setTimeout(function () { if (recorder.state !== 'inactive') { recorder.stop(); } }, MAX_SECONDS * 1000);
+  }
+
+  // ---- gallery file (V0-4) -------------------------------------------------------
+  $('vp-file').addEventListener('change', function () {
+    var file = this.files && this.files[0];
+    pickedFile = null;
+    resetNumbers();
+    $('vp-file-upload').disabled = true;
+    if (!file) { return; }
+    var ext = (file.name.split('.').pop() || '').toLowerCase();
+    var type = baseType(file.type) || EXTENSION_TYPES[ext] || '';
+    if (ACCEPTED.indexOf(type) === -1) {
+      setText('vp-file-note', 'This file type cannot be uploaded (' + (file.type || ext || 'unknown') + '). Use MP4, WebM, MOV or 3GP.');
+      return;
+    }
+    var t = {source: 'file', mime: type, blob: file.slice(0, file.size, type)};
+    setText('vp-file-note', file.name + ' — ' + mb(file.size));
+    // Read resolution and duration from the file itself; a format this browser cannot
+    // decode leaves them blank, which is a result too.
+    var probe = document.createElement('video');
+    var url = URL.createObjectURL(file);
+    var done = false;
+    var finish = function () {
+      if (done) { return; } done = true;
+      URL.revokeObjectURL(url);
+      showFileNumbers(t);
+      if (file.size > MAX_BYTES) {
+        setText('vp-result', 'This video is ' + mb(file.size) + ' — the limit is 30 MB. Pick a shorter one.');
+        logTry(t, 'failed', 'too_large', {});
+        return;
+      }
+      pickedFile = t;
+      $('vp-file-upload').disabled = false;
+      setText('vp-result', 'Ready to upload.');
+    };
+    probe.preload = 'auto';
+    probe.muted = true;
+    var readSize = function () { t.width = probe.videoWidth || null; t.height = probe.videoHeight || null; };
+    probe.onloadedmetadata = function () {
+      t.duration = isFinite(probe.duration) ? probe.duration : null;
+      readSize();
+      if (t.width) { finish(); }
+    };
+    // Some MP4s (a recorder's fragmented MP4 among them) report a 0 width until the first
+    // frame is decoded, so the size is read again then.
+    probe.onloadeddata = function () { readSize(); finish(); };
+    probe.onerror = finish;
+    setTimeout(finish, 5000);
+    probe.src = url;
+  });
+  $('vp-file-upload').addEventListener('click', function () { if (pickedFile) { upload(pickedFile); } });
+  $('vp-retry').addEventListener('click', function () { if (lastTry) { upload(lastTry); } });
+
+  // ---- upload (V0-5) and playback check (V0-6) -----------------------------------
+  function checkAndUpload(t) {
+    if (t.blob.size > MAX_BYTES) {
+      setText('vp-result', 'This video is ' + mb(t.blob.size) + ' — the limit is 30 MB. Record a shorter clip.');
+      logTry(t, 'failed', 'too_large', {});
+      return;
+    }
+    upload(t);
+  }
+
+  function upload(t) {
+    lastTry = t;
+    t.path = '';
+    uploading = true;
+    lockControls(true);
+    show('vp-retry', false);
+    show('vp-progress-wrap', true);
+    $('vp-progress').style.width = '0%';
+    var started = now(), sent = 0, pct = 0;
+    var tick = setInterval(function () {
+      setText('vp-progress-text', 'Uploading… ' + pct + '% · ' + secs((now() - started) / 1000));
+    }, 250);
+    var end = function (resultText, retry) {
+      clearInterval(tick);
+      uploading = false;
+      lockControls(false);
+      show('vp-progress-wrap', false);
+      setText('vp-result', resultText);
+      show('vp-retry', !!retry);
+    };
+    var failedAfter = function () { return 'Upload failed after ' + secs((now() - started) / 1000) + ' — try again'; };
+    setText('vp-result', 'Uploading…');
+
+    postJSON(root.dataset.signUpload, {content_type: t.blob.type, bytes: t.blob.size}).then(function (r) {
+      if (!r.ok) { throw {stage: 'sign_failed', error: r.data.error || ('HTTP ' + r.code)}; }
+      t.path = r.data.path;
+      return new Promise(function (resolve, reject) {
+        var xhr = new XMLHttpRequest();
+        var putStarted = now();
+        xhr.open('PUT', r.data.signed_url);
+        xhr.setRequestHeader('Content-Type', t.blob.type);
+        xhr.setRequestHeader('x-upsert', 'false');
+        xhr.upload.onprogress = function (e) {
+          sent = e.loaded;
+          if (e.lengthComputable) { pct = Math.round(100 * e.loaded / e.total); $('vp-progress').style.width = pct + '%'; }
+        };
+        xhr.onload = function () {
+          if (xhr.status >= 200 && xhr.status < 300) { resolve((now() - putStarted) / 1000); }
+          else { reject({stage: 'upload_failed', error: 'HTTP ' + xhr.status + ' ' + (xhr.responseText || '').slice(0, 120)}); }
+        };
+        xhr.onerror = function () { reject({stage: 'upload_failed', error: 'network error'}); };
+        xhr.onabort = function () { reject({stage: 'upload_failed', error: 'aborted'}); };
+        xhr.send(t.blob);
+      });
+    }, function (err) {
+      throw (err && err.stage) ? err : {stage: 'sign_failed', error: 'no connection'};
+    }).then(function (uploadSeconds) {
+      t.uploadSeconds = uploadSeconds;
+      setText('vp-n-up', secs(uploadSeconds));
+      setText('vp-n-mbps', (t.blob.size * 8 / 1e6 / uploadSeconds).toFixed(2) + ' Mbps');
+      $('vp-progress').style.width = '100%';
+      return playBack(t);
+    }).then(function () {
+      var total = (now() - started) / 1000;
+      end('Uploaded ' + mb(t.blob.size) + ' in ' + secs(total), false);
+      lastTry = null;
+      logTry(t, 'ok', '', {upload_seconds: t.uploadSeconds, elapsed: total});
+    }).catch(function (err) {
+      var total = (now() - started) / 1000;
+      var stage = (err && err.stage) || 'upload_failed';
+      if (stage === 'playback_failed') {
+        end('Uploaded ' + mb(t.blob.size) + ' in ' + secs(total) + ', but it would not play back — try again', true);
+      } else {
+        end(failedAfter(), true);
+      }
+      logTry(t, 'failed', stage, {error: (err && err.error) || String(err), bytes_sent: sent,
+                                  elapsed: total, upload_seconds: t.uploadSeconds || null});
+    });
+  }
+
+  // Play the stored copy from a fresh signed read URL: proof the object is whole AND has a
+  // picture. Metadata alone is not enough: headless Chrome on Windows (11 Nov 2026) said it
+  // could record video/mp4;codecs=avc1 and then wrote an audio-only MP4, whose metadata
+  // loads fine. So the check passes only when the stored file reports a picture size; that
+  // size is logged as played=WxH, which also shows the stored orientation.
+  function playBack(t) {
+    return postJSON(root.dataset.signRead, {path: t.path}).then(function (r) {
+      if (!r.ok) { throw {stage: 'playback_failed', error: 'read link: ' + (r.data.error || r.code)}; }
+      return new Promise(function (resolve, reject) {
+        var video = $('vp-playback');
+        var settled = false;
+        var settle = function (fn, arg) { if (!settled) { settled = true; clearTimeout(timer); fn(arg); } };
+        var timer = setTimeout(function () { settle(reject, {stage: 'playback_failed', error: 'no picture after 30 s'}); }, 30000);
+        var check = function (final) {
+          if (video.videoWidth > 0) {
+            t.playedWidth = video.videoWidth; t.playedHeight = video.videoHeight;
+            settle(resolve);
+          } else if (final) {
+            settle(reject, {stage: 'playback_failed', error: 'stored file has no picture (0x0)'});
+          }
+        };
+        // Safari knows the size at metadata; Chrome sometimes only after the first frame.
+        video.onloadedmetadata = function () { check(false); };
+        video.onloadeddata = function () { check(true); };
+        video.onerror = function () {
+          settle(reject, {stage: 'playback_failed', error: 'media error ' + (video.error ? video.error.code : '')});
+        };
+        video.preload = 'auto';
+        video.src = r.data.url;
+        show('vp-playback', true);
+      });
+    }, function () { throw {stage: 'playback_failed', error: 'read link: no connection'}; });
+  }
+})();
+</script>
+{% endblock %}
