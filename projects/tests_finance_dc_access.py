@@ -374,18 +374,22 @@ class HelpTextTests(FinanceDcBase):
 
     def test_both_grn_forms_name_finance(self):
         # The SE's form (shown while the challan is not Received — setUp's receipt left
-        # the inverter line blank) and SCM's override modal.
+        # the inverter line blank) and SCM's override modal. GRN-P2 (W2, W3) reworded the
+        # SE form only (approved wording update); the override keeps its words (W5).
         self.dc.refresh_from_db()
         self.assertEqual(self.dc.status, DeliveryChallan.PARTIALLY_RECEIVED)
-        for profile in (self.se, self.scm):
-            with self.subTest(role=profile.role):
-                page = self.page_for(profile).content.decode()
-                self.assertIn('Signed challan copy, LR/bilty or delivery photo. Site '
-                              'Engineers and Finance will see this file — no rates or '
-                              'amounts.', page)
-                self.assertIn('These documents show no rates, values or amounts. Site '
-                              'Engineers and Finance will see them.</label>', page)
-                self.assertNotIn('Site Engineers will see', page)
+        se_page = self.page_for(self.se).content.decode()
+        self.assertIn('Signed challan copy, LR/bilty or delivery photo. SCM, PM and Finance '
+                      "can see these files — don't attach anything showing prices.", se_page)
+        self.assertIn('No prices or amounts are visible in these files.</label>', se_page)
+        self.assertNotIn('Site Engineers will see', se_page)
+        scm_page = self.page_for(self.scm).content.decode()
+        self.assertIn('Signed challan copy, LR/bilty or delivery photo. Site '
+                      'Engineers and Finance will see this file — no rates or '
+                      'amounts.', scm_page)
+        self.assertIn('These documents show no rates, values or amounts. Site '
+                      'Engineers and Finance will see them.</label>', scm_page)
+        self.assertNotIn('Site Engineers will see', scm_page)
 
     def test_dc_create_and_edit_pages_name_finance(self):
         self.login(self.scm)

@@ -95,8 +95,11 @@ RECEIPT_PHOTO_REQUIRED = ('Add at least one photo of the received material (deli
 #: words. A separate "add documents to an existing receipt" action is NTF-DCG 4b-2.
 DOCUMENTS_NEED_A_QUANTITY = ('Documents can only be attached with a quantity change for '
                              'now — enter the received quantity, or ask SCM.')
-RECEIPT_DOCUMENTS_NO_PRICES = ('Tick "These documents show no rates, values or amounts" to '
-                               'attach them — Site Engineers and Finance will see them.')
+#: GRN-P2 (Q2): shared by both GRN forms, so it names no label — the SE form's tick reads
+#: "No prices or amounts are visible in these files", the SCM override's keeps its older
+#: words (W5). Only the wording changed; the rule in plan_receipt_documents did not.
+RECEIPT_DOCUMENTS_NO_PRICES = ('Tick the box confirming no prices or amounts are visible, '
+                               'to attach these documents.')
 RECEIPT_DOCUMENT_STORAGE_OFF = ('Delivery documents cannot be stored right now: the private '
                                 'delivery bucket is not configured. Nothing was saved — '
                                 'remove the documents to record the receipt without them.')

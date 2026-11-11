@@ -506,18 +506,25 @@ for SCM and Admin (the view splits them off), and only they see the Withdraw con
               <td class="grn-cat"><span class="badge bg-light text-dark border">{{ item.boq_category }}</span></td>
               <td class="small grn-desc">{{ item.item_description }}</td>
               <td class="text-end text-muted grn-ordered" data-label="Ordered">{{ item.ordered_quantity }} {{ item.unit }}</td>
+              {% comment %}GRN-P2 (W4): on a line never recorded (received_quantity null, no refused
+              draft) both boxes start EMPTY. Received has no placeholder, so a grey "0" is never
+              read as a recorded quantity; Damaged keeps "0" as a placeholder only, never as a
+              value (the column defaults to 0). A recorded line shows its stored Damaged value,
+              0 included, because that is real data. The server is unchanged: a blank Received
+              box skips the line, and a blank Damaged box on a recorded line counts as 0. SE
+              form only; the SCM override form below keeps its boxes (W5).{% endcomment %}
               <td class="grn-field" data-label="Total received so far (including earlier deliveries)">
                 <input type="number" name="received_qty_{{ item.pk }}"
                        class="form-control form-control-sm"
                        step="any" min="0" inputmode="decimal"
                        value="{% if item.grn_draft %}{{ item.grn_draft.received }}{% elif item.received_quantity is not None %}{{ item.received_quantity }}{% endif %}"
-                       placeholder="0" aria-label="Received quantity">
+                       aria-label="Received quantity">
               </td>
               <td class="grn-field" data-label="Damaged">
                 <input type="number" name="damaged_qty_{{ item.pk }}"
                        class="form-control form-control-sm"
                        step="1" min="0" inputmode="numeric"
-                       value="{% if item.grn_draft %}{{ item.grn_draft.damaged }}{% else %}{{ item.damaged_quantity }}{% endif %}"
+                       value="{% if item.grn_draft %}{{ item.grn_draft.damaged }}{% elif item.received_quantity is not None %}{{ item.damaged_quantity }}{% endif %}"
                        placeholder="0" aria-label="Damaged quantity"
                        title="How many of the received units are damaged"
                        data-grn-damaged="{{ item.pk }}" data-grn-initial="{{ item.damaged_quantity }}">
@@ -555,7 +562,7 @@ for SCM and Admin (the view splits them off), and only they see the Withdraw con
       not "(optional)" here (a raise needs a photo); the override form's still is.{% endcomment %}
       <div class="border rounded p-2 mb-2 grn-docs" data-grn-docs>
         <div class="small fw-semibold mb-1">Delivery documents</div>
-        <p class="small text-muted mb-2">Signed challan copy, LR/bilty or delivery photo. Site Engineers and Finance will see this file — no rates or amounts.</p>
+        <p class="small text-muted mb-2">Signed challan copy, LR/bilty or delivery photo. SCM, PM and Finance can see these files — don't attach anything showing prices.</p>
         <p class="small fw-semibold mb-2" data-grn-photo-required>Photo required when you record received quantities.</p>
         {% for n in "12345" %}
         <div class="row g-2 mb-2" data-grn-doc-slot>
@@ -578,9 +585,13 @@ for SCM and Admin (the view splits them off), and only they see the Withdraw con
         {% endfor %}
         <button type="button" class="btn btn-outline-secondary btn-sm d-none" data-grn-doc-add>Add another document</button>
         <div class="form-text">PDF, JPG or PNG; up to 5 documents, 20 MB each. Choose what each one is.</div>
-        <div class="form-check mt-1">
+        {% comment %}GRN-P2 (W1, W2): the no-prices tick is RENDERED VISIBLE (progressive
+        enhancement). The script at the end of the page hides it, on load and on every change,
+        while the server's delivery-photo exemption would apply; without the script it simply
+        stays visible. The server (goods_receipts.plan_receipt_documents) still decides.{% endcomment %}
+        <div class="form-check mt-1" data-grn-no-prices>
           <input class="form-check-input" type="checkbox" name="receipt_docs_no_prices" value="1" id="grnDocsNoPricesC">
-          <label class="form-check-label small" for="grnDocsNoPricesC">These documents show no rates, values or amounts. Site Engineers and Finance will see them.</label>
+          <label class="form-check-label small" for="grnDocsNoPricesC">No prices or amounts are visible in these files.</label>
         </div>
       </div>
       {% comment %}DG-B: the damage Issue. With one open, damage recorded now is added to it;
@@ -1102,6 +1113,48 @@ document.addEventListener('DOMContentLoaded', function () {
       .then(finish, finish);
   });
 })();
+</script>
+<script>
+/* GRN-P2 (W1): hide the Site Engineer's no-prices tick ([data-grn-no-prices], SE form
+   only) while the server would not ask for it, and show it as soon as it would. The
+   SERVER decides (goods_receipts.plan_receipt_documents and _delivery_photos_only); this
+   mirrors that rule and nothing more:
+     hidden  every slot holding a file is "Delivery photo" with a .jpg/.jpeg/.png name
+             (the server judges by name too), and every slot without a file is on
+             "What is it?" or "Delivery photo";
+     shown   otherwise: another type chosen, a file with no type, or a PDF.
+   No documents at all also hides it: the server asks no tick then. A tick hidden while
+   ticked still posts 1, which is harmless. Without this script the tick stays visible.
+   Runs on load and on every change in the documents block. The GRN-P shrink above can
+   rename a PNG to .jpg after the change event, which leaves it an image either way. */
+document.addEventListener('DOMContentLoaded', function () {
+  var PHOTO = 'delivery_photo';         /* goods_receipts.RECEIPT_DOCUMENT_PHOTO */
+  var IMAGE_NAME = /\.(jpe?g|png)$/i;  /* goods_receipts._IMAGE_EXTENSIONS */
+  function exempt(docs) {
+    var slots = docs.querySelectorAll('[data-grn-doc-slot]');
+    for (var i = 0; i < slots.length; i++) {
+      var kind = slots[i].querySelector('select'), input = slots[i].querySelector('input[type="file"]');
+      var type = kind ? kind.value : '';
+      var file = input && input.files && input.files[0];
+      if (file) {
+        if (type !== PHOTO || !IMAGE_NAME.test(file.name || '')) return false;
+      } else if (type && type !== PHOTO) {
+        return false;
+      }
+    }
+    return true;
+  }
+  var ticks = document.querySelectorAll('[data-grn-no-prices]');
+  for (var t = 0; t < ticks.length; t++) {
+    (function (tick) {
+      var docs = tick.closest('[data-grn-docs]');
+      if (!docs) return;
+      var refresh = function () { tick.classList.toggle('d-none', exempt(docs)); };
+      docs.addEventListener('change', refresh);
+      refresh();
+    })(ticks[t]);
+  }
+});
 </script>
 {% endif %}
 

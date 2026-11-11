@@ -522,8 +522,14 @@ class FormTests(ReceiptDocumentBase):
                 first = first[:first.index('</select>')]
                 self.assertEqual(re.findall(r'<option value="([^"]+)"', first), expected_options)
                 self.assertIn('name="receipt_docs_no_prices" value="1"', form)
-                self.assertIn('Signed challan copy, LR/bilty or delivery photo. Site Engineers '
-                              'and Finance will see this file — no rates or amounts.', form)
+                # GRN-P2 (W3) reworded the SE form's help line only; the override keeps its
+                # words (W5). Approved wording update.
+                help_line = ('Signed challan copy, LR/bilty or delivery photo. SCM, PM and '
+                             "Finance can see these files — don't attach anything showing prices."
+                             if which == 'confirm' else
+                             'Signed challan copy, LR/bilty or delivery photo. Site Engineers '
+                             'and Finance will see this file — no rates or amounts.')
+                self.assertIn(help_line, form)
 
     def test_no_capture_and_shrinking_on_the_se_form_only(self):
         # GRN-P (M5) amends Q5: the SE form's slots shrink an image (data-grn-doc-shrink,
