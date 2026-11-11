@@ -28,6 +28,7 @@ uploader, discard, open link and withdraw, reused (A1). In the views:
 
     ... damage refusals, then G4 (a documents-only submission is refused there, Q2) ...
     plan_receipt_documents()  type, count, tick, storage, each file — before any upload
+    receipt_photo_errors()    GRN-P, confirm_grn only: a raise needs an image (joined)
     upload_planned_photos()   unchanged, then
     upload_receipt_documents() the same DC-B2 uploader, folder 'grn-document' (Q7)
     -- transaction.atomic() -- ... as above, ending with link_receipt_documents()
@@ -50,7 +51,8 @@ from .delivery_storage import (
 from .grn_damage import photo_field
 from .grn_notify import fire_after_commit
 from .models import (
-    RECEIPT_DOCUMENT_TYPE_CHOICES, DeliveryChallanAttachment, GoodsReceipt, GoodsReceiptLine,
+    RECEIPT_DOCUMENT_PHOTO, RECEIPT_DOCUMENT_TYPE_CHOICES, DeliveryChallanAttachment,
+    GoodsReceipt, GoodsReceiptLine,
 )
 
 #: G4: a submission in which no line is recorded or changed.
@@ -72,7 +74,22 @@ RECEIPT_DOCUMENT_TYPE_FIELD = 'receipt_doc_type_{}'
 _RECEIPT_DOCUMENT_FIELD_RE = re.compile(r'^receipt_doc_(\d+)$')
 
 #: A4: the uploader's tick that no document shows a price, one per submission as DC-B2.
+#: GRN-P amends it: not asked when every document is a JPG/PNG typed "Delivery photo".
 RECEIPT_DOCUMENTS_NO_PRICES_FIELD = 'receipt_docs_no_prices'
+
+#: GRN-P (M3): a receipt document whose file name ends in one of these is an image.
+#: The name is enough: validate_dc_document() refuses a .jpg/.png whose bytes are not one,
+#: and anything it refuses never reaches a receipt.
+_IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png')
+
+#: GRN-P follow-up: a PDF posted as a "Delivery photo" (slot 1 starts on that type, so a
+#: PDF picked there without changing it would be mislabelled). Both GRN forms.
+RECEIPT_PDF_NOT_A_PHOTO = ("A PDF can't be a delivery photo — choose Signed challan copy, "
+                           "LR or bilty, or Other.")
+
+#: GRN-P (M4): the Site Engineer's refusal when a raise carries no image.
+RECEIPT_PHOTO_REQUIRED = ('Add at least one photo of the received material (delivery photo, '
+                          'packing list photo or damage photo).')
 
 #: Ruling Q2 (option b): a submission carrying only documents is refused by G4, in these
 #: words. A separate "add documents to an existing receipt" action is NTF-DCG 4b-2.
@@ -108,14 +125,62 @@ def receipt_documents_chosen(request):
     return bool(_chosen_documents(request))
 
 
+def _is_image(upload):
+    """GRN-P (M3): True for a JPG or PNG by its name (see _IMAGE_EXTENSIONS)."""
+    return (upload.name or '').lower().endswith(_IMAGE_EXTENSIONS)
+
+
+def _delivery_photos_only(chosen):
+    """GRN-P tick ruling (amends 4b A4): True when EVERY chosen document is an image typed
+    "Delivery photo". A photo of the goods taken at site shows no rate or amount, so it
+    needs no no-prices tick; any PDF, or any other type, still does."""
+    return all(doc_type == RECEIPT_DOCUMENT_PHOTO and _is_image(upload)
+               for _slot, doc_type, upload in chosen)
+
+
+def receipt_photo_errors(request, grn_lines, damage_plan):
+    """GRN-P (M1–M4): the Site Engineer's photo rule. Returns [] or [RECEIPT_PHOTO_REQUIRED].
+
+    Asked by confirm_grn only (M1; override_grn never calls it), after G4 and beside
+    plan_receipt_documents(), before any upload — so its message joins the document
+    refusals in one refusal and nothing is stored.
+
+    M2 — only a RAISE needs a photo: some line's posted received quantity is above what
+    the line holds now, a line never recorded counting as 0. Damage-only, notes-only and
+    downward corrections need none. `grn_lines` is changed_grn_lines()' output; each
+    item is the row as read before the lock, so `item.received_quantity` is still the
+    value before this submission (no line is written until the transaction).
+    TODO(GRN-P): the rule is not asked again under the challan lock. A downward
+    correction that becomes a raise because SCM lowered the line meanwhile goes through
+    without a photo; deferred because it needs an SCM correction and an SE correction on
+    the same line within seconds, and asking it under the lock would mean refusing after
+    the uploads.
+
+    M3 — any image in THIS submission: a damage photo (damage_plan.files, already
+    validated as JPG/PNG by plan_damage), or a receipt document whose file is a JPG or
+    PNG, of any type. A PDF does not count. Photos already on record do not count.
+    """
+    raises = any(received > (item.received_quantity or 0)
+                 for item, received, *_rest in grn_lines)
+    if not raises:
+        return []
+    if damage_plan is not None and damage_plan.files:
+        return []
+    if any(_is_image(upload) for _slot, _type, upload in _chosen_documents(request)):
+        return []
+    return [RECEIPT_PHOTO_REQUIRED]
+
+
 def plan_receipt_documents(request):
     """Decide the documents this GRN attaches. Returns ([(type, file)], errors).
 
     Writes nothing and uploads nothing, so the views call it before any upload (A5) and a
     refusal leaves no trace. Refused: more than RECEIPT_DOCUMENTS_MAX_FILES; a file with
-    no type or an unknown one (A2); no no-prices tick (A4); storage off; then each file
-    through DC-B2's validate_dc_document (PDF/JPG/PNG, 20 MB, MIME, leading bytes). A type
-    chosen in a slot with no file is ignored: it records nothing.
+    no type or an unknown one (A2); a PDF typed "Delivery photo" (GRN-P,
+    RECEIPT_PDF_NOT_A_PHOTO); no no-prices tick (A4) — unless every document is a
+    JPG/PNG typed "Delivery photo" (GRN-P, on both GRN forms since A4 is shared); storage
+    off; then each file through DC-B2's validate_dc_document (PDF/JPG/PNG, 20 MB, MIME,
+    leading bytes). A type chosen in a slot with no file is ignored: it records nothing.
     """
     chosen = _chosen_documents(request)
     if not chosen:
@@ -128,7 +193,13 @@ def plan_receipt_documents(request):
         if doc_type not in _RECEIPT_DOCUMENT_TYPES:
             errors.append(f'{upload.name}: choose what this document is — Signed DC copy, '
                           f'LR or bilty, Delivery photo or Other.')
-    if request.POST.get(RECEIPT_DOCUMENTS_NO_PRICES_FIELD) != '1':
+        elif (doc_type == RECEIPT_DOCUMENT_PHOTO
+              and (upload.name or '').lower().endswith('.pdf')
+              and RECEIPT_PDF_NOT_A_PHOTO not in errors):
+            # Once per submission, however many PDFs are typed so: the fix is the same.
+            errors.append(RECEIPT_PDF_NOT_A_PHOTO)
+    if (request.POST.get(RECEIPT_DOCUMENTS_NO_PRICES_FIELD) != '1'
+            and not _delivery_photos_only(chosen)):
         errors.append(RECEIPT_DOCUMENTS_NO_PRICES)
     if errors:
         return [], errors
@@ -171,7 +242,10 @@ def link_receipt_documents(receipt, stored, uploaded_by):
     inside the GRN view's transaction, after write_goods_receipt() (A5), so a rollback
     takes the rows back and the views' discard then finds the objects unrecorded.
     no_prices_confirmed is True because plan_receipt_documents() refused the submission
-    without the tick. One INSERT per document (at most five); create(), not bulk_create(),
+    without the tick — except a submission of delivery photos only (GRN-P), where True
+    records the ruling that such a photo shows no price, not a tick (the CHECK
+    dc_attachment_no_prices_confirmed holds the column true; see SECONDARY_FINDINGS).
+    One INSERT per document (at most five); create(), not bulk_create(),
     so the model's append-only save() is the one that runs."""
     return [
         DeliveryChallanAttachment.objects.create(

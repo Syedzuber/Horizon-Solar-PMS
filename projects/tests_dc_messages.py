@@ -26,6 +26,7 @@ from django.urls import reverse
 from .models import (
     BOQ, DCLineItem, DeliveryChallan, Project, ProjectPhase, Task, UserProfile,
 )
+from .tests_grn_damage import stub_delivery_storage, with_grn_photo
 
 
 def _profile(username, role):
@@ -81,10 +82,11 @@ class DcDetailMessageTests(TestCase):
         return response.content.decode()
 
     def test_grn_confirmed_is_shown_once(self):
-        page = self._post_and_follow(self.se, 'confirm_grn', {
+        stub_delivery_storage(self)   # GRN-P: the delivery photo goes to a mock bucket
+        page = self._post_and_follow(self.se, 'confirm_grn', with_grn_photo({
             f'received_qty_{self.line.pk}': '10',
             f'damaged_qty_{self.line.pk}': '0',
-        })
+        }))
         self.assertEqual(page.count('GRN confirmed'), 1)
 
     def test_grn_overridden_is_shown_once(self):

@@ -295,6 +295,8 @@ from .goods_receipts import (
     DOCUMENTS_NEED_A_QUANTITY, discard_receipt_documents, link_receipt_documents,
     plan_receipt_documents, receipt_documents_chosen, upload_receipt_documents,
     documents_message,
+    # GRN-P — confirm_grn's photo rule (M1–M4), joined to the document refusals.
+    receipt_photo_errors,
 )
 from .models import GOODS_RECEIPT_CORRECTION, GOODS_RECEIPT_RECEIPT
 # DC-B3 — correcting a challan after creation. Every decision and write is in dc_edit;
@@ -14803,6 +14805,9 @@ def confirm_grn(request, project_id, dc_id):
     before any upload, uploaded by DC-B2's uploader after the photos, and linked to that
     receipt inside the transaction; every refusal or rollback discards them too.
     Documents with no quantity change are refused (ruling Q2).
+    GRN-P: a submission that raises any line's received quantity must carry at least one
+    image — a damage photo or a JPG/PNG receipt document — or it is refused with the
+    document refusals, before any upload, draft kept (goods_receipts.receipt_photo_errors).
     Access: Site Engineer only. POST only.
     """
     if request.method != 'POST':
@@ -14879,6 +14884,13 @@ def confirm_grn(request, project_id, dc_id):
     # NTF-DCG 4b (A2–A5): every document refusal — count, type, tick, storage, the files
     # themselves — before any upload, so a refusal stores nothing.
     receipt_documents, document_errors = plan_receipt_documents(request)
+    # GRN-P (M1–M4): a raise of any received quantity needs an image in this submission
+    # (a damage photo, or a JPG/PNG receipt document). Here, after G4 and before any
+    # upload, and ADDED to the document refusals rather than asked on its own, so the
+    # Site Engineer re-attaches once and is told everything that is missing at one go.
+    # Asked whether or not the documents were refused, so it never hides behind a tick
+    # message. Site Engineer form only (M1): override_grn does not ask it.
+    document_errors += receipt_photo_errors(request, grn_lines, damage_plan)
     if document_errors:
         _refuse_grn(request, challan, GRN_DRAFT_CONFIRM, line_items, document_errors,
                     'The GRN was not recorded.')

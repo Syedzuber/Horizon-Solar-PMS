@@ -53,6 +53,7 @@ from .models import (
     ChecklistTaskLink, DCLineItem, DeliveryChallan, Issue, PaymentMilestone,
     Project, ProjectDocument, SystemSettings, Task, TaskAttachment, UserProfile,
 )
+from .tests_grn_damage import stub_delivery_storage, with_grn_photo
 from .utils import RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL, assign_tasks_to
 
 
@@ -587,9 +588,10 @@ class LiveProjectStillWorksTests(SoftDeleteBase):
     def test_a_live_challan_still_takes_a_grn(self):
         challan = self._make_dc(self.project)
         line = challan.line_items.first()
+        stub_delivery_storage(self)   # GRN-P: the delivery photo goes to a mock bucket
         response = _client_for(self.se).post(
             reverse('confirm_grn', args=[self.project.project_id, challan.pk]),
-            {f'received_qty_{line.pk}': '10', f'damaged_qty_{line.pk}': '0'},
+            with_grn_photo({f'received_qty_{line.pk}': '10', f'damaged_qty_{line.pk}': '0'}),
         )
         self.assertEqual(response.status_code, 302)
         line.refresh_from_db()

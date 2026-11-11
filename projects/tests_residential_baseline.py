@@ -80,6 +80,7 @@ from .models import (
     PaymentMilestone, PaymentRequest, Project, ProjectDocument, SystemSettings, Task,
     UserProfile, Vendor, VendorOrder, get_standard_boq_items,
 )
+from .tests_grn_damage import stub_delivery_storage, with_grn_photo
 from .utils import (
     INVOICE_TASK_NAMES, RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL,
     RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES, add_calendar_days, assign_tasks_to,
@@ -705,11 +706,12 @@ class DeliveryGRNWorkflowTests(ResidentialBaselineBase):
     def test_the_site_engineer_on_this_project_confirms_a_full_grn(self):
         challan = self._make_dc(self.project_a, ordered=Decimal('10.00'))
         item = challan.line_items.first()
+        stub_delivery_storage(self)   # GRN-P: the delivery photo goes to a mock bucket
 
         response = _client_for(self.se_a).post(
             reverse('confirm_grn', args=[self.project_a.project_id, challan.pk]),
-            {f'received_qty_{item.pk}': '10', f'damaged_qty_{item.pk}': '0',
-             f'grn_notes_{item.pk}': 'all good'},
+            with_grn_photo({f'received_qty_{item.pk}': '10', f'damaged_qty_{item.pk}': '0',
+                            f'grn_notes_{item.pk}': 'all good'}),
         )
         self.assertEqual(response.status_code, 302)
 
@@ -725,9 +727,10 @@ class DeliveryGRNWorkflowTests(ResidentialBaselineBase):
     def test_a_shortfall_alone_rolls_up_to_partially_received(self):
         challan = self._make_dc(self.project_a, 'DC-SHORT', ordered=Decimal('10.00'))
         item = challan.line_items.first()
+        stub_delivery_storage(self)   # GRN-P: the delivery photo goes to a mock bucket
         _client_for(self.se_a).post(
             reverse('confirm_grn', args=[self.project_a.project_id, challan.pk]),
-            {f'received_qty_{item.pk}': '7', f'damaged_qty_{item.pk}': '0'},
+            with_grn_photo({f'received_qty_{item.pk}': '7', f'damaged_qty_{item.pk}': '0'}),
         )
         item.refresh_from_db(); challan.refresh_from_db()
         # `condition` is derived from DAMAGE ALONE, so a pure shortfall reads 'Good'
@@ -770,9 +773,10 @@ class DeliveryGRNWorkflowTests(ResidentialBaselineBase):
     def test_scm_overrides_a_grn_without_overwriting_the_original_engineer(self):
         challan = self._make_dc(self.project_a, 'DC-OVR', ordered=Decimal('10.00'))
         item = challan.line_items.first()
+        stub_delivery_storage(self)   # GRN-P: the delivery photo goes to a mock bucket
         _client_for(self.se_a).post(
             reverse('confirm_grn', args=[self.project_a.project_id, challan.pk]),
-            {f'received_qty_{item.pk}': '8', f'damaged_qty_{item.pk}': '0'},
+            with_grn_photo({f'received_qty_{item.pk}': '8', f'damaged_qty_{item.pk}': '0'}),
         )
         _client_for(self.scm).post(
             reverse('override_grn', args=[self.project_a.project_id, challan.pk]),
@@ -1680,6 +1684,7 @@ class NotificationTests(ResidentialBaselineBase):
         damage sends live there."""
         challan = self._make_dc(self.project_a, 'DC-SILENT')
         item = challan.line_items.first()
+        stub_delivery_storage(self)   # GRN-P: the delivery photo goes to a mock bucket
         with patch('projects.views.send_notification') as sender, \
                 patch('projects.grn_damage.send_notification') as damage_sender, \
                 patch('projects.grn_damage.notify') as damage_notify:
@@ -1687,7 +1692,8 @@ class NotificationTests(ResidentialBaselineBase):
                 _client_for(self.se_a).post(
                     reverse('confirm_grn',
                             args=[self.project_a.project_id, challan.pk]),
-                    {f'received_qty_{item.pk}': '4', f'damaged_qty_{item.pk}': '0'},
+                    with_grn_photo({f'received_qty_{item.pk}': '4',
+                                    f'damaged_qty_{item.pk}': '0'}),
                 )
         sender.assert_not_called()
         damage_sender.assert_not_called()

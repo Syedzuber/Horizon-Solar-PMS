@@ -73,6 +73,22 @@ PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
 ZEPTOMAIL_API_KEY = ''
 INTERAKT_API_KEY = ''
 
+# NO LIVE STORAGE UNDER TEST (GRN-P, item 8). `from .settings import *` also copies in the
+# development Supabase URL, key and bucket names, so a test that uploaded without mocking
+# the storage client wrote a real object to the dev project (the GRN-P pre-flight did, 15
+# times). Empty, nothing reaches the network: both client builders
+# (design_storage._client, supabase_storage.get_supabase_client) raise "not configured" on
+# an empty URL or key, and delivery_bucket() / bills_bucket() read '' as storage off. A
+# test that needs storage stubs the client AND names a test bucket itself
+# (tests_grn_damage.stub_delivery_storage, or override_settings beside its own
+# mock.patch) — it never inherits one from here.
+SUPABASE_URL = ''
+SUPABASE_KEY = ''
+SUPABASE_BUCKET = ''
+SUPABASE_DESIGN_BUCKET = ''
+SUPABASE_BILLS_BUCKET = ''
+SUPABASE_DELIVERY_BUCKET = ''
+
 # DEFERRED SENDS RUN INLINE (NTF-DCG S2, S8). notify_deferred hands a deferred event's
 # email to a background thread; that thread would open its own connection, and an
 # in-memory SQLite database is private to one connection, so it would find no tables.

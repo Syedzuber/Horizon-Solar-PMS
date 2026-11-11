@@ -83,6 +83,86 @@ def jpg(name='damage.jpg'):
     return SimpleUploadedFile(name, JPG, content_type='image/jpeg')
 
 
+# ---------------------------------------------------------------------------
+# GRN-P (M7) — the shared photo and storage helpers for every SE-GRN test
+# ---------------------------------------------------------------------------
+
+#: A delivery photo as an SE attaches it to satisfy GRN-P: a small JPEG.
+DELIVERY_JPG = b'\xff\xd8\xff\xe0\x00\x10JFIF delivery'
+DELIVERY_PHOTO_NAME = 'delivery.jpg'
+
+
+#: The SE's success message on a first GRN that carried the helper's delivery photo.
+CONFIRMED_WITH_PHOTO = 'GRN confirmed. DC status: {status}. 1 document attached to GRN-000001.'
+
+
+def grn_photo(name=DELIVERY_PHOTO_NAME):
+    return SimpleUploadedFile(name, DELIVERY_JPG, content_type='image/jpeg')
+
+
+def _files(value):
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+def with_grn_photo(data):
+    """`data` (a confirm_grn POST) plus what a Site Engineer attaches to satisfy GRN-P —
+    one JPG typed "Delivery photo" in the next free receipt_doc slot — but ONLY when the
+    post raises some line's received quantity and carries no image. Any other post comes
+    back unchanged, so a refusal, a correction, a damage-only or a documents-only post is
+    the test it was before. No no-prices tick is added: a delivery photo alone needs none
+    (GRN-P tick ruling), and a post with other documents brings its own tick.
+
+    "Raises" is the rule's own test (goods_receipts.receipt_photo_errors), asked of the
+    lines as stored now, one query; a box that does not parse is left to the view."""
+    data = dict(data)
+    posted = {}
+    for key, value in data.items():
+        if key.startswith('received_qty_') and str(value).strip():
+            try:
+                posted[int(key.rsplit('_', 1)[1])] = Decimal(str(value).strip())
+            except (ArithmeticError, ValueError):
+                continue
+    if not posted:
+        return data
+    stored = dict(DCLineItem.objects.filter(pk__in=posted)
+                  .values_list('pk', 'received_quantity'))
+    if not any(qty > (stored.get(pk) or 0) for pk, qty in posted.items() if pk in stored):
+        return data
+    for key, value in data.items():
+        if key.startswith(('damage_photos_', 'receipt_doc_')) and not key.startswith('receipt_doc_type_'):
+            if any(getattr(f, 'name', '').lower().endswith(('.jpg', '.jpeg', '.png'))
+                   for f in _files(value)):
+                return data
+    # A slot is taken by a file or by a type chosen alone, so the photo never overwrites
+    # a type a test posts on purpose.
+    used = {int(key.rsplit('_', 1)[1]) for key in data
+            if re.fullmatch(r'receipt_doc_(type_)?\d+', key)}
+    slot = next(n for n in range(1, 100) if n not in used)
+    data[f'receipt_doc_{slot}'] = grn_photo()
+    data[f'receipt_doc_type_{slot}'] = 'delivery_photo'
+    return data
+
+
+def stub_delivery_storage(testcase):
+    """Stub the Supabase client for one test, as GrnDamageBase.setUp does, and name the
+    test bucket. For the modules that post an SE GRN without GrnDamageBase: test_settings
+    empties every Supabase setting (GRN-P item 8), so without this a GRN photo is refused
+    as "not configured". Returns the bucket mock (upload / remove / create_signed_url)."""
+    storage = mock.MagicMock()
+    bucket_api = storage.storage.from_.return_value
+    bucket_api.create_signed_url.return_value = {'signedURL': SIGNED}
+    for target in ('projects.delivery_storage._client', 'projects.design_storage._client'):
+        patcher = mock.patch(target, return_value=storage)
+        patcher.start()
+        testcase.addCleanup(patcher.stop)
+    bucket = override_settings(SUPABASE_DELIVERY_BUCKET=BUCKET)
+    bucket.enable()
+    testcase.addCleanup(bucket.disable)
+    return bucket_api
+
+
 def _project(project_id, pm=None):
     return Project.objects.create(
         project_id=project_id, customer_name=f'{project_id} Residence',
@@ -158,12 +238,18 @@ class GrnDamageBase(TestCase):
             data['grn_on_behalf_reason'] = reason
         return data
 
-    def confirm(self, lines, description='', actor=None, challan=None, project=None):
+    def confirm(self, lines, description='', actor=None, challan=None, project=None,
+                photo=True):
+        """An SE GRN. GRN-P: a raise gets a delivery photo (with_grn_photo) unless
+        `photo=False`, which posts exactly what `lines` says."""
         self.login(actor or self.se)
         challan, project = challan or self.dc, project or self.site
+        data = self._payload(lines, description)
+        if photo:
+            data = with_grn_photo(data)
         with self.captureOnCommitCallbacks(execute=True):
             return self.client.post(reverse('confirm_grn', args=[project.project_id, challan.pk]),
-                                    self._payload(lines, description))
+                                    data)
 
     def override(self, lines, description='', reason='', actor=None):
         self.login(actor or self.scm)
@@ -664,10 +750,11 @@ class AllOrNothingTests(GrnDamageBase):
 
     def test_a_grn_with_no_damage_is_unchanged(self):
         response = self.confirm({self.panels: ('10', '0', []), self.inverter: ('2', '0', [])})
-        self.assertIn('GRN confirmed. DC status: Received.', self.messages_of(response))
+        self.assertIn(CONFIRMED_WITH_PHOTO.format(status='Received'), self.messages_of(response))
         self.assertFalse(Issue.objects.exists())
         self.assertFalse(Comment.objects.exists())
-        self.assertEqual(self.uploads(), [])
+        # No damage photo uploaded; the one upload is GRN-P's delivery photo.
+        self.assertEqual([path.split('/')[1] for path in self.uploads()], ['grn-document'])
         self.assertNotIn('grn_draft', self.client.session)
 
 
@@ -740,7 +827,7 @@ class ChangedMeanwhileTests(GrnDamageBase):
         with self.in_the_window(lambda: DeliveryChallan.objects.filter(pk=self.dc.pk).update(
                 po_number='PO-EDITED', notes='Edited while the GRN was saving')):
             response = self.confirm({self.panels: ('10', '0', []), self.inverter: ('2', '0', [])})
-        self.assertIn('GRN confirmed. DC status: Received.', self.messages_of(response))
+        self.assertIn(CONFIRMED_WITH_PHOTO.format(status='Received'), self.messages_of(response))
         self.dc.refresh_from_db()
         self.assertEqual((self.dc.po_number, self.dc.notes),
                          ('PO-EDITED', 'Edited while the GRN was saving'))
@@ -757,7 +844,8 @@ class ChangedMeanwhileTests(GrnDamageBase):
         with self.in_the_window(add_line):
             response = self.confirm({self.panels: ('10', '0', [])})
         # NTF-DCG 4c: the added line is still blank, so the challan is not yet Received.
-        self.assertIn('GRN confirmed. DC status: Partially Received.', self.messages_of(response))
+        self.assertIn(CONFIRMED_WITH_PHOTO.format(status='Partially Received'),
+                      self.messages_of(response))
         added['line'].refresh_from_db()
         self.assertIsNone(added['line'].received_quantity)
 
@@ -780,7 +868,8 @@ class ChangedMeanwhileTests(GrnDamageBase):
         self.assertEqual((self.inverter.received_quantity, self.inverter.grn_notes),
                          (Decimal('1'), 'one short'))
         # The status is decided on both GRNs' rows: the inverter is one short.
-        self.assertIn('GRN confirmed. DC status: Partially Received.', self.messages_of(response))
+        self.assertIn(CONFIRMED_WITH_PHOTO.format(status='Partially Received'),
+                      self.messages_of(response))
 
     def test_damage_recorded_by_a_second_grn_in_the_window_refuses_the_later_one(self):
         # The page saw no damage, so the plan asked nothing; under the lock the line has
@@ -839,7 +928,7 @@ class ChangedMeanwhileTests(GrnDamageBase):
                          'Engineer phone dead at site')
 
     def test_no_race_confirm_then_override_write_as_before(self):
-        self.assertIn('GRN confirmed. DC status: Received.', self.messages_of(
+        self.assertIn(CONFIRMED_WITH_PHOTO.format(status='Received'), self.messages_of(
             self.confirm({self.panels: ('10', '0', []), self.inverter: ('2', '0', [])})))
         self.assertIn('GRN overridden. DC status: Partially Received.', self.messages_of(
             self.override({self.panels: ('9', '0', [])})))

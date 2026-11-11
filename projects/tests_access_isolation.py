@@ -66,6 +66,7 @@ from .permissions import (
 )
 # Closeout step 3: two activated OPEX sites and the QA/QC cast, shared with the positive
 # suite. The fixture class holds no test methods, so importing it here runs nothing twice.
+from .tests_grn_damage import stub_delivery_storage, with_grn_photo
 from .tests_qaqc_assignment import QaqcFixture
 from .utils import RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL, assign_task_to, assign_tasks_to
 
@@ -418,10 +419,11 @@ class RoleGateScopingTests(AccessIsolationBase):
         repeated here so this file cannot pass by refusing every site engineer."""
         challan = self._a_challan(self.project_b)
         line = challan.line_items.first()
+        stub_delivery_storage(self)   # GRN-P: the delivery photo goes to a mock bucket
 
         response = _client_for(self.se_b).post(
             reverse('confirm_grn', args=[self.project_b.project_id, challan.pk]),
-            {f'received_qty_{line.pk}': '10', f'damaged_qty_{line.pk}': '0'},
+            with_grn_photo({f'received_qty_{line.pk}': '10', f'damaged_qty_{line.pk}': '0'}),
         )
         self.assertEqual(response.status_code, 302)
         line.refresh_from_db()

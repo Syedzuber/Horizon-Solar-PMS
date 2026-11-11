@@ -362,6 +362,40 @@ def bill_storage_stub():
         yield
 
 
+@contextmanager
+def delivery_storage_stub():
+    """GRN-P (M7): what the Site Engineer's GRN needs from storage, stubbed — around the
+    delivery GRNs only, inside seed_sandbox(), mirroring bill_storage_stub().
+
+    seed_sandbox() blanks SUPABASE_URL / SUPABASE_KEY, and delivery_storage imports
+    design_storage's `_client` by name, so the delivery photo each raise now carries would
+    be refused "Supabase is not configured". The client is patched where delivery_storage
+    looks it up, and the private delivery bucket is set to STUB_BUCKET, so the photo is
+    validated and recorded exactly as a real one and stored nowhere. On the walked
+    database the receipt lists the photo; opening it fails ("bucket not found"), as the
+    bill PDFs do.
+
+    TODO: belongs in _walkthrough_support.seed_sandbox() beside bill_storage_stub (see
+    that function's TODO); kept here because this session could not edit that module.
+    """
+    with ExitStack() as stack:
+        stack.enter_context(override_settings(SUPABASE_DELIVERY_BUCKET=STUB_BUCKET))
+        stack.enter_context(mock.patch('projects.delivery_storage._client',
+                                       return_value=StubSupabaseClient()))
+        yield
+
+
+#: GRN-P (M7): the delivery photo the walkthrough's Site Engineer attaches to a raise —
+#: a few JPEG bytes (validate_dc_document checks the name, the type and the leading
+#: bytes), generated here so the seed needs no image file or library.
+WALK_DELIVERY_JPG = b'\xff\xd8\xff\xe0\x00\x10JFIF walkthrough delivery photo\xff\xd9'
+
+
+def walk_delivery_photo():
+    return SimpleUploadedFile('delivery-photo.jpg', WALK_DELIVERY_JPG,
+                              content_type='image/jpeg')
+
+
 def independent_aging_figures(now):
     """The aging page's figures, computed from the step rows WITHOUT approval_queries —
     the walk script prints them so the page can be checked against them, and the tests
@@ -1340,10 +1374,16 @@ class Command(BaseCommand):
                            == expected, what=f'GRN {number}')
 
         # 0001 stays Expected. 0002 partial, 0003 received, 0004 rejected (nothing came).
-        grn('walk.se', 'WALK-DC-0002', lambda i: (int(i.ordered_quantity) // 2, 0),
-            expected=m.DeliveryChallan.PARTIALLY_RECEIVED)
-        grn('walk.se', 'WALK-DC-0003', lambda i: (int(i.ordered_quantity), 0),
-            expected=m.DeliveryChallan.RECEIVED)
+        # GRN-P: 0002 and 0003 raise a received quantity, so each carries a delivery photo
+        # in slot 1 (no no-prices tick: a delivery photo alone needs none). 0004 records 0
+        # on a never-recorded line, which is not a raise, so it carries none.
+        photo = lambda: {'receipt_doc_1': walk_delivery_photo(),   # noqa: E731
+                         'receipt_doc_type_1': 'delivery_photo'}
+        with delivery_storage_stub():
+            grn('walk.se', 'WALK-DC-0002', lambda i: (int(i.ordered_quantity) // 2, 0),
+                extra=photo(), expected=m.DeliveryChallan.PARTIALLY_RECEIVED)
+            grn('walk.se', 'WALK-DC-0003', lambda i: (int(i.ordered_quantity), 0),
+                extra=photo(), expected=m.DeliveryChallan.RECEIVED)
         grn('walk.se', 'WALK-DC-0004', lambda i: (0, 0),
             expected=m.DeliveryChallan.REJECTED)
         # 0005 — the site engineer was unreachable; SCM records it on their behalf.

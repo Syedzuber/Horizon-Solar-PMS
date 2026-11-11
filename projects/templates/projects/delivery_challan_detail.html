@@ -548,10 +548,15 @@ for SCM and Admin (the view splits them off), and only they see the Withdraw con
       so they never mix with the damage photos in each line's card. Five slots
       (goods_receipts.RECEIPT_DOCUMENTS_MAX_FILES), each a type and one file; the script at
       the end shows one at a time. No capture attribute (Q4): the phone offers camera,
-      gallery and files. No data-qaqc-photo (Q5): documents upload at full size.{% endcomment %}
+      gallery and files. No data-qaqc-photo (Q5) — but GRN-P (M5) shrinks a JPG/PNG
+      chosen here to 2048 px through data-grn-doc-shrink (the script below the page's
+      GRN script); a PDF uploads as chosen. GRN-P (M6): the photo-required line, and slot
+      1 starts on "Delivery photo"; a type with no file records nothing. The heading is
+      not "(optional)" here (a raise needs a photo); the override form's still is.{% endcomment %}
       <div class="border rounded p-2 mb-2 grn-docs" data-grn-docs>
-        <div class="small fw-semibold mb-1">Delivery documents <span class="text-muted fw-normal">(optional)</span></div>
+        <div class="small fw-semibold mb-1">Delivery documents</div>
         <p class="small text-muted mb-2">Signed challan copy, LR/bilty or delivery photo. Site Engineers and Finance will see this file — no rates or amounts.</p>
+        <p class="small fw-semibold mb-2" data-grn-photo-required>Photo required when you record received quantities.</p>
         {% for n in "12345" %}
         <div class="row g-2 mb-2" data-grn-doc-slot>
           <div class="col-12 col-md-4">
@@ -559,13 +564,14 @@ for SCM and Admin (the view splits them off), and only they see the Withdraw con
               <option value="">What is it?</option>
               <option value="signed_dc">Signed DC copy</option>
               <option value="lr">LR or bilty</option>
-              <option value="delivery_photo">Delivery photo</option>
+              <option value="delivery_photo"{% if n == "1" %} selected{% endif %}>Delivery photo</option>
               <option value="other">Other</option>
             </select>
           </div>
           <div class="col-12 col-md-8">
             <input type="file" name="receipt_doc_{{ n }}" class="form-control form-control-sm"
                    accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+                   data-grn-doc-shrink
                    aria-label="Document {{ n }}: file">
           </div>
         </div>
@@ -1009,6 +1015,93 @@ document.addEventListener('DOMContentLoaded', function () {
     }
   });
 });
+</script>
+<script>
+/* GRN-P (M5): a JPG or PNG chosen in a Site Engineer receipt-document slot
+   (input[data-grn-doc-shrink]) is redrawn at most 2048 px on its long edge, JPEG quality
+   0.85, before it is sent — a phone photo of 5–10 MB becomes well under 1 MB on a site
+   connection. A PDF, or any other file, is left exactly as chosen. The original is kept
+   when the result is not smaller or anything fails (no canvas, no DataTransfer, a JS
+   error): this never blocks a GRN, and the server's validator and 20 MB limit apply
+   either way.
+
+   A sibling of downscale() in _qaqc_photo_script.html, not a change to it: that partial
+   serves QA/QC visits, punch points and the damage-photo inputs with 1600 px / 0.8, and
+   the damage inputs (data-qaqc-photo) are not touched here — no input carries both
+   attributes. Two differences: the canvas is filled white first, so a PNG's transparent
+   areas do not turn black as JPEG; and no EXIF read (no photo_taken_at on this form).
+   It shares the partial's per-form counter (form._qaqcPhotoPending), so Save stays
+   disabled until every photo on the form, damage or document, is ready.
+   TODO(GRN-P): fold into _qaqc_photo_script.html with per-input size/quality
+   attributes — deferred because that partial was outside this session's scope. */
+(function () {
+  var MAX_EDGE = 2048, QUALITY = 0.85;
+
+  function isImage(file) {
+    return /^image\/(jpeg|png)$/i.test(file.type || '') || /\.(jpe?g|png)$/i.test(file.name || '');
+  }
+
+  function shrink(file) {
+    /* A smaller JPEG File, or null to keep the original. */
+    return new Promise(function (resolve) {
+      if (!isImage(file) || !window.URL || !window.DataTransfer || !window.File) { resolve(null); return; }
+      var url = URL.createObjectURL(file), img = new Image();
+      img.onload = function () {
+        URL.revokeObjectURL(url);
+        try {
+          var w = img.naturalWidth, h = img.naturalHeight;
+          if (!w || !h) { resolve(null); return; }
+          var scale = Math.min(1, MAX_EDGE / Math.max(w, h));
+          var canvas = document.createElement('canvas');
+          canvas.width = Math.round(w * scale);
+          canvas.height = Math.round(h * scale);
+          var ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          canvas.toBlob(function (blob) {
+            try {
+              if (!blob || blob.size >= file.size) { resolve(null); return; }
+              var base = file.name.replace(/\.[^.]+$/, '') || 'photo';
+              resolve(new File([blob], base + '.jpg', {type: 'image/jpeg'}));
+            } catch (err) { resolve(null); }
+          }, 'image/jpeg', QUALITY);
+        } catch (err) { resolve(null); }
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); resolve(null); };
+      img.src = url;
+    });
+  }
+
+  function hold(form, delta) {
+    /* The partial's counter: submit buttons are disabled while any photo is preparing. */
+    if (!form) return;
+    var count = Math.max(0, (form._qaqcPhotoPending || 0) + delta);
+    form._qaqcPhotoPending = count;
+    var saves = form.querySelectorAll('button[type="submit"]');
+    for (var k = 0; k < saves.length; k++) saves[k].disabled = count > 0;
+  }
+
+  document.addEventListener('change', function (evt) {
+    var input = evt.target;
+    if (!input.matches || !input.matches('input[data-grn-doc-shrink]')) return;
+    var file = input.files && input.files[0];
+    if (!file || !isImage(file)) return;   /* a PDF is never held or touched */
+    var form = input.form;
+    hold(form, 1);
+    var done = false;
+    var finish = function () { if (!done) { done = true; hold(form, -1); } };
+    shrink(file)
+      .then(function (small) {
+        if (!small) return;
+        var transfer = new DataTransfer();
+        transfer.items.add(small);
+        input.files = transfer.files;   /* does not fire another change event */
+      })
+      .catch(function () { /* keep the original file: never block the GRN */ })
+      .then(finish, finish);
+  });
+})();
 </script>
 {% endif %}
 

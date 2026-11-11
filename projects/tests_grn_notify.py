@@ -197,7 +197,8 @@ class ContentTests(GrnNotifyBase):
                      # 5c review: no damage before or after, so no "Damaged" part.
                      f'1. Panel 540Wp — Unit: Nos · DC qty: 10 · Received: — → 6 (+6) · '
                      f'Condition: Good · Notes: note {self.panels.pk}',
-                     'Documents: No documents attached'):
+                     # GRN-P: the raise carries the helper's delivery photo.
+                     'Documents: Delivery photo: 1'):
             with self.subTest(line=line):
                 self.assertIn(line, text)
         self.assertNotIn('Damage\n', text, 'no damage section without a damaged line')

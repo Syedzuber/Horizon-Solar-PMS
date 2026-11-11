@@ -24,7 +24,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from django.urls import reverse
 
 from . import approval_notices
@@ -146,6 +146,10 @@ class ChokepointTests(ScreenFixture):
 # The decide view
 # ===========================================================================
 
+# The client and the upload are mocked in setUp; the bucket is named here because
+# test_settings now empties every Supabase setting (GRN-P item 8) and
+# approval_views._upload_attachments reads settings.SUPABASE_BUCKET directly.
+@override_settings(SUPABASE_BUCKET='approvals-test-bucket')
 class DecideViewTests(ScreenFixture):
 
     def setUp(self):

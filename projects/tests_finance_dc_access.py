@@ -36,7 +36,8 @@ from django.utils import timezone
 
 from . import dc_edit, permissions, views
 from .models import (
-    RECEIPT_DOCUMENT_LR, RECEIPT_DOCUMENT_SIGNED_DC, ActivityLog, DCLineDamagePhoto,
+    RECEIPT_DOCUMENT_LR, RECEIPT_DOCUMENT_PHOTO, RECEIPT_DOCUMENT_SIGNED_DC, ActivityLog,
+    DCLineDamagePhoto,
     DeliveryChallan, DeliveryChallanAttachment, GoodsReceipt, Issue, UserProfile,
 )
 from .permissions import (
@@ -44,7 +45,7 @@ from .permissions import (
     user_can_view_delivery_challan, user_has_dc_read_role,
 )
 from .tests_grn_damage import PDF, SIGNED, _profile
-from .tests_receipt_attachments import ReceiptDocumentBase, pdf
+from .tests_receipt_attachments import ReceiptDocumentBase, pdf, photo
 
 LR_NAME = 'lr-bilty.pdf'
 
@@ -71,11 +72,14 @@ class FinanceDcBase(ReceiptDocumentBase):
         super().setUp()
         # The receipt and its documents go through the real confirm_grn, so the rows are
         # exactly what a Site Engineer's submission writes (storage is the mock).
+        # GRN-P: the raise carries its delivery photo, named here so the three documents
+        # below are exactly what was posted.
         self.confirm_docs({self.panels: ('10', '0', [])},
                           [(RECEIPT_DOCUMENT_SIGNED_DC, pdf()),
-                           (RECEIPT_DOCUMENT_LR, pdf(LR_NAME))])
+                           (RECEIPT_DOCUMENT_LR, pdf(LR_NAME)),
+                           (RECEIPT_DOCUMENT_PHOTO, photo())])
         self.receipt = GoodsReceipt.objects.get()
-        self.signed_copy, self.lr = self.documents()
+        self.signed_copy, self.lr, self.delivery_photo = self.documents()
         DeliveryChallanAttachment.objects.filter(pk=self.lr.pk).update(
             withdrawn_at=timezone.now(), withdrawn_by=self.scm,
             withdrawn_reason='Shows the freight amount')

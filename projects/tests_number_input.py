@@ -37,6 +37,7 @@ from .models import (
 )
 from .number_input import decimal_field_max, parse_decimal_input
 from .tests_design_part11 import Part11Base
+from .tests_grn_damage import with_grn_photo
 from .tests_grn_on_behalf import GrnOnBehalfBase, _client_for
 from .tests_vendor_order_raise import RaiseFixture
 
@@ -237,10 +238,11 @@ class DeliveryQuantityTests(GrnOnBehalfBase):
              'line_item_qty_0': qty, 'line_item_unit_0': 'Mtr'})
 
     def _confirm(self, received, damaged='0'):
+        # GRN-P: a raise carries a delivery photo (the bucket is stubbed by GrnOnBehalfBase).
         return _client_for(self.se).post(
             reverse('confirm_grn', args=[self.project.project_id, self.challan.pk]),
-            {f'received_qty_{self.line_a.pk}': received,
-             f'damaged_qty_{self.line_a.pk}': damaged})
+            with_grn_photo({f'received_qty_{self.line_a.pk}': received,
+                            f'damaged_qty_{self.line_a.pk}': damaged}))
 
     # -- create_delivery_challan --
 

@@ -50,6 +50,7 @@ from .models import (
     DCLineItem, DeliveryChallan, Project, ProjectPhase, StatusTransition, Task,
     TaskTemplate, TaskTemplatePhase, TaskTemplateTask, UserProfile,
 )
+from .tests_grn_damage import stub_delivery_storage, with_grn_photo
 from .utils import resolve_residential_template
 
 
@@ -136,6 +137,8 @@ class GrnOnBehalfBase(TestCase):
             item_description='String Inverter 50kW',
             ordered_quantity=Decimal('4.00'), unit='Nos',
         )
+        # GRN-P: an SE raise now carries a delivery photo, so the bucket is a mock.
+        stub_delivery_storage(self)
 
     # -- helpers -------------------------------------------------------------
 
@@ -149,7 +152,7 @@ class GrnOnBehalfBase(TestCase):
         """Drive the real SE path, so a 'confirmed' line is one confirm_grn produced."""
         response = _client_for(self.se).post(
             reverse('confirm_grn', args=[self.project.project_id, self.challan.pk]),
-            {f'received_qty_{line.pk}': qty, f'damaged_qty_{line.pk}': damaged},
+            with_grn_photo({f'received_qty_{line.pk}': qty, f'damaged_qty_{line.pk}': damaged}),
         )
         self.assertEqual(response.status_code, 302,
                          'the site engineer holding a task here must be able to confirm')

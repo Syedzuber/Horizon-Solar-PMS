@@ -16,7 +16,10 @@ WHAT IS PINNED
   * Q1: a receipt document never appears on the Challan Documents card and never counts
     toward DC-B3's cap of 10.
   * The forms: RECEIPT_DOCUMENTS_MAX_FILES slots, the type options are the model's
-    choices, no capture attribute (Q4), no client-side shrinking (Q5), the help text (Q8).
+    choices, no capture attribute (Q4), client-side shrinking on the SE form only (Q5 as
+    amended by GRN-P M5), the help text (Q8).
+  * GRN-P: confirm_grn posts here go through with_grn_photo (a raise without an image
+    gets a delivery photo); `photo=False` posts exactly what the test names.
 
 Storage is stubbed exactly as tests_grn_damage stubs it (the Supabase client is a mock;
 any HTTP request fails the test), so a real upload is checked only on dev/production.
@@ -44,10 +47,10 @@ from .goods_receipts import (
 from .models import (
     GOODS_RECEIPT_CORRECTION, GOODS_RECEIPT_RECEIPT, RECEIPT_DOCUMENT_LR,
     RECEIPT_DOCUMENT_OTHER, RECEIPT_DOCUMENT_PHOTO, RECEIPT_DOCUMENT_SIGNED_DC,
-    RECEIPT_DOCUMENT_TYPE_CHOICES, DCLineDamagePhoto, DeliveryChallanAttachment,
+    RECEIPT_DOCUMENT_TYPE_CHOICES, DCLineDamagePhoto, DCLineItem, DeliveryChallanAttachment,
     GoodsReceipt,
 )
-from .tests_grn_damage import BUCKET, JPG, PDF, GrnDamageBase, jpg
+from .tests_grn_damage import BUCKET, JPG, PDF, GrnDamageBase, jpg, with_grn_photo
 
 SIGNED_COPY = 'signed-copy.pdf'
 
@@ -73,14 +76,19 @@ class ReceiptDocumentBase(GrnDamageBase):
             data['receipt_docs_no_prices'] = '1'
         return data
 
-    def post(self, view, data, actor):
+    def post(self, view, data, actor, photo=True):
+        """GRN-P: an SE raise without an image gets a delivery photo (with_grn_photo)
+        unless `photo=False`. override_grn posts are never touched (M1)."""
+        if view == 'confirm_grn' and photo:
+            data = with_grn_photo(data)
         self.login(actor)
         with self.captureOnCommitCallbacks(execute=True):
             return self.client.post(reverse(view, args=[self.site.project_id, self.dc.pk]),
                                     data)
 
-    def confirm_docs(self, lines, docs=(), **kwargs):
-        return self.post('confirm_grn', self.payload(lines, docs, **kwargs), self.se)
+    def confirm_docs(self, lines, docs=(), photo=True, **kwargs):
+        return self.post('confirm_grn', self.payload(lines, docs, **kwargs), self.se,
+                         photo=photo)
 
     def override_docs(self, lines, docs=(), **kwargs):
         return self.post('override_grn', self.payload(lines, docs, **kwargs), self.scm)
@@ -153,10 +161,10 @@ class LinkTests(ReceiptDocumentBase):
                             for m in self.messages_of(response)))
 
     def test_override_with_a_file_links_it_to_the_correction(self):
-        self.confirm_docs({self.panels: ('10', '0', [])})
+        self.confirm_docs({self.panels: ('10', '0', [])})   # GRN-P: carries a delivery photo
         self.override_docs({self.panels: ('9', '0', [])}, [(RECEIPT_DOCUMENT_LR, pdf('lr.pdf'))])
         correction = GoodsReceipt.objects.get(kind=GOODS_RECEIPT_CORRECTION)
-        [doc] = self.documents()
+        [doc] = [d for d in self.documents() if d.receipt == correction]
         self.assertEqual(doc.receipt, correction)
         self.assertEqual(doc.document_type, RECEIPT_DOCUMENT_LR)
         self.assertEqual(doc.uploaded_by, self.scm)
@@ -172,7 +180,10 @@ class LinkTests(ReceiptDocumentBase):
                          ['grn-damage', 'grn-document'])
 
     def test_a_grn_without_documents_is_unchanged(self):
-        response = self.confirm_docs({self.panels: ('10', '0', [])}, tick=False)
+        # GRN-P: a raise now needs an image, so the document-free GRN is a correction
+        # down (10 recorded earlier, 8 now), which needs none.
+        DCLineItem.objects.filter(pk=self.panels.pk).update(received_quantity=10)
+        response = self.confirm_docs({self.panels: ('8', '0', [])}, tick=False, photo=False)
         self.assertEqual(self.documents(), [])
         self.assertEqual(self.uploads(), [])
         self.assertIn('GRN confirmed. DC status: Partially Received.',
@@ -183,7 +194,9 @@ class LinkTests(ReceiptDocumentBase):
         data['receipt_doc_type_1'] = RECEIPT_DOCUMENT_LR
         self.post('confirm_grn', data, self.se)
         self.assertEqual(GoodsReceipt.objects.count(), 1)
-        self.assertEqual(self.documents(), [])
+        # GRN-P: the only document is the helper's delivery photo (slot 2); the LR type
+        # in slot 1, with no file, recorded nothing.
+        self.assertEqual([d.document_type for d in self.documents()], [RECEIPT_DOCUMENT_PHOTO])
 
 
 # ---------------------------------------------------------------------------
@@ -228,14 +241,18 @@ class RefusalTests(ReceiptDocumentBase):
         self.assertFalse(GoodsReceipt.objects.exists())
 
     def test_six_files_are_refused(self):
-        docs = [(RECEIPT_DOCUMENT_OTHER, pdf(f'd{n}.pdf')) for n in range(6)]
+        # GRN-P: the first is the delivery photo, so the helper adds no seventh.
+        docs = ([(RECEIPT_DOCUMENT_PHOTO, photo('d0.jpg'))]
+                + [(RECEIPT_DOCUMENT_OTHER, pdf(f'd{n}.pdf')) for n in range(1, 6)])
         response = self.confirm_docs({self.panels: ('10', '0', [])}, docs)
         self.assert_refused_before_upload(
             response, 'At most 5 documents can be attached to one receipt; 6 were chosen.')
 
     def test_two_files_in_one_slot_count_towards_the_five(self):
+        # GRN-P: slot 1 is the delivery photo, so the helper adds no seventh.
         data = self.payload({self.panels: ('10', '0', [])},
-                            [(RECEIPT_DOCUMENT_OTHER, pdf(f'd{n}.pdf')) for n in range(4)])
+                            [(RECEIPT_DOCUMENT_PHOTO, photo('d0.jpg'))]
+                            + [(RECEIPT_DOCUMENT_OTHER, pdf(f'd{n}.pdf')) for n in range(1, 4)])
         data['receipt_doc_4'] = [pdf('d3.pdf'), pdf('extra.pdf'), pdf('extra2.pdf')]
         response = self.post('confirm_grn', data, self.se)
         self.assert_refused_before_upload(
@@ -249,6 +266,8 @@ class RefusalTests(ReceiptDocumentBase):
 
     def test_documents_alone_are_refused_in_their_own_words(self):
         self.confirm_docs({self.panels: ('10', '0', [])})
+        # GRN-P: that first GRN carried its delivery photo — one document, one upload.
+        first_documents, first_uploads = self.documents(), len(self.uploads())
         for which, send in (('confirm', self.confirm_docs), ('override', self.override_docs)):
             with self.subTest(form=which):
                 # Posted back unchanged, as the pre-filled form does, plus a signed copy.
@@ -257,8 +276,8 @@ class RefusalTests(ReceiptDocumentBase):
                                 [(RECEIPT_DOCUMENT_SIGNED_DC, pdf())])
                 self.assertEqual(self.messages_of(response), [DOCUMENTS_NEED_A_QUANTITY])
                 self.assertEqual(GoodsReceipt.objects.count(), 1)
-                self.assertEqual(self.documents(), [])
-                self.assertEqual(len(self.uploads()), 0)
+                self.assertEqual(self.documents(), first_documents)
+                self.assertEqual(len(self.uploads()), first_uploads)
 
     def test_documents_alone_win_over_their_own_refusals(self):
         # No tick and no type, but no quantity change either: the real reason first.
@@ -352,10 +371,13 @@ class DisplayTests(ReceiptDocumentBase):
 
     def setUp(self):
         super().setUp()
+        # GRN-P: the raise carries its delivery photo, named here so the three documents
+        # below are exactly what was posted.
         self.confirm_docs({self.panels: ('10', '0', [])},
                           [(RECEIPT_DOCUMENT_SIGNED_DC, pdf()),
-                           (RECEIPT_DOCUMENT_LR, pdf('bilty.pdf'))])
-        self.signed, self.bilty = self.documents()
+                           (RECEIPT_DOCUMENT_LR, pdf('bilty.pdf')),
+                           (RECEIPT_DOCUMENT_PHOTO, photo())])
+        self.signed, self.bilty, self.delivery_photo = self.documents()
         DeliveryChallanAttachment.objects.filter(pk=self.bilty.pk).update(
             withdrawn_at=timezone.now(), withdrawn_by=self.scm,
             withdrawn_reason='Bilty shows the freight rate')
@@ -367,7 +389,7 @@ class DisplayTests(ReceiptDocumentBase):
         self.assertIn(self.se.user.get_full_name(), section)
         self.assertIn(reverse('delivery_challan_attachment_open',
                               args=[self.site.project_id, self.dc.pk, self.signed.pk]), section)
-        self.assertIn('· 1 document', section)
+        self.assertIn('· 2 documents', section)   # the signed copy and the delivery photo
 
     def test_a_withdrawn_file_is_hidden_from_se_and_shown_to_scm(self):
         se_section = self.card(self.detail(self.se), 'dc-receipts')
@@ -503,7 +525,10 @@ class FormTests(ReceiptDocumentBase):
                 self.assertIn('Signed challan copy, LR/bilty or delivery photo. Site Engineers '
                               'and Finance will see this file — no rates or amounts.', form)
 
-    def test_no_capture_and_no_client_side_shrinking(self):
+    def test_no_capture_and_shrinking_on_the_se_form_only(self):
+        # GRN-P (M5) amends Q5: the SE form's slots shrink an image (data-grn-doc-shrink,
+        # its own script — never the shared data-qaqc-photo one); the override form's
+        # slots upload as chosen. Neither has capture or multiple.
         for which, form in self.forms().items():
             with self.subTest(form=which):
                 for tag in re.findall(r'<input type="file" name="receipt_doc_\d+"[^>]*>', form):
@@ -512,6 +537,10 @@ class FormTests(ReceiptDocumentBase):
                     self.assertNotIn('multiple', tag)
                     self.assertIn('accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"',
                                   tag)
+                    if which == 'confirm':
+                        self.assertIn('data-grn-doc-shrink', tag)
+                    else:
+                        self.assertNotIn('data-grn-doc-shrink', tag)
 
     def test_the_refusal_alert_names_photos_and_documents(self):
         self.confirm_docs({self.panels: ('10', '0', [])},

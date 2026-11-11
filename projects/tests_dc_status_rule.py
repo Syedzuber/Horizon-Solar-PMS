@@ -44,6 +44,7 @@ from .models import (
     DCLineItem, DeliveryChallan, GoodsReceipt, Project, ProjectPhase, Task,
     derive_dc_status, recalculate_dc_status,
 )
+from .tests_grn_damage import with_grn_photo
 
 BUCKET = 'Horizon-PMS-Delivery-test'
 
@@ -121,10 +122,11 @@ class DcStatusRuleBase(TestCase):
         return data
 
     def confirm(self, values):
+        """An SE GRN; GRN-P: a raise gets a delivery photo (tests_grn_damage.with_grn_photo)."""
         self.client.force_login(self.se.user)
         return self.client.post(
             reverse('confirm_grn', args=[self.site.project_id, self.dc.pk]),
-            self.grn_payload(values))
+            with_grn_photo(self.grn_payload(values)))
 
     def override(self, values):
         self.client.force_login(self.scm.user)

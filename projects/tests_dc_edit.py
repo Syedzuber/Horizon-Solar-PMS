@@ -49,6 +49,7 @@ from .models import (
     StatusTransition, StockLocation, Task, TaskTemplate, TaskTemplatePhase,
     TaskTemplateTask, Vendor, recalculate_dc_status,
 )
+from .tests_grn_damage import with_grn_photo
 from .utils import resolve_residential_template
 
 BUCKET = 'Horizon-PMS-Delivery-test'
@@ -415,7 +416,8 @@ class ConcurrencyTests(DcEditBase):
         self.login(self.se)
         response = self.client.post(
             reverse('confirm_grn', args=[self.site.project_id, self.dc.pk]),
-            {f'received_qty_{self.expected.pk}': '2', f'damaged_qty_{self.expected.pk}': '0'})
+            with_grn_photo({f'received_qty_{self.expected.pk}': '2',
+                            f'damaged_qty_{self.expected.pk}': '0'}))   # GRN-P
         self.assertEqual(response.status_code, 302)
         self.expected.refresh_from_db()
         self.assertIsNotNone(self.expected.received_quantity)

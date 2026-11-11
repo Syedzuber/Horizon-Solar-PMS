@@ -1007,6 +1007,10 @@ class RoundChangeTests(RevisionFixture):
 # Approvals 2a-2 — proxy evidence files
 # ===========================================================================
 
+# The client is mocked per test; the bucket is named here because test_settings now
+# empties every Supabase setting (GRN-P item 8) and _upload_attachments reads
+# settings.SUPABASE_BUCKET directly, so an empty name would be recorded and refused.
+@override_settings(SUPABASE_BUCKET='approvals-test-bucket')
 class ProxyEvidenceTests(ApprovalViewFixture):
 
     def setUp(self):

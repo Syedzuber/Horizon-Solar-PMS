@@ -53,6 +53,7 @@ from .models import (
     SUBJECT_DELIVERY_CHALLAN, SUBJECT_ISSUE, SUBJECT_PAYMENT_MILESTONE,
     SUBJECT_PROJECT, SUBJECT_TASK,
 )
+from .tests_grn_damage import stub_delivery_storage, with_grn_photo
 from .utils import (
     RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL, _subject_type_registry, assign_tasks_to,
     record_transition,
@@ -609,10 +610,11 @@ class InstrumentedSubjectTypeTests(LedgerFixture):
         the first, 'how long did this delivery take' has no start."""
         challan = self._make_dc()
         item = challan.line_items.first()
+        stub_delivery_storage(self)   # GRN-P: the delivery photo goes to a mock bucket
 
         _client_for(self.se).post(
             reverse('confirm_grn', args=[self.project.project_id, challan.pk]),
-            {f'received_qty_{item.pk}': '10', f'damaged_qty_{item.pk}': '0'},
+            with_grn_photo({f'received_qty_{item.pk}': '10', f'damaged_qty_{item.pk}': '0'}),
         )
 
         rows = self._rows(SUBJECT_DELIVERY_CHALLAN, challan)
