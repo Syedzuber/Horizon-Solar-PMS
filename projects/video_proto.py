@@ -87,19 +87,24 @@ ACTION_FAILED = 'video_proto_upload_failed'
 #: one copy.
 PRESETS = {
     'rec': {'width': 640, 'height': 480, 'fps': 24, 'video_bps': 1_000_000,
-            'audio_bps': 32_000, 'label': 'Record (640×480, 1 Mbps)'},
+            'audio_bps': 32_000, 'label': 'Record (640×480, 1 Mbps)', 'order': 'webm'},
     'rec720': {'width': 1280, 'height': 720, 'fps': 24, 'video_bps': 2_000_000,
-               'audio_bps': 32_000, 'label': 'Record 720p (2 Mbps)'},
+               'audio_bps': 32_000, 'label': 'Record 720p (2 Mbps)', 'order': 'mp4'},
 }
 MAX_SECONDS = 90
 
-#: The recorder formats tried in order (V0-3); the first one the browser supports wins.
-RECORDER_TYPES = (
-    'video/mp4;codecs=avc1,mp4a.40.2',
-    'video/webm;codecs=vp9,opus',
-    'video/webm;codecs=vp8,opus',
-    'video/webm',
-)
+#: The recorder formats tried, in order; the first one the browser supports wins. Each
+#: preset names its order, and every log line records it as ord=webm|mp4.
+#:   webm  the default button: Chrome wrote audio-only MP4s in the local check (SECONDARY_
+#:         FINDINGS, GRN-V0), and every WebM had a picture, so WebM is tried first.
+#:   mp4   the 720p button keeps V0-3's original MP4-first order on purpose, to measure how
+#:         often real phones hit the audio-only MP4 (their playback_failed rows).
+RECORDER_ORDERS = {
+    'webm': ('video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm',
+             'video/mp4;codecs=avc1,mp4a.40.2'),
+    'mp4': ('video/mp4;codecs=avc1,mp4a.40.2', 'video/webm;codecs=vp9,opus',
+            'video/webm;codecs=vp8,opus', 'video/webm'),
+}
 
 #: Bucket settings the prototype bucket must never equal (V0-2: never the delivery bucket,
 #: and by the same reasoning never any other bucket holding real files).
@@ -214,7 +219,7 @@ def video_proto_page(request):
         'max_seconds': MAX_SECONDS,
         'max_bytes': MAX_BYTES,
         'accepted_types': list(ACCEPTED_TYPES),
-        'recorder_types': list(RECORDER_TYPES),
+        'recorder_orders': {name: list(types) for name, types in RECORDER_ORDERS.items()},
         'stages': list(STAGES),
         'storage_ready': bucket_api() is not None,
     })
@@ -316,6 +321,10 @@ def build_log_text(data, username):
     source = data.get('source')
     if source not in SOURCES:
         raise ValueError('unknown source')
+    # Which recorder-format order the page used (RECORDER_ORDERS); none for a gallery file.
+    order = data.get('order') or ''
+    if order and order not in RECORDER_ORDERS:
+        raise ValueError('unknown order')
     path = str(data.get('path') or '')
     # A path, when given, must be the caller's own server-built one; a failure before
     # signing has none.
@@ -334,6 +343,7 @@ def build_log_text(data, username):
     sent = _number(data.get('bytes_sent'))
     tokens = [
         ('src', source),
+        ('ord', order or None),
         ('stage', stage or None),
         ('mime', mime or None),
         ('res', f'{int(width)}x{int(height)}' if width and height else None),
@@ -417,6 +427,7 @@ def results_rows(limit=500):
             'ok': ok,
             'stage': values.get('stage', ''),
             'source': values.get('src', ''),
+            'order': values.get('ord', ''),
             'mime': values.get('mime', ''),
             'res': values.get('res', ''),
             'played': values.get('played', ''),

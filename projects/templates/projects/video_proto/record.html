@@ -75,14 +75,14 @@ signs URLs and writes one log line per try.
 </div>
 
 {{ presets|json_script:"vp-presets" }}
-{{ recorder_types|json_script:"vp-recorder-types" }}
+{{ recorder_orders|json_script:"vp-recorder-orders" }}
 {{ accepted_types|json_script:"vp-accepted-types" }}
 <script>
 (function () {
   'use strict';
   var root = document.getElementById('vp-root');
   var PRESETS = JSON.parse(document.getElementById('vp-presets').textContent);
-  var RECORDER_TYPES = JSON.parse(document.getElementById('vp-recorder-types').textContent);
+  var RECORDER_ORDERS = JSON.parse(document.getElementById('vp-recorder-orders').textContent);
   var ACCEPTED = JSON.parse(document.getElementById('vp-accepted-types').textContent);
   var MAX_BYTES = {{ max_bytes }};
   var MAX_SECONDS = {{ max_seconds }};
@@ -129,9 +129,11 @@ signs URLs and writes one log line per try.
     });
   }
 
-  function pickRecorderType() {
-    for (var i = 0; i < RECORDER_TYPES.length; i++) {
-      if (window.MediaRecorder && MediaRecorder.isTypeSupported(RECORDER_TYPES[i])) { return RECORDER_TYPES[i]; }
+  // Each button names its order (video_proto.RECORDER_ORDERS): the default tries WebM
+  // first, the 720p button MP4 first, to measure the audio-only MP4 on real phones.
+  function pickRecorderType(types) {
+    for (var i = 0; i < types.length; i++) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported(types[i])) { return types[i]; }
     }
     return '';   // none listed: let the browser choose, and report what it chose
   }
@@ -154,7 +156,7 @@ signs URLs and writes one log line per try.
   // One log line per try (V0-2, Q3). A log that fails to save does not change the result.
   function logTry(t, outcome, stage, extra) {
     var body = {
-      outcome: outcome, stage: stage || '', source: t.source, mime: t.mime || '',
+      outcome: outcome, stage: stage || '', source: t.source, order: t.order || '', mime: t.mime || '',
       width: t.width || null, height: t.height || null, fps: t.fps || null,
       duration: t.duration || null, bytes: t.blob ? t.blob.size : null, path: t.path || '',
       played_width: t.playedWidth || null, played_height: t.playedHeight || null
@@ -175,7 +177,7 @@ signs URLs and writes one log line per try.
 
   function startRecording(source) {
     var p = PRESETS[source];
-    var t = {source: source, mime: '', blob: null};
+    var t = {source: source, order: p.order, mime: '', blob: null};
     resetNumbers();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
       setText('vp-result', 'This browser cannot record video here. Try Chrome, or upload from the gallery.');
@@ -201,7 +203,7 @@ signs URLs and writes one log line per try.
   }
 
   function record(stream, p, t) {
-    var chosen = pickRecorderType();
+    var chosen = pickRecorderType(RECORDER_ORDERS[p.order]);
     var track = stream.getVideoTracks()[0];
     var s = track && track.getSettings ? track.getSettings() : {};
     t.width = s.width; t.height = s.height; t.fps = s.frameRate;
@@ -217,7 +219,7 @@ signs URLs and writes one log line per try.
       return;
     }
     t.mime = recorder.mimeType || chosen;
-    setText('vp-format', t.mime || 'browser default');
+    setText('vp-format', (t.mime || 'browser default') + ' (' + (p.order === 'mp4' ? 'MP4' : 'WebM') + ' tried first)');
     var chunks = [], started = now(), failed = false;
     recorder.ondataavailable = function (e) { if (e.data && e.data.size) { chunks.push(e.data); } };
     recorder.onerror = function (e) {

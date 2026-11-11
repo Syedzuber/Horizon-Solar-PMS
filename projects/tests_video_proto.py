@@ -83,7 +83,7 @@ class StorageMockedBase(TestCase):
                            content_type='application/json')
 
     def log(self, client, **body):
-        base = {'outcome': 'ok', 'source': 'rec', 'mime': 'video/mp4;codecs=avc1,mp4a.40.2',
+        base = {'outcome': 'ok', 'source': 'rec', 'order': 'webm', 'mime': 'video/mp4;codecs=avc1,mp4a.40.2',
                 'width': 640, 'height': 480, 'fps': 24, 'duration': 60.2,
                 'bytes': 7_400_000, 'upload_seconds': 48.3, 'path': TESS_PATH}
         base.update(body)
@@ -157,6 +157,12 @@ class AccessTests(StorageMockedBase):
         self.assertContains(page, 'accept="video/*"')
         self.assertContains(page, reverse('video_proto_sign_upload'))
         self.assertContains(page, 'video/mp4;codecs=avc1,mp4a.40.2')
+        orders = page.context['recorder_orders']
+        self.assertEqual(orders['webm'], ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus',
+                                          'video/webm', 'video/mp4;codecs=avc1,mp4a.40.2'])
+        self.assertEqual(orders['mp4'][0], 'video/mp4;codecs=avc1,mp4a.40.2')
+        presets = page.context['presets']
+        self.assertEqual((presets['rec']['order'], presets['rec720']['order']), ('webm', 'mp4'))
         self.assertNotContains(page, 'storage is not configured')
         self.assertEqual(client.get(reverse('video_proto_results')).status_code, 200)
 
@@ -302,7 +308,7 @@ class LogTests(StorageMockedBase):
         self.assertEqual(row.entity_type, 'VideoProto')
         self.assertEqual(
             row.action,
-            'Video test ok: src=rec mime=video/mp4;codecs=avc1,mp4a.40.2 '
+            'Video test ok: src=rec ord=webm mime=video/mp4;codecs=avc1,mp4a.40.2 '
             f'res=640x480 fps=24 dur=60.2 bytes=7400000 up=48.30 file={HEX}.mp4')
 
     def test_the_stored_picture_size_is_logged_and_shown(self):
@@ -317,14 +323,16 @@ class LogTests(StorageMockedBase):
         self.assertContains(page, '<td>480x640</td>', html=False)
 
     def test_a_full_failure_line_keeps_room_for_the_error(self):
-        """Every number present, the longest recorder format and a 9-letter tester: the
-        error still keeps at least 40 characters of the 255."""
+        """Every number a failure line can carry, the longest recorder format, the MP4-first
+        order and a 9-letter tester: the error still keeps at least 40 characters of the 255.
+        No played= here: the page sets it only when playback succeeds, so a failure line
+        never has it."""
         error = 'HTTP 413 {"statusCode":"413","error":"Payload too large","message":"The object exceeded the maximum allowed size"}'
         text, _ = video_proto.build_log_text({
-            'outcome': 'failed', 'stage': 'playback_failed', 'source': 'rec720',
+            'outcome': 'failed', 'stage': 'playback_failed', 'source': 'rec720', 'order': 'mp4',
             'mime': 'video/mp4;codecs=avc1,mp4a.40.2', 'width': 1280, 'height': 720, 'fps': 30,
             'duration': 90.0, 'bytes': 23_456_789, 'upload_seconds': 123.45,
-            'bytes_sent': 23_456_789, 'elapsed': 130.2, 'played_width': 720, 'played_height': 1280,
+            'bytes_sent': 23_456_789, 'elapsed': 130.2,
             'path': f'video-proto/sudhanshu/{HEX}.webm', 'error': error}, 'sudhanshu')
         before_error = text.index(' err=') + len(' err=')
         self.assertGreaterEqual(255 - before_error, 40, text)
@@ -339,7 +347,7 @@ class LogTests(StorageMockedBase):
         rows = ActivityLog.objects.filter(action_code='video_proto_upload_failed')
         self.assertEqual(rows.count(), len(video_proto.STAGES))
         line = rows.get(action__contains='stage=upload_failed').action
-        self.assertTrue(line.startswith('Video test failed: src=rec stage=upload_failed '))
+        self.assertTrue(line.startswith('Video test failed: src=rec ord=webm stage=upload_failed '))
         self.assertIn('sent=1234567 el=22.0 err=network error', line)
         self.assertNotIn('file=', line)
 
@@ -351,7 +359,7 @@ class LogTests(StorageMockedBase):
     def test_bad_lines_are_refused_and_write_nothing(self):
         client = self.client_for(self.tess)
         for body in ({'outcome': 'maybe'}, {'outcome': 'failed', 'stage': 'gremlins'},
-                     {'outcome': 'failed', 'stage': ''}, {'source': 'webcam'},
+                     {'outcome': 'failed', 'stage': ''}, {'source': 'webcam'}, {'order': 'vp9'},
                      {'path': ''}, {'path': OTHER_PATH},
                      {'outcome': 'failed', 'stage': 'upload_failed', 'path': OTHER_PATH}):
             with self.subTest(body=body):
@@ -382,7 +390,7 @@ class ResultsTests(StorageMockedBase):
         super().setUp()
         tess = self.client_for(self.tess)
         self.log(tess)                                               # 7.4 MB in 60.2 s
-        self.log(tess, source='rec720', bytes=12_000_000, duration=60, upload_seconds=80,
+        self.log(tess, source='rec720', order='mp4', bytes=12_000_000, duration=60, upload_seconds=80,
                  path=f'video-proto/tess/{"f" * 32}.webm', mime='video/webm;codecs=vp8,opus')
         self.log(tess, outcome='failed', stage='upload_failed', path='', bytes_sent=2_500_000,
                  elapsed=22, error='network error')
@@ -405,6 +413,8 @@ class ResultsTests(StorageMockedBase):
         self.assertAlmostEqual(first_ok['mbps'], 7.4 * 8 / 48.3)
         self.assertFalse(first_ok['over_budget'])
         self.assertTrue(rows[2]['over_budget'])                      # 12 MB per minute
+        self.assertEqual(rows[2]['order'], 'mp4')
+        self.assertEqual(first_ok['order'], 'webm')
         self.assertEqual(rows[1]['stage'], 'upload_failed')
         self.assertAlmostEqual(rows[1]['sent_mb'], 2.5)
         self.assertEqual(rows[1]['path'], '')
@@ -423,6 +433,8 @@ class ResultsTests(StorageMockedBase):
                 self.assertContains(page, f'{reverse("video_proto_play")}?path=video-proto/tess/{HEX}.mp4')
                 self.assertContains(page, '>Play</a>', count=2)
                 self.assertContains(page, 'NotAllowedError: Permission denied')
+                self.assertContains(page, 'rec720 · mp4 first')
+                self.assertContains(page, 'rec · webm first')
         self.api.create_signed_url.assert_not_called()           # links sign at the click
 
     def test_play_signs_any_testers_video_at_the_click(self):

@@ -970,6 +970,7 @@ Incidental issues noticed during audits. Logged, not fixed. Each entry: file/lin
   - `MediaRecorder.isTypeSupported('video/mp4;codecs=avc1,mp4a.40.2')` was true, and the camera track reported 640×480.
   - The stored file had one `soun` track and no `vide` track. Its metadata loaded, so a "metadata loaded" playback check passed it.
   - It is intermittent: two of three fresh browser sessions wrote audio-only MP4s, and the third wrote a normal one. Every WebM had a picture.
+  - **Changed after this finding (Zuber, 11 Nov):** the default button now tries `video/webm;codecs=vp9,opus` → `video/webm;codecs=vp8,opus` → `video/webm` → `video/mp4;codecs=avc1,mp4a.40.2`. The 720p button keeps V0-3's MP4-first order on purpose, so the field test measures how often real phones write the audio-only MP4. Every log line records the order used as `ord=webm` or `ord=mp4`, and the results page shows it beside the source. This amends V0-3 for the default button only.
   - The prototype now passes playback only when the stored file reports a picture size, logged as `played=WxH`.
   - Not seen on a real phone. The field test's `playback_failed` count will show whether Android Chrome does it.
   - GRN-V must verify a video track before accepting a recording, and may want to fall back to WebM when the MP4 has none.

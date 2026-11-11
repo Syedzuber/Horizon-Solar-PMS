@@ -36,7 +36,7 @@ goes through video_proto_play, which signs a fresh 300-second link at the click.
           <td class="text-nowrap">{{ row.when|date:"d M H:i" }}</td>
           <td>{{ row.tester }}</td>
           <td>{% if row.ok %}<span class="badge text-bg-success">ok</span>{% else %}<span class="badge text-bg-danger">{{ row.stage }}</span>{% endif %}</td>
-          <td>{{ row.source }}</td>
+          <td>{{ row.source }}{% if row.order %} · {{ row.order }} first{% endif %}</td>
           <td class="text-break">{{ row.mime|default:"—" }}</td>
           <td>{{ row.res|default:"—" }}{% if row.fps %} @ {{ row.fps }}{% endif %}</td>
           <td>{{ row.played|default:"—" }}</td>
