@@ -13,8 +13,9 @@ too wide)." FIN-M-B2 rulings (Zuber, 12 Nov 2026):
   or "M1–M3 amounts not set", or "Contract value not set" (followed by "M1 + M2 + M3 = ₹Y"
   with no verdict when all three are set). "matches" is green, short/over red. Shown in
   the "No milestones yet" state too.
-* The card's own role list is NOT changed: System Admin still does not see the card, so
-  the footer cannot show for them on this page even though the helper admits them.
+* The card's own audience was not changed by FIN-M-B2. Since FIN-M-C it is decided by
+  permissions.milestone_card_mode(), which shows System Admin the card read-only, so the
+  footer shows for them too.
 * A milestone amount of 0 reads ₹0 on the card, "Amount TBD" only when blank — otherwise
   the new sum line (which counts 0) would contradict the row.
 
@@ -201,12 +202,13 @@ class CardAudienceTests(ContractValueBase):
                 self.assertNotIn(FOOTER, html)
                 self.assertNotIn('3,00,000', html)
 
-    def test_system_admin_sees_no_footer_because_the_card_role_list_is_unchanged(self):
-        """The helper admits System Admin, but the card is not shown to them (ruling:
-        the card's role list is not touched), so neither is the footer."""
+    def test_system_admin_sees_the_card_and_the_footer(self):
+        """FIN-M-C: System Admin now sees the card (read-only, milestone_card_mode), and
+        the helper admits them, so the footer shows too."""
         html = self.page(self.sysadmin)
-        self.assertNotIn('Payment Milestones', html)
-        self.assertNotIn(FOOTER, html)
+        self.assertIn('Payment Milestones', html)
+        self.assertIn(FOOTER, html)
+        self.assertIn('Contract value ₹3,00,000', _text(_card(html)))
 
     def test_no_footer_on_a_non_residential_project(self):
         """R2: the card is Residential-only; the footer goes with it."""

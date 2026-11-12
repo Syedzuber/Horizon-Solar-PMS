@@ -2943,6 +2943,61 @@ def user_can_see_contract_value(user, project):
     return True
 
 
+# FIN-M-C — the roles that see the project page's payment milestone card READ-ONLY. None of
+# them can save from it: project_overview's update_milestone takes managers and Finance,
+# set_milestone_amounts takes BD and the site's PM. A role here who also manages the site
+# gets the manager form instead (milestone_card_mode() asks management first).
+MILESTONE_CARD_READ_ROLES = frozenset({'CEO', 'Admin', 'System Admin'})
+
+
+def milestone_card_mode(user, project, can_manage=None):
+    """Return how `user` sees the payment milestone card on `project`'s page (FIN-M-C).
+
+        None       — no card;
+        'finance'  — card, with Finance's form (description + amount received);
+        'manager'  — card, with the PM/Coordinator form (description, amount, due date);
+        'bd'       — card, with BD's amount editor (posts to set_milestone_amounts);
+        'read'     — card, no edit pencil.
+
+    Who and why, in the order asked:
+      * Finance — records what was received; project_overview's update_milestone gives the
+        Finance role its own branch by ROLE, so a Finance user who also manages the site
+        still gets the Finance form here, matching what the server would save.
+      * The site's managers (user_can_manage_project(): assigned PM and coordinators,
+        whatever their role string) — R15: they may edit milestone amounts, and
+        update_milestone accepts them.
+      * BD — R6: BD owns the M1-M3 amounts. Unscoped, as set_milestone_amounts is (BD has
+        no per-site term yet). Asked after management so a BD manager gets the manager
+        form, as the template's if/elif did before.
+      * CEO, Admin, System Admin (MILESTONE_CARD_READ_ROLES) — read only.
+    Blocked: everyone else — SCM, Site Engineer, Design, and any PM or Coordinator who sees
+    the site without managing it. CL-I: a PM who sees a site only as its QA/QC engineer gets
+    no more than a Site Engineer, and a Site Engineer gets no card.
+
+    `can_manage` is user_can_manage_project(user, project) when the caller already has it
+    (project_overview does), so this costs no query; left None, it is asked here, which
+    costs the coordinator lookup for anyone but the assigned PM.
+
+    No project-type term: the card is Residential-only in its template (R2), and the view
+    combines the two for the column widths. A missing or soft-deleted project is refused.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None or project is None or project.is_deleted:
+        return None
+    role = profile.role
+    if role == 'Finance':
+        return 'finance'
+    if can_manage is None:
+        can_manage = user_can_manage_project(user, project)
+    if can_manage:
+        return 'manager'
+    if role == 'BD':
+        return 'bd'
+    if role in MILESTONE_CARD_READ_ROLES:
+        return 'read'
+    return None
+
+
 def user_can_raise_vendor_order(user, project):
     """Return True if `user` may record a new vendor order for `project`.
 

@@ -248,7 +248,9 @@
 
   {# Phase progress bars #}
   {% if phases %}
-  <div class="col-12 {% if role == 'PM' or role == 'Finance' or role == 'CEO' or role == 'Admin' or role == 'BD' %}col-md-4{% else %}col-md-6{% endif %}">
+  {% comment %}FIN-M-C: a third of the row only when the milestone card is actually drawn
+     (its audience AND Residential), so an OPEX page has no empty milestone column.{% endcomment %}
+  <div class="col-12 {% if show_milestone_card %}col-md-4{% else %}col-md-6{% endif %}">
     <div class="card shadow-sm h-100">
       <div class="card-header py-2 fw-semibold small">
         <i data-lucide="bar-chart-3" class="lucide-icon me-1"></i>Task Progress by Phase
@@ -297,9 +299,15 @@
      than `or`, so `project_type == 'Residential' and role == 'PM' or role == 'Finance'`
      parses as `(Residential and PM) or Finance or ...` and would still show the card to
      Finance, CEO, Admin and BD on an OPEX site. Template `{% if %}` has no parentheses,
-     so the outer tag IS the parenthesis.{% endcomment %}
+     so the outer tag IS the parenthesis.
+
+     FIN-M-C: the inner gate is milestone_card_mode() from permissions.py, not a role list.
+     The old list showed the card to every PM — including one who sees the site only as
+     its QA/QC engineer (CL-I) — and hid it from the Coordinators who may edit milestones.
+     The same mode picks the pencil below, so the card offers only the form the server
+     accepts from this viewer.{% endcomment %}
   {% if project.project_type == 'Residential' %}
-  {% if role == 'PM' or role == 'Finance' or role == 'CEO' or role == 'Admin' or role == 'BD' %}
+  {% if milestone_card_mode %}
   <div class="col-12 col-md-4">
     <div class="card shadow-sm h-100">
       <div class="card-header py-2 d-flex justify-content-between align-items-center">
@@ -358,7 +366,7 @@
                 {% else %}
                   <span class="badge bg-secondary">Pending</span>
                 {% endif %}
-                {% if is_assigned_pm or role == 'Finance' %}
+                {% if milestone_card_mode == 'manager' or milestone_card_mode == 'finance' %}
                   <button class="btn btn-outline-secondary milestone-edit-btn"
                           type="button"
                           data-bs-toggle="collapse"
@@ -366,7 +374,7 @@
                           title="Edit">
                     <i class="bi bi-pencil"></i>
                   </button>
-                {% elif role == 'BD' %}
+                {% elif milestone_card_mode == 'bd' %}
                   <button class="btn btn-outline-secondary milestone-edit-btn"
                           type="button"
                           data-bs-toggle="collapse"
@@ -377,7 +385,7 @@
                 {% endif %}
               </div>
             </div>
-            {% if is_assigned_pm or role == 'Finance' %}
+            {% if milestone_card_mode == 'manager' or milestone_card_mode == 'finance' %}
             <div class="collapse mt-2" id="editMilestone{{ m.pk }}">
               <form method="post" action="{% url 'project_overview' project.project_id %}"
                     class="p-2 rounded" style="background:#f8f9fa;">
@@ -386,7 +394,7 @@
                 <input type="hidden" name="milestone_pk" value="{{ m.pk }}">
                 <input type="text" name="milestone_description" class="form-control form-control-sm mb-2"
                        value="{{ m.milestone_description }}" placeholder="Description / Note">
-                {% if role == 'Finance' %}
+                {% if milestone_card_mode == 'finance' %}
                 <div class="mb-2">
                   <input type="number" name="amount_received" step="0.01" min="0"
                          class="form-control form-control-sm"
@@ -411,7 +419,7 @@
               </form>
             </div>
             {% endif %}
-            {% if role == 'BD' %}
+            {% if milestone_card_mode == 'bd' %}
             <div class="collapse mt-2" id="editMilestoneBD{{ m.pk }}">
               <div class="p-2 rounded" style="background:#f8f9fa;">
                 <div class="input-group input-group-sm mb-2">
@@ -476,7 +484,7 @@
   {% endif %}
   {% endif %}{# /project_type == 'Residential' — payment milestones card #}
 
-  <div class="col-12 {% if role == 'PM' or role == 'Finance' or role == 'CEO' or role == 'Admin' or role == 'BD' %}col-md-4{% else %}col-md-6{% endif %}">
+  <div class="col-12 {% if show_milestone_card %}col-md-4{% else %}col-md-6{% endif %}">
     <div class="card h-100 shadow-sm">
       <div class="card-header py-2 d-flex justify-content-between align-items-center">
         <span class="fw-semibold small"><i data-lucide="history" class="lucide-icon me-1"></i>Recent Activity</span>

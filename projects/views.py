@@ -11795,6 +11795,19 @@ def project_overview(request, project_id):
         # A blank contract value with all three amounts set keeps state None and shows
         # the total with no verdict (ruling): there is nothing to compare it with.
 
+    # FIN-M-C: who sees the milestone card and which edit form they get — decided by
+    # milestone_card_mode() (Finance, the site's managers, BD, read-only CEO/Admin/System
+    # Admin; everyone else, including a PM who only sees the site as QA/QC, gets None).
+    # `is_assigned_pm` is passed in so the helper adds no query. Lazy import for the same
+    # reason as user_can_see_contract_value above: keeps the change inside this view; no
+    # circular import exists. `show_milestone_card` adds the card's Residential gate (R2)
+    # so the neighbouring columns narrow only when the card is actually drawn.
+    from .permissions import milestone_card_mode as _milestone_card_mode
+    milestone_card_mode = _milestone_card_mode(request.user, project,
+                                               can_manage=is_assigned_pm)
+    show_milestone_card = (milestone_card_mode is not None
+                           and project.project_type == 'Residential')
+
     # Phases + task completion percentages (empty for Draft projects)
     phases = []
     phase_data_json = []
@@ -12183,6 +12196,9 @@ def project_overview(request, project_id):
         'milestone_amounts':           milestone_amounts,
         # FIN-M-B2: None unless user_can_see_contract_value(); see where it is built.
         'contract_footer':             contract_footer,
+        # FIN-M-C: None / 'read' / 'manager' / 'finance' / 'bd'; see where it is built.
+        'milestone_card_mode':         milestone_card_mode,
+        'show_milestone_card':         show_milestone_card,
         'phases':                      phases,
         'phase_data_json':             json.dumps(phase_data_json),
         'recent_activity':             recent_activity,
