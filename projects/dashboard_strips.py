@@ -263,10 +263,20 @@ def scm_open_delivery_issues():
 # ---------------------------------------------------------------------------
 
 def milestones_awaiting_count():
-    """The Finance dashboard's "Milestones Awaiting" tile, moved from
-    views.dashboard_finance with its default (no context) scope: Pending client payment
-    milestones on Active or In Progress projects. One COUNT query."""
+    """The Finance "Milestones awaiting" tile on the Site Dashboard: Pending client payment
+    milestones on Active or In Progress projects that are Residential and not soft-deleted.
+    One COUNT query.
+
+    FIN-M-B1 narrowed it from the retired Finance dashboard's rule (rulings R2, R3), which
+    counted OPEX/CAPEX and deleted projects too. Residential only is Zuber's ruling R2; the
+    tile's second line ("Residential, pending") says so, so Finance does not read a missing
+    OPEX/CAPEX milestone as a fault. is_deleted is filtered by hand (R3): project_delete
+    leaves status untouched, so a deleted project still passes the status filter, and
+    there is no manager that drops it.
+    The retired views.dashboard_finance copy keeps the old, wider rule until it is deleted."""
     return PaymentMilestone.objects.filter(
         project__status__in=_LIVE_STATUSES,
+        project__project_type='Residential',
+        project__is_deleted=False,
         status=PaymentMilestone.PENDING,
     ).count()

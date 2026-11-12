@@ -788,7 +788,7 @@ def _role_tiles(strips):
         ]
     if 'milestones_awaiting' in strips:
         tiles.append({'label': 'Milestones awaiting', 'value': strips['milestones_awaiting'],
-                      'detail': 'client milestones pending'})
+                      'detail': 'Residential, pending'})
     return tiles
 
 

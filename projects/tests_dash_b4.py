@@ -38,6 +38,7 @@ from django.utils import timezone
 
 from .approvals import create_approval_request
 from .context_processors import home_url
+from .dashboard_strips import milestones_awaiting_count
 from .decorators import SITE_DASHBOARD_URL, get_post_login_url, get_user_dashboard
 from .models import (BOQ, ApprovalStep, DeliveryChallan, DesignAssignment, Issue,
                      PaymentMilestone, ProjectPhase, PunchPoint, QaqcVisit,
@@ -418,6 +419,54 @@ class FinanceTileTests(B4Fixture):
             with self.subTest(role=profile.role):
                 labels = [t['label'] for t in self._get(profile).context['kpis']]
                 self.assertNotIn('Milestones awaiting', labels)
+
+    # FIN-M-B1 (rulings R2, R3): the tile counts Pending milestones on live, non-deleted
+    # Residential projects only. Each test below seeds one case and calls the helper.
+
+    def _milestone(self, site, status=PaymentMilestone.PENDING, name='M1'):
+        return PaymentMilestone.objects.create(project=site, milestone_name=name,
+                                               milestone_description='Advance',
+                                               status=status, created_by=self.pm)
+
+    def test_pending_on_a_live_residential_project_is_counted(self):
+        self._milestone(self._bare())
+        self.assertEqual(milestones_awaiting_count(), 1)
+
+    def test_pending_on_a_soft_deleted_residential_project_is_not_counted(self):
+        # project_delete sets is_deleted and leaves status Active, so status alone keeps it.
+        self._milestone(self._bare(is_deleted=True, deleted_at=timezone.now()))
+        self.assertEqual(milestones_awaiting_count(), 0)
+
+    def test_pending_on_live_opex_and_capex_projects_is_not_counted(self):
+        self._milestone(self._bare(project_type='OPEX'))
+        self._milestone(self._bare(project_type='CAPEX'))
+        self.assertEqual(milestones_awaiting_count(), 0)
+
+    def test_invoiced_and_received_on_a_live_residential_project_are_not_counted(self):
+        site = self._bare()
+        self._milestone(site, status=PaymentMilestone.INVOICED, name='M1')
+        self._milestone(site, status=PaymentMilestone.RECEIVED, name='M2')
+        self.assertEqual(milestones_awaiting_count(), 0)
+
+    def test_pending_on_a_draft_residential_project_is_not_counted(self):
+        self._milestone(self._bare(status='Draft'))
+        self.assertEqual(milestones_awaiting_count(), 0)
+
+    def test_the_count_is_one_query(self):
+        self._milestone(self._bare())
+        self._milestone(self._bare(project_type='OPEX'))
+        self._milestone(self._bare(is_deleted=True, deleted_at=timezone.now()))
+        # Setup above is outside the block, so only the helper's own queries are counted;
+        # the value is checked after the block so a wrong count cannot mask the query count.
+        with self.assertNumQueries(1):
+            count = milestones_awaiting_count()
+        self.assertEqual(count, 1)
+
+    def test_tile_second_line_says_residential_pending(self):
+        page = self._get(self.finance)
+        tile = next(t for t in page.context['kpis'] if t['label'] == 'Milestones awaiting')
+        self.assertEqual(tile['detail'], 'Residential, pending')
+        self.assertContains(page, '<span class="d">Residential, pending</span>', html=False)
 
 
 # ---------------------------------------------------------------------------
