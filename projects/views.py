@@ -7266,9 +7266,19 @@ def _apply_task_status_change(task, new_status, profile, request, project, *,
     # Payment milestone notification: task.is_payment_milestone is read from the pre-update
     # object — the flag never changes during a status update, so this is safe.
     if new_status == Task.DONE and task.is_payment_milestone:
-        milestone_recipients = list(UserProfile.objects.filter(role='Finance', is_active=True))
-        milestone_recipients += project_managers(project)
+        # FIN-M-R9: "Payment received" goes to the project's managers, BD and CEO.
+        # Finance is told only when someone who is NOT Finance recorded the payment (a PM
+        # or Coordinator completing the confirmation task), because then Finance did not
+        # record it and must hear of it. When Finance recorded it, Finance already knows,
+        # so all Finance users are left out. INTERIM: FIN-M-R10 will stop non-Finance
+        # users recording payments, and that session drops Finance here entirely.
+        # Covers both firing points: the task row and Finance's receipt (FIN-M-B9a calls
+        # this helper with from_milestone=True, the Finance user as `profile`).
+        milestone_recipients = project_managers(project)
         milestone_recipients += list(UserProfile.objects.filter(role__in=['BD', 'CEO'], is_active=True))
+        if getattr(profile, 'role', None) != 'Finance':
+            milestone_recipients += list(UserProfile.objects.filter(role='Finance', is_active=True))
+        _recorded_by_name = profile.user.get_full_name() or profile.user.username
         _pm_link = f'/projects/{project.project_id}/'
         # AFTER COMMIT on every channel (ruling T-15). task_approve and the self-certify
         # path call this helper inside their own atomic block and roll it back when a
@@ -7280,15 +7290,18 @@ def _apply_task_status_change(task, new_status, profile, request, project, *,
             related_project=project, link=_pm_link, log_label='payment_notification',
             values={'project_id': project.project_id,
                     'customer_name': project.customer_name,
-                    'task_name': task.task_name},
+                    'task_name': task.task_name,
+                    'recorded_by_name': _recorded_by_name},
         )
         # WhatsApp is still sent here, template and params unchanged, until the WhatsApp
-        # phase.
+        # phase. _pm_message is only the text written to the send log; Interakt sends its
+        # own approved payment_notification text (FIN-M-R9 keeps that template, its 1+2
+        # params and its failure, deferred item H1, untouched).
         _pm_whatsapp = resolve_recipients(milestone_recipients, profile)
         _pm_message = (
-            f'Project {project.project_id} ({project.customer_name}) has reached '
-            f'payment milestone: "{task.task_name}". Please initiate collection at the '
-            f'earliest.'
+            f'Payment received for project {project.project_id} '
+            f'({project.customer_name}): "{task.task_name}", recorded by '
+            f'{_recorded_by_name}.'
         )
         _pm_params = [project.customer_name, task.task_name, project.customer_name]
 

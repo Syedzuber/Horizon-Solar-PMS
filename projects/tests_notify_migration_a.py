@@ -448,9 +448,15 @@ class PaymentMilestoneGoldenTests(GoldenBase):
 
         pid = self.project_a.project_id
         link = f'/projects/{pid}/'
-        paragraphs = [f'Project {pid} (Alpha Residence) has reached payment milestone: '
-                      f'"Advance Payment Confirmation".',
-                      'Please initiate collection at the earliest.']
+        # CHANGED AT FIN-M-R9 (ruling R9): the alert reads "Payment received" and names who
+        # recorded it; "Please initiate collection" is gone. The in-app line is one
+        # sentence, the email two paragraphs, so each is pinned on its own.
+        paragraphs = [f'Payment received for project {pid} (Alpha Residence).',
+                      f'"Advance Payment Confirmation" was recorded by '
+                      f'{self.name(self.finance)}.']
+        in_app_line = [f'Payment received for project {pid} (Alpha Residence): '
+                       f'"Advance Payment Confirmation", recorded by '
+                       f'{self.name(self.finance)}.']
         # CHANGED AT T3a (P2, ruling Q3): the Finance user completed the task, so as the
         # actor they are dropped on every channel. Before, they were told too.
         expected = {self.pm_a, self.coord_a, self.bd, self.ceo}
@@ -460,9 +466,9 @@ class PaymentMilestoneGoldenTests(GoldenBase):
         mails = self.emails()
         self.assertEqual(set(mails), {self.address(p) for p in expected})
         for person in expected:
-            self.assert_in_app(notes[person], paragraphs, link)
+            self.assert_in_app(notes[person], in_app_line, link)
             self.assert_email(mails[self.address(person)],
-                              'Payment Milestone Reached — Alpha Residence', paragraphs, link)
+                              'Payment received — Alpha Residence', paragraphs, link)
         params = ['Alpha Residence', 'Advance Payment Confirmation', 'Alpha Residence']
         self.assertEqual(self.whatsapps(),
                          {person: ('payment_notification', params) for person in expected})

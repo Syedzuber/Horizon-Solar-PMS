@@ -587,30 +587,37 @@ NOTIFICATION_EVENTS = _build_registry([
         default_state='active',
         whatsapp_sent_separately=True,
     ),
+    # FIN-M-R9: renamed "Payment received" and "initiate collection" dropped — the alert
+    # fires when the money has been recorded (task Done, or Finance's receipt via the
+    # FIN-M-B9a chokepoint), so there is nothing left to collect. The CODE is unchanged:
+    # log rows, setting rows, Admin template versions and tests key on it.
     NotificationEvent(
         code='payment_milestone_reached',
-        label='Payment milestone reached',
+        label='Payment received',
         module='Payments',
         tier=TIER_ACT,
         channels=('email',),
         variables=(
             Variable('project_id', 'Project ID', 'HRP-RES-2026-014'),
             Variable('customer_name', 'Customer name of the project', 'Sharma Residence'),
-            Variable('task_name', 'The milestone task that was completed',
-                     'Plant Commissioning'),
+            Variable('task_name', 'The payment confirmation task that was completed',
+                     'Pre Dispatch Payment Confirmation'),
+            Variable('recorded_by_name', 'The person who recorded the payment',
+                     'Ravi Verma'),
         ),
-        in_app_text=('Project {{ project_id }} ({{ customer_name }}) has reached payment '
-                     'milestone: "{{ task_name }}". Please initiate collection at the '
-                     'earliest.'),
-        default_subject='Payment Milestone Reached — {{ customer_name }}',
+        in_app_text=('Payment received for project {{ project_id }} ({{ customer_name }}): '
+                     '"{{ task_name }}", recorded by {{ recorded_by_name }}.'),
+        default_subject='Payment received — {{ customer_name }}',
         default_body=(
-            'Project {{ project_id }} ({{ customer_name }}) has reached payment milestone: '
-            '"{{ task_name }}".\n\n'
-            'Please initiate collection at the earliest.'
+            'Payment received for project {{ project_id }} ({{ customer_name }}).\n\n'
+            '"{{ task_name }}" was recorded by {{ recorded_by_name }}.'
         ),
         button_label='View in Horizon Solar PMS',
-        recipients_rule=('Finance, BD and CEO users and the project managers (PM and '
-                         'coordinators), except the person who completed the task.'),
+        recipients_rule=('BD and CEO users and the project managers (PM and coordinators), '
+                         'except the person who recorded the payment. Finance users are '
+                         'included only when the payment was recorded by someone who is '
+                         'not Finance; this interim rule ends when PMs and coordinators '
+                         'can no longer record payments (FIN-M-R10).'),
         default_state='active',
         whatsapp_sent_separately=True,
     ),
