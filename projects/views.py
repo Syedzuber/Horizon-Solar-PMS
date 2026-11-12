@@ -6874,7 +6874,8 @@ def _announce_phase_rule_overrides(request, subject_name, rows, may_explain):
     messages.warning(request, f"'{subject_name}' started early — {rules}. {tail}")
 
 
-def _apply_task_status_change(task, new_status, profile, request, project):
+def _apply_task_status_change(task, new_status, profile, request, project, *,
+                              from_milestone=False):
     """
     Apply a user-initiated change to a Task's status: validation, the field writes,
     the StatusTransition row, the ActivityLog row, and the downstream milestone sync
@@ -6901,6 +6902,15 @@ def _apply_task_status_change(task, new_status, profile, request, project):
     Emits its own user-facing messages so the wording of a refusal cannot drift between
     the two screens. Returns one of _TASK_STATUS_APPLIED, _TASK_STATUS_REFUSED or
     _TASK_STATUS_NEEDS_BLOCK_REASON — see those constants for why three.
+
+    `from_milestone` (FIN-M-B9a) is True only when _sync_finance_task_from_milestone()
+    completes a Finance confirmation task because its PaymentMilestone was just marked
+    Received. The milestone is then the SOURCE of the move, so the task -> milestone sync
+    below is skipped (it would only re-read a row already Received) and the ledger row
+    carries REASON_MILESTONE_SYNC, as the bulk update it replaced did. Every other rung,
+    the activity line, the reschedule check and the payment alert run as for any move.
+    Keyword-only so no positional caller can set it by accident; the default leaves both
+    screens' behaviour unchanged.
     """
     # A MIRROR IS READ-ONLY TO EVERY HUMAN. This is rung 0 of the refusal ladder and
     # belongs nowhere else (R-18, R-20; OPEX spec §2.2). Prompt B22.
@@ -7140,8 +7150,10 @@ def _apply_task_status_change(task, new_status, profile, request, project):
             actor=profile,
             # Only leaving Blocked carries a reason here; the ordinary ladder
             # moves have none, and inventing one would be a lie in a column
-            # people will later group by.
-            reason_code=REASON_UNBLOCKED if task.status == Task.BLOCKED else '',
+            # people will later group by. A move caused by a milestone receipt
+            # says so (FIN-M-B9a): nobody touched the task directly.
+            reason_code=(REASON_MILESTONE_SYNC if from_milestone
+                         else REASON_UNBLOCKED if task.status == Task.BLOCKED else ''),
         )
         phase_rule_rows = record_phase_rule_overrides(
             project, profile, phase_rule_hits, task=task,
@@ -7166,7 +7178,11 @@ def _apply_task_status_change(task, new_status, profile, request, project):
     # Bidirectional sync: Finance confirmation tasks → PaymentMilestone Received.
     # Mapping by task name — names are fixed in the residential template.
     # Map lives at module level (_FINANCE_TASK_TO_MILESTONE).
-    if new_status == Task.DONE and task.task_name in _FINANCE_TASK_TO_MILESTONE:
+    # Skipped when the milestone is what moved this task (from_milestone, FIN-M-B9a):
+    # that milestone is already Received, and re-running would also re-read the
+    # receipt form's amount_received as if it came with the task.
+    if (not from_milestone and new_status == Task.DONE
+            and task.task_name in _FINANCE_TASK_TO_MILESTONE):
         _ms_label  = _FINANCE_TASK_TO_MILESTONE[task.task_name]
         _ms_update = {'status': 'Received', 'received_date': date.today()}
         _ar_str    = request.POST.get('amount_received', '').strip()
@@ -7178,16 +7194,26 @@ def _apply_task_status_change(task, new_status, profile, request, project):
                 pass
         if _vr_str:
             _ms_update['variance_reason'] = _vr_str
+        # FIN-M-B9a, failure handling (a): the task's Done is already committed above and
+        # stands whatever happens here. A sync failure is logged at ERROR with a
+        # traceback and the tag Admin searches the Railway logs for, and the user is
+        # told; it used to be `except Exception: pass`. The savepoint keeps a database
+        # error from poisoning a caller's outer transaction (task_approve holds one).
+        _ms_updated = 0
         try:
-            # Read the rows BEFORE the set-based update — a .update() cannot
-            # report the from-status it overwrote, and the ledger needs one per
-            # milestone. At most one row matches in practice.
-            _ms_before = list(PaymentMilestone.objects.filter(
-                project=project,
-                milestone_name=_ms_label,
-                status__in=['Pending', 'Invoiced'],
-            ))
             with transaction.atomic():
+                # Read the rows BEFORE the set-based update — a .update() cannot
+                # report the from-status it overwrote, and the ledger needs one per
+                # milestone. At most one row matches in practice.
+                _ms_before = list(PaymentMilestone.objects.filter(
+                    project=project,
+                    milestone_name=_ms_label,
+                    status__in=['Pending', 'Invoiced'],
+                ))
+                # Race: the status__in filter makes the write conditional, so of two
+                # completions racing here only one flips the row (the other updates
+                # 0 rows). _ms_before is unlocked, so both may write a ledger row and
+                # a log line from the same pre-read — accepted, as before FIN-M-B9a.
                 _ms_updated = PaymentMilestone.objects.filter(
                     project=project,
                     milestone_name=_ms_label,
@@ -7199,6 +7225,17 @@ def _apply_task_status_change(task, new_status, profile, request, project):
                         actor=profile, project=project,
                         reason_code=REASON_MILESTONE_SYNC,
                     )
+        except Exception:
+            logger.exception(
+                'FIN-M-B9a sync failed: task %s (%s) on project %s was marked Done but '
+                'milestone %s could not be marked Received',
+                task.pk, task.task_name, project.project_id, _ms_label)
+            messages.warning(request, 'Task marked Done; the payment milestone could not '
+                                      'be updated — tell Admin.')
+            # The savepoint rolled the update back even if it had already counted rows,
+            # so nothing below may log a change that did not happen.
+            _ms_updated = 0
+        try:
             # Attribution: this Finance-confirmation task can be completed by the PM
             # OR a Project Coordinator (drizzle-down authority), which auto-flips the
             # milestone to Received. Log WHO did it — by name and role — so Finance can
@@ -7218,7 +7255,13 @@ def _apply_task_status_change(task, new_status, profile, request, project):
                         plain_suffix=(f" via completion of Finance task '{task.task_name}'"
                                       f" by {_actor_name} ({profile.role})"))
         except Exception:
-            pass  # Non-critical — never block the task update
+            # FIN-M-B9a (ruling 7): the milestone and the task are both saved; only the
+            # change-log line is missing, so this is logged for Admin and the user is
+            # not warned — what they did happened.
+            logger.exception(
+                'FIN-M-B9a sync failed: change-log line not written for milestone %s on '
+                'project %s after task %s (%s) was marked Done',
+                _ms_label, project.project_id, task.pk, task.task_name)
 
     # Payment milestone notification: task.is_payment_milestone is read from the pre-update
     # object — the flag never changes during a status update, so this is safe.
@@ -11020,6 +11063,67 @@ def notifications_view(request):
 # Finance milestone actions
 # ---------------------------------------------------------------------------
 
+def _sync_finance_task_from_milestone(request, project, milestone, profile):
+    """
+    Milestone Received -> its Finance confirmation task Done, THROUGH THE CHOKEPOINT
+    (FIN-M-B9a). Called by milestone_receive and the Finance branch of project_overview's
+    update_milestone, after the milestone's own save has committed. Not a view: it has no
+    gate of its own and relies on its two callers' Finance-only checks.
+
+    R1: the milestone is the record and the task is the trigger and alert, so the task is
+    moved by _apply_task_status_change(..., from_milestone=True) like any other Done — the
+    task activity line, the reschedule check and the payment_milestone_reached alert all
+    run — instead of the bulk .update() this replaced, which ran none of them.
+    from_milestone keeps the chokepoint from syncing the (already Received) milestone back.
+
+    Failure handling (a): the receipt is already saved and is never undone from here.
+      * A task the chokepoint refuses (Blocked: the transition table has no Blocked ->
+        Done) stays as it is; the chokepoint's own refusal message and the warning below
+        tell Finance. Not logged: a refusal is a rule working, not a fault.
+      * An exception is logged at ERROR with the tag and a traceback, and Finance is
+        warned. Each task's move runs in its own savepoint, so a failure part-way leaves
+        that task untouched (status, ledger row and activity line together) and its
+        queued alert is discarded with the rollback.
+
+    Matching is by task name through the module-level map; whether to match by template
+    code is FIN-M-B9b's question.
+    """
+    task_name = _MILESTONE_TO_FINANCE_TASK.get(milestone.milestone_name)
+    if not task_name:
+        return
+    warning = 'Milestone saved; the Finance task could not be updated — tell Admin.'
+    try:
+        # The confirmation task(s) still open on this project — normally one. Done is
+        # left out (nothing to do); Blocked is kept so the chokepoint can refuse it and
+        # Finance hears why the task did not move.
+        tasks = list(Task.objects.filter(
+            phase__project=project,
+            task_name=task_name,
+            status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
+        ))
+    except Exception:
+        logger.exception(
+            'FIN-M-B9a sync failed: milestone %s on project %s was marked Received but '
+            "its Finance task '%s' could not be read", milestone.milestone_name,
+            project.project_id, task_name)
+        messages.warning(request, warning)
+        return
+    for task in tasks:
+        try:
+            with transaction.atomic():
+                outcome = _apply_task_status_change(task, Task.DONE, profile, request,
+                                                    project, from_milestone=True)
+        except Exception:
+            logger.exception(
+                'FIN-M-B9a sync failed: milestone %s on project %s was marked Received but '
+                'task %s (%s) could not be marked Done', milestone.milestone_name,
+                project.project_id, task.pk, task.task_name)
+            messages.warning(request, warning)
+            continue
+        if outcome != _TASK_STATUS_APPLIED:
+            messages.warning(request, warning)
+
+
 @login_required
 @role_required(['Finance'])
 def milestone_invoice(request, project_id, milestone_pk):
@@ -11109,38 +11213,11 @@ def milestone_receive(request, project_id, milestone_pk):
         milestone.project, request.user.profile, milestone, _ms_logged_before,
         ['status', 'received_date', 'amount_received', 'variance_reason'])
 
-    # Bidirectional sync: PaymentMilestone Received → Finance confirmation task Done.
-    # Map lives at module level (_MILESTONE_TO_FINANCE_TASK), derived from the forward map.
-    _sync_task_name = _MILESTONE_TO_FINANCE_TASK.get(milestone.milestone_name)
-    if _sync_task_name:
-        try:
-            # Pre-read for the from-status: a set-based .update() cannot report what
-            # it overwrote, and each synced task needs its own row.
-            _sync_before = list(Task.objects.filter(
-                phase__project=milestone.project,
-                task_name=_sync_task_name,
-                status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
-            ).select_related('phase__project'))
-            # The atomic block sits INSIDE the existing try, which is deliberate and
-            # is NOT the helper swallowing anything. If the ledger write fails here,
-            # the sync rolls back and the except below leaves the milestone update
-            # alone — so the outcome is neither the status change nor the row, never
-            # one without the other. Removing that except would change this path's
-            # documented "never block the milestone update" behaviour.
-            with transaction.atomic():
-                Task.objects.filter(
-                    phase__project=milestone.project,
-                    task_name=_sync_task_name,
-                    status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
-                ).update(status=Task.DONE, completed_at=timezone.now())
-                for _sync_task in _sync_before:
-                    record_transition(
-                        _sync_task, to_status=Task.DONE, from_status=_sync_task.status,
-                        actor=request.user.profile, project=milestone.project,
-                        reason_code=REASON_MILESTONE_SYNC,
-                    )
-        except Exception:
-            pass  # Non-critical — never block the milestone update
+    # Bidirectional sync: PaymentMilestone Received → Finance confirmation task Done,
+    # through the task-status chokepoint (FIN-M-B9a). The milestone is saved above and
+    # the helper never undoes it; a failure is logged and Finance is warned.
+    _sync_finance_task_from_milestone(request, milestone.project, milestone,
+                                      request.user.profile)
 
     messages.success(request, f'{milestone.milestone_name} marked as Received.')
     return redirect('dashboard_finance')
@@ -11585,31 +11662,10 @@ def project_overview(request, project_id):
                         _log_milestone_changes(project, request.user.profile, milestone,
                                                _ms_logged_before, _save_fields)
                         if 'status' in _save_fields:
-                            # Map lives at module level (_MILESTONE_TO_FINANCE_TASK).
-                            _sync_task_name = _MILESTONE_TO_FINANCE_TASK.get(milestone.milestone_name)
-                            if _sync_task_name:
-                                try:
-                                    # Pre-read for the from-status — see milestone_receive.
-                                    _sync_before = list(Task.objects.filter(
-                                        phase__project=project,
-                                        task_name=_sync_task_name,
-                                        status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
-                                    ).select_related('phase__project'))
-                                    with transaction.atomic():
-                                        Task.objects.filter(
-                                            phase__project=project,
-                                            task_name=_sync_task_name,
-                                            status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
-                                        ).update(status=Task.DONE, completed_at=timezone.now())
-                                        for _sync_task in _sync_before:
-                                            record_transition(
-                                                _sync_task, to_status=Task.DONE,
-                                                from_status=_sync_task.status,
-                                                actor=request.user.profile, project=project,
-                                                reason_code=REASON_MILESTONE_SYNC,
-                                            )
-                                except Exception:
-                                    pass
+                            # Milestone Received → Finance task Done, through the
+                            # chokepoint (FIN-M-B9a); see milestone_receive.
+                            _sync_finance_task_from_milestone(
+                                request, project, milestone, request.user.profile)
                     else:
                         milestone.milestone_description = request.POST.get('milestone_description', '').strip()
                         amount_str   = request.POST.get('amount', '').strip()
