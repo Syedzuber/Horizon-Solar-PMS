@@ -11444,12 +11444,36 @@ def project_overview(request, project_id):
                         if _ms_due_error:
                             messages.error(request, f'{milestone.milestone_name} not updated. {_ms_due_error}')
                             return redirect('project_overview', project_id=project.project_id)
+                        # FIN-M-B1b. A refused amount refuses the whole edit, like the
+                        # date above. This branch used to turn blank, "abc" or "1,50,000"
+                        # into None, erasing the amount BD set from the final proposal
+                        # (R6: BD owns M1-M3 amounts) and then reporting "updated". It
+                        # also let a negative through, rounded a third decimal place, and
+                        # 500'd on NaN or an over-long number. The shared reader refuses
+                        # all of those with a message; it does not strip commas, matching
+                        # BD's set_milestone_amounts.
                         try:
-                            milestone.amount = Decimal(amount_str) if amount_str else None
-                        except InvalidOperation:
-                            milestone.amount = None
+                            _ms_amount = parse_decimal_input(
+                                amount_str, places=2, min_value=0,
+                                max_value=decimal_field_max(PaymentMilestone, 'amount'),
+                                field_label='Amount')
+                        except ValidationError as exc:
+                            messages.error(request, f'{milestone.milestone_name} not updated. {exc.messages[0]}')
+                            return redirect('project_overview', project_id=project.project_id)
+                        # Blank means "no change", not "clear": the form pre-fills the
+                        # stored amount but renders 0 as an empty box, so a blank here was
+                        # also wiping a 0 on every description-only save. A PM can no
+                        # longer clear an amount from this form — ruled acceptable, BD
+                        # owns amounts. A blank due date still clears (unchanged).
+                        # The amount column is written only when one was typed, so a blank
+                        # submit cannot write back a stale copy over an amount BD saved
+                        # after this row was read.
+                        _ms_fields = ['milestone_description', 'due_date']
+                        if _ms_amount is not None:
+                            milestone.amount = _ms_amount
+                            _ms_fields.append('amount')
                         milestone.due_date = _ms_due
-                        milestone.save(update_fields=['milestone_description', 'amount', 'due_date'])
+                        milestone.save(update_fields=_ms_fields)
                     messages.success(request, f'{milestone.milestone_name} updated.')
                 except PaymentMilestone.DoesNotExist:
                     messages.error(request, 'Milestone not found.')
