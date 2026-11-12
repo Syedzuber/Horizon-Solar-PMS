@@ -24,8 +24,12 @@ MONEY_ACTIVITY_CODES = frozenset({
     'payment_request_rejected',   # order_views
     'payment_hold_answered',      # order_views: SCM's response to a hold
     'payment_request_paid',       # payments.mark_payment_paid
-    'milestone_amounts_set',      # views.set_milestone_amounts (Residential)
+    'milestone_amounts_set',      # views: BD's set_milestone_amounts and the PM edit's amount
+    'milestone_amount_received',  # views: amount received / variance reason (FIN-M-L)
 })
+# FIN-M-L's plain milestone code, 'milestone_updated' (description, dates, status,
+# creation), is deliberately NOT here: those lines carry no amount and every viewer of
+# the site sees them.
 
 # NON_ACTIVITY_CODES (DASH-B1, decision D3) — codes whose rows are NOT something a person
 # did on the site, so they never count as a site's "latest activity" or fill its feed on

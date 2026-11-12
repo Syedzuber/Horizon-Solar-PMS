@@ -418,6 +418,12 @@ class MoneyAudienceBase(TestCase):
             reverse('project_timeline', args=[self.site.project_id]), {'page': page})
 
 
+#: The Recent activity card holds 8 rows. Since FIN-M-L there are more money codes than
+#: that, so a viewer inside the audience sees the 8 NEWEST — _seed_feed writes them in
+#: sorted order, newest first — not every code.
+CARD_ROWS = 8
+NEWEST_MONEY_CODES = frozenset(sorted(MONEY_ACTIVITY_CODES)[:CARD_ROWS])
+
 SEES_MONEY = ('pm', 'coord', 'ceo', 'sysadmin', 'admin', 'finance', 'scm')
 NO_MONEY   = ('se', 'qaqc_pm', 'designer', 'bd')
 
@@ -457,7 +463,7 @@ class AudienceTests(MoneyAudienceBase):
             response = self._overview(getattr(self, who))
             self.assertContains(response, 'id="vendor-orders-card"')
             codes = {e.action_code for e in response.context['recent_activity']}
-            self.assertEqual(codes, MONEY_ACTIVITY_CODES, who)
+            self.assertEqual(codes, NEWEST_MONEY_CODES, who)
 
     def test_helper_cost(self):
         with CaptureQueriesContext(connection) as ctx:
@@ -484,7 +490,7 @@ class FeedTests(MoneyAudienceBase):
         self._seed_feed()
         for who in ('pm', 'finance', 'scm', 'admin'):
             feed = self._overview(getattr(self, who)).context['recent_activity']
-            self.assertEqual({e.action_code for e in feed}, MONEY_ACTIVITY_CODES, who)
+            self.assertEqual({e.action_code for e in feed}, NEWEST_MONEY_CODES, who)
 
     def test_timeline_excludes_money_and_page_one_is_full(self):
         self._seed_feed(others=25)
@@ -502,7 +508,9 @@ class FeedTests(MoneyAudienceBase):
         for who in ('pm', 'coord', 'ceo', 'finance'):
             page = self._timeline(getattr(self, who)).context['page_obj']
             self.assertEqual(page.paginator.count, 25 + len(MONEY_ACTIVITY_CODES), who)
-            self.assertEqual({e.action_code for e in page.object_list[:8]},
+            # The timeline page holds 20, so every money row leads it.
+            self.assertEqual({e.action_code for e in
+                              page.object_list[:len(MONEY_ACTIVITY_CODES)]},
                              MONEY_ACTIVITY_CODES, who)
 
     def test_the_rendered_pages_carry_no_rupee_for_a_site_engineer(self):

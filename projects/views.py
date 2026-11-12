@@ -2460,6 +2460,147 @@ def _format_inr(value):
     return ','.join(groups + [tail])
 
 
+# ---------------------------------------------------------------------------
+# FIN-M-L — the milestone change log (ruling R15)
+# ---------------------------------------------------------------------------
+
+def _milestone_rupees(value):
+    """An amount for the milestone log: '₹1,35,000', '₹1,00,000.40', 'blank'.
+
+    Not _format_inr() alone, which rounds to whole rupees: in an audit line a 40-paise
+    correction would then read "₹1,00,000 → ₹1,00,000". Paise are shown only when they
+    are not zero. The sign is handled here because _format_inr() mis-groups a negative
+    ('-,50,000'), and milestone_receive still accepts one (a secondary finding)."""
+    if value is None:
+        return 'blank'
+    value = Decimal(value)
+    if not value.is_finite():
+        # NaN/Infinity cannot be grouped; say what was stored rather than raise inside
+        # a log call.
+        return str(value)
+    sign = '-' if value < 0 else ''
+    value = abs(value).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    whole = Decimal(int(value))
+    text = _format_inr(whole)
+    paise = int((value - whole) * 100)
+    if paise:
+        text += f'.{paise:02d}'
+    return f'{sign}₹{text}'
+
+
+def _milestone_day(value):
+    """'5 Dec 2026' (ruling: the year is kept, the log spans years); None → 'blank'."""
+    return 'blank' if value is None else f'{value.day} {value:%b %Y}'
+
+
+def _milestone_text(value):
+    return f"'{value}'" if value else 'blank'
+
+
+def _milestone_plain(value):
+    return value or 'blank'
+
+
+#: Every PaymentMilestone field the log reports, in the order a line lists them:
+#: field -> (label, formatter). Which line a field goes on is decided by the three
+#: tuples below, not here.
+_MILESTONE_LOG_FIELDS = {
+    'milestone_description': ('description', _milestone_text),
+    'due_date':              ('due date', _milestone_day),
+    'status':                ('status', _milestone_plain),
+    'invoice_date':          ('invoice date', _milestone_day),
+    'received_date':         ('received date', _milestone_day),
+    'amount':                ('amount', _milestone_rupees),
+    'amount_received':       ('amount received', _milestone_rupees),
+    'variance_reason':       ('variance reason', _milestone_text),
+}
+# Plain line, code milestone_updated: visible to everyone who can see the site.
+_MILESTONE_PLAIN_FIELDS = ('milestone_description', 'due_date', 'status',
+                           'invoice_date', 'received_date')
+# Money lines. The variance reason is money by ruling: it is free text Finance types
+# and can carry a figure ("short by 5,000").
+_MILESTONE_AMOUNT_FIELDS = ('amount',)
+_MILESTONE_RECEIVED_FIELDS = ('amount_received', 'variance_reason')
+
+
+def _milestone_values(milestone):
+    """The logged fields of `milestone` as it stands, taken BEFORE a writer mutates it."""
+    return {field: getattr(milestone, field) for field in _MILESTONE_LOG_FIELDS}
+
+
+def _milestone_diff(before, after, fields):
+    """'label old → new; label old → new' for each of `fields` present in `after` whose
+    value really changed, or '' when none did.
+
+    Equal by value, not spelling: the edit forms post every stored value back, so
+    Decimal('150000') against a stored 150000.00 is no change. Blank text and None are
+    the same "nothing"; a Decimal 0 is NOT blank, so it is compared as a number."""
+    parts = []
+    for field in fields:
+        if field not in after:
+            continue
+        old, new = before.get(field), after[field]
+        if old in (None, '') and new in (None, ''):
+            continue
+        if old == new:
+            continue
+        label, fmt = _MILESTONE_LOG_FIELDS[field]
+        parts.append(f'{label} {fmt(old)} → {fmt(new)}')
+    return '; '.join(parts)
+
+
+def _log_milestone_changes(project, actor, milestone, before, saved_fields, plain_suffix='',
+                           new_values=None):
+    """Write the R15 log for one milestone save: at most one plain line and one money
+    line, each listing every changed field of its kind as old → new. A save that changed
+    nothing writes nothing. Called only AFTER the save succeeded, so a refused save
+    never reaches it.
+
+    `before` is _milestone_values() taken before the writer touched the row; the new
+    values are read from `milestone` for `saved_fields` only, so a field the writer did
+    not save is never reported. A writer that saves through a set-based .update() (the
+    task sync) has no updated instance, so it passes the dict it updated with as
+    `new_values` instead.
+
+    THE OLD VALUE IS WHAT THIS REQUEST READ, NOT A LOCKED READ. A concurrent writer that
+    saves between this request's read and its save makes "old" stale in this line.
+    TODO: lock the row (select_for_update) if that ever matters. Deferred by ruling
+    (FIN-M-L): a lock changes how two writers interleave, and this change only logs.
+
+    Two money codes, one per money event, each written by its own call with a literal
+    code so tests_activity_money's static tripwire can resolve it. No writer saves
+    `amount` and `amount_received` together, so a save still writes at most one money
+    line."""
+    after = {field: (new_values[field] if new_values is not None
+                     else getattr(milestone, field))
+             for field in saved_fields if field in _MILESTONE_LOG_FIELDS}
+    name = milestone.milestone_name
+    plain = _milestone_diff(before, after, _MILESTONE_PLAIN_FIELDS)
+    if plain:
+        log_activity(project, actor, f'{name}: {plain}{plain_suffix}',
+                     entity_type='Milestone', entity_id=milestone.pk,
+                     action_code='milestone_updated')
+    amount = _milestone_diff(before, after, _MILESTONE_AMOUNT_FIELDS)
+    if amount:
+        # Same code as BD's set_milestone_amounts line: one field, one money code.
+        log_activity(project, actor, f'{name}: {amount}',
+                     entity_type='Milestone', entity_id=milestone.pk,
+                     action_code='milestone_amounts_set')
+    # `paid`, not a longer name: the tripwire recognises a money description by words
+    # such as "amount" and "paid" in the call's own source.
+    paid = _milestone_diff(before, after, _MILESTONE_RECEIVED_FIELDS)
+    if paid:
+        log_activity(project, actor, f'{name}: {paid}',
+                     entity_type='Milestone', entity_id=milestone.pk,
+                     action_code='milestone_amount_received')
+
+
+def _log_milestones_created(project, actor):
+    """One plain line when M1-M3 are minted (project_activate, milestone_create)."""
+    log_activity(project, actor, 'Payment milestones M1–M3 created',
+                 entity_type='Milestone', action_code='milestone_updated')
+
+
 def _requests_phrase(count):
     return f'{count} request{"" if count == 1 else "s"}'
 
@@ -4018,6 +4159,8 @@ def project_activate(request, project_id):
 
     # Log project activation after the transaction commits
     log_activity(project, request.user.profile, f"Activated project: {project.project_id}", entity_type='Project', entity_id=project.pk)
+    # FIN-M-L (R15): the milestones' own creation line, after the commit like the line above.
+    _log_milestones_created(project, request.user.profile)
 
     if project.project_type == 'Residential':
         # Count the rows actually created rather than restating the template size — the
@@ -7060,14 +7203,20 @@ def _apply_task_status_change(task, new_status, profile, request, project):
             # OR a Project Coordinator (drizzle-down authority), which auto-flips the
             # milestone to Received. Log WHO did it — by name and role — so Finance can
             # identify the specific person, never attributed generically to "PM".
+            #
+            # FIN-M-L (R15): the "auto-marked Received" line is replaced by the plain
+            # line (status, received date; old → new) carrying the same "via completion
+            # of Finance task … by Name (Role)" tail, plus a money line when an amount
+            # received or variance reason came with the task. Old values are the
+            # _ms_before pre-read: unlocked, see the TODO in _log_milestone_changes().
             if _ms_updated:
                 _actor_name = profile.user.get_full_name() or profile.user.username
-                log_activity(
-                    project, profile,
-                    f"Milestone {_ms_label} auto-marked Received via completion of "
-                    f"Finance task '{task.task_name}' by {_actor_name} ({profile.role})",
-                    entity_type='Milestone',
-                )
+                for _ms_row in _ms_before:
+                    _log_milestone_changes(
+                        project, profile, _ms_row, _milestone_values(_ms_row),
+                        list(_ms_update), new_values=_ms_update,
+                        plain_suffix=(f" via completion of Finance task '{task.task_name}'"
+                                      f" by {_actor_name} ({profile.role})"))
         except Exception:
             pass  # Non-critical — never block the task update
 
@@ -10888,6 +11037,7 @@ def milestone_invoice(request, project_id, milestone_pk):
         messages.error(request, 'Only Pending milestones can be marked as Invoiced.')
         return redirect('dashboard_finance')
 
+    _ms_logged_before = _milestone_values(milestone)   # FIN-M-L: old values for the log
     with transaction.atomic():
         _ms_prev_status        = milestone.status   # 'Pending' — checked above
         milestone.status       = 'Invoiced'
@@ -10897,8 +11047,10 @@ def milestone_invoice(request, project_id, milestone_pk):
             milestone, to_status='Invoiced', from_status=_ms_prev_status,
             actor=request.user.profile,
         )
-    # Log milestone invoiced — project accessed via FK to avoid extra query
-    log_activity(milestone.project, request.user.profile, f"Marked {milestone.milestone_name} as Invoiced", entity_type='Milestone', entity_id=milestone.pk)
+    # FIN-M-L (R15): replaces "Marked M1 as Invoiced" with old → new for each saved
+    # field. Project via the FK the lookup already joined on, no extra query.
+    _log_milestone_changes(milestone.project, request.user.profile, milestone,
+                           _ms_logged_before, ['status', 'invoice_date'])
     messages.success(request, f'{milestone.milestone_name} marked as Invoiced.')
     return redirect('dashboard_finance')
 
@@ -10936,6 +11088,7 @@ def milestone_receive(request, project_id, milestone_pk):
     if milestone.amount and amount_received > milestone.amount and not variance_reason:
         variance_reason = 'Overpayment'
 
+    _ms_logged_before = _milestone_values(milestone)   # FIN-M-L: old values for the log
     with transaction.atomic():
         _ms_prev_status           = milestone.status
         milestone.status          = 'Received'
@@ -10950,8 +11103,11 @@ def milestone_receive(request, project_id, milestone_pk):
             # nearest thing this path has to a stated reason.
             remark=variance_reason,
         )
-    # Log milestone received — project accessed via FK to avoid extra query
-    log_activity(milestone.project, request.user.profile, f"Marked {milestone.milestone_name} as Received", entity_type='Milestone', entity_id=milestone.pk)
+    # FIN-M-L (R15): replaces "Marked M1 as Received". Status and received date go on
+    # the plain line; amount received and variance reason on the money line.
+    _log_milestone_changes(
+        milestone.project, request.user.profile, milestone, _ms_logged_before,
+        ['status', 'received_date', 'amount_received', 'variance_reason'])
 
     # Bidirectional sync: PaymentMilestone Received → Finance confirmation task Done.
     # Map lives at module level (_MILESTONE_TO_FINANCE_TASK), derived from the forward map.
@@ -11044,6 +11200,8 @@ def milestone_create(request, project_id):
                 milestone_description=desc,
                 created_by=request.user.profile,
             )
+        # FIN-M-L (R15): logged only when rows were actually created.
+        _log_milestones_created(project, request.user.profile)
         messages.success(request, 'Payment milestones created.')
     else:
         messages.info(request, 'Milestones already exist for this project.')
@@ -11276,7 +11434,12 @@ def set_milestone_amounts(request, project_id):
         return JsonResponse({'success': False, 'error': 'No amounts provided.'})
 
     # Contract value check — only when all three milestones will be non-null after this update
-    existing = {m.milestone_name: m.amount for m in project.milestones.all() if m.amount is not None}
+    # FIN-M-L: every row's amount, blank ones included, is kept as the log's "old" value;
+    # `existing` is the same non-null subset the sum check always used. Still one query.
+    # The read is not locked, so a concurrent writer can make "old" stale; see the TODO
+    # in _log_milestone_changes().
+    previous = {m.milestone_name: m.amount for m in project.milestones.all()}
+    existing = {name: amount for name, amount in previous.items() if amount is not None}
     merged = dict(existing)
     merged.update(amounts)
     if all(merged.get(n) is not None for n in ('M1', 'M2', 'M3')):
@@ -11299,15 +11462,23 @@ def set_milestone_amounts(request, project_id):
                     project=project, milestone_name=name,
                     defaults={'amount': amount},
                 )
-        log_activity(
-            project, request.user.profile,
-            'Set milestone amounts: ' + ', '.join(f'{n}=₹{a}' for n, a in amounts.items()),
-            entity_type='Milestone',
-            # AF-1: a money line. Its code is in activity_codes.MONEY_ACTIVITY_CODES, so
-            # project pages hide it from viewers outside the project's money audience;
-            # migration 0121 stamped the rows written before it had one.
-            action_code='milestone_amounts_set',
-        )
+        # FIN-M-L (R15): old → new for each milestone whose amount really changed (equal
+        # by value: 150000 == 150000.00); a missing row reads "blank". Identical amounts
+        # write no line (ruling). The prefix is kept: tests_activity_money pins it and
+        # migration 0121 stamped old rows by it.
+        changed = [(n, a) for n, a in amounts.items() if previous.get(n) != a]
+        if changed:
+            log_activity(
+                project, request.user.profile,
+                'Set milestone amounts: ' + ', '.join(
+                    f'{n} {_milestone_rupees(previous.get(n))} → {_milestone_rupees(a)}'
+                    for n, a in changed),
+                entity_type='Milestone',
+                # AF-1: a money line. Its code is in activity_codes.MONEY_ACTIVITY_CODES, so
+                # project pages hide it from viewers outside the project's money audience;
+                # migration 0121 stamped the rows written before it had one.
+                action_code='milestone_amounts_set',
+            )
     except Exception as e:
         return JsonResponse({'success': False, 'error': str(e)})
 
@@ -11379,6 +11550,9 @@ def project_overview(request, project_id):
             if milestone_pk:
                 try:
                     milestone = project.milestones.get(pk=milestone_pk)
+                    # FIN-M-L: old values for the log, taken before either branch
+                    # assigns anything (both overwrite the description first).
+                    _ms_logged_before = _milestone_values(milestone)
                     _actor_role = getattr(getattr(request.user, 'profile', None), 'role', None)
 
                     if _actor_role == 'Finance':
@@ -11406,7 +11580,10 @@ def project_overview(request, project_id):
                                     from_status=_ms_prev_status,
                                     actor=request.user.profile, project=project,
                                 )
-                        log_activity(project, request.user.profile, f"Updated {milestone.milestone_name}", entity_type='Milestone', entity_id=milestone.pk)
+                        # FIN-M-L (R15): replaces "Updated M1", which was written on
+                        # every save, changed or not.
+                        _log_milestone_changes(project, request.user.profile, milestone,
+                                               _ms_logged_before, _save_fields)
                         if 'status' in _save_fields:
                             # Map lives at module level (_MILESTONE_TO_FINANCE_TASK).
                             _sync_task_name = _MILESTONE_TO_FINANCE_TASK.get(milestone.milestone_name)
@@ -11474,6 +11651,11 @@ def project_overview(request, project_id):
                             _ms_fields.append('amount')
                         milestone.due_date = _ms_due
                         milestone.save(update_fields=_ms_fields)
+                        # FIN-M-L (R15): this branch logged nothing before. Reached only
+                        # after both refusals above have returned, so a refused edit
+                        # writes no line.
+                        _log_milestone_changes(project, request.user.profile, milestone,
+                                               _ms_logged_before, _ms_fields)
                     messages.success(request, f'{milestone.milestone_name} updated.')
                 except PaymentMilestone.DoesNotExist:
                     messages.error(request, 'Milestone not found.')
