@@ -331,7 +331,10 @@
                   <div class="text-muted" style="font-size:.75rem;">{{ m.milestone_description }}</div>
                 {% endif %}
                 <div class="small text-muted">
-                  {% if m.amount %}₹{{ m.amount|floatformat:0 }}{% else %}Amount TBD{% endif %}
+                  {% comment %}FIN-M-B2: `is not None`, not truthiness. BD is told to enter 0 for a
+                     milestone that does not apply; that 0 is a set amount and counts in the
+                     contract footer's sum, so it reads ₹0 here, not "Amount TBD".{% endcomment %}
+                  {% if m.amount is not None %}₹{{ m.amount|floatformat:0 }}{% else %}Amount TBD{% endif %}
                   {% if m.due_date %} · Due {{ m.due_date|date:"d M Y" }}{% endif %}
                 </div>
                 {% if m.amount_received is not None %}
@@ -438,6 +441,32 @@
                 {% csrf_token %}
                 <button type="submit" class="btn btn-outline-brand btn-sm">Create M1 / M2 / M3</button>
               </form>
+            {% endif %}
+          </div>
+        {% endif %}
+        {% comment %}FIN-M-B2 (R12): contract value and whether M1-M3 add up to it. Rendered
+           only when the view built `contract_footer`, i.e. for the roles in
+           user_can_see_contract_value() — the PM and BD see this card but not this footer.
+           Shown in the "No milestones yet" state too (ruling). Two short lines that wrap,
+           no fixed widths, so it fits a phone.{% endcomment %}
+        {% if contract_footer %}
+          <div class="px-3 py-2 border-top small" id="contract-value-footer">
+            {% if contract_footer.contract_value %}
+              <div>Contract value <span class="fw-semibold">{{ contract_footer.contract_value }}</span></div>
+              {% if contract_footer.state == 'not_set' %}
+                <div class="text-muted">M1–M3 amounts not set</div>
+              {% elif contract_footer.state == 'matches' %}
+                <div class="text-success">M1 + M2 + M3 = {{ contract_footer.total }} · matches</div>
+              {% elif contract_footer.state == 'short' %}
+                <div class="text-danger">M1 + M2 + M3 = {{ contract_footer.total }} · {{ contract_footer.difference }} short of contract</div>
+              {% else %}
+                <div class="text-danger">M1 + M2 + M3 = {{ contract_footer.total }} · {{ contract_footer.difference }} over contract</div>
+              {% endif %}
+            {% else %}
+              <div class="text-muted">Contract value not set</div>
+              {% if contract_footer.total %}
+                <div>M1 + M2 + M3 = {{ contract_footer.total }}</div>
+              {% endif %}
             {% endif %}
           </div>
         {% endif %}

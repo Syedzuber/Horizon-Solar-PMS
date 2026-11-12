@@ -2904,6 +2904,45 @@ def user_can_see_project_money(user, project):
     return user_can_manage_project(user, project)
 
 
+# FIN-M-B2 (ruling R12) — the roles that see a project's CONTRACT VALUE (the client's
+# price, Project.contract_value). Its own set, not MONEY_PORTFOLIO_ROLES: that set holds
+# SCM, and user_can_see_project_money() adds the site's PM, and R12 names both as roles
+# that must not see the client's price outside the places listed in the helper below.
+# Admin and System Admin are here by Zuber's FIN-M-B2 ruling: the administrative roles are
+# unrestricted (execution-model §2 D-4), and Admin already reads the figure on the Admin
+# projects list and the CEO dashboard.
+CONTRACT_VALUE_ROLES = frozenset({'CEO', 'Finance', 'Admin', 'System Admin'})
+
+
+def user_can_see_contract_value(user, project):
+    """Return True if `user` may see `project`'s contract value (FIN-M-B2, ruling R12).
+
+    R12: "Contract value: CEO + Finance everywhere. The PM keeps it on the create/edit
+    form they enter it on; BD keeps it in the amount-check error message. Not SCM, not
+    the site PM elsewhere." Admin and System Admin were added by ruling (see
+    CONTRACT_VALUE_ROLES). Allowed: a role in CONTRACT_VALUE_ROLES. Blocked: everyone
+    else, including the site's own PM and coordinators — R12 deliberately gives them the
+    figure only where they type it in, so management authority is NOT asked here, unlike
+    user_can_see_project_money().
+
+    The two places R12 keeps for PM and BD do not call this helper and must not start to:
+    they are the PM's own form and BD's refusal message, which are narrower rules of their
+    own.
+
+    The role is checked first; then a missing or soft-deleted project is refused. No
+    project-type term (ruling): where the figure is shown keeps its own gate, e.g. the
+    project page's milestone card is Residential-only in its template. Costs no query —
+    the profile is the one already cached on the user, and is_deleted is a column on the
+    loaded project.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None or profile.role not in CONTRACT_VALUE_ROLES:
+        return False
+    if project is None or project.is_deleted:
+        return False
+    return True
+
+
 def user_can_raise_vendor_order(user, project):
     """Return True if `user` may record a new vendor order for `project`.
 

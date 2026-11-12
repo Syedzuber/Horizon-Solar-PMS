@@ -11754,6 +11754,47 @@ def project_overview(request, project_id):
     # Dict of existing amounts keyed by milestone_name — used by BD modal pre-fill
     milestone_amounts = {m.milestone_name: str(m.amount) if m.amount is not None else '' for m in milestones}
 
+    # FIN-M-B2 (R12): the milestone card's contract-value footer. Allowed: the roles in
+    # user_can_see_contract_value() (CEO, Finance, Admin, System Admin). Blocked: everyone
+    # else, including the PM and BD who also see this card — R12 gives them the figure
+    # only on their own form and in BD's amount-check error. None means "no footer".
+    # Imported here, not at the top, only to keep this change inside project_overview —
+    # there is no circular import: permissions.py imports no project module.
+    # Built from `milestones` (already evaluated above) and the loaded project, so it
+    # costs no query. The card itself is Residential-only in the template (R2), and the
+    # project was resolved through _active_project, so a deleted one never gets here (R3).
+    from .permissions import user_can_see_contract_value
+    contract_footer = None
+    if user_can_see_contract_value(request.user, project):
+        contract = project.contract_value
+        contract_footer = {'contract_value': None, 'state': None,
+                           'total': None, 'difference': None}
+        # "Set" means a stored amount, 0 included — BD is told to enter 0 for a milestone
+        # that does not apply, so 0 counts towards the sum. A missing M1-M3 row is "not
+        # set" too.
+        by_name = {m.milestone_name: m.amount for m in milestones}
+        agreed = [by_name.get(name) for name in ('M1', 'M2', 'M3')]
+        total = None
+        if any(amount is None for amount in agreed):
+            contract_footer['state'] = 'not_set'
+        else:
+            total = sum(agreed, Decimal('0'))
+            contract_footer['total'] = _milestone_rupees(total)
+        if contract is not None:
+            contract_footer['contract_value'] = _milestone_rupees(contract)
+            if total is not None:
+                # _milestone_rupees, not _format_inr: a few paise apart must not read
+                # "₹0 short". Compared exactly, as set_milestone_amounts does.
+                contract_footer['difference'] = _milestone_rupees(abs(contract - total))
+                if total == contract:
+                    contract_footer['state'] = 'matches'
+                elif total < contract:
+                    contract_footer['state'] = 'short'
+                else:
+                    contract_footer['state'] = 'over'
+        # A blank contract value with all three amounts set keeps state None and shows
+        # the total with no verdict (ruling): there is nothing to compare it with.
+
     # Phases + task completion percentages (empty for Draft projects)
     phases = []
     phase_data_json = []
@@ -12140,6 +12181,8 @@ def project_overview(request, project_id):
         'issue_draft':                 _pop_issue_draft(request, f'project:{project.project_id}'),
         'milestones':                  milestones,
         'milestone_amounts':           milestone_amounts,
+        # FIN-M-B2: None unless user_can_see_contract_value(); see where it is built.
+        'contract_footer':             contract_footer,
         'phases':                      phases,
         'phase_data_json':             json.dumps(phase_data_json),
         'recent_activity':             recent_activity,
