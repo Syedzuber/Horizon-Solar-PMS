@@ -1187,6 +1187,19 @@ INVOICE_TASK_MATERIAL = 'Send Invoice - Material Supply'
 INVOICE_TASK_FINAL    = 'Send Invoice - Final Payment'
 INVOICE_TASK_NAMES = (INVOICE_TASK_ADVANCE, INVOICE_TASK_MATERIAL, INVOICE_TASK_FINAL)
 
+# R8: the task whose Done makes an M2/M3 invoice fall due — the task just before the
+# send-invoice task in the Residential template (Procurement 5 -> 6, Commissioning 9 ->
+# 10). M1 has none (R4: the advance is never invoiced). ONE definition for the two
+# readers that must agree: the Finance work page's "due" (views_finance_work, which
+# keeps the name TRIGGER_TASKS for it) and the "Invoice due" alert fired from
+# _apply_task_status_change (FIN-M-B4). Matched by name, like the invoice and
+# confirmation maps. Keyed by the milestone name (PaymentMilestone.M2 / .M3), spelled
+# as strings because this module does not import PaymentMilestone at top level.
+INVOICE_DUE_TRIGGERS = {
+    'M2': 'PO for B & C Class Items',
+    'M3': 'Customer Handover',
+}
+
 # Existing finance-confirmation tasks back-assigned to the same Finance user.
 # ("Finance Confirmation" is intentionally NOT here — it is deleted from the
 # template; its M2 milestone role passes to Pre Dispatch Payment Confirmation.)

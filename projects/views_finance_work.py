@@ -66,21 +66,22 @@ from .payments import payment_counts, payment_type_q
 from .permissions import (milestone_card_mode, user_can_invoice_milestone,
                           user_can_see_contract_value, user_can_view_finance_work,
                           user_has_dc_read_role)
-# views.py does not import this module, so this top-level import is not circular
+from .utils import INVOICE_DUE_TRIGGERS
+# views.py imports this module only inside a function (FIN-M-B4's lazy import, at call
+# time, when both modules are loaded), so this top-level import is not circular
 # (dashboard_strips imports from views the same way). _format_inr is the one Indian
 # grouping rule (whole rupees), already used by the CEO strips.
 from .views import _format_inr
 
 #: R8: the task whose Done makes an M2/M3 invoice fall due (the task before the
 #: send-invoice task in the Residential template). Matched by name, as the B3 and B9a
-#: task maps are.
-TRIGGER_TASKS = {
-    PaymentMilestone.M2: 'PO for B & C Class Items',
-    PaymentMilestone.M3: 'Customer Handover',
-}
+#: task maps are. The table lives in utils as INVOICE_DUE_TRIGGERS (FIN-M-B4) so the
+#: "Invoice due" alert reads the same one; this name is kept for the page and its tests.
+TRIGGER_TASKS = INVOICE_DUE_TRIGGERS
 
 #: Ruling 3: a Pending milestone on a Draft or Cancelled site is not Finance's to act on.
 #: (A Draft Residential site has no milestones yet; Cancelled is excluded by the ruling.)
+#: The "Invoice due" alert (FIN-M-B4) reads this same list, so the two agree.
 NOT_ACTIONABLE_STATUSES = ('Draft', 'Cancelled')
 
 #: How many payment requests the section lists per type (ruling 8); the rest are in the queue.

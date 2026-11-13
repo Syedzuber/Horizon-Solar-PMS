@@ -222,6 +222,8 @@ from .utils import (
     record_transition,
     # FIN-M-B3: the two "Send Invoice" task names that record an M2/M3 invoice.
     INVOICE_TASK_MATERIAL, INVOICE_TASK_FINAL,
+    # FIN-M-B4: the R8 trigger tasks, shared with the Finance work page.
+    INVOICE_DUE_TRIGGERS,
     # Prompt 0.4 — the versioned task template (R-7). Read-only here; the two duration
     # screens render the active version and nothing in views writes a template.
     resolve_active_task_template,
@@ -682,6 +684,24 @@ _MILESTONE_TO_INVOICE_TASK = {
     milestone: task_name
     for task_name, milestone in _INVOICE_TASK_TO_MILESTONE.items()
 }
+
+# --- R8 trigger task -> the milestone whose invoice it makes due (FIN-M-B4) ----------
+# Derived from utils.INVOICE_DUE_TRIGGERS, the one table the Finance work page reads
+# too, so the "Invoice due" alert and the page's "due" cannot drift apart.
+_INVOICE_DUE_TRIGGER_TO_MILESTONE = {
+    task_name: milestone
+    for milestone, task_name in INVOICE_DUE_TRIGGERS.items()
+}
+
+# The notify() event and its per-milestone log label. The label (NotificationLog.
+# template_name) is also the "sent once" key: one row with it for a project means that
+# milestone's alert has gone out (ruling (b): no migration, no new column).
+INVOICE_DUE_EVENT = 'invoice_due'
+
+
+def _invoice_due_log_label(milestone_name):
+    """'invoice_due_m2' / 'invoice_due_m3'."""
+    return f'{INVOICE_DUE_EVENT}_{milestone_name.lower()}'
 
 # UserProfile.role and Task.assigned_role use the same strings for every role
 # except BD, which the task template spells 'BD / Sales'. Normalise through this
@@ -7404,6 +7424,67 @@ def _apply_task_status_change(task, new_status, profile, request, project, *,
             for _ms_row in _ms_before:
                 _warn_receipt_without_invoice(request, project, _ms_row.milestone_name,
                                               _ms_row.status)
+
+    # FIN-M-B4 (R8): "Invoice due" to Finance when the task just before an M2/M3
+    # send-invoice task is marked Done. The name test comes first and costs no query, so
+    # an ordinary task's Done pays nothing for this block. Conditions, each a ruling:
+    #   * Residential only (R2), project not soft-deleted (R3);
+    #   * not Draft or Cancelled — the Finance work page's own list, so the alert and the
+    #     page agree on which sites Finance acts on;
+    #   * not a move caused by a milestone (from_milestone): that path only ever moves
+    #     Finance confirmation and send-invoice tasks, never a trigger, but the alert is
+    #     about a person finishing work, so the guard is stated rather than assumed;
+    #   * the matching milestone is Pending — once Invoiced or Received nothing is due;
+    #   * sent once per site and milestone (ruling (b)): a reopened trigger task
+    #     completed again sends nothing.
+    # A trigger marked Not Applicable never reaches Done, so it never alerts; the page
+    # still lists that milestone as due ("trigger N/A").
+    _due_label = _INVOICE_DUE_TRIGGER_TO_MILESTONE.get(task.task_name)
+    if (_due_label is not None and new_status == Task.DONE and not from_milestone
+            and project.project_type == 'Residential' and not project.is_deleted):
+        # Lazy import: views_finance_work imports this module at its top, so importing it
+        # at the top here would be circular. By the time a task moves both are loaded,
+        # and only a trigger task's Done pays the lookup.
+        from .views_finance_work import NOT_ACTIONABLE_STATUSES, rupees
+        if project.status not in NOT_ACTIONABLE_STATUSES:
+            _due_milestone = PaymentMilestone.objects.filter(
+                project=project, milestone_name=_due_label,
+                status=PaymentMilestone.PENDING).first()
+            _due_log_label = _invoice_due_log_label(_due_label)
+            # "Sent before" = any log row of this event, project and milestone label.
+            # notify() writes an in-app row for every recipient even while the email is
+            # paused, so the first alert always leaves one. Race: the rows are written
+            # after commit, so two completions committing at the same instant could both
+            # pass this check and both alert; the transition table already refuses a
+            # second Done of the same task, so that needs two different trigger rows on
+            # one site (none exist) — accepted.
+            if _due_milestone is not None and not NotificationLog.objects.filter(
+                    event_code=INVOICE_DUE_EVENT, related_project=project,
+                    template_name=_due_log_label).exists():
+                # Recipients: every active Finance user (ruling 3; B3: the invoice is
+                # Finance's to record). notify() drops the actor, so a Finance user who
+                # completed the trigger is not told about their own act. user is loaded
+                # with them because resolve_recipients() reads user.is_active.
+                _due_recipients = list(UserProfile.objects.filter(
+                    role='Finance', is_active=True).select_related('user'))
+                _due_today = timezone.localdate()
+                notify(
+                    INVOICE_DUE_EVENT, recipients=_due_recipients, actor=profile,
+                    related_project=project, log_label=_due_log_label,
+                    link=(reverse('project_overview', args=[project.project_id])
+                          + '#payment-milestones'),
+                    values={'project_id': project.project_id,
+                            'customer_name': project.customer_name,
+                            'milestone': _due_label,
+                            'trigger_task': task.task_name,
+                            'completed_by_name': (profile.user.get_full_name()
+                                                  or profile.user.username),
+                            'completed_on': f'{_due_today.day} {_due_today:%b %Y}',
+                            # The page's rupee format; blank reads "amount not set",
+                            # never ₹0 (76 of 78 milestones have no agreed amount).
+                            'agreed_amount': (rupees(_due_milestone.amount)
+                                              or 'amount not set')},
+                )
 
     # Payment milestone notification: task.is_payment_milestone is read from the pre-update
     # object — the flag never changes during a status update, so this is safe.

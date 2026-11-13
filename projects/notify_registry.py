@@ -622,6 +622,57 @@ NOTIFICATION_EVENTS = _build_registry([
         whatsapp_sent_separately=True,
     ),
 
+    # --- FIN-M-B4: an M2/M3 invoice has fallen due (R8) -----------------------------
+    # Fired only from views._apply_task_status_change, after commit, when an R8 trigger
+    # task (utils.INVOICE_DUE_TRIGGERS) is marked Done while its milestone is Pending.
+    # Email starts PAUSED (Admin switches it on after a test send); in-app is never
+    # paused, so it is live from the deploy (ruling (A)). Deferred, like every external
+    # send added since S2. No WhatsApp: there is no approved Interakt template. The
+    # agreed amount is in the email only; every recipient is Finance.
+    NotificationEvent(
+        code='invoice_due',
+        label='Invoice due',
+        module='Payments',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('project_id', 'Project ID', 'HRP-RES-2026-014'),
+            Variable('customer_name', 'Customer name of the project', 'Sharma Residence'),
+            Variable('milestone', 'The payment milestone now due: M2 or M3', 'M2'),
+            Variable('trigger_task', 'The task whose completion made the invoice due',
+                     'PO for B & C Class Items'),
+            Variable('completed_by_name', 'The person who marked that task Done',
+                     'Ravi Verma'),
+            Variable('completed_on', 'The day it was marked Done, e.g. "13 Nov 2026"',
+                     '13 Nov 2026'),
+            Variable('agreed_amount', 'The milestone\'s agreed amount in rupees, or '
+                     '"amount not set"', '₹1,35,000'),
+        ),
+        in_app_text=('{{ milestone }} invoice is now due for project {{ project_id }} '
+                     '({{ customer_name }}): "{{ trigger_task }}" was completed by '
+                     '{{ completed_by_name }}.'),
+        default_subject='Invoice due — {{ customer_name }} ({{ milestone }})',
+        default_body=(
+            'Hello {{ recipient_name }},\n\n'
+            'The {{ milestone }} invoice for project {{ project_id }} ({{ customer_name }}) '
+            'is now due.\n\n'
+            '"{{ trigger_task }}" was marked Done by {{ completed_by_name }} on '
+            '{{ completed_on }}.\n\n'
+            '**Agreed amount:** {{ agreed_amount }}\n\n'
+            'Record the invoice on the project\'s payment milestone card.'
+        ),
+        button_label='Open the milestone card',
+        recipients_rule=('Every active Finance user, except the person who completed the '
+                         'task. Sent when "PO for B & C Class Items" (M2) or "Customer '
+                         'Handover" (M3) is marked Done on a Residential site that is not '
+                         'deleted, Draft or Cancelled, while that milestone is Pending. '
+                         'Once per site and milestone: completing the task again after a '
+                         'reopen sends nothing. Never sent for a task marked Not '
+                         'Applicable.'),
+        default_state='paused',
+        deferred=True,
+    ),
+
     # --- T3b: task assignment --------------------------------------------------------
     # Wording pinned by tests_notify_migration_b. utils._notify_assignment chooses between
     # the two per recipient and project inside one after-commit callback (the cooldown),
