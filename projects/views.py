@@ -127,6 +127,8 @@ from .decorators import (
 )
 from .permissions import (
     user_can_manage_project, user_can_view_project, manageable_projects_q,
+    # FIN-M-B3: who records an invoice on an M2/M3 milestone (Finance only, ruling (a)).
+    user_can_invoice_milestone,
     user_can_open_dc_document, user_can_manage_dc_documents,
     # NTF-DCG 5a: the role half of the challan read audience (Finance read-only).
     user_has_dc_read_role,
@@ -218,6 +220,8 @@ from .utils import (
     # Prompt 0.3 — the state ledger. R-2: every status change writes a transition
     # row, inside the same transaction as the change itself.
     record_transition,
+    # FIN-M-B3: the two "Send Invoice" task names that record an M2/M3 invoice.
+    INVOICE_TASK_MATERIAL, INVOICE_TASK_FINAL,
     # Prompt 0.4 — the versioned task template (R-7). Read-only here; the two duration
     # screens render the active version and nothing in views writes a template.
     resolve_active_task_template,
@@ -659,6 +663,22 @@ _FINANCE_TASK_TO_MILESTONE = {
 _MILESTONE_TO_FINANCE_TASK = {
     milestone: task_name
     for task_name, milestone in _FINANCE_TASK_TO_MILESTONE.items()
+}
+
+# --- "Send Invoice" task <-> PaymentMilestone mapping (FIN-M-B3, R7) -----------
+# Completing one of these tasks while its milestone is Pending records the invoice
+# (number, date, amount) and marks the milestone Invoiced; invoicing from the card
+# completes the task. M1 is not invoiced (R4: token advance), so 'Send Invoice -
+# Advance Payment' is deliberately absent and keeps behaving as before. Matched by
+# name, like the confirmation map above; the reverse map is derived for the same
+# reason.
+_INVOICE_TASK_TO_MILESTONE = {
+    INVOICE_TASK_MATERIAL: 'M2',
+    INVOICE_TASK_FINAL:    'M3',
+}
+_MILESTONE_TO_INVOICE_TASK = {
+    milestone: task_name
+    for task_name, milestone in _INVOICE_TASK_TO_MILESTONE.items()
 }
 
 # UserProfile.role and Task.assigned_role use the same strings for every role
@@ -2509,17 +2529,21 @@ _MILESTONE_LOG_FIELDS = {
     'due_date':              ('due date', _milestone_day),
     'status':                ('status', _milestone_plain),
     'invoice_date':          ('invoice date', _milestone_day),
+    'invoice_number':        ('invoice number', _milestone_text),
     'received_date':         ('received date', _milestone_day),
     'amount':                ('amount', _milestone_rupees),
+    'invoice_amount':        ('invoice amount', _milestone_rupees),
     'amount_received':       ('amount received', _milestone_rupees),
     'variance_reason':       ('variance reason', _milestone_text),
 }
-# Plain line, code milestone_updated: visible to everyone who can see the site.
+# Plain line, code milestone_updated: visible to everyone who can see the site. The
+# invoice number is plain (FIN-M-B3): it identifies a document and carries no figure.
 _MILESTONE_PLAIN_FIELDS = ('milestone_description', 'due_date', 'status',
-                           'invoice_date', 'received_date')
+                           'invoice_date', 'invoice_number', 'received_date')
 # Money lines. The variance reason is money by ruling: it is free text Finance types
 # and can carry a figure ("short by 5,000").
 _MILESTONE_AMOUNT_FIELDS = ('amount',)
+_MILESTONE_INVOICE_FIELDS = ('invoice_amount',)   # FIN-M-B3: its own code, by ruling
 _MILESTONE_RECEIVED_FIELDS = ('amount_received', 'variance_reason')
 
 
@@ -2567,10 +2591,10 @@ def _log_milestone_changes(project, actor, milestone, before, saved_fields, plai
     TODO: lock the row (select_for_update) if that ever matters. Deferred by ruling
     (FIN-M-L): a lock changes how two writers interleave, and this change only logs.
 
-    Two money codes, one per money event, each written by its own call with a literal
-    code so tests_activity_money's static tripwire can resolve it. No writer saves
-    `amount` and `amount_received` together, so a save still writes at most one money
-    line."""
+    Three money codes, one per money event, each written by its own call with a literal
+    code so tests_activity_money's static tripwire can resolve it. No writer saves two
+    of `amount`, `invoice_amount` and `amount_received` together, so a save still writes
+    at most one money line."""
     after = {field: (new_values[field] if new_values is not None
                      else getattr(milestone, field))
              for field in saved_fields if field in _MILESTONE_LOG_FIELDS}
@@ -2586,6 +2610,15 @@ def _log_milestone_changes(project, actor, milestone, before, saved_fields, plai
         log_activity(project, actor, f'{name}: {amount}',
                      entity_type='Milestone', entity_id=milestone.pk,
                      action_code='milestone_amounts_set')
+    # FIN-M-B3: the invoice amount Finance records. Its own code (ruling), so
+    # "milestone_amounts_set" keeps meaning BD's agreed amount (0121's stamp reads it).
+    # `amount` is reused on purpose: the tripwire recognises a money description by the
+    # whole word "amount", and "invoiced_amount" does not contain it as a word.
+    amount = _milestone_diff(before, after, _MILESTONE_INVOICE_FIELDS)
+    if amount:
+        log_activity(project, actor, f'{name}: {amount}',
+                     entity_type='Milestone', entity_id=milestone.pk,
+                     action_code='milestone_invoice_amount')
     # `paid`, not a longer name: the tripwire recognises a money description by words
     # such as "amount" and "paid" in the call's own source.
     paid = _milestone_diff(before, after, _MILESTONE_RECEIVED_FIELDS)
@@ -6905,8 +6938,10 @@ def _apply_task_status_change(task, new_status, profile, request, project, *,
 
     `from_milestone` (FIN-M-B9a) is True only when _sync_finance_task_from_milestone()
     completes a Finance confirmation task because its PaymentMilestone was just marked
-    Received. The milestone is then the SOURCE of the move, so the task -> milestone sync
-    below is skipped (it would only re-read a row already Received) and the ledger row
+    Received — or, since FIN-M-B3, a "Send Invoice" task because its milestone was just
+    invoiced from the card. The milestone is then the SOURCE of the move, so the task ->
+    milestone syncs below and the invoice rung are skipped (they would only re-read a row
+    already moved) and the ledger row
     carries REASON_MILESTONE_SYNC, as the bulk update it replaced did. Every other rung,
     the activity line, the reschedule check and the payment alert run as for any move.
     Keyword-only so no positional caller can set it by accident; the default leaves both
@@ -7025,6 +7060,56 @@ def _apply_task_status_change(task, new_status, profile, request, project, *,
             f"Cannot move task from '{task.status}' to '{new_status}'."
         )
         return _TASK_STATUS_REFUSED
+
+    # FIN-M-B3 (R7) — AN M2/M3 "SEND INVOICE" TASK IS COMPLETED BY RECORDING THE INVOICE.
+    # While the task's milestone is Pending, Done needs the invoice number, date and
+    # amount, and the milestone becomes Invoiced with them (written after the task's own
+    # Done below). Asked after the transition table, so a Blocked task keeps its familiar
+    # refusal, and before any write, so every refusal here saves nothing.
+    #   * Who: Finance only (user_can_invoice_milestone, ruling (a)). The site's PM and
+    #     Coordinators, who may otherwise complete this task, are refused while it would
+    #     record the invoice: an invoice without a number is what R7 removes.
+    #   * Where: only the project page's invoice modal posts `invoice_form`. The task
+    #     detail page has no form, so a Done there is refused with a pointer (ruling).
+    #   * Not asked when the milestone moved the task (from_milestone: the card already
+    #     invoiced it), when the milestone is already Invoiced or Received (the task is
+    #     then plain bookkeeping and everyone's old rights apply — 20 legacy M2s are
+    #     Received), or when the site has no such milestone row.
+    # One query, the milestone row, and only on Done of these two task names.
+    invoice_milestone = invoice_values = None
+    if (not from_milestone and new_status == Task.DONE
+            and task.task_name in _INVOICE_TASK_TO_MILESTONE
+            and project.project_type == 'Residential'):
+        _inv_label = _INVOICE_TASK_TO_MILESTONE[task.task_name]
+        invoice_milestone = PaymentMilestone.objects.filter(
+            project=project, milestone_name=_inv_label,
+            status=PaymentMilestone.PENDING).first()
+        if invoice_milestone is not None:
+            # Finance only: who is allowed and why the others are blocked is in
+            # user_can_invoice_milestone()'s docstring.
+            if not user_can_invoice_milestone(request.user, project):
+                messages.error(
+                    request,
+                    f"Only Finance can complete '{task.task_name}' while {_inv_label} is "
+                    f"not invoiced — completing it records the invoice. No change was "
+                    f"made.")
+                return _TASK_STATUS_REFUSED
+            _inv_refusal = _milestone_invoice_refusal(project, invoice_milestone)
+            if _inv_refusal:
+                messages.error(request, _inv_refusal)
+                return _TASK_STATUS_REFUSED
+            if request.POST.get('invoice_form') != '1':
+                messages.error(
+                    request,
+                    f"Completing '{task.task_name}' records the invoice for "
+                    f"{_inv_label}. Record the invoice from the project page.")
+                return _TASK_STATUS_REFUSED
+            invoice_values, _inv_error = _read_invoice_form(request.POST,
+                                                            invoice_milestone)
+            if _inv_error:
+                messages.error(request, f'{_inv_label} not invoiced. {_inv_error} '
+                                        f'The task was not marked Done.')
+                return _TASK_STATUS_REFUSED
 
     # Finance can supply due_date inline when switching to In Progress — save before the guard
     _due_date_str = request.POST.get('due_date', '').strip()
@@ -7174,6 +7259,29 @@ def _apply_task_status_change(task, new_status, profile, request, project, *,
     # Log status changes for all non-blocked transitions (blocked has its own log above)
     log_activity(project, profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk,
                  action_code=f"task_status_{new_status.lower().replace(' ', '_')}")
+
+    # FIN-M-B3: the invoice the rung above read and checked, now that the task's Done is
+    # committed. Failure handling as B9a (a): the Done stands whatever happens here; an
+    # exception is logged with the tag Admin searches for and the user is warned. The
+    # savepoint keeps a database error from poisoning a caller's outer transaction.
+    if invoice_values is not None:
+        try:
+            with transaction.atomic():
+                _inv_outcome, _inv_row = _record_milestone_invoice(
+                    request, project, invoice_milestone, invoice_values, profile,
+                    plain_suffix=f" via completion of task '{task.task_name}'")
+        except Exception:
+            logger.exception(
+                'FIN-M-B9a sync failed: task %s (%s) on project %s was marked Done but '
+                'milestone %s could not be marked Invoiced',
+                task.pk, task.task_name, project.project_id,
+                invoice_milestone.milestone_name)
+            messages.warning(request, 'Task marked Done; the payment milestone could not '
+                                      'be updated — tell Admin.')
+        else:
+            if _inv_outcome == _INVOICE_RECORDED:
+                messages.success(request, f'{_inv_row.milestone_name} invoiced '
+                                          f'({_inv_row.invoice_number}).')
 
     # Bidirectional sync: Finance confirmation tasks → PaymentMilestone Received.
     # Mapping by task name — names are fixed in the residential template.
@@ -11076,20 +11184,27 @@ def notifications_view(request):
 # Finance milestone actions
 # ---------------------------------------------------------------------------
 
-def _sync_finance_task_from_milestone(request, project, milestone, profile):
+def _sync_finance_task_from_milestone(request, project, milestone, profile, *,
+                                      task_name=None, event='Received'):
     """
     Milestone Received -> its Finance confirmation task Done, THROUGH THE CHOKEPOINT
     (FIN-M-B9a). Called by milestone_receive and the Finance branch of project_overview's
     update_milestone, after the milestone's own save has committed. Not a view: it has no
-    gate of its own and relies on its two callers' Finance-only checks.
+    gate of its own and relies on its callers' Finance-only checks.
+
+    FIN-M-B3 reuses it for milestone Invoiced -> its "Send Invoice" task Done: the card's
+    invoice (milestone_invoice) passes `task_name` from _MILESTONE_TO_INVOICE_TASK and
+    `event='Invoiced'`, which only changes the wording of the logged failure. Left None,
+    `task_name` is the confirmation task, as before.
 
     R1: the milestone is the record and the task is the trigger and alert, so the task is
     moved by _apply_task_status_change(..., from_milestone=True) like any other Done — the
     task activity line, the reschedule check and the payment_milestone_reached alert all
     run — instead of the bulk .update() this replaced, which ran none of them.
-    from_milestone keeps the chokepoint from syncing the (already Received) milestone back.
+    from_milestone keeps the chokepoint from syncing the (already moved) milestone back,
+    and skips the invoice rung (the milestone is no longer Pending anyway).
 
-    Failure handling (a): the receipt is already saved and is never undone from here.
+    Failure handling (a): the milestone is already saved and is never undone from here.
       * A task the chokepoint refuses (Blocked: the transition table has no Blocked ->
         Done) stays as it is; the chokepoint's own refusal message and the warning below
         tell Finance. Not logged: a refusal is a rule working, not a fault.
@@ -11098,17 +11213,18 @@ def _sync_finance_task_from_milestone(request, project, milestone, profile):
         that task untouched (status, ledger row and activity line together) and its
         queued alert is discarded with the rollback.
 
-    Matching is by task name through the module-level map; whether to match by template
+    Matching is by task name through the module-level maps; whether to match by template
     code is FIN-M-B9b's question.
     """
-    task_name = _MILESTONE_TO_FINANCE_TASK.get(milestone.milestone_name)
+    if task_name is None:
+        task_name = _MILESTONE_TO_FINANCE_TASK.get(milestone.milestone_name)
     if not task_name:
         return
     warning = 'Milestone saved; the Finance task could not be updated — tell Admin.'
     try:
-        # The confirmation task(s) still open on this project — normally one. Done is
-        # left out (nothing to do); Blocked is kept so the chokepoint can refuse it and
-        # Finance hears why the task did not move.
+        # The task(s) still open on this project — normally one. Done is left out
+        # (nothing to do); Blocked is kept so the chokepoint can refuse it and Finance
+        # hears why the task did not move.
         tasks = list(Task.objects.filter(
             phase__project=project,
             task_name=task_name,
@@ -11116,9 +11232,9 @@ def _sync_finance_task_from_milestone(request, project, milestone, profile):
         ))
     except Exception:
         logger.exception(
-            'FIN-M-B9a sync failed: milestone %s on project %s was marked Received but '
+            'FIN-M-B9a sync failed: milestone %s on project %s was marked %s but '
             "its Finance task '%s' could not be read", milestone.milestone_name,
-            project.project_id, task_name)
+            project.project_id, event, task_name)
         messages.warning(request, warning)
         return
     for task in tasks:
@@ -11128,48 +11244,217 @@ def _sync_finance_task_from_milestone(request, project, milestone, profile):
                                                     project, from_milestone=True)
         except Exception:
             logger.exception(
-                'FIN-M-B9a sync failed: milestone %s on project %s was marked Received but '
+                'FIN-M-B9a sync failed: milestone %s on project %s was marked %s but '
                 'task %s (%s) could not be marked Done', milestone.milestone_name,
-                project.project_id, task.pk, task.task_name)
+                project.project_id, event, task.pk, task.task_name)
             messages.warning(request, warning)
             continue
         if outcome != _TASK_STATUS_APPLIED:
             messages.warning(request, warning)
 
 
+def _milestone_invoice_refusal(project, milestone):
+    """Why `milestone` cannot be invoiced or have its invoice corrected, or None.
+
+    FIN-M-B3's data rules, shared by the card (milestone_invoice) and the "Send Invoice"
+    task rung in _apply_task_status_change(), so both refuse the same things in the same
+    words. Who may invoice is a separate question, asked first by each caller through
+    user_can_invoice_milestone(). Costs no query.
+      * R3: a soft-deleted project is refused.
+      * R2: Residential only — M1-M3 describe a residential contract (see milestone_create).
+      * R4: M1 is the token advance and is not invoiced.
+      * Received is final: no correction after the money arrived (ruling).
+    """
+    if project.is_deleted:
+        return 'This site has been deleted. No invoice was recorded.'
+    if project.project_type != 'Residential':
+        return 'Invoices are recorded on Residential payment milestones only.'
+    if milestone.milestone_name not in _MILESTONE_TO_INVOICE_TASK:
+        return (f'{milestone.milestone_name} is not invoiced — it is the token advance. '
+                f'No change was made.')
+    if milestone.status == PaymentMilestone.RECEIVED:
+        return (f'{milestone.milestone_name} is already Received; its invoice can no '
+                f'longer be changed.')
+    return None
+
+
+def _read_invoice_form(post, milestone):
+    """Read the invoice number, date and amount Finance typed. Returns (values, None) or
+    (None, message); `values` is a dict keyed by the three PaymentMilestone fields.
+
+    One reader for the card form and the task-completion modal (FIN-M-B3 rulings):
+      * number — required, trimmed, at most the column's 50 characters, and not already
+        used on another milestone of a live project, compared trimmed and ignoring case.
+        Checked here only (ruling: no database index), so two Finance users saving the
+        same new number in the same instant could both succeed — accepted at this volume.
+      * date — required; any typed date check_typed_date() accepts, but not after today
+        (an invoice that has not been sent yet is a typo). Past dates are allowed so an
+        invoice sent before this screen existed can be recorded.
+      * amount — required, through parse_decimal_input: at least ₹0.01, two places, at
+        most what the column holds. Commas are refused, as on every other amount box.
+    """
+    number = (post.get('invoice_number') or '').strip()
+    if not number:
+        return None, 'Invoice number is required.'
+    max_number = PaymentMilestone._meta.get_field('invoice_number').max_length
+    if len(number) > max_number:
+        return None, f'Invoice number must be at most {max_number} characters.'
+
+    date_str = (post.get('invoice_date') or '').strip()
+    if not date_str:
+        return None, 'Invoice date is required.'
+    invoice_day, date_error = check_typed_date(date_str)
+    if date_error:
+        return None, f'Invoice date: {date_error}'
+    if invoice_day > timezone.localdate():
+        return None, 'Invoice date cannot be in the future.'
+
+    try:
+        amount = parse_decimal_input(
+            post.get('invoice_amount', ''), places=2, min_value=Decimal('0.01'),
+            max_value=decimal_field_max(PaymentMilestone, 'invoice_amount'),
+            field_label='Invoice amount')
+    except ValidationError as exc:
+        return None, exc.messages[0]
+    if amount is None:
+        return None, 'Invoice amount is required.'
+
+    # Fetches at most one other live milestone already carrying this number, with its
+    # project id for the message. The milestone being corrected is excluded so re-saving
+    # its own number is not a duplicate; soft-deleted projects are left out (R3).
+    clash = (PaymentMilestone.objects
+             .filter(invoice_number__iexact=number, project__is_deleted=False)
+             .exclude(pk=milestone.pk)
+             .values_list('project__project_id', 'milestone_name')
+             .first())
+    if clash:
+        return None, (f'Invoice number {number} is already used on {clash[0]} '
+                      f'{clash[1]}.')
+    return {'invoice_number': number, 'invoice_date': invoice_day,
+            'invoice_amount': amount}, None
+
+
+# Outcomes of _record_milestone_invoice().
+_INVOICE_RECORDED  = 'recorded'    # Pending -> Invoiced
+_INVOICE_CORRECTED = 'corrected'   # still Invoiced, number/date/amount changed
+_INVOICE_UNCHANGED = 'unchanged'   # still Invoiced, nothing differed
+_INVOICE_REFUSED   = 'refused'     # turned Received under us; message already emitted
+
+
+def _record_milestone_invoice(request, project, milestone, values, profile, *,
+                              plain_suffix=''):
+    """THE ONE INVOICE WRITER (FIN-M-B3, R7). Records `values` (from _read_invoice_form)
+    on an M2/M3 milestone: Pending -> Invoiced, or a correction while still Invoiced.
+
+    Called by milestone_invoice (the card) and by _apply_task_status_change() when an
+    M2/M3 "Send Invoice" task is completed. Not a view and has no gate: both callers have
+    already asked user_can_invoice_milestone() and _milestone_invoice_refusal(). It does
+    NOT move the task — the card caller does that afterwards through the chokepoint, and
+    the task caller has just done it — so this function cannot recurse into either.
+
+    The row is re-read under select_for_update(): the caller's copy may be stale, and two
+    saves racing here must not both write Pending -> Invoiced ledger rows. If the row
+    turned Received meanwhile, nothing is written and Finance is told.
+
+    Logged per FIN-M-L after the save: the plain line (status, invoice date, invoice
+    number) and the invoice-amount money line, each old -> new. A logging failure is
+    logged for Admin only (B9a ruling 7) — what Finance did happened.
+
+    Returns (outcome, milestone) with the saved row.
+    """
+    with transaction.atomic():
+        row = PaymentMilestone.objects.select_for_update().get(pk=milestone.pk)
+        if row.status == PaymentMilestone.RECEIVED:
+            messages.error(request, f'{row.milestone_name} is already Received; its '
+                                    f'invoice can no longer be changed.')
+            return _INVOICE_REFUSED, row
+        before = _milestone_values(row)
+        was_pending = row.status == PaymentMilestone.PENDING
+        fields = ['invoice_number', 'invoice_date', 'invoice_amount']
+        if not was_pending and all(before[f] == values[f] for f in fields):
+            return _INVOICE_UNCHANGED, row
+        for field in fields:
+            setattr(row, field, values[field])
+        if was_pending:
+            row.status = PaymentMilestone.INVOICED
+            fields.append('status')
+        row.save(update_fields=fields)
+        if was_pending:
+            # R-2: the status write and its ledger row commit together. A correction is
+            # not a transition (status stays Invoiced), so it writes no row.
+            record_transition(row, to_status=PaymentMilestone.INVOICED,
+                              from_status=PaymentMilestone.PENDING,
+                              actor=profile, project=project)
+    try:
+        _log_milestone_changes(project, profile, row, before, fields,
+                               plain_suffix=plain_suffix)
+    except Exception:
+        logger.exception(
+            'FIN-M-B9a sync failed: change-log line not written for the invoice on '
+            'milestone %s on project %s', row.milestone_name, project.project_id)
+    return (_INVOICE_RECORDED if was_pending else _INVOICE_CORRECTED), row
+
+
 @login_required
-@role_required(['Finance'])
 def milestone_invoice(request, project_id, milestone_pk):
     """
-    Mark a Pending milestone as Invoiced and record today as invoice_date.
-    Access: Finance only. POST only.
+    Record the invoice on an M2/M3 milestone from the project page's milestone card
+    (FIN-M-B3, R7): invoice number, date and amount. A Pending milestone becomes Invoiced
+    and its "Send Invoice" task is then completed through the chokepoint; an Invoiced one
+    has its invoice corrected (logged old -> new, no status or task change).
+
+    Access: Finance only, through user_can_invoice_milestone() (ruling (a)). POST only.
+    Refused with a message and nothing saved: a soft-deleted site, a non-Residential site,
+    M1, a Received milestone, or a missing or invalid number, date or amount.
     """
     if request.method != 'POST':
-        return redirect('dashboard_finance')
+        return redirect('project_overview', project_id=project_id)
 
+    # The milestone and its project in one query; the project is read for every rule.
     milestone = get_object_or_404(
-        PaymentMilestone, pk=milestone_pk, project__project_id=project_id
+        PaymentMilestone.objects.select_related('project'),
+        pk=milestone_pk, project__project_id=project_id,
     )
-    if milestone.status != 'Pending':
-        messages.error(request, 'Only Pending milestones can be marked as Invoiced.')
-        return redirect('dashboard_finance')
+    project = milestone.project
+    if project.is_deleted:
+        # R3: there is no project page to return to, so back to the user's dashboard.
+        messages.error(request, 'This site has been deleted. No invoice was recorded.')
+        return redirect(get_user_dashboard(request.user))
 
-    _ms_logged_before = _milestone_values(milestone)   # FIN-M-L: old values for the log
-    with transaction.atomic():
-        _ms_prev_status        = milestone.status   # 'Pending' — checked above
-        milestone.status       = 'Invoiced'
-        milestone.invoice_date = date.today()
-        milestone.save(update_fields=['status', 'invoice_date'])
-        record_transition(
-            milestone, to_status='Invoiced', from_status=_ms_prev_status,
-            actor=request.user.profile,
-        )
-    # FIN-M-L (R15): replaces "Marked M1 as Invoiced" with old → new for each saved
-    # field. Project via the FK the lookup already joined on, no extra query.
-    _log_milestone_changes(milestone.project, request.user.profile, milestone,
-                           _ms_logged_before, ['status', 'invoice_date'])
-    messages.success(request, f'{milestone.milestone_name} marked as Invoiced.')
-    return redirect('dashboard_finance')
+    # Finance only (ruling (a)): Finance raises the invoice, so Finance records it. Every
+    # other role, the site's PM and Coordinators included, is refused here.
+    if not user_can_invoice_milestone(request.user, project):
+        messages.error(request, 'Only Finance can record an invoice. No change was made.')
+        return redirect('project_overview', project_id=project.project_id)
+
+    refusal = _milestone_invoice_refusal(project, milestone)
+    if refusal:
+        messages.error(request, refusal)
+        return redirect('project_overview', project_id=project.project_id)
+
+    values, error = _read_invoice_form(request.POST, milestone)
+    if error:
+        messages.error(request, f'{milestone.milestone_name} not invoiced. {error}')
+        return redirect('project_overview', project_id=project.project_id)
+
+    profile = request.user.profile
+    outcome, milestone = _record_milestone_invoice(request, project, milestone, values,
+                                                   profile)
+    if outcome == _INVOICE_RECORDED:
+        messages.success(request, f'{milestone.milestone_name} invoiced '
+                                  f'({milestone.invoice_number}).')
+        # Milestone Invoiced -> its "Send Invoice" task Done through the chokepoint, as
+        # B9a does for receipts. The invoice is saved above and never undone from here; a
+        # Blocked task stays Blocked and Finance is warned.
+        _sync_finance_task_from_milestone(
+            request, project, milestone, profile,
+            task_name=_MILESTONE_TO_INVOICE_TASK[milestone.milestone_name],
+            event='Invoiced')
+    elif outcome == _INVOICE_CORRECTED:
+        messages.success(request, f'{milestone.milestone_name} invoice updated.')
+    elif outcome == _INVOICE_UNCHANGED:
+        messages.info(request, f'{milestone.milestone_name} invoice: no change.')
+    return redirect('project_overview', project_id=project.project_id)
 
 
 @login_required
@@ -11877,6 +12162,35 @@ def project_overview(request, project_id):
     show_milestone_card = (milestone_card_mode is not None
                            and project.project_type == 'Residential')
 
+    # FIN-M-B3 (R7): Finance's invoice controls. On the card, "Mark invoiced" on a Pending
+    # M2/M3 and "Correct invoice" on an Invoiced one; on the phase list, the invoice modal
+    # that opens when Finance picks Done on that milestone's "Send Invoice" task. Shown
+    # only to whoever user_can_invoice_milestone() admits (Finance, ruling (a)) and only
+    # where the card is drawn (Residential). Built from `milestones`, already evaluated
+    # above, so it costs no query.
+    can_invoice_milestones = (show_milestone_card
+                              and user_can_invoice_milestone(request.user, project))
+    # Keyed by task name for the modal's script: which milestone the task invoices and the
+    # amount to pre-fill. Only Pending milestones: once Invoiced or Received the task
+    # completes without a form, so the script must not intercept it.
+    invoice_task_prefill = {}
+    for m in milestones:
+        m.invoiceable = (can_invoice_milestones
+                         and m.milestone_name in _MILESTONE_TO_INVOICE_TASK
+                         and m.status in (PaymentMilestone.PENDING,
+                                          PaymentMilestone.INVOICED))
+        # Pre-fill: the invoiced amount when correcting, else BD's agreed amount. An
+        # agreed 0 (BD's "does not apply") is left blank: the form refuses below ₹0.01.
+        if m.invoice_amount is not None:
+            m.invoice_amount_prefill = str(m.invoice_amount)
+        elif m.amount is not None and m.amount > 0:
+            m.invoice_amount_prefill = str(m.amount)
+        else:
+            m.invoice_amount_prefill = ''
+        if m.invoiceable and m.status == PaymentMilestone.PENDING:
+            invoice_task_prefill[_MILESTONE_TO_INVOICE_TASK[m.milestone_name]] = {
+                'milestone': m.milestone_name, 'amount': m.invoice_amount_prefill}
+
     # Phases + task completion percentages (empty for Draft projects)
     phases = []
     phase_data_json = []
@@ -12267,6 +12581,10 @@ def project_overview(request, project_id):
         'contract_footer':             contract_footer,
         # FIN-M-C: None / 'read' / 'manager' / 'finance' / 'bd'; see where it is built.
         'milestone_card_mode':         milestone_card_mode,
+        # FIN-M-B3: Finance's invoice form on the card and the "Send Invoice" task modal.
+        'can_invoice_milestones':      can_invoice_milestones,
+        'invoice_task_prefill':        invoice_task_prefill,
+        'invoice_date_today':          timezone.localdate().isoformat(),
         'show_milestone_card':         show_milestone_card,
         'phases':                      phases,
         'phase_data_json':             json.dumps(phase_data_json),

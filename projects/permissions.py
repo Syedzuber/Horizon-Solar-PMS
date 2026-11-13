@@ -2998,6 +2998,33 @@ def milestone_card_mode(user, project, can_manage=None):
     return None
 
 
+# FIN-M-B3 (R7, ruling "Who" = (a)) — the roles that record an invoice on a payment
+# milestone, whether from the card or by completing an M2/M3 "Send Invoice" task.
+MILESTONE_INVOICE_ROLES = frozenset({'Finance'})
+
+
+def user_can_invoice_milestone(user, project):
+    """Return True if `user` may record or correct an invoice on `project`'s milestones.
+
+    Allowed: Finance only (ruling (a)). Finance raises the invoice, so Finance records its
+    number, date and amount. Blocked: everyone else, including the site's PM and
+    Coordinators who may otherwise complete a "Send Invoice" task — while the milestone is
+    Pending, completing that task IS recording the invoice, so _apply_task_status_change()
+    refuses them with this predicate. Once the milestone is Invoiced or Received the task
+    needs no invoice and their old rights apply.
+
+    A missing or soft-deleted project is refused. No project-type term: the invoice writer
+    refuses a non-Residential project and M1 with their own messages, and the card is
+    Residential-only. Costs no query.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None or profile.role not in MILESTONE_INVOICE_ROLES:
+        return False
+    if project is None or project.is_deleted:
+        return False
+    return True
+
+
 def user_can_raise_vendor_order(user, project):
     """Return True if `user` may record a new vendor order for `project`.
 

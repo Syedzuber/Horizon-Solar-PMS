@@ -206,11 +206,20 @@ class FinanceEditLogTests(MilestoneLogBase):
 
 class FinanceActionLogTests(MilestoneLogBase):
 
-    def test_invoice_writes_one_plain_line(self):
+    def test_invoice_writes_a_plain_line_and_an_invoice_amount_line(self):
+        # FIN-M-B3: moved to M2 (M1 is not invoiced, R4). The invoice now carries a
+        # number (plain line) and an amount (its own money code, by ruling).
+        m2 = PaymentMilestone.objects.create(
+            project=self.project, milestone_name='M2', milestone_description='Supply',
+            amount=Decimal('150000.00'), created_by=self.pm)
         _client(self.finance).post(
-            reverse('milestone_invoice', args=[self.project.project_id, self.m1.pk]))
+            reverse('milestone_invoice', args=[self.project.project_id, m2.pk]),
+            {'invoice_number': 'INV-9', 'invoice_date': date.today().isoformat(),
+             'invoice_amount': '150000'})
         self.assertEqual(self.lines(), [
-            (PLAIN, f'M1: status Pending → Invoiced; invoice date blank → {TODAY}',
+            (PLAIN, f"M2: status Pending → Invoiced; invoice date blank → {TODAY}; "
+                    f"invoice number blank → 'INV-9'", self.finance.pk),
+            ('milestone_invoice_amount', 'M2: invoice amount blank → ₹1,50,000',
              self.finance.pk)])
 
     def test_receive_writes_a_plain_and_a_money_line_with_the_variance_reason(self):

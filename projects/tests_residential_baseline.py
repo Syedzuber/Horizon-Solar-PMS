@@ -823,24 +823,30 @@ class MilestoneAndPaymentWorkflowTests(ResidentialBaselineBase):
         self.assertEqual(
             self.project_a.milestones.filter(amount__isnull=False).count(), 0)
 
-    def test_finance_invoices_m1_and_records_receipt(self):
+    def test_finance_invoices_m2_and_records_receipt(self):
+        # FIN-M-B3: M1 is not invoiced (R4), and an invoice now carries a number, a date
+        # and an amount (R7). Moved from M1 to M2 by ruling.
         self._set_amounts(_client_for(self.pm_a), self.project_a, 100000, 100000, 100000)
-        m1 = self.project_a.milestones.get(milestone_name='M1')
+        m2 = self.project_a.milestones.get(milestone_name='M2')
         client = _client_for(self.finance)
 
         client.post(reverse('milestone_invoice',
-                            args=[self.project_a.project_id, m1.pk]))
-        m1.refresh_from_db()
-        self.assertEqual(m1.status, 'Invoiced')
-        self.assertEqual(m1.invoice_date, date.today())
+                            args=[self.project_a.project_id, m2.pk]),
+                    {'invoice_number': 'INV/26-27/0001',
+                     'invoice_date': date.today().isoformat(),
+                     'invoice_amount': '100000'})
+        m2.refresh_from_db()
+        self.assertEqual(m2.status, 'Invoiced')
+        self.assertEqual(m2.invoice_date, date.today())
+        self.assertEqual(m2.invoice_number, 'INV/26-27/0001')
 
         client.post(reverse('milestone_receive',
-                            args=[self.project_a.project_id, m1.pk]),
+                            args=[self.project_a.project_id, m2.pk]),
                     {'amount_received': '100000'})
-        m1.refresh_from_db()
-        self.assertEqual(m1.status, 'Received')
-        self.assertEqual(m1.amount_received, Decimal('100000.00'))
-        self.assertEqual(m1.received_date, date.today())
+        m2.refresh_from_db()
+        self.assertEqual(m2.status, 'Received')
+        self.assertEqual(m2.amount_received, Decimal('100000.00'))
+        self.assertEqual(m2.received_date, date.today())
 
     def test_m1_receipt_closes_the_advance_payment_confirmation_task(self):
         """The milestone → task half of the bidirectional sync. M1 and M3 map to task

@@ -1470,6 +1470,12 @@ class PaymentMilestone(models.Model):
     variance_reason      = models.CharField(max_length=255, blank=True, default='')  # Explanation when amount_received ≠ amount
     due_date             = models.DateField(null=True, blank=True)
     invoice_date         = models.DateField(null=True, blank=True)   # Set when Finance marks Invoiced
+    # FIN-M-B3 (R7): M2/M3 only; blank on M1 and on rows invoiced before B3. Unique across live
+    # projects, compared trimmed and case-insensitive, checked in the view (no DB index).
+    invoice_number       = models.CharField(max_length=50, blank=True, default='')
+    # FIN-M-B3: what Finance invoiced. Its own column so BD's agreed `amount` stays as set
+    # and a difference between the two stays visible. Null until invoiced.
+    invoice_amount       = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     received_date        = models.DateField(null=True, blank=True)   # Set when Finance marks Received
     status               = models.CharField(max_length=20, choices=STATUS_CHOICES, default=PENDING)
     created_by           = models.ForeignKey(UserProfile, null=True, blank=True, on_delete=models.SET_NULL)

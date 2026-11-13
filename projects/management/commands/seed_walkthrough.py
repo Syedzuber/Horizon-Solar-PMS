@@ -1709,16 +1709,23 @@ class Command(BaseCommand):
                        check=lambda: m.PaymentMilestone.objects.filter(
                            project=acked, amount__isnull=False).count() == 3,
                        what='milestone amounts')
-        # milestone_invoice / milestone_receive write invoice_date and received_date with
-        # date.today(), which no clock can move — so both are driven TODAY, minutes
-        # apart, and a milestone's dates never disagree with its own ledger rows.
+        # milestone_receive writes received_date with date.today(), which no clock can
+        # move — so receipts and invoices are driven TODAY, minutes apart, and a
+        # milestone's dates never disagree with its own ledger rows.
+        # FIN-M-B3: M1 is not invoiced (R4) — its receipt goes straight from Pending, which
+        # receipts still allow. M2's invoice carries a number, today's date and an amount
+        # (R7), and completes its "Send Invoice - Material Supply" task.
         ms = {x.milestone_name: x for x in m.PaymentMilestone.objects.filter(project=acked)}
-        for name, invoice_at, receive_at in (('M1', -0.5, -0.4), ('M2', -0.3, None)):
-            with self.clock.at(0, history=f'ms:{acked.pk}:{name}', hours=invoice_at):
-                self._post('walk.finpay', 'milestone_invoice',
-                           {'project_id': acked.project_id, 'milestone_pk': ms[name].pk},
-                           check=lambda n=name: m.PaymentMilestone.objects.get(
-                               pk=ms[n].pk).status == 'Invoiced', what=f'invoice {name}')
+        for name, invoice_at, receive_at in (('M1', None, -0.4), ('M2', -0.3, None)):
+            if invoice_at is not None:
+                with self.clock.at(0, history=f'ms:{acked.pk}:{name}', hours=invoice_at):
+                    self._post('walk.finpay', 'milestone_invoice',
+                               {'project_id': acked.project_id, 'milestone_pk': ms[name].pk},
+                               {'invoice_number': f'WALK-CINV-{name}',
+                                'invoice_date': self._plus_days(0),
+                                'invoice_amount': '150000'},
+                               check=lambda n=name: m.PaymentMilestone.objects.get(
+                                   pk=ms[n].pk).status == 'Invoiced', what=f'invoice {name}')
             if receive_at:
                 with self.clock.at(0, history=f'ms:{acked.pk}:{name}', hours=receive_at):
                     self._post('walk.finpay', 'milestone_receive',

@@ -319,7 +319,7 @@
             {% if m.status == 'Received' %}
               <span class="badge" style="background:var(--hz-green)" title="{{ m.milestone_name }} — Received">{{ m.milestone_name }}</span>
             {% elif m.status == 'Invoiced' %}
-              <span class="badge bg-primary" title="{{ m.milestone_name }} — Invoiced">{{ m.milestone_name }}</span>
+              <span class="badge bg-primary" title="{{ m.milestone_name }} — Invoiced{% if m.invoice_number %} ({{ m.invoice_number }}){% endif %}">{{ m.milestone_name }}</span>
             {% else %}
               <span class="badge bg-secondary" title="{{ m.milestone_name }} — Pending">{{ m.milestone_name }}</span>
             {% endif %}
@@ -345,6 +345,16 @@
                   {% if m.amount is not None %}₹{{ m.amount|floatformat:0 }}{% else %}Amount TBD{% endif %}
                   {% if m.due_date %} · Due {{ m.due_date|date:"d M Y" }}{% endif %}
                 </div>
+                {% comment %}FIN-M-B3 (R7): the invoice Finance recorded — number and date, then the
+                   invoiced amount beside the agreed one above so a difference is visible.
+                   Shown to every card audience, like the agreed and received amounts on
+                   this card (pre-flight 8). A row invoiced before B3 has a date only.{% endcomment %}
+                {% if m.invoice_number or m.invoice_amount is not None %}
+                  <div style="font-size:.75rem;" class="text-muted">
+                    Invoice {% if m.invoice_number %}{{ m.invoice_number }}{% endif %}{% if m.invoice_date %} · {{ m.invoice_date|date:"d M Y" }}{% endif %}
+                    {% if m.invoice_amount is not None %}<br>Invoiced: ₹{{ m.invoice_amount|floatformat:0 }}{% endif %}
+                  </div>
+                {% endif %}
                 {% if m.amount_received is not None %}
                   <div style="font-size:.75rem;" class="text-muted">
                     Received: ₹{{ m.amount_received|floatformat:0 }}
@@ -366,6 +376,15 @@
                 {% else %}
                   <span class="badge bg-secondary">Pending</span>
                 {% endif %}
+                {% if m.invoiceable %}
+                  <button class="btn btn-outline-primary milestone-edit-btn"
+                          type="button"
+                          data-bs-toggle="collapse"
+                          data-bs-target="#invoiceMilestone{{ m.pk }}"
+                          title="{% if m.status == 'Invoiced' %}Correct invoice{% else %}Mark invoiced{% endif %}">
+                    {% if m.status == 'Invoiced' %}Correct{% else %}Invoice{% endif %}
+                  </button>
+                {% endif %}
                 {% if milestone_card_mode == 'manager' or milestone_card_mode == 'finance' %}
                   <button class="btn btn-outline-secondary milestone-edit-btn"
                           type="button"
@@ -385,6 +404,32 @@
                 {% endif %}
               </div>
             </div>
+            {% comment %}FIN-M-B3 (R7): Finance's invoice form — "Mark invoiced" on a Pending M2/M3,
+               "Correct invoice" on an Invoiced one. Plain POST to milestone_invoice, which
+               re-checks every rule; `invoiceable` is only set for user_can_invoice_milestone()
+               viewers. Stacked full-width fields so it fits a phone.{% endcomment %}
+            {% if m.invoiceable %}
+            <div class="collapse mt-2" id="invoiceMilestone{{ m.pk }}">
+              <form method="post" action="{% url 'milestone_invoice' project.project_id m.pk %}"
+                    class="p-2 rounded" style="background:#f8f9fa;">
+                {% csrf_token %}
+                <label class="form-label small mb-1" for="invNumber{{ m.pk }}">Invoice number</label>
+                <input type="text" name="invoice_number" id="invNumber{{ m.pk }}" maxlength="50" required
+                       class="form-control form-control-sm mb-2" value="{{ m.invoice_number }}">
+                <label class="form-label small mb-1" for="invDate{{ m.pk }}">Invoice date</label>
+                <input type="date" name="invoice_date" id="invDate{{ m.pk }}" required
+                       min="{{ typed_date_min }}" max="{{ invoice_date_today }}"
+                       class="form-control form-control-sm mb-2"
+                       value="{% if m.invoice_date %}{{ m.invoice_date|date:'Y-m-d' }}{% else %}{{ invoice_date_today }}{% endif %}">
+                <label class="form-label small mb-1" for="invAmount{{ m.pk }}">Invoice amount (₹)</label>
+                <input type="number" name="invoice_amount" id="invAmount{{ m.pk }}" step="0.01" min="0.01" required
+                       class="form-control form-control-sm mb-2" value="{{ m.invoice_amount_prefill }}">
+                <button type="submit" class="btn btn-brand btn-sm w-100">
+                  {% if m.status == 'Invoiced' %}Save correction{% else %}Mark {{ m.milestone_name }} invoiced{% endif %}
+                </button>
+              </form>
+            </div>
+            {% endif %}
             {% if milestone_card_mode == 'manager' or milestone_card_mode == 'finance' %}
             <div class="collapse mt-2" id="editMilestone{{ m.pk }}">
               <form method="post" action="{% url 'project_overview' project.project_id %}"
@@ -1328,6 +1373,46 @@ label (get_status_display) — never a two-state branch.
     </div>
   </div>
 </div>
+
+{% comment %}FIN-M-B3 (R7): invoice modal. Opened by handleTaskStatusChange() when Finance picks
+   Done on an M2/M3 "Send Invoice" task whose milestone is still Pending (the keys of
+   invoice_task_prefill). A plain POST to the row's own task_status_update URL with
+   status=Done and invoice_form=1; _apply_task_status_change() refuses the Done unless the
+   number, date and amount pass, so nothing here is trusted. No Skip button: completing
+   the task without the invoice is exactly what the server refuses.{% endcomment %}
+<div class="modal fade" id="invoiceTaskModal" tabindex="-1" aria-hidden="true" aria-labelledby="invoiceTaskTitle">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title fw-semibold" id="invoiceTaskTitle">Record invoice</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cancel"></button>
+      </div>
+      <form id="invoiceTaskForm" method="post" action="">
+        {% csrf_token %}
+        <input type="hidden" name="status" value="Done">
+        <input type="hidden" name="invoice_form" value="1">
+        <div class="modal-body">
+          <p class="small text-muted mb-3" id="invoiceTaskLabel"></p>
+          <label class="form-label small fw-semibold mb-1" for="invoiceTaskNumber">Invoice number</label>
+          <input type="text" id="invoiceTaskNumber" name="invoice_number" maxlength="50" required
+                 class="form-control form-control-sm mb-2">
+          <label class="form-label small fw-semibold mb-1" for="invoiceTaskDate">Invoice date</label>
+          <input type="date" id="invoiceTaskDate" name="invoice_date" required
+                 min="{{ typed_date_min }}" max="{{ invoice_date_today }}"
+                 class="form-control form-control-sm mb-2" value="{{ invoice_date_today }}">
+          <label class="form-label small fw-semibold mb-1" for="invoiceTaskAmount">Invoice amount (₹)</label>
+          <input type="number" id="invoiceTaskAmount" name="invoice_amount" step="0.01" min="0.01" required
+                 class="form-control form-control-sm">
+        </div>
+        <div class="modal-footer py-2 gap-2">
+          <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-brand btn-sm flex-grow-1">Save invoice &amp; Mark Done</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{{ invoice_task_prefill|json_script:"invoice-task-prefill" }}
 {% endif %}
 
 {% comment %}Phase rules (OPEX v1) — the start dialog for the site's PM side. Opened by
@@ -1636,6 +1721,12 @@ at the top of this page unmodified, exactly as it does on task_detail.
   var bsPhaseRuleModal        = null;
   var _phaseRulePendingSelect = null;
   var _FINANCE_CONF_TASKS     = ['Advance Payment Confirmation', 'Pre Dispatch Payment Confirmation', '100% Payment Confirmation'];
+  var bsInvoiceTaskModal      = null;
+  /* FIN-M-B3: {task name: {milestone, amount}} for M2/M3 "Send Invoice" tasks whose
+     milestone is Pending. Rendered for Finance only; empty object for everyone else. */
+  var _INVOICE_TASK_PREFILL   = {};
+  var _invoicePrefillEl       = document.getElementById('invoice-task-prefill');
+  if (_invoicePrefillEl) { try { _INVOICE_TASK_PREFILL = JSON.parse(_invoicePrefillEl.textContent) || {}; } catch (e) {} }
 
   /* candidates keyed by Task.ROLE_CHOICES value — loaded in DOMContentLoaded */
   var assignCandidates = {};
@@ -1704,6 +1795,20 @@ at the top of this page unmodified, exactly as it does on task_detail.
       document.getElementById('phaseRuleStartRules').textContent = select.dataset.phaseRules;
       document.getElementById('phaseRuleStartReason').value = '';
       bsPhaseRuleModal.show();
+      return;
+    }
+
+    /* FIN-M-B3 — an M2/M3 "Send Invoice" task whose milestone is Pending is completed by
+       recording the invoice. The select goes back until the modal's form is submitted. */
+    var _invoiceTask = _INVOICE_TASK_PREFILL[select.dataset.taskName || ''];
+    if (newStatus === 'Done' && _invoiceTask && bsInvoiceTaskModal) {
+      select.value = originalStatus;
+      document.getElementById('invoiceTaskLabel').textContent =
+        (select.dataset.taskName || '') + ' — records the invoice for ' + _invoiceTask.milestone + '.';
+      document.getElementById('invoiceTaskForm').action = select.form.action;
+      document.getElementById('invoiceTaskNumber').value = '';
+      document.getElementById('invoiceTaskAmount').value = _invoiceTask.amount || '';
+      bsInvoiceTaskModal.show();
       return;
     }
 
@@ -2018,6 +2123,10 @@ at the top of this page unmodified, exactly as it does on task_detail.
       });
       paymentCaptureEl.addEventListener('hidden.bs.modal', function () { _paymentPendingSelect = null; });
     }
+
+    /* FIN-M-B3 invoice modal — created here, not inline (bootstrap loads after content). */
+    var invoiceTaskEl = document.getElementById('invoiceTaskModal');
+    if (invoiceTaskEl) { bsInvoiceTaskModal = new bootstrap.Modal(invoiceTaskEl); }
 
     /* Phase-rule start dialog (OPEX v1). The select and reason are captured BEFORE
        .hide(): hide.bs.modal fires synchronously and the hidden handler below clears

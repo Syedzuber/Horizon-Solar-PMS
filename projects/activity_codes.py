@@ -26,6 +26,7 @@ MONEY_ACTIVITY_CODES = frozenset({
     'payment_request_paid',       # payments.mark_payment_paid
     'milestone_amounts_set',      # views: BD's set_milestone_amounts and the PM edit's amount
     'milestone_amount_received',  # views: amount received / variance reason (FIN-M-L)
+    'milestone_invoice_amount',   # views: the invoice amount Finance records (FIN-M-B3)
 })
 # FIN-M-L's plain milestone code, 'milestone_updated' (description, dates, status,
 # creation), is deliberately NOT here: those lines carry no amount and every viewer of

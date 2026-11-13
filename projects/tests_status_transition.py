@@ -699,17 +699,21 @@ class InstrumentedSubjectTypeTests(LedgerFixture):
         )
 
     def test_payment_milestone_invoiced_then_received(self):
-        m1 = self.project.milestones.get(milestone_name='M1')
-        PaymentMilestone.objects.filter(pk=m1.pk).update(amount=Decimal('100000.00'))
+        # FIN-M-B3: on M2, with the invoice's number, date and amount — M1 is not
+        # invoiced (R4). Moved from M1 by ruling.
+        m2 = self.project.milestones.get(milestone_name='M2')
+        PaymentMilestone.objects.filter(pk=m2.pk).update(amount=Decimal('100000.00'))
         client = _client_for(self.finance)
 
         client.post(reverse('milestone_invoice',
-                            args=[self.project.project_id, m1.pk]))
+                            args=[self.project.project_id, m2.pk]),
+                    {'invoice_number': 'INV-T-1', 'invoice_date': date.today().isoformat(),
+                     'invoice_amount': '100000'})
         client.post(reverse('milestone_receive',
-                            args=[self.project.project_id, m1.pk]),
+                            args=[self.project.project_id, m2.pk]),
                     {'amount_received': '100000'})
 
-        rows = self._rows(SUBJECT_PAYMENT_MILESTONE, m1)
+        rows = self._rows(SUBJECT_PAYMENT_MILESTONE, m2)
         self.assertEqual([(r.from_status, r.to_status) for r in rows], [
             ('Pending',  'Invoiced'),
             ('Invoiced', 'Received'),
