@@ -406,6 +406,6 @@ class FormatTests(SimpleTestCase):
         self.assertEqual(_milestone_rupees(Decimal('12345678.5')), '₹1,23,45,678.50')
         # Paise are kept: a 40-paise change must not read "₹X → ₹X".
         self.assertEqual(_milestone_rupees(Decimal('100000.40')), '₹1,00,000.40')
-        # milestone_receive accepts a negative today (a secondary finding); the log
-        # still reads it correctly rather than mis-grouping the sign.
+        # No receipt path accepts a negative since FIN-M-B3b, but the formatter is shared
+        # and must still read a sign correctly rather than mis-grouping it.
         self.assertEqual(_milestone_rupees(Decimal('-50000')), '-₹50,000')

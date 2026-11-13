@@ -20,7 +20,8 @@ Rulings (Zuber, 12 Nov 2026):
 * The task detail page refuses Done on those tasks while Pending: "Record the invoice from
   the project page".
 * Correction while Invoiced, logged old -> new; none after Received.
-* A receipt straight from Pending is still allowed, with no warning (B3b).
+* A receipt straight from Pending is still allowed; FIN-M-B3b added a warning that no
+  invoice was recorded (tests_milestone_input_checks).
 * Number, date and amount required; date may be past, not future; amount at least ₹0.01;
   pre-filled from the milestone amount when set.
 * New money code milestone_invoice_amount. Failure tag reused: "FIN-M-B9a sync failed".
@@ -509,12 +510,16 @@ class SyncAndLifecycleTests(InvoiceBase):
                          Task.DONE)
 
     def test_receipt_straight_from_pending_is_still_allowed(self):
+        """Allowed (B3 ruling 7), and since FIN-M-B3b Finance is warned that no invoice
+        was recorded; the send-invoice task is left open (B3b ruling)."""
         response = _client(self.finance).post(
             reverse('milestone_receive', args=[self.project.project_id, self.m2.pk]),
             {'amount_received': '150000'})
         self.m2.refresh_from_db()
         self.assertEqual(self.m2.status, 'Received')
-        self.assertFalse(any('invoice' in t.lower() for t in _texts(response)))
+        self.assertIn("M2 marked Received, but no invoice was recorded for it. Its task "
+                      "'Send Invoice - Material Supply' is still open.", _texts(response))
+        self.assertEqual(self.status_of(self.m2_task), Task.NOT_STARTED)
 
 
 # ---------------------------------------------------------------------------

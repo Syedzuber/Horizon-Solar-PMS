@@ -7111,6 +7111,35 @@ def _apply_task_status_change(task, new_status, profile, request, project, *,
                                         f'The task was not marked Done.')
                 return _TASK_STATUS_REFUSED
 
+    # FIN-M-B3b — THE PAYMENT-CAPTURE MODAL'S AMOUNT IS READ HERE, BEFORE ANY WRITE.
+    # Done on a payment-confirmation task carries the amount received (and a note) into
+    # the milestone sync further down. A typed amount that cannot be read now REFUSES THE
+    # DONE (ruling): it used to be dropped silently while the task completed and the
+    # milestone turned Received with no amount — and once Received, no screen lets
+    # anyone add the amount afterwards. Refused whatever the milestone's state (ruling),
+    # so a typo gets the same answer every time and this costs no query. A blank box —
+    # the modal's Skip button — reads as None and completes the task as before. An
+    # over-long note is refused for the same reason. Not asked when the milestone moved
+    # the task (from_milestone): that request's amount is the milestone's own, already
+    # read by its path.
+    receipt_amount = receipt_note = None
+    if (not from_milestone and new_status == Task.DONE
+            and task.task_name in _FINANCE_TASK_TO_MILESTONE):
+        _rc_label = _FINANCE_TASK_TO_MILESTONE[task.task_name]
+        try:
+            receipt_amount = _read_amount_received(request.POST.get('amount_received', ''))
+        except ValidationError as exc:
+            messages.error(request, f'{_rc_label} not updated. {exc.messages[0]} '
+                                    f'The task was not marked Done.')
+            return _TASK_STATUS_REFUSED
+        receipt_note = request.POST.get('variance_reason', '').strip()
+        _rc_note_error = _milestone_text_error(receipt_note, 'variance_reason',
+                                               'Variance reason')
+        if _rc_note_error:
+            messages.error(request, f'{_rc_label} not updated. {_rc_note_error} '
+                                    f'The task was not marked Done.')
+            return _TASK_STATUS_REFUSED
+
     # Finance can supply due_date inline when switching to In Progress — save before the guard
     _due_date_str = request.POST.get('due_date', '').strip()
     if _due_date_str and new_status == Task.IN_PROGRESS and not task.due_date:
@@ -7293,15 +7322,12 @@ def _apply_task_status_change(task, new_status, profile, request, project, *,
             and task.task_name in _FINANCE_TASK_TO_MILESTONE):
         _ms_label  = _FINANCE_TASK_TO_MILESTONE[task.task_name]
         _ms_update = {'status': 'Received', 'received_date': date.today()}
-        _ar_str    = request.POST.get('amount_received', '').strip()
-        _vr_str    = request.POST.get('variance_reason', '').strip()
-        if _ar_str:
-            try:
-                _ms_update['amount_received'] = Decimal(_ar_str)
-            except InvalidOperation:
-                pass
-        if _vr_str:
-            _ms_update['variance_reason'] = _vr_str
+        # Read and checked by the FIN-M-B3b rung above, before the task was written; a
+        # bad value never gets this far.
+        if receipt_amount is not None:
+            _ms_update['amount_received'] = receipt_amount
+        if receipt_note:
+            _ms_update['variance_reason'] = receipt_note
         # FIN-M-B9a, failure handling (a): the task's Done is already committed above and
         # stands whatever happens here. A sync failure is logged at ERROR with a
         # traceback and the tag Admin searches the Railway logs for, and the user is
@@ -7370,6 +7396,12 @@ def _apply_task_status_change(task, new_status, profile, request, project, *,
                 'FIN-M-B9a sync failed: change-log line not written for milestone %s on '
                 'project %s after task %s (%s) was marked Done',
                 _ms_label, project.project_id, task.pk, task.task_name)
+        # FIN-M-B3b: a receipt straight from Pending on M2/M3 via this task. Only when the
+        # milestone really moved (_ms_updated); _ms_before holds its pre-move status.
+        if _ms_updated:
+            for _ms_row in _ms_before:
+                _warn_receipt_without_invoice(request, project, _ms_row.milestone_name,
+                                              _ms_row.status)
 
     # Payment milestone notification: task.is_payment_milestone is read from the pre-update
     # object — the flag never changes during a status update, so this is safe.
@@ -11184,6 +11216,64 @@ def notifications_view(request):
 # Finance milestone actions
 # ---------------------------------------------------------------------------
 
+def _read_amount_received(raw):
+    """Read the "amount received" Finance typed. Returns a Decimal, or None for a blank
+    box; raises ValidationError with a message naming the field (FIN-M-B3b).
+
+    One reader for the three receipt paths: the project page's Finance edit, the receipt
+    modal (milestone_receive) and the payment-capture modal on the confirmation task. Each
+    used to call Decimal() itself, which let a negative through as a real receipt, rounded a
+    third decimal place, and turned "NaN" or an over-long number into a server error; two of
+    them threw an unreadable value away and still reported success. Zero is allowed
+    (ruling): a receipt of ₹0 saved before this session and is kept. Commas are refused,
+    as on every other amount box (B1b).
+    """
+    return parse_decimal_input(
+        raw, places=2, min_value=0,
+        max_value=decimal_field_max(PaymentMilestone, 'amount_received'),
+        field_label='Amount received')
+
+
+def _milestone_text_error(value, field_name, label):
+    """A refusal message when `value` is longer than PaymentMilestone.`field_name` holds,
+    else None (FIN-M-B3b). Without it an over-long description or variance reason reached
+    the database and failed there as a server error. The limit is read from the field so
+    a later change to the column moves the check with it."""
+    max_length = PaymentMilestone._meta.get_field(field_name).max_length
+    if len(value) > max_length:
+        return f'{label} must be at most {max_length} characters.'
+    return None
+
+
+def _warn_receipt_without_invoice(request, project, milestone_name, from_status):
+    """Warn when an M2/M3 receipt skipped the invoice step (FIN-M-B3b, ruling on B3's
+    ruling 7). A receipt straight from Pending stays ALLOWED — this never refuses — but
+    R7 says M2 and M3 are invoiced first, so Finance is told no invoice was recorded.
+
+    Called by all three receipt paths after their save, with the status the milestone had
+    before it. M1 is never invoiced (R4), and non-Residential sites have no invoice step.
+
+    The send-invoice task is left open by ruling: closing it would record an invoice that
+    was never sent. The second sentence names it only when an open, applicable one really
+    exists — on the local copy most Pending M2/M3 sites have no such task (older
+    template) or have it Done already, and the message must not claim otherwise. That is
+    one query, paid only on this rare move.
+    """
+    if (from_status != PaymentMilestone.PENDING
+            or project.project_type != 'Residential'
+            or milestone_name not in _MILESTONE_TO_INVOICE_TASK):
+        return
+    task_name = _MILESTONE_TO_INVOICE_TASK[milestone_name]
+    text = f'{milestone_name} marked Received, but no invoice was recorded for it.'
+    # Whether this site's send-invoice task is still open: not Done and not marked Not
+    # Applicable by the PM. Existence only, so no row is fetched.
+    if (Task.objects.filter(phase__project=project, task_name=task_name,
+                            status__in=OPEN_STATUSES)
+            .filter(applicable_tasks_q()).exists()):
+        text += f" Its task '{task_name}' is still open."
+    messages.warning(request, text)
+
+
 def _sync_finance_task_from_milestone(request, project, milestone, profile, *,
                                       task_name=None, event='Received'):
     """
@@ -11461,32 +11551,60 @@ def milestone_invoice(request, project_id, milestone_pk):
 @role_required(['Finance'])
 def milestone_receive(request, project_id, milestone_pk):
     """
-    Mark an Invoiced milestone as Received. Records amount_received and variance_reason.
-    Auto-sets variance_reason='Overpayment' when amount_received > amount and no reason given.
-    Access: Finance only. POST only.
+    Mark a Pending or Invoiced milestone as Received (the "Mark as Received" modal).
+    Records amount_received and variance_reason. Auto-sets variance_reason='Overpayment'
+    when amount_received > amount and no reason given.
+    Access: Finance only (@role_required). POST only. Returns to the project page.
+
+    FIN-M-B3b: refused with a message and nothing saved — a soft-deleted site (R3), a
+    non-Residential site (R2), a milestone already Received, a blank, unreadable, negative,
+    over-precise or over-large amount, and a variance reason longer than its column. A
+    receipt straight from Pending on M2/M3 is still allowed, with a warning that no
+    invoice was recorded.
     """
     if request.method != 'POST':
-        return redirect('dashboard_finance')
+        return redirect('project_overview', project_id=project_id)
 
+    # The milestone and its project in one query: the project is read for the R2/R3
+    # refusals below, the change log and the task sync.
     milestone = get_object_or_404(
-        PaymentMilestone, pk=milestone_pk, project__project_id=project_id
+        PaymentMilestone.objects.select_related('project'),
+        pk=milestone_pk, project__project_id=project_id,
     )
+    project = milestone.project
+    if project.is_deleted:
+        # R3: there is no project page to return to, so back to the user's dashboard,
+        # as milestone_invoice does.
+        messages.error(request, 'This site has been deleted. No receipt was recorded.')
+        return redirect(get_user_dashboard(request.user))
+    if project.project_type != 'Residential':
+        # R2: M1-M3 describe a residential contract; no other site type records them.
+        messages.error(request, 'Payment receipts are recorded on Residential payment '
+                                'milestones only. No change was made.')
+        return redirect('project_overview', project_id=project.project_id)
+
     if milestone.status == 'Received':
         messages.error(request, 'Milestone is already marked as Received.')
-        return redirect('dashboard_finance')
+        return redirect('project_overview', project_id=project.project_id)
 
-    amount_received_str = request.POST.get('amount_received', '').strip()
-    if not amount_received_str:
-        messages.error(request, 'Amount received is required.')
-        return redirect('dashboard_finance')
-
+    # FIN-M-B3b: one reader for every receipt path; a refusal saves nothing and writes
+    # no change-log line. Blank is refused here (unlike the other two paths) because this
+    # form exists only to record an amount.
     try:
-        amount_received = Decimal(amount_received_str)
-    except InvalidOperation:
-        messages.error(request, 'Invalid amount value.')
-        return redirect('dashboard_finance')
+        amount_received = _read_amount_received(request.POST.get('amount_received', ''))
+    except ValidationError as exc:
+        messages.error(request, f'{milestone.milestone_name} not updated. {exc.messages[0]}')
+        return redirect('project_overview', project_id=project.project_id)
+    if amount_received is None:
+        messages.error(request, f'{milestone.milestone_name} not updated. '
+                                f'Amount received is required.')
+        return redirect('project_overview', project_id=project.project_id)
 
     variance_reason = request.POST.get('variance_reason', '').strip()
+    _vr_error = _milestone_text_error(variance_reason, 'variance_reason', 'Variance reason')
+    if _vr_error:
+        messages.error(request, f'{milestone.milestone_name} not updated. {_vr_error}')
+        return redirect('project_overview', project_id=project.project_id)
     if milestone.amount and amount_received > milestone.amount and not variance_reason:
         variance_reason = 'Overpayment'
 
@@ -11508,17 +11626,18 @@ def milestone_receive(request, project_id, milestone_pk):
     # FIN-M-L (R15): replaces "Marked M1 as Received". Status and received date go on
     # the plain line; amount received and variance reason on the money line.
     _log_milestone_changes(
-        milestone.project, request.user.profile, milestone, _ms_logged_before,
+        project, request.user.profile, milestone, _ms_logged_before,
         ['status', 'received_date', 'amount_received', 'variance_reason'])
 
     # Bidirectional sync: PaymentMilestone Received → Finance confirmation task Done,
     # through the task-status chokepoint (FIN-M-B9a). The milestone is saved above and
     # the helper never undoes it; a failure is logged and Finance is warned.
-    _sync_finance_task_from_milestone(request, milestone.project, milestone,
-                                      request.user.profile)
+    _sync_finance_task_from_milestone(request, project, milestone, request.user.profile)
 
     messages.success(request, f'{milestone.milestone_name} marked as Received.')
-    return redirect('dashboard_finance')
+    _warn_receipt_without_invoice(request, project, milestone.milestone_name,
+                                  _ms_prev_status)
+    return redirect('project_overview', project_id=project.project_id)
 
 
 @login_required
@@ -11784,26 +11903,43 @@ def set_milestone_amounts(request, project_id):
     if request.user.profile.role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
+    # R2 (FIN-M-B3b): M1-M3 describe a residential contract. The update_or_create below
+    # would otherwise CREATE milestone rows on an OPEX or CAPEX site that has none. Asked
+    # after the PM scope check, so a PM outside the site still gets the 404 and learns
+    # nothing about its type.
+    if project.project_type != 'Residential':
+        return JsonResponse({'success': False,
+                             'error': 'Milestone amounts are set on Residential sites only. '
+                                      'No change was made.'})
+
     try:
         data = json.loads(request.body)
     except (json.JSONDecodeError, ValueError):
         return JsonResponse({'success': False, 'error': 'Invalid request body.'})
 
+    # FIN-M-B3b: the shared reader, as on the PM edit (B1b). The old Decimal() call
+    # reported "abc", "1,50,000" and "NaN" as "All three milestone amounts are required.",
+    # rounded a third decimal place, and let an over-large number reach the database.
+    # Any refusal refuses the whole save. JSON null still means "skip this milestone"
+    # (the single-milestone pencil sends the other two as null); a blank string is
+    # refused, as before.
     amounts = {}
     for name, key in [('M1', 'm1_amount'), ('M2', 'm2_amount'), ('M3', 'm3_amount')]:
         raw = data.get(key)
         if raw is None:
             continue  # null in JSON = skip this milestone
-        raw_str = str(raw).strip()
-        if raw_str == '':
-            return JsonResponse({'success': False, 'error': 'All three milestone amounts are required.'})
         try:
-            val = Decimal(raw_str)
-            if val < 0:
-                return JsonResponse({'success': False, 'error': 'Amounts must be 0 or greater.'})
-            amounts[name] = val
-        except InvalidOperation:
-            return JsonResponse({'success': False, 'error': 'All three milestone amounts are required.'})
+            val = parse_decimal_input(
+                str(raw), places=2, min_value=0,
+                max_value=decimal_field_max(PaymentMilestone, 'amount'),
+                field_label='Amount')
+        except ValidationError as exc:
+            return JsonResponse({'success': False,
+                                 'error': f'{name} not updated. {exc.messages[0]}'})
+        if val is None:
+            return JsonResponse({'success': False,
+                                 'error': f'{name} not updated. Amount is required.'})
+        amounts[name] = val
 
     if not amounts:
         return JsonResponse({'success': False, 'error': 'No amounts provided.'})
@@ -11854,8 +11990,14 @@ def set_milestone_amounts(request, project_id):
                 # migration 0121 stamped the rows written before it had one.
                 action_code='milestone_amounts_set',
             )
-    except Exception as e:
-        return JsonResponse({'success': False, 'error': str(e)})
+    except Exception:
+        # FIN-M-B3b: the raw database error text used to go back to the browser. It is
+        # logged for Admin instead and BD sees a plain message. A failure inside the
+        # atomic block has rolled the amounts back; one in the log line comes after they
+        # were saved (unchanged behaviour, so the message says "tell Admin", not "retry").
+        logger.exception('set_milestone_amounts failed on project %s', project.project_id)
+        return JsonResponse({'success': False,
+                             'error': 'The amounts could not be saved — tell Admin.'})
 
     return JsonResponse({'success': True})
 
@@ -11926,29 +12068,85 @@ def project_overview(request, project_id):
                 try:
                     milestone = project.milestones.get(pk=milestone_pk)
                     # FIN-M-L: old values for the log, taken before either branch
-                    # assigns anything (both overwrite the description first).
+                    # assigns anything (both may overwrite the description first).
                     _ms_logged_before = _milestone_values(milestone)
                     _actor_role = getattr(getattr(request.user, 'profile', None), 'role', None)
+                    # FIN-M-B3b: the status a Finance receipt moved the milestone from,
+                    # for the "no invoice was recorded" warning after the success line.
+                    # Stays None when no receipt was recorded.
+                    _receipt_from_status = None
+                    # FIN-M-B3b: True when Finance typed a different amount on a
+                    # milestone that is already Received (warned after the success line).
+                    _amount_not_changed = False
 
                     if _actor_role == 'Finance':
-                        milestone.milestone_description = request.POST.get('milestone_description', '').strip()
-                        _save_fields = ['milestone_description']
+                        # R2 (FIN-M-B3b): Finance records receipts on Residential
+                        # milestones only; a POST naming another site type's milestone
+                        # used to mark it Received.
+                        if project.project_type != 'Residential':
+                            messages.error(request, 'Payment receipts are recorded on '
+                                                    'Residential payment milestones only. '
+                                                    'No change was made.')
+                            return redirect('project_overview', project_id=project.project_id)
+                        # FIN-M-B3b, description ruling: a missing field means "no
+                        # change" (it used to blank the stored description); a field
+                        # present and blank clears it, as on the PM branch — the box is
+                        # pre-filled, so an emptied box is deliberate.
+                        _save_fields = []
+                        if 'milestone_description' in request.POST:
+                            _ms_desc = request.POST['milestone_description'].strip()
+                            _desc_error = _milestone_text_error(
+                                _ms_desc, 'milestone_description', 'Description')
+                            if _desc_error:
+                                messages.error(request, f'{milestone.milestone_name} not updated. {_desc_error}')
+                                return redirect('project_overview', project_id=project.project_id)
+                            milestone.milestone_description = _ms_desc
+                            _save_fields.append('milestone_description')
                         _ms_prev_status = milestone.status
-                        _amount_received_str = request.POST.get('amount_received', '').strip()
-                        if _amount_received_str and milestone.status != 'Received':
+                        # FIN-M-B3b: read only while the milestone is not Received
+                        # (ruling). The box is pre-filled with the stored amount, so on a
+                        # Received row it comes back on every description edit and is
+                        # ignored, as before; reading it there could only refuse those
+                        # edits. Otherwise a refused amount refuses the whole save and
+                        # writes no change-log line; it used to be dropped silently, and
+                        # negatives, NaN and over-long numbers got through or 500'd.
+                        if milestone.status != 'Received':
                             try:
-                                milestone.amount_received = Decimal(_amount_received_str)
+                                _ms_received = _read_amount_received(
+                                    request.POST.get('amount_received', ''))
+                            except ValidationError as exc:
+                                messages.error(request, f'{milestone.milestone_name} not updated. {exc.messages[0]}')
+                                return redirect('project_overview', project_id=project.project_id)
+                            if _ms_received is not None:
+                                milestone.amount_received = _ms_received
                                 milestone.status        = 'Received'
                                 milestone.received_date = date.today()
                                 _save_fields += ['amount_received', 'status', 'received_date']
-                            except InvalidOperation:
-                                pass
+                                _receipt_from_status = _ms_prev_status
+                        else:
+                            # FIN-M-B3b ruling: the amount box is not read on a Received
+                            # row, but when Finance typed an amount that differs from the
+                            # stored one they are told it was not changed, rather than
+                            # only "updated". Compared by value (the pre-filled
+                            # "150000.00" equals 150000), never parsed for refusal; text
+                            # that is not a number simply differs. NaN compares unequal.
+                            _typed_received = request.POST.get('amount_received', '').strip()
+                            if _typed_received:
+                                try:
+                                    _amount_same = (Decimal(_typed_received)
+                                                    == milestone.amount_received)
+                                except InvalidOperation:
+                                    _amount_same = False
+                                _amount_not_changed = not _amount_same
                         # R-2. This branch writes a status only SOMETIMES — when a
                         # parsable amount arrives on a not-yet-Received milestone — so
                         # the ledger row is conditional on the same test, not on the
                         # save. A description-only edit is not a transition.
                         with transaction.atomic():
-                            milestone.save(update_fields=_save_fields)
+                            # update_fields=[] would be a no-op save anyway; skipped so a
+                            # hand-built POST with neither field touches nothing.
+                            if _save_fields:
+                                milestone.save(update_fields=_save_fields)
                             if 'status' in _save_fields:
                                 record_transition(
                                     milestone, to_status='Received',
@@ -11966,6 +12164,14 @@ def project_overview(request, project_id):
                                 request, project, milestone, request.user.profile)
                     else:
                         milestone.milestone_description = request.POST.get('milestone_description', '').strip()
+                        # FIN-M-B3b: an over-long description used to reach the database
+                        # and fail there as a server error. Refused like the date below.
+                        _desc_error = _milestone_text_error(
+                            milestone.milestone_description, 'milestone_description',
+                            'Description')
+                        if _desc_error:
+                            messages.error(request, f'{milestone.milestone_name} not updated. {_desc_error}')
+                            return redirect('project_overview', project_id=project.project_id)
                         amount_str   = request.POST.get('amount', '').strip()
                         due_date_str = request.POST.get('due_date', '').strip()
                         # A refused date refuses the whole edit and leaves the row as it
@@ -12011,6 +12217,13 @@ def project_overview(request, project_id):
                         _log_milestone_changes(project, request.user.profile, milestone,
                                                _ms_logged_before, _ms_fields)
                     messages.success(request, f'{milestone.milestone_name} updated.')
+                    # FIN-M-B3b: a Finance receipt straight from Pending on M2/M3.
+                    _warn_receipt_without_invoice(request, project,
+                                                  milestone.milestone_name,
+                                                  _receipt_from_status)
+                    if _amount_not_changed:
+                        messages.warning(request, f'{milestone.milestone_name}: amount not '
+                                                  f'changed — already Received.')
                 except PaymentMilestone.DoesNotExist:
                     messages.error(request, 'Milestone not found.')
             return redirect('project_overview', project_id=project.project_id)
