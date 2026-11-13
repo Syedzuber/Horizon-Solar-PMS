@@ -495,8 +495,10 @@ def _apply_project_sections(rows):
 def login_view(request):
     """
     Render login form and authenticate. Redirects already-authenticated users
-    onward immediately. CEO/Finance/SCM land on the context chooser; every other
-    role goes straight to its role dashboard exactly as before. Access: public.
+    onward immediately. Every user goes to their own landing (get_post_login_url):
+    the Site Dashboard for the DASH-B4 roles, the Finance work page for Finance
+    (FIN-M-B8b), and their own dashboard for Site Engineer, designer and BD.
+    Access: public.
     """
     if request.user.is_authenticated:
         # 0.2 lockdown: a profile-less user now resolves to NO_PROFILE_URL ('/login/'),

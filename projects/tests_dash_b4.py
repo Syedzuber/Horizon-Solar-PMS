@@ -3,15 +3,18 @@ DASH-B4 — the Site Dashboard becomes the dashboard; the PM, SCM, Finance and C
 and /landing/ redirect to it (Zuber's rulings, 10 Nov).
 
 WHAT THIS PINS
-    Landing      every R1 role (PM, coordinator, CEO, Finance, SCM, Admin, System Admin,
-                 Design Head) lands on /dashboard/sites/ after login, from /login/ POST, an
-                 authenticated GET of /login/ and `/`; Site Engineer, designer and BD land
-                 where they did. Home (home_url) follows (R1, R5).
-    Redirects    each old URL 302s an R1 role to the Site Dashboard; the CEO page's
+    Landing      every R1 role (PM, coordinator, CEO, SCM, Admin, System Admin, Design
+                 Head) lands on /dashboard/sites/ after login, from /login/ POST, an
+                 authenticated GET of /login/ and `/`; Finance lands on /finance/work/
+                 since FIN-M-B8b (tests_finance_landing pins it in full); Site Engineer,
+                 designer and BD land where they did. Home (home_url) follows (R1, R5).
+    Redirects    each old URL 302s an R1 role to its own landing (the Site Dashboard, or
+                 Finance work for Finance since FIN-M-B8b); the CEO page's
                  ?context=residential / tenders still serve (ruling 5); Site Engineer,
                  designer and BD keep today's 403; the settings switch turns it off (R2, 3)
     Nav          no separate "Site Dashboard" entry; Home points at it (R5)
-    More row     each role's groups, and every link opens for that role (no 403)
+    More row     each role's groups, and every link opens for that role (no 403); the
+                 Finance group leads with "Finance work" for its readers (FIN-M-B8b)
     Strips       approvals card (and approve from it end to end), PM re-verify group,
                  SCM tiles / stall pill / stage line / procurement / delivery issues,
                  Finance milestones tile — each for its roles and not for others
@@ -65,6 +68,11 @@ class B4Fixture(DashFixture):
         return (self.pm, self.coord, self.ceo, self.finance, self.scm, self.admin,
                 self.sysadmin, self.head)
 
+    def landing(self, profile):
+        """Where an R1 role lands: the Site Dashboard, except Finance, who land on the
+        Finance work page since FIN-M-B8b (pinned in full by tests_finance_landing)."""
+        return '/finance/work/' if profile is self.finance else SITE_DASHBOARD_URL
+
     def others(self):
         """The roles that keep their own dashboards, with where that is."""
         return ((self.se, '/dashboard/site-engineer/'), (self.designer, '/dashboard/design/'),
@@ -87,11 +95,13 @@ class LandingTests(B4Fixture):
     def test_every_r1_role_lands_on_the_site_dashboard_after_login(self):
         for profile in self.r1():
             with self.subTest(role=profile.role, head=profile.is_design_head):
+                # FIN-M-B8b: Finance lands on the Finance work page (tests_finance_landing).
+                home = self.landing(profile)
                 response = Client().post('/login/', {'username': profile.user.username,
                                                      'password': 'x'})
                 self.assertEqual(response.status_code, 302)
-                self.assertEqual(response['Location'], SITE_DASHBOARD_URL)
-                self.assertEqual(get_post_login_url(_fresh(profile.user)), SITE_DASHBOARD_URL)
+                self.assertEqual(response['Location'], home)
+                self.assertEqual(get_post_login_url(_fresh(profile.user)), home)
 
     def test_other_roles_land_where_they_did(self):
         for profile, home in self.others():
@@ -103,10 +113,11 @@ class LandingTests(B4Fixture):
     def test_an_authenticated_login_page_and_the_root_follow_the_same_rule(self):
         for profile in (self.ceo, self.finance, self.scm, self.pm):
             with self.subTest(role=profile.role):
+                home = self.landing(profile)        # FIN-M-B8b: Finance work for Finance
                 client = _client(profile)
-                self.assertEqual(client.get('/login/')['Location'], SITE_DASHBOARD_URL)
+                self.assertEqual(client.get('/login/')['Location'], home)
                 response = client.get('/', follow=True)
-                self.assertEqual(response.redirect_chain[-1][0], SITE_DASHBOARD_URL)
+                self.assertEqual(response.redirect_chain[-1][0], home)
                 self.assertEqual(response.status_code, 200)
         response = _client(self.se).get('/', follow=True)
         self.assertEqual(response.redirect_chain[-1][0], '/dashboard/site-engineer/')
@@ -117,7 +128,8 @@ class LandingTests(B4Fixture):
             with self.subTest(role=profile.role, head=profile.is_design_head):
                 request = factory.get('/')
                 request.user = _fresh(profile.user)
-                self.assertEqual(home_url(request), {'home_url': SITE_DASHBOARD_URL})
+                # FIN-M-B8b: Finance's Home is the Finance work page.
+                self.assertEqual(home_url(request), {'home_url': self.landing(profile)})
         for profile, home in self.others():
             with self.subTest(role=profile.role):
                 self.assertEqual(get_user_dashboard(_fresh(profile.user)), home)
@@ -142,7 +154,8 @@ class RedirectTests(B4Fixture):
                 with self.subTest(role=profile.role, head=profile.is_design_head, url=url):
                     response = client.get(url)
                     self.assertEqual(response.status_code, 302)
-                    self.assertEqual(response['Location'], SITE_DASHBOARD_URL)
+                    # FIN-M-B8b option A: each user's own landing, so Finance work for Finance.
+                    self.assertEqual(response['Location'], self.landing(profile))
 
     def test_the_ceo_pages_kept_by_ruling_5_still_serve(self):
         for profile in (self.ceo, self.admin, self.sysadmin):
@@ -239,18 +252,23 @@ class MoreRowTests(B4Fixture):
             self.scm:      {'Tasks': self.TASKS,
                             'SCM': ['Contractors to map',
                                     'Vendor attendance · 0 sites · 0 people']},
-            self.finance:  {'Tasks': self.TASKS, 'Finance': ['Payments queue · to pay']},
-            self.ceo:      {'Tasks': self.TASKS, 'Finance': ['Payments queue · to pay'],
+            # FIN-M-B8b ruling (b): "Finance work" heads the Finance group for everyone the
+            # Finance work page admits (Finance, CEO, Admin, System Admin).
+            self.finance:  {'Tasks': self.TASKS,
+                            'Finance': ['Finance work', 'Payments queue · to pay']},
+            self.ceo:      {'Tasks': self.TASKS,
+                            'Finance': ['Finance work', 'Payments queue · to pay'],
                             'CEO': ['Portfolio analytics (Residential)', 'Tenders overview',
                                     'Overdue tasks list']},
             self.admin:    {'Tasks': self.TASKS,
                             'SCM': ['Contractors to map',
                                     'Vendor attendance · 0 sites · 0 people'],
-                            'Finance': ['Payments queue · to pay'],
+                            'Finance': ['Finance work', 'Payments queue · to pay'],
                             'Admin': ['Manage users', 'Activity log', 'Admin panel'],
                             'CEO': ['Portfolio analytics (Residential)', 'Tenders overview',
                                     'Overdue tasks list']},
-            self.sysadmin: {'Tasks': self.TASKS, 'Finance': ['Payments queue · to pay'],
+            self.sysadmin: {'Tasks': self.TASKS,
+                            'Finance': ['Finance work', 'Payments queue · to pay'],
                             'Admin': ['Sub-admin portal'],
                             'CEO': ['Portfolio analytics (Residential)', 'Tenders overview',
                                     'Overdue tasks list']},

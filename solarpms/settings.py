@@ -210,10 +210,11 @@ ATTENDANCE_ALERT_SITE_LIST_LIMIT = 15   # site codes named in one message, then 
 ATTENDANCE_ALERT_WHATSAPP_ENABLED = config('ATTENDANCE_ALERT_WHATSAPP_ENABLED', default=False, cast=bool)
 
 # DASH-B4: whether the retired PM / SCM / Finance / bare-CEO dashboards and /landing/ 302
-# Site Dashboard users to /dashboard/sites/ (decorators.retired_for_site_dashboard). An
-# environment variable so it can be turned off on Railway with no code change: set
+# Site Dashboard users to their own landing (decorators.retired_for_site_dashboard):
+# /dashboard/sites/, or /finance/work/ for Finance since FIN-M-B8b. An environment
+# variable so it can be turned off on Railway with no code change: set
 # RETIRED_DASHBOARDS_REDIRECT=False and the old pages serve their own roles again. Login
-# and Home still go to the Site Dashboard either way (that is get_user_dashboard, not this).
+# and Home still go to each user's landing either way (that is get_user_dashboard, not this).
 # Tests that exercise an old page set it False with @override_settings. Removed with the
 # old views in the deletion commit.
 RETIRED_DASHBOARDS_REDIRECT = config('RETIRED_DASHBOARDS_REDIRECT', default=True, cast=bool)

@@ -68,6 +68,7 @@ from .models import DesignAssignment, PaymentRequest, SystemSettings
 from .payments import payment_counts
 from .permissions import (DASHBOARD_MANAGER_ROLES, user_can_map_attendance,
                           user_can_raise_group_order, user_can_view_ceo_dashboard_lists,
+                          user_can_view_finance_work,  # FIN-M-B8b: the More row's link
                           user_can_view_payment_queue, user_can_view_site_dashboard,
                           user_can_view_vendor_attendance, user_sees_payment_totals)
 from .punch_points import open_punch_point_counts
@@ -661,7 +662,9 @@ def _more_links(user, profile):
                  was; dashboard_design admits the Design role.
         SCM      user_can_map_attendance / user_can_view_vendor_attendance (SCM and Admin),
                  with the counts the SCM dashboard showed (one query each, only when shown)
-        Finance  user_can_view_payment_queue, with the approved-to-pay count from
+        Finance  Finance work (FIN-M-B8b): user_can_view_finance_work — Finance, whose
+                 landing it is, and CEO / Admin / System Admin, who read it. The payments
+                 queue: user_can_view_payment_queue, with the approved-to-pay count from
                  payments.payment_counts(), the function the queue's own tabs count with
         Admin    Admin: the three Admin-only screens the old Admin home linked
                  (@role_required(['Admin'])); System Admin: the sub-admin portal
@@ -703,13 +706,22 @@ def _more_links(user, profile):
     if scm:
         groups.append({'label': 'SCM', 'links': scm})
 
+    finance = []
+    # FIN-M-B8b ruling (b): the Finance work page, one click back from here for everyone
+    # that page admits (Finance, CEO, Admin, System Admin; user_can_view_finance_work).
+    # Everyone else gets its 403 (portfolio money they do not read), so is not shown it.
+    # Its own check, not the queue's: a payment approver alone sees the queue, not this.
+    # No query and no count: the page's own tiles carry the numbers.
+    if user_can_view_finance_work(user):
+        finance.append(_link('Finance work', reverse('finance_work')))
     # The payments queue: Finance, CEO, Admin, System Admin and payment approvers, as the
     # queue itself admits (and the nav's Payments link). The count is approved-to-pay, the
     # old Finance dashboard's "Payment Requests Pending" figure.
     if user_can_view_payment_queue(user):
         to_pay = payment_counts()[PaymentRequest.APPROVED].count
-        groups.append({'label': 'Finance', 'links': [
-            _link('Payments queue · to pay', reverse('payment_queue'), to_pay)]})
+        finance.append(_link('Payments queue · to pay', reverse('payment_queue'), to_pay))
+    if finance:
+        groups.append({'label': 'Finance', 'links': finance})
 
     admin = []
     # Admin-only screens (@role_required(['Admin'])): user management, the audit log and the

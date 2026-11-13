@@ -7,8 +7,10 @@ from django.http import HttpResponseForbidden
 
 # permissions.py imports nothing from this module (its only top-level import is Q), so
 # this is not circular. user_can_view_site_dashboard is THE answer to "does this user
-# land on the Site Dashboard" (DASH-B4 R1), the same helper that page itself calls.
-from .permissions import user_can_view_site_dashboard
+# land on the Site Dashboard" (DASH-B4 R1), the same helper that page itself calls;
+# user_can_view_finance_work is the Finance work page's own check (FIN-M-B8b), asked
+# before Finance is sent there so the landing can never be a page that refuses them.
+from .permissions import user_can_view_finance_work, user_can_view_site_dashboard
 
 logger = logging.getLogger(__name__)
 
@@ -24,16 +26,25 @@ logger = logging.getLogger(__name__)
 NO_PROFILE_URL = '/login/'
 
 #: The common Site Dashboard (DASH-B2). Since DASH-B4 it is the landing page and the
-#: Home link of everyone user_can_view_site_dashboard() admits.
+#: Home link of everyone user_can_view_site_dashboard() admits, except Finance (FIN-M-B8b).
 SITE_DASHBOARD_URL = '/dashboard/sites/'
+
+#: The Finance work page (FIN-M-B8a, views_finance_work.finance_work). Since FIN-M-B8b it
+#: is Finance's landing page and Home link; the Site Dashboard stays one click away from
+#: it ("Site list"). Written out like SITE_DASHBOARD_URL rather than reversed, because
+#: urls.py imports views, which import this module; tests_finance_landing pins it equal
+#: to reverse('finance_work').
+FINANCE_WORK_URL = '/finance/work/'
 
 # Maps every role to its landing dashboard URL.
 # Used by login_view and role_required to redirect users after auth.
 #
-# DASH-B4 (R1): the seven Site Dashboard roles map to SITE_DASHBOARD_URL. get_user_dashboard()
+# DASH-B4 (R1): the six Site Dashboard roles map to SITE_DASHBOARD_URL. get_user_dashboard()
 # asks user_can_view_site_dashboard() first, so for them this table is never read; it is
 # kept true so a reader of the table is not misled. The Design Head is a flag on a 'Design'
 # profile, not a role, so only the helper can send them there.
+# FIN-M-B8b: Finance maps to FINANCE_WORK_URL; get_user_dashboard() answers it in its own
+# branch, before the Site Dashboard check, so this entry is likewise never read.
 ROLE_DASHBOARD = {
     'Admin':         SITE_DASHBOARD_URL,
     'System Admin':  SITE_DASHBOARD_URL,
@@ -44,7 +55,7 @@ ROLE_DASHBOARD = {
     'Project Coordinator': SITE_DASHBOARD_URL,
     'Site Engineer': '/dashboard/site-engineer/',
     'Design':        '/dashboard/design/',
-    'Finance':       SITE_DASHBOARD_URL,
+    'Finance':       FINANCE_WORK_URL,  # FIN-M-B8b: Finance lands on its own queue
     'SCM':           SITE_DASHBOARD_URL,
     'CEO':           SITE_DASHBOARD_URL,
     'BD':            '/dashboard/bd/',
@@ -55,8 +66,9 @@ ROLE_DASHBOARD = {
 # the old CEO, Finance and SCM dashboards. A display concern only — it grants and removes
 # no access.
 #
-# DASH-B4: no longer a post-login destination. These three roles land on the Site
-# Dashboard like every other R1 role, and /landing/ itself redirects there. The tuple
+# DASH-B4: no longer a post-login destination. CEO and SCM land on the Site Dashboard like
+# every other R1 role, Finance on the Finance work page (FIN-M-B8b), and /landing/ itself
+# redirects each of them to that landing. The tuple
 # stays because the CEO page's Residential and Tenders views are kept (ruling 5) and
 # still draw the switcher, and because landing's @role_required reads it.
 LANDING_ROLES = ('CEO', 'Finance', 'SCM')
@@ -86,12 +98,23 @@ def get_user_dashboard(user, context=None):
         logger.warning("No UserProfile for user %s — no dashboard to resolve", user.username)
         return NO_PROFILE_URL
 
+    # FIN-M-B8b: Finance lands on its own queue, the Finance work page; the Site Dashboard
+    # is one click away from it. Decided by role alone (ruling 13 Nov): CEO, Admin and
+    # System Admin may READ the Finance work page too, but their landing stays the Site
+    # Dashboard, and no flag (is_payment_approver, is_design_head, ...) moves Finance
+    # elsewhere. Asked of the page's own helper as well, so Home and every back link can
+    # never point Finance at a page that refuses them. Before the Site Dashboard check
+    # below, which also admits Finance. A context argument is not carried: the Finance
+    # work page has no Residential / Tenders split.
+    if role == 'Finance' and user_can_view_finance_work(user):
+        return FINANCE_WORK_URL
+
     # DASH-B4 R1: PM, Project Coordinator, CEO, Finance, SCM, Admin, System Admin and the
     # Design Head belong on the Site Dashboard. Asked of the page's own access helper, so
     # Home, the 403 page's "Return to your dashboard" and every back link can never point
     # one of them at a page that refuses them, and the Design Head (a flag, not a role)
     # is caught where the role table above cannot see them. Every other role (Site
-    # Engineer, designer, BD) keeps its own dashboard.
+    # Engineer, designer, BD) keeps its own dashboard. Finance is answered above.
     if user_can_view_site_dashboard(user):
         return SITE_DASHBOARD_URL
 
@@ -106,8 +129,9 @@ def get_post_login_url(user):
     also serves `/` through the /login/ redirect.
 
     DASH-B4 (R1): the role's own dashboard for everyone, which is the Site Dashboard for
-    every role user_can_view_site_dashboard() admits. The CEO / Finance / SCM context
-    chooser (/landing/) is no longer a stop on the way in.
+    every role user_can_view_site_dashboard() admits except Finance, who land on the
+    Finance work page (FIN-M-B8b). The CEO / Finance / SCM context chooser (/landing/) is
+    no longer a stop on the way in.
 
     0.2 lockdown: profile-less resolves to NO_PROFILE_URL for the same reason
     get_user_dashboard() does. role_required() no longer redirects on denial at all — it
@@ -123,13 +147,18 @@ def get_post_login_url(user):
 
 def retired_for_site_dashboard(serve_if=None):
     """
-    DASH-B4 (R2): send a Site Dashboard user who opens a retired dashboard URL to the Site
-    Dashboard with a 302, so bookmarks, stored notification links and old back links keep
-    working. Applied to dashboard_pm, dashboard_scm, dashboard_finance, dashboard_ceo and
-    landing, ABOVE their @role_required and below @login_required:
+    DASH-B4 (R2): send a Site Dashboard user who opens a retired dashboard URL to their own
+    landing page with a 302, so bookmarks, stored notification links and old back links
+    keep working. Applied to dashboard_pm, dashboard_scm, dashboard_finance, dashboard_ceo
+    and landing, ABOVE their @role_required and below @login_required:
 
-        Site Dashboard roles (R1)  302 to SITE_DASHBOARD_URL, whichever old URL it is
+        Site Dashboard roles (R1)  302 to get_user_dashboard(user), whichever old URL it
+                                   is: SITE_DASHBOARD_URL for every R1 role but Finance,
+                                   FINANCE_WORK_URL for Finance (FIN-M-B8b, option A)
         everyone else              falls through to @role_required: today's 403 unchanged
+
+    The name is kept from DASH-B4: who is redirected is still decided by the Site
+    Dashboard's helper; only where to is now each user's own landing.
 
     serve_if(request) -> True keeps the old page for that request. Only dashboard_ceo
     uses it: its Residential and Tenders views stay (ruling 5) and only the bare URL goes.
@@ -139,14 +168,16 @@ def retired_for_site_dashboard(serve_if=None):
     change. The old views' own tests set it False (@override_settings) so they keep
     exercising the pages until the deletion commit removes those views, those tests and
     this switch together (ruling 3). Read per request, so override_settings takes effect.
-    Turning it off restores the old pages only; login and Home still go to the Site
-    Dashboard (get_user_dashboard).
+    Turning it off restores the old pages only; login and Home still go to each user's
+    landing (get_user_dashboard: the Site Dashboard, or Finance work for Finance).
     """
     def decorator(view_func):
         @wraps(view_func)
         def wrapper(request, *args, **kwargs):
-            # Only a user the Site Dashboard admits is moved there (the same helper the
-            # page calls), so the redirect never lands on a 403. Anyone it refuses keeps
+            # Only a user the Site Dashboard admits is moved (the same helper the page
+            # calls). Their target is get_user_dashboard(), which asks each landing page's
+            # own helper, so the redirect never lands on a 403 and can never loop: neither
+            # landing page carries this decorator. Anyone the Site Dashboard refuses keeps
             # whatever the old view's own decorator answers today.
             # getattr default True: a settings module without the line (a test settings
             # file that does not import settings.py) still redirects, as production does.
@@ -154,7 +185,7 @@ def retired_for_site_dashboard(serve_if=None):
                     and request.user.is_authenticated
                     and user_can_view_site_dashboard(request.user)
                     and not (serve_if is not None and serve_if(request))):
-                return redirect(SITE_DASHBOARD_URL)
+                return redirect(get_user_dashboard(request.user))
             return view_func(request, *args, **kwargs)
         return wrapper
     return decorator
