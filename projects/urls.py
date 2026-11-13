@@ -15,6 +15,7 @@ from . import attendance_views  # ATT-B1 contractor attendance screens — separ
 from . import views_tender_documents  # TD-B2 tender documents manage page — separate module, same pattern
 from . import views_site_dashboard  # DASH-B2 Site Dashboard page — separate module, same pattern
 from . import views_tenders_gantt  # DASH-B3 Tenders Gantt page — separate module, same pattern
+from . import views_finance_work  # FIN-M-B8a Finance work page — separate module, same pattern
 from . import video_proto  # GRN-V0 throwaway video prototype — delete with the prototype
 
 urlpatterns = [
@@ -56,6 +57,9 @@ urlpatterns = [
     # DASH-B3 Tenders Gantt — the Site Dashboard's audience and site scope, OPEX sites with
     # a Program only (permissions.user_can_view_site_dashboard); everyone else 403.
     path('dashboard/tenders/gantt/', views_tenders_gantt.tenders_gantt, name='tenders_gantt'),
+    # FIN-M-B8a Finance work page — Finance works from it; CEO, Admin and System Admin read
+    # it (permissions.user_can_view_finance_work); everyone else 403. GET only.
+    path('finance/work/',            views_finance_work.finance_work, name='finance_work'),
 
     # ---------------------------------------------------------------------------
     # User management — Admin only

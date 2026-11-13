@@ -1,0 +1,314 @@
+{% extends "base.html" %}
+{% block title %}Finance work — SolarPMS{% endblock %}
+
+{% block extra_head %}
+{% comment %}FIN-M-B8a. The Site Dashboard's stack: Bootstrap 5.3.3 from base.html, page-scoped
+   CSS under .sd, Alpine 3.14.8 for open/closed state only, Lucide pinned to an exact version.
+   Layout follows the prototype "Horizon Site Dashboards" v6, Finance work tab. No fetch, no
+   XHR: every filter is a link or a GET form, every action a link to an existing screen.
+   TODO: the .sd rules below are copied from site_dashboard.html (ruling 9, B8a); merge both
+   pages onto one stylesheet when the Site Dashboard is next changed.{% endcomment %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<style>
+  [x-cloak] { display: none !important; }
+  .sd {
+    --sd-surface:#ffffff; --sd-surface-2:#edf1eb; --sd-ink:#16231b; --sd-muted:#56655c;
+    --sd-faint:#7a887f; --sd-line:#d9e0d7; --sd-brand:#1a7a4a; --sd-brand-2:#7cb847;
+    --sd-gold:#f0a829; --sd-navy:#243a6b; --sd-ok:#1f8a4c; --sd-warn:#a86400; --sd-crit:#c23b2a;
+    --sd-ok-bg:#e2f2e7; --sd-warn-bg:#fcefd6; --sd-crit-bg:#fae3df; --sd-info-bg:#e5eaf5;
+    color: var(--sd-ink); padding-bottom: 48px;
+  }
+  .sd .num { font-variant-numeric: tabular-nums; }
+  .sd .code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-weight: 600; font-size: 13px; }
+  .sd :focus-visible { outline: 2px solid var(--sd-gold); outline-offset: 2px; }
+  .sd .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--sd-faint); font-weight: 600; }
+  .sd h1 { font-size: 1.6rem; font-weight: 600; margin: 0; }
+  .sd h2 { font-size: 1.1rem; font-weight: 600; margin: 0; display: flex; align-items: center; gap: 8px; }
+  .sd .sub { color: var(--sd-muted); margin: 2px 0 0; font-size: .9rem; }
+  .sd .head { display: flex; gap: 12px; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; margin-bottom: 16px; }
+  .sd .meta { font-size: 12px; color: var(--sd-muted); display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .sd .tag { display: inline-block; font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+    padding: 1px 6px; border-radius: 4px; background: var(--sd-surface-2); color: var(--sd-muted); vertical-align: 1px; margin-left: 4px; }
+
+  /* KPI strip, as the Site Dashboard's: each tile is a link that focuses one section. */
+  .sd .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    background: var(--sd-surface); border: 1px solid var(--sd-line); border-radius: 12px; overflow: hidden; margin-bottom: 16px; }
+  .sd .kpi { background: var(--sd-surface); padding: 12px 14px; display: flex; flex-direction: column; gap: 2px;
+    color: inherit; text-decoration: none; min-width: 0; box-shadow: 1px 0 0 var(--sd-line), 0 1px 0 var(--sd-line); }
+  .sd a.kpi:hover { background: var(--sd-surface-2); }
+  .sd a.kpi[aria-pressed="true"] { background: var(--sd-info-bg); box-shadow: inset 0 -3px 0 var(--sd-navy); }
+  .sd .kpi .v { font-size: 1.75rem; font-weight: 600; line-height: 1; }
+  .sd .kpi .l { font-size: 12px; color: var(--sd-muted); }
+  .sd .kpi .d { font-size: 11px; color: var(--sd-faint); }
+  .sd .kpi.crit .v { color: var(--sd-crit); }
+  .sd .kpi.warn .v { color: var(--sd-warn); }
+
+  .sd .ctrl { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; min-width: 0; margin-bottom: 18px; }
+  .sd .ctrl input[type=search] { width: 260px; }
+  .sd .seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--sd-line); border-radius: 8px; overflow: hidden; background: var(--sd-surface); }
+  .sd .seg a { padding: 6px 11px; color: var(--sd-muted); text-decoration: none; font-size: .875rem; white-space: nowrap; }
+  .sd .seg a[aria-current="true"] { background: var(--sd-ink); color: var(--sd-surface); }
+
+  .sd .pill { font-size: 11.5px; padding: 2px 7px; border-radius: 99px; white-space: nowrap; font-weight: 500; display: inline-block; }
+  .sd .pill.crit { background: var(--sd-crit-bg); color: var(--sd-crit); }
+  .sd .pill.warn { background: var(--sd-warn-bg); color: var(--sd-warn); }
+  .sd .pill.ok { background: var(--sd-ok-bg); color: var(--sd-ok); }
+  .sd .pill.mut { background: var(--sd-surface-2); color: var(--sd-muted); }
+  .sd .pill.info { background: var(--sd-info-bg); color: var(--sd-navy); }
+  .sd .amt { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
+  .sd .na { color: var(--sd-warn); font-weight: 600; }
+  .sd .chev { width: 16px; height: 16px; transition: transform .15s; color: var(--sd-faint); }
+  .sd [aria-expanded="true"] .chev { transform: rotate(180deg); }
+  .sd .kv { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 5px 10px; font-size: 12.5px; margin: 0; max-width: 540px; }
+  .sd .kv dt { color: var(--sd-muted); font-weight: 400; }
+  .sd .kv dd { margin: 0; text-align: right; font-weight: 500; }
+
+  /* Work sections (prototype's .qsec / .qrow): rows collapsed by default, click to open. */
+  .sd .qsec { margin-bottom: 26px; }
+  .sd .qhead { display: flex; align-items: baseline; gap: 6px 12px; flex-wrap: wrap; margin-bottom: 8px; }
+  .sd .qhead .right { margin-left: auto; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .sd .qn { font-size: 13px; font-weight: 600; background: var(--sd-gold); color: #241a00; border-radius: 99px; padding: 1px 8px; min-width: 24px; text-align: center; }
+  .sd .qn.z { background: var(--sd-surface-2); color: var(--sd-faint); }
+  .sd .qcols, .sd .qrow { display: grid; grid-template-columns: var(--cols) 18px; gap: 14px; align-items: center; }
+  .sd .qcols { padding: 0 14px 5px; font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--sd-faint); font-weight: 600; }
+  .sd .qlist { display: flex; flex-direction: column; gap: 5px; }
+  .sd .qitem { background: var(--sd-surface); border: 1px solid var(--sd-line); border-radius: 10px; }
+  .sd .qitem.crit { box-shadow: inset 4px 0 0 var(--sd-crit); }
+  .sd .qitem.warn { box-shadow: inset 4px 0 0 var(--sd-warn); }
+  .sd .qrow { width: 100%; background: none; border: 0; text-align: left; padding: 10px 14px; cursor: pointer; border-radius: 10px; color: inherit; margin: 0; }
+  .sd .qrow:hover { background: #f6f8f5; }
+  .sd .qrow > * { min-width: 0; }
+  .sd .qdet { border-top: 1px dashed var(--sd-line); padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 12px; }
+  .sd .qempty { padding: 16px; color: var(--sd-muted); background: var(--sd-surface); border: 1px dashed var(--sd-line); border-radius: 10px; font-size: 13px; }
+  .sd .qfoot { font-size: 12.5px; color: var(--sd-muted); margin-top: 6px; }
+  .sd .wbtns { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .sd .wbtn { border: 1px solid var(--sd-line); background: var(--sd-surface); border-radius: 8px; padding: 6px 12px; font-weight: 500; font-size: 13px; color: var(--sd-ink); text-decoration: none; }
+  .sd .wbtn:hover { background: var(--sd-surface-2); }
+  .sd .wbtn.pri { background: var(--sd-brand); border-color: var(--sd-brand); color: #fff; }
+  .sd .lines { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; max-width: 620px; }
+  .sd .lines li { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--sd-line); padding-bottom: 5px; }
+  .sd .lines li span:first-child { min-width: 0; overflow-wrap: anywhere; }
+
+  /* Phone (E9-style): rows stack, the column headings go, the chevron stays top right. */
+  @media (max-width: 760px) {
+    .sd .qcols { display: none; }
+    .sd .qrow { display: flex; flex-wrap: wrap; gap: 6px 12px; padding-right: 40px; position: relative; }
+    .sd .qrow > * { flex: 1 1 auto; }
+    .sd .qrow > *:first-child { flex: 1 1 100%; }
+    .sd .qrow > .chev { position: absolute; top: 12px; right: 14px; flex: none; }
+    .sd .qhead .right { margin-left: 0; }
+    .sd .ctrl input[type=search] { width: 100%; }
+    .sd .ctrl, .sd .ctrl form { width: 100%; }
+    .sd h1 { font-size: 1.4rem; }
+  }
+  @media (prefers-reduced-motion: reduce) { .sd .chev { transition: none; } }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="sd">
+  <div class="head">
+    <div>
+      <div class="eyebrow">Finance work · all sites</div>
+      <h1>Finance — today's work</h1>
+      <p class="sub">Milestones to invoice, money to collect, payments to approve and make, goods received to reconcile. Click a row for detail.</p>
+    </div>
+    <div class="wbtns">
+      <a class="wbtn" href="{% url 'site_dashboard' %}" data-site-list>Site list →</a>
+      <a class="wbtn" href="{% url 'payment_queue' %}">Payments queue →</a>
+    </div>
+  </div>
+
+  {% comment %}Tiles: each is counted from the rows of the section it names (views_finance_work),
+     so a tile and its section always agree. A tile is a link that shows only its section;
+     on the active tile the link shows every section again.{% endcomment %}
+  <div class="kpis" id="kpis">
+    {% for t in tiles %}
+      <a class="kpi {{ t.tone }}" href="{{ t.href }}" aria-pressed="{% if t.active %}true{% else %}false{% endif %}" data-tile="{{ t.key }}">
+        <span class="v num" data-value>{{ t.value }}</span><span class="l">{{ t.label }}</span><span class="d">{{ t.detail }}</span>
+      </a>
+    {% endfor %}
+  </div>
+
+  <form method="get" class="ctrl" role="search" aria-label="Search Finance work">
+    <input type="search" name="q" value="{{ params.q }}" class="form-control form-control-sm"
+           placeholder="Search site, invoice, challan, vendor, PO" aria-label="Search Finance work" maxlength="100">
+    {% if params.focus %}<input type="hidden" name="focus" value="{{ params.focus }}">{% endif %}
+    {% if params.ptype %}<input type="hidden" name="ptype" value="{{ params.ptype }}">{% endif %}
+    <button type="submit" class="btn btn-sm btn-brand">Search</button>
+    {% if filtered %}<a href="{{ clear_href }}" class="btn btn-sm btn-outline-secondary">Show everything</a>{% endif %}
+  </form>
+
+  {% if show.milestones %}
+  <section class="qsec" id="sec-milestones" aria-labelledby="h-milestones">
+    <div class="qhead">
+      <h2 id="h-milestones">{{ sections.milestones }} <span class="qn num{% if not to_act %} z{% endif %}">{{ to_act|length }}</span></h2>
+      <span class="meta">Residential. M1 advance: confirm the money, no invoice. M2 and M3: invoice once the task before the invoice is Done. Rows to check first, then longest wait.</span>
+    </div>
+    <div class="qcols" style="--cols: minmax(0,1.3fr) minmax(0,1.2fr) minmax(0,.9fr) minmax(0,1fr);" aria-hidden="true">
+      <div>Site</div><div>Milestone</div><div>Waiting since</div><div>Waiting</div>
+    </div>
+    <div class="qlist" id="milestone-rows">
+      {% for r in to_act %}
+      <div class="qitem{% if r.tone != 'mut' %} {{ r.tone }}{% endif %}" x-data="{ open: false }" data-milestone="{{ r.milestone.pk }}" data-kind="{{ r.kind }}">
+        <button type="button" class="qrow" style="--cols: minmax(0,1.3fr) minmax(0,1.2fr) minmax(0,.9fr) minmax(0,1fr);"
+                @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="false" aria-controls="ms-{{ r.milestone.pk }}">
+          <span><span class="code">{{ r.code }}</span><span class="meta">{{ r.project.customer_name }} · {{ r.project.city }}</span></span>
+          <span><b>{{ r.milestone.milestone_name }}</b><span class="meta">{% if r.agreed %}Agreed <span class="amt">{{ r.agreed }}</span>{% else %}<span class="na">amount not set</span>{% endif %}</span></span>
+          <span>{% if r.since %}<span class="meta">{% if r.kind == 'advance' %}Activated{% else %}Due since{% endif %}</span>{{ r.since|date:"j M Y" }}{% elif r.note %}<span class="pill mut" data-note>{{ r.note }}</span>{% else %}<span class="meta">—</span>{% endif %}</span>
+          <span>{% if r.waiting is not None %}<span class="pill {{ r.tone }}">{{ r.waiting }}d {% if r.kind == 'advance' %}unconfirmed{% else %}not invoiced{% endif %}</span>{% else %}<span class="pill warn" data-check>check</span>{% endif %}</span>
+          <i data-lucide="chevron-down" class="chev" aria-hidden="true"></i>
+        </button>
+        <div class="qdet" id="ms-{{ r.milestone.pk }}" x-show="open" x-cloak>
+          <dl class="kv">
+            {% if r.kind == 'invoice' %}<dt>Invoice point</dt><dd>{{ r.trigger }}{% if r.note %} ({{ r.note }}){% endif %}</dd>{% endif %}
+            <dt>Agreed amount</dt><dd>{% if r.agreed %}<span class="amt">{{ r.agreed }}</span>{% else %}<span class="na">amount not set</span>{% endif %}</dd>
+            {% if r.contract_shown %}<dt>Contract value</dt><dd data-contract>{% if r.contract %}<span class="amt">{{ r.contract }}</span>{% else %}<span class="na">not set</span>{% endif %}</dd>{% endif %}
+            <dt>PM</dt><dd>{% if r.project.assigned_pm %}{{ r.project.assigned_pm.user.get_full_name|default:r.project.assigned_pm.user.username }}{% else %}No PM{% endif %}</dd>
+          </dl>
+          <div class="wbtns"><a class="wbtn{% if r.action != 'Open site' %} pri{% endif %}" href="{{ r.href }}" data-action>{{ r.action }}</a></div>
+        </div>
+      </div>
+      {% empty %}
+      <div class="qempty">{% if params.q %}No milestone to act on matches this search.{% else %}Nothing to act on: every advance is confirmed and every due milestone is invoiced.{% endif %}</div>
+      {% endfor %}
+    </div>
+    <div class="qfoot" data-not-due>{{ not_due }} more M2/M3 not yet due (the task before the invoice is not Done yet).</div>
+  </section>
+  {% endif %}
+
+  {% if show.invoiced %}
+  <section class="qsec" id="sec-invoiced" aria-labelledby="h-invoiced">
+    <div class="qhead">
+      <h2 id="h-invoiced">{{ sections.invoiced }} <span class="qn num{% if not invoiced %} z{% endif %}">{{ invoiced|length }}</span></h2>
+      <span class="meta">Oldest invoice first. Due = invoice amount less what has been received.</span>
+    </div>
+    <div class="qcols" style="--cols: minmax(0,1fr) minmax(0,1.4fr) minmax(0,1fr) minmax(0,1fr);" aria-hidden="true">
+      <div>Invoice</div><div>Site · milestone</div><div>Due</div><div>Age</div>
+    </div>
+    <div class="qlist" id="invoiced-rows">
+      {% for r in invoiced %}
+      <div class="qitem{% if r.tone == 'crit' %} crit{% endif %}" x-data="{ open: false }" data-milestone="{{ r.milestone.pk }}">
+        <button type="button" class="qrow" style="--cols: minmax(0,1fr) minmax(0,1.4fr) minmax(0,1fr) minmax(0,1fr);"
+                @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="false" aria-controls="inv-{{ r.milestone.pk }}">
+          <span><span class="code">{{ r.milestone.invoice_number|default:"No number" }}</span><span class="meta">{{ r.since|date:"j M Y"|default:"no date" }}</span></span>
+          <span><b>{{ r.code }}</b> · {{ r.milestone.milestone_name }}<span class="meta">{{ r.project.customer_name }}</span></span>
+          <span>{% if r.due %}<span class="amt" data-due>{{ r.due }}</span><span class="meta">due</span>{% else %}<span class="na" data-due>amount not set</span>{% endif %}</span>
+          <span>{% if r.waiting is not None %}<span class="pill {{ r.tone }}">{{ r.waiting }}d since invoice</span>{% endif %}</span>
+          <i data-lucide="chevron-down" class="chev" aria-hidden="true"></i>
+        </button>
+        <div class="qdet" id="inv-{{ r.milestone.pk }}" x-show="open" x-cloak>
+          <dl class="kv">
+            <dt>Invoice amount</dt><dd>{% if r.invoiced %}<span class="amt">{{ r.invoiced }}</span>{% else %}<span class="na">amount not set</span>{% endif %}</dd>
+            <dt>Received so far</dt><dd>{% if r.received %}<span class="amt">{{ r.received }}</span>{% else %}Nothing{% endif %}</dd>
+            <dt>Agreed amount</dt><dd>{% if r.agreed %}<span class="amt">{{ r.agreed }}</span>{% else %}<span class="na">amount not set</span>{% endif %}</dd>
+            {% if r.contract_shown %}<dt>Contract value</dt><dd data-contract>{% if r.contract %}<span class="amt">{{ r.contract }}</span>{% else %}<span class="na">not set</span>{% endif %}</dd>{% endif %}
+            <dt>Site status</dt><dd>{{ r.project.status }}</dd>
+          </dl>
+          <div class="wbtns"><a class="wbtn{% if r.action != 'Open site' %} pri{% endif %}" href="{{ r.href }}" data-action>{{ r.action }}</a></div>
+        </div>
+      </div>
+      {% empty %}
+      <div class="qempty">{% if params.q %}No invoice matches this search.{% else %}Nothing awaiting payment.{% endif %}</div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  {% if show.payments %}
+  <section class="qsec" id="sec-payments" aria-labelledby="h-payments">
+    <div class="qhead">
+      <h2 id="h-payments">{{ sections.payments }} <span class="qn num{% if not payments.awaiting and not payments.to_pay %} z{% endif %}">{{ payments.awaiting|add:payments.to_pay }}</span></h2>
+      <span class="meta">One queue per project type. The five oldest awaiting approval or payment are listed here; act on them in the queue.</span>
+      <div class="right">
+        <nav class="seg" aria-label="Project type">
+          {% for b in payments.buttons %}<a href="{{ b.href }}" aria-current="{% if b.active %}true{% else %}false{% endif %}" data-ptype="{{ b.value }}">{{ b.label }} <span class="num">{{ b.open }}</span></a>{% endfor %}
+        </nav>
+      </div>
+    </div>
+    <div class="qcols" style="--cols: minmax(0,1fr) minmax(0,1.6fr) minmax(0,.9fr) minmax(0,1.1fr);" aria-hidden="true">
+      <div>Request</div><div>Vendor · order</div><div>Amount</div><div>Status</div>
+    </div>
+    <div class="qlist" id="payment-rows">
+      {% for p in payments.rows %}
+      <div class="qitem" x-data="{ open: false }" data-payment="{{ p.payment.pk }}">
+        <button type="button" class="qrow" style="--cols: minmax(0,1fr) minmax(0,1.6fr) minmax(0,.9fr) minmax(0,1.1fr);"
+                @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="false" aria-controls="pr-{{ p.payment.pk }}">
+          <span><span class="code">PR #{{ p.payment.pk }}</span><span class="meta">{{ payments.ptype_label }} · raised {{ p.raised }}</span></span>
+          <span>{{ p.vendor }}<span class="meta">{{ p.reference }} · by {{ p.raised_by }}</span></span>
+          <span><span class="amt">{{ p.amount }}</span>{% if p.requested %}<span class="meta">of {{ p.requested }} asked</span>{% endif %}</span>
+          <span><span class="pill {{ p.tone }}">{{ p.status_label }}</span></span>
+          <i data-lucide="chevron-down" class="chev" aria-hidden="true"></i>
+        </button>
+        <div class="qdet" id="pr-{{ p.payment.pk }}" x-show="open" x-cloak>
+          <dl class="kv">
+            <dt>Order or bill</dt><dd>{{ p.reference }}</dd>
+            <dt>Waiting</dt><dd>{{ p.waiting }} day{{ p.waiting|pluralize }}</dd>
+          </dl>
+          <div class="wbtns"><a class="wbtn pri" href="{{ p.href }}">Open in the payments queue</a></div>
+        </div>
+      </div>
+      {% empty %}
+      <div class="qempty">No {{ payments.ptype_label }} payment requests awaiting approval or payment.</div>
+      {% endfor %}
+    </div>
+    <div class="qfoot">
+      {% if payments.more %}{{ payments.more }} more in the queue · {% endif %}
+      <a href="{{ payments.queue_href }}">Open the {{ payments.ptype_label }} queue</a>
+      {% if payment_search_href %} · <a href="{{ payment_search_href }}">Search the queue for “{{ params.q }}”</a>{% endif %}
+    </div>
+  </section>
+  {% endif %}
+
+  {% if show.receipts %}
+  <section class="qsec" id="sec-receipts" aria-labelledby="h-receipts">
+    <div class="qhead">
+      <h2 id="h-receipts">{{ sections.receipts }} <span class="qn num{% if not receipts %} z{% endif %}">{{ receipts|length }}</span></h2>
+      <span class="meta">Every project type, by receipt date. Damaged first. "Confirmed with photo" = the site engineer recorded it with a photo. Read only.</span>
+    </div>
+    <div class="qcols" style="--cols: minmax(0,.9fr) minmax(0,1.2fr) minmax(0,1.2fr) minmax(0,.9fr) minmax(0,1.1fr);" aria-hidden="true">
+      <div>Receipt</div><div>Challan · vendor</div><div>Site</div><div>Lines</div><div>State</div>
+    </div>
+    <div class="qlist" id="receipt-rows">
+      {% for r in receipts %}
+      <div class="qitem{% if r.state == 'damaged' %} crit{% endif %}" x-data="{ open: false }" data-receipt="{{ r.receipt.number }}" data-state="{{ r.state }}">
+        <button type="button" class="qrow" style="--cols: minmax(0,.9fr) minmax(0,1.2fr) minmax(0,1.2fr) minmax(0,.9fr) minmax(0,1.1fr);"
+                @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="false" aria-controls="grn-{{ r.receipt.pk }}">
+          <span><span class="code">{{ r.receipt.number }}</span><span class="meta">{{ r.receipt.receipt_date|date:"j M Y" }}</span></span>
+          <span>DC {{ r.challan.dc_number }}<span class="meta">{{ r.challan.vendor.name|default:"No vendor" }}</span></span>
+          <span><b>{{ r.code }}</b><span class="tag">{{ r.type_label }}</span><span class="meta">{{ r.who }} · {{ r.recorder }}</span></span>
+          <span class="num">{{ r.complete_lines }} of {{ r.lines|length }} complete</span>
+          <span>
+            {% if r.state == 'damaged' %}<span class="pill crit">Damaged</span>{% elif r.state == 'partial' %}<span class="pill mut">Partial</span>{% endif %}
+            {% if r.with_photo %}<span class="pill ok">✓ Confirmed with photo</span>{% endif %}
+          </span>
+          <i data-lucide="chevron-down" class="chev" aria-hidden="true"></i>
+        </button>
+        <div class="qdet" id="grn-{{ r.receipt.pk }}" x-show="open" x-cloak>
+          <ul class="lines">
+            {% for l in r.lines %}
+              <li><span>{{ l.item }}</span><span class="num">{{ l.received }} / {{ l.ordered }} {{ l.unit }}{% if l.damaged %} · <span class="pill crit">{{ l.damaged }} damaged</span>{% elif l.partial %} · <span class="pill mut">partial</span>{% endif %}</span></li>
+            {% empty %}
+              <li><span>No lines recorded on this receipt.</span><span></span></li>
+            {% endfor %}
+          </ul>
+          <dl class="kv">
+            <dt>PO on the challan</dt><dd>{{ r.challan.po_number|default:"none" }}</dd>
+            <dt>Recorded by</dt><dd>{{ r.recorder }} ({{ r.who }})</dd>
+          </dl>
+          {% if r.href %}<div class="wbtns"><a class="wbtn pri" href="{{ r.href }}" data-receipt-link>Open receipt and photos</a></div>{% endif %}
+        </div>
+      </div>
+      {% empty %}
+      <div class="qempty">{% if params.q %}No goods receipt matches this search.{% else %}No goods received in the last {{ receipt_days }} days.{% endif %}</div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+</div>
+<script>
+  // Draw the Lucide icons once; Alpine only toggles visibility, so nothing is re-rendered.
+  if (window.lucide && typeof window.lucide.createIcons === 'function') { window.lucide.createIcons(); }
+</script>
+{% endblock %}

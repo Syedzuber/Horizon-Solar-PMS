@@ -3383,6 +3383,36 @@ def user_can_view_payment_queue(user):
     return profile.role in PAYMENT_QUEUE_ROLES or user_is_payment_approver(user)
 
 
+# FIN-M-B8 — who may open the Finance work page (/finance/work/). Finance works from it;
+# CEO, Admin and System Admin read it (Zuber's ruling, pre-flight 2). Exactly the four
+# PAYMENT_QUEUE_ROLES by role, so every viewer may also open the queue the page links
+# into, and every viewer is in CONTRACT_VALUE_ROLES and MILESTONE_CARD_READ_ROLES or is
+# Finance, so nothing the page shows is money they could not already read elsewhere.
+# Its own set, not an alias: a later change to who reads the queue must not silently
+# change who sees milestones and receipts here.
+FINANCE_WORK_ROLES = frozenset({'Finance', 'CEO', 'Admin', 'System Admin'})
+
+
+def user_can_view_finance_work(user):
+    """Return True if `user` may open the Finance work page (FIN-M-B8).
+
+    Allowed: Finance, CEO, Admin and System Admin (FINANCE_WORK_ROLES). The page itself
+    writes nothing; Finance's actions are links to the existing screens, which keep their
+    own gates (milestone_invoice and the Finance receipt form: Finance only; the payments
+    queue: user_can_view_payment_queue). Blocked: everyone else — SCM, PM, Project
+    Coordinator, BD, Site Engineer and Design have no Finance work, and the page lists
+    client milestone amounts and vendor payments across every site, which is portfolio
+    money (AF-1) they do not read. A payment-approver flag alone does not admit: the
+    queue already lists what such an approver must act on.
+    Not project-scoped, so it costs no query.
+    """
+    profile = getattr(user, 'profile', None)
+    # No profile: no role, so no Finance work; blocked like every other helper here.
+    if profile is None:
+        return False
+    return profile.role in FINANCE_WORK_ROLES
+
+
 def user_can_mark_paid(user, payment_request):
     """Return True if `user` may record `payment_request` as PAID.
 
