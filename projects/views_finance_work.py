@@ -7,7 +7,9 @@ that already exists and keeps its own gate:
 
     milestone to invoice / advance to confirm / receipt to record
         -> the project page's milestone card (#payment-milestones), where Finance's B3
-           invoice form and Finance pencil live (milestone_invoice, update_milestone)
+           invoice form and Finance pencil live (milestone_invoice, update_milestone).
+           FIN-M-RT: the link carries ?return=finance_work&rq=<this page's filters>, so
+           a save there comes back here with the same filters (see finance_work_return)
     payment requests
         -> the payments queue tab for that project type and status (payment_views)
     goods receipts
@@ -52,6 +54,7 @@ from urllib.parse import urlencode
 
 from django.db.models import (BooleanField, CharField, Exists, OuterRef, Q, Subquery,
                               Value, Case, When)
+from django.http import QueryDict
 from django.shortcuts import render
 from django.urls import reverse
 from django.utils import timezone
@@ -107,6 +110,16 @@ SECTIONS = {
 }
 
 SEARCH_MAX = 100
+
+#: FIN-M-RT: the one value of the `return` marker that sends a milestone save back to
+#: this page. A fixed name, never a URL: the redirect target is always this page.
+RETURN_FINANCE_WORK = 'finance_work'
+
+#: FIN-M-RT: `rq` is cut to this many characters before it is parsed. Enough for the
+#: longest real value (a 100-character search of 3-byte characters, percent-encoded, is
+#: 900, plus focus and ptype), and short enough that it can never hold the 1000 fields
+#: that would make QueryDict raise after the milestone has already been saved.
+RQ_MAX = 1200
 
 
 # ---------------------------------------------------------------------------
@@ -209,14 +222,19 @@ def _site_code(project):
     return project.site_code or project.project_id
 
 
-def _milestone_rows(user, today):
+def _milestone_rows(user, today, params):
     """(to_act, invoiced, not_due) from the one milestone query.
 
     to_act    M1 Pending (kind 'advance', waiting since the site's activation) and M2/M3
               Pending that are due (kind 'invoice', waiting since the trigger was Done)
     invoiced  Invoiced milestones (kind 'invoiced'), waiting since the invoice date
     not_due   how many M2/M3 Pending are not yet due — a number only
+
+    `params` are this page's filters; every row's link carries them in the FIN-M-RT
+    return marker ("Open site" rows too, by ruling), so a save on the card returns here.
     """
+    # The marker is the same for every row; built once, not once per site.
+    back = '?' + return_query(return_marker(params))
     site_page = {}
     to_act, invoiced = [], []
     not_due = 0
@@ -224,7 +242,8 @@ def _milestone_rows(user, today):
         project = m.project
         if project.project_id not in site_page:
             site_page[project.project_id] = (
-                reverse('project_overview', args=[project.project_id]) + '#payment-milestones')
+                reverse('project_overview', args=[project.project_id]) + back
+                + '#payment-milestones')
         # R12: the contract value only for the roles that may see it; every role this page
         # admits is one of them today, but the rule is asked, not assumed. No query.
         contract_shown = user_can_see_contract_value(user, project)
@@ -510,22 +529,66 @@ def _qty(value):
 # The request
 # ---------------------------------------------------------------------------
 
-def _params(request):
-    """The page's GET parameters. Anything unknown is dropped, so no parameter can raise.
-    ptype is checked against the types actually shown later (_payment_section)."""
-    focus = request.GET.get('focus', '')
-    ptype = request.GET.get('ptype', '')
+def _clean_params(data):
+    """The page's parameters read from `data` (a QueryDict). Anything unknown is dropped,
+    so no parameter can raise. ptype is checked against the types actually shown later
+    (_payment_section). Shared by the page's own GET and the FIN-M-RT return marker, so
+    the filters a save returns to are cleaned by exactly the rule the page applies."""
+    focus = data.get('focus', '')
+    ptype = data.get('ptype', '')
     return {
-        'q': request.GET.get('q', '').strip()[:SEARCH_MAX],
+        'q': data.get('q', '').strip()[:SEARCH_MAX],
         'focus': focus if focus in SECTIONS else '',
         'ptype': ptype if ptype in TYPE_LABELS else '',
     }
+
+
+def _params(request):
+    """The page's GET parameters (see _clean_params)."""
+    return _clean_params(request.GET)
 
 
 def _query(params, **changes):
     """The page's query string with `changes` applied; empty values left out."""
     merged = {**params, **changes}
     return '?' + urlencode({k: v for k, v in merged.items() if v})
+
+
+# ---------------------------------------------------------------------------
+# FIN-M-RT: returning here after a save on the milestone card
+# ---------------------------------------------------------------------------
+
+def return_marker(params):
+    """The return marker for cleaned `params`: {'return': 'finance_work', 'rq': '<the
+    page's query string, without the ?>'}. rq is '' when no filter is set."""
+    return {'return': RETURN_FINANCE_WORK, 'rq': _query(params)[1:]}
+
+
+def return_query(marker):
+    """The marker as a query string (no ?), with an empty rq left out."""
+    return urlencode({k: v for k, v in marker.items() if v})
+
+
+def finance_work_return(data, user):
+    """The cleaned return marker carried in `data` (request.POST or request.GET), or None.
+
+    None unless `return` is exactly RETURN_FINANCE_WORK — a fixed name, so no URL from
+    the request is ever redirected to — and `user` may open this page
+    (permissions.user_can_view_finance_work: Finance, CEO, Admin, System Admin; anyone
+    else would be sent to a 403, so they keep today's behaviour). rq is re-parsed and
+    passed through _clean_params, so only q, focus and ptype survive, each checked as
+    the page checks it; any other key in rq is dropped. Costs no query.
+    """
+    if data.get('return') != RETURN_FINANCE_WORK:
+        return None
+    if not user_can_view_finance_work(user):
+        return None
+    return return_marker(_clean_params(QueryDict(data.get('rq', '')[:RQ_MAX])))
+
+
+def finance_work_url(marker):
+    """This page's URL with the filters a cleaned `marker` carries."""
+    return reverse('finance_work') + (f'?{marker["rq"]}' if marker['rq'] else '')
 
 
 def _matches(q, *values):
@@ -566,7 +629,7 @@ def finance_work(request):
     params = _params(request)
     q = params['q'].lower()
 
-    to_act, invoiced, not_due = _milestone_rows(request.user, today)
+    to_act, invoiced, not_due = _milestone_rows(request.user, today, params)
     payments = _payment_section(params, today)
     # Who may follow a receipt to its challan page: the DC page's own role rule. No query.
     receipts = _receipt_rows(today, user_has_dc_read_role(request.user))

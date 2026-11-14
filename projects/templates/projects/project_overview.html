@@ -413,6 +413,12 @@
               <form method="post" action="{% url 'milestone_invoice' project.project_id m.pk %}"
                     class="p-2 rounded" style="background:#f8f9fa;">
                 {% csrf_token %}
+                {% comment %}FIN-M-RT: opened from the Finance work page — the save goes back there
+                   with its filters. Values are cleaned in the view; never a URL.{% endcomment %}
+                {% if finance_return %}
+                <input type="hidden" name="return" value="{{ finance_return.return }}">
+                <input type="hidden" name="rq" value="{{ finance_return.rq }}">
+                {% endif %}
                 <label class="form-label small mb-1" for="invNumber{{ m.pk }}">Invoice number</label>
                 <input type="text" name="invoice_number" id="invNumber{{ m.pk }}" maxlength="50" required
                        class="form-control form-control-sm mb-2" value="{{ m.invoice_number }}">
@@ -437,6 +443,10 @@
                 {% csrf_token %}
                 <input type="hidden" name="action" value="update_milestone">
                 <input type="hidden" name="milestone_pk" value="{{ m.pk }}">
+                {% if finance_return %}{# FIN-M-RT: back to Finance work after the save #}
+                <input type="hidden" name="return" value="{{ finance_return.return }}">
+                <input type="hidden" name="rq" value="{{ finance_return.rq }}">
+                {% endif %}
                 <input type="text" name="milestone_description" class="form-control form-control-sm mb-2"
                        value="{{ m.milestone_description }}" placeholder="Description / Note">
                 {% if milestone_card_mode == 'finance' %}

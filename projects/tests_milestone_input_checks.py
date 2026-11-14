@@ -262,7 +262,8 @@ class ValidInputTests(InputChecksBase):
     def test_finance_edit_records_a_receipt_with_the_same_lines(self):
         PaymentMilestone.objects.filter(pk=self.m2.pk).update(status='Invoiced')
         response = self.finance_edit(self.m2, '150000', description='Stage 2')
-        self.assertIn('M2 updated.', _texts(response))
+        # FIN-M-RT (ruling): a pencil save that records a receipt says so.
+        self.assertIn('M2 marked as Received.', _texts(response))
         self.m2.refresh_from_db()
         self.assertEqual((self.m2.status, self.m2.amount_received, self.m2.received_date),
                          ('Received', Decimal('150000.00'), TODAY))

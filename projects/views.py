@@ -11365,6 +11365,42 @@ def _milestone_text_error(value, field_name, label):
     return None
 
 
+def _finance_return(request, data):
+    """FIN-M-RT: the cleaned "return to Finance work" marker in `data` (request.POST on a
+    save, request.GET on the project page), or None. See
+    views_finance_work.finance_work_return for what is accepted and who it applies to."""
+    # Lazy import: views_finance_work imports _format_inr from this module at its top, so
+    # importing it here at module level would be circular.
+    from .views_finance_work import finance_work_return
+    return finance_work_return(data, request.user)
+
+
+def _milestone_saved_redirect(request, project):
+    """Where a milestone card save goes after it SUCCEEDED (FIN-M-RT): the Finance work
+    page with its own filters when the form carried a valid marker for a user that page
+    admits; otherwise the project page, as before."""
+    marker = _finance_return(request, request.POST)
+    if marker:
+        # Lazy import: see _finance_return.
+        from .views_finance_work import finance_work_url
+        return redirect(finance_work_url(marker))
+    return redirect('project_overview', project_id=project.project_id)
+
+
+def _milestone_refused_redirect(request, project):
+    """Where a milestone card save goes after it was REFUSED (FIN-M-RT, ruling 3): always
+    the project page, so the form can be corrected next to the error. With a valid marker
+    the page is reopened at the card with the marker kept (ruling 6), so the corrected
+    second save still returns to Finance work."""
+    marker = _finance_return(request, request.POST)
+    if marker:
+        # Lazy import: see _finance_return.
+        from .views_finance_work import return_query
+        return redirect(reverse('project_overview', args=[project.project_id])
+                        + '?' + return_query(marker) + '#payment-milestones')
+    return redirect('project_overview', project_id=project.project_id)
+
+
 def _warn_receipt_without_invoice(request, project, milestone_name, from_status):
     """Warn when an M2/M3 receipt skipped the invoice step (FIN-M-B3b, ruling on B3's
     ruling 7). A receipt straight from Pending stays ALLOWED — this never refuses — but
@@ -11645,19 +11681,21 @@ def milestone_invoice(request, project_id, milestone_pk):
 
     # Finance only (ruling (a)): Finance raises the invoice, so Finance records it. Every
     # other role, the site's PM and Coordinators included, is refused here.
+    # FIN-M-RT: every refusal below stays on the project page (ruling 3); with the
+    # Finance work marker the page reopens at the card with the marker kept (ruling 6).
     if not user_can_invoice_milestone(request.user, project):
         messages.error(request, 'Only Finance can record an invoice. No change was made.')
-        return redirect('project_overview', project_id=project.project_id)
+        return _milestone_refused_redirect(request, project)
 
     refusal = _milestone_invoice_refusal(project, milestone)
     if refusal:
         messages.error(request, refusal)
-        return redirect('project_overview', project_id=project.project_id)
+        return _milestone_refused_redirect(request, project)
 
     values, error = _read_invoice_form(request.POST, milestone)
     if error:
         messages.error(request, f'{milestone.milestone_name} not invoiced. {error}')
-        return redirect('project_overview', project_id=project.project_id)
+        return _milestone_refused_redirect(request, project)
 
     profile = request.user.profile
     outcome, milestone = _record_milestone_invoice(request, project, milestone, values,
@@ -11676,7 +11714,8 @@ def milestone_invoice(request, project_id, milestone_pk):
         messages.success(request, f'{milestone.milestone_name} invoice updated.')
     elif outcome == _INVOICE_UNCHANGED:
         messages.info(request, f'{milestone.milestone_name} invoice: no change.')
-    return redirect('project_overview', project_id=project.project_id)
+    # FIN-M-RT: "no change" counts as success too — nothing was refused.
+    return _milestone_saved_redirect(request, project)
 
 
 @login_required
@@ -11709,15 +11748,19 @@ def milestone_receive(request, project_id, milestone_pk):
         # as milestone_invoice does.
         messages.error(request, 'This site has been deleted. No receipt was recorded.')
         return redirect(get_user_dashboard(request.user))
+    # FIN-M-RT: every refusal below stays on the project page (ruling 3), keeping the
+    # Finance work marker when one came with the form (ruling 6). No screen sends the
+    # marker here today (the "Mark as Received" pop-up has no live button); the handler
+    # honours it so all three Finance save paths behave alike (ruling).
     if project.project_type != 'Residential':
         # R2: M1-M3 describe a residential contract; no other site type records them.
         messages.error(request, 'Payment receipts are recorded on Residential payment '
                                 'milestones only. No change was made.')
-        return redirect('project_overview', project_id=project.project_id)
+        return _milestone_refused_redirect(request, project)
 
     if milestone.status == 'Received':
         messages.error(request, 'Milestone is already marked as Received.')
-        return redirect('project_overview', project_id=project.project_id)
+        return _milestone_refused_redirect(request, project)
 
     # FIN-M-B3b: one reader for every receipt path; a refusal saves nothing and writes
     # no change-log line. Blank is refused here (unlike the other two paths) because this
@@ -11726,17 +11769,17 @@ def milestone_receive(request, project_id, milestone_pk):
         amount_received = _read_amount_received(request.POST.get('amount_received', ''))
     except ValidationError as exc:
         messages.error(request, f'{milestone.milestone_name} not updated. {exc.messages[0]}')
-        return redirect('project_overview', project_id=project.project_id)
+        return _milestone_refused_redirect(request, project)
     if amount_received is None:
         messages.error(request, f'{milestone.milestone_name} not updated. '
                                 f'Amount received is required.')
-        return redirect('project_overview', project_id=project.project_id)
+        return _milestone_refused_redirect(request, project)
 
     variance_reason = request.POST.get('variance_reason', '').strip()
     _vr_error = _milestone_text_error(variance_reason, 'variance_reason', 'Variance reason')
     if _vr_error:
         messages.error(request, f'{milestone.milestone_name} not updated. {_vr_error}')
-        return redirect('project_overview', project_id=project.project_id)
+        return _milestone_refused_redirect(request, project)
     if milestone.amount and amount_received > milestone.amount and not variance_reason:
         variance_reason = 'Overpayment'
 
@@ -11761,15 +11804,19 @@ def milestone_receive(request, project_id, milestone_pk):
         project, request.user.profile, milestone, _ms_logged_before,
         ['status', 'received_date', 'amount_received', 'variance_reason'])
 
+    # FIN-M-RT message order: the success line first, then the no-invoice warning, then
+    # whatever the task sync says. The sync used to run first, so "left as it is" read
+    # before the milestone was said to be Received. Only the messages move; the sync
+    # still runs after the milestone's save, as before.
+    messages.success(request, f'{milestone.milestone_name} marked as Received.')
+    _warn_receipt_without_invoice(request, project, milestone.milestone_name,
+                                  _ms_prev_status)
+
     # Bidirectional sync: PaymentMilestone Received → Finance confirmation task Done,
     # through the task-status chokepoint (FIN-M-B9a). The milestone is saved above and
     # the helper never undoes it; a failure is logged and Finance is warned.
     _sync_finance_task_from_milestone(request, project, milestone, request.user.profile)
-
-    messages.success(request, f'{milestone.milestone_name} marked as Received.')
-    _warn_receipt_without_invoice(request, project, milestone.milestone_name,
-                                  _ms_prev_status)
-    return redirect('project_overview', project_id=project.project_id)
+    return _milestone_saved_redirect(request, project)
 
 
 @login_required
@@ -12195,6 +12242,10 @@ def project_overview(request, project_id):
         action = request.POST.get('action', '')
 
         if action == 'update_milestone':
+            # FIN-M-RT: refusals in this action return through _milestone_refused_redirect
+            # (project page; the Finance work marker kept when valid) and a save through
+            # _milestone_saved_redirect (back to Finance work with the marker; otherwise
+            # the project page). Without a marker both are today's redirect.
             milestone_pk = request.POST.get('milestone_pk', '').strip()
             if milestone_pk:
                 try:
@@ -12210,6 +12261,9 @@ def project_overview(request, project_id):
                     # FIN-M-B3b: True when Finance typed a different amount on a
                     # milestone that is already Received (warned after the success line).
                     _amount_not_changed = False
+                    # FIN-M-RT: True when this save recorded a Finance receipt. Picks the
+                    # success wording and runs the task sync AFTER the success line.
+                    _receipt_recorded = False
 
                     if _actor_role == 'Finance':
                         # R2 (FIN-M-B3b): Finance records receipts on Residential
@@ -12219,7 +12273,7 @@ def project_overview(request, project_id):
                             messages.error(request, 'Payment receipts are recorded on '
                                                     'Residential payment milestones only. '
                                                     'No change was made.')
-                            return redirect('project_overview', project_id=project.project_id)
+                            return _milestone_refused_redirect(request, project)
                         # FIN-M-B3b, description ruling: a missing field means "no
                         # change" (it used to blank the stored description); a field
                         # present and blank clears it, as on the PM branch — the box is
@@ -12231,7 +12285,7 @@ def project_overview(request, project_id):
                                 _ms_desc, 'milestone_description', 'Description')
                             if _desc_error:
                                 messages.error(request, f'{milestone.milestone_name} not updated. {_desc_error}')
-                                return redirect('project_overview', project_id=project.project_id)
+                                return _milestone_refused_redirect(request, project)
                             milestone.milestone_description = _ms_desc
                             _save_fields.append('milestone_description')
                         _ms_prev_status = milestone.status
@@ -12248,7 +12302,7 @@ def project_overview(request, project_id):
                                     request.POST.get('amount_received', ''))
                             except ValidationError as exc:
                                 messages.error(request, f'{milestone.milestone_name} not updated. {exc.messages[0]}')
-                                return redirect('project_overview', project_id=project.project_id)
+                                return _milestone_refused_redirect(request, project)
                             if _ms_received is not None:
                                 milestone.amount_received = _ms_received
                                 milestone.status        = 'Received'
@@ -12289,11 +12343,9 @@ def project_overview(request, project_id):
                         # every save, changed or not.
                         _log_milestone_changes(project, request.user.profile, milestone,
                                                _ms_logged_before, _save_fields)
-                        if 'status' in _save_fields:
-                            # Milestone Received → Finance task Done, through the
-                            # chokepoint (FIN-M-B9a); see milestone_receive.
-                            _sync_finance_task_from_milestone(
-                                request, project, milestone, request.user.profile)
+                        # The task sync for a receipt runs below, after the success line
+                        # (FIN-M-RT message order).
+                        _receipt_recorded = 'status' in _save_fields
                     else:
                         milestone.milestone_description = request.POST.get('milestone_description', '').strip()
                         # FIN-M-B3b: an over-long description used to reach the database
@@ -12303,7 +12355,7 @@ def project_overview(request, project_id):
                             'Description')
                         if _desc_error:
                             messages.error(request, f'{milestone.milestone_name} not updated. {_desc_error}')
-                            return redirect('project_overview', project_id=project.project_id)
+                            return _milestone_refused_redirect(request, project)
                         amount_str   = request.POST.get('amount', '').strip()
                         due_date_str = request.POST.get('due_date', '').strip()
                         # A refused date refuses the whole edit and leaves the row as it
@@ -12312,7 +12364,7 @@ def project_overview(request, project_id):
                         _ms_due, _ms_due_error = check_typed_date(due_date_str)
                         if _ms_due_error:
                             messages.error(request, f'{milestone.milestone_name} not updated. {_ms_due_error}')
-                            return redirect('project_overview', project_id=project.project_id)
+                            return _milestone_refused_redirect(request, project)
                         # FIN-M-B1b. A refused amount refuses the whole edit, like the
                         # date above. This branch used to turn blank, "abc" or "1,50,000"
                         # into None, erasing the amount BD set from the final proposal
@@ -12328,7 +12380,7 @@ def project_overview(request, project_id):
                                 field_label='Amount')
                         except ValidationError as exc:
                             messages.error(request, f'{milestone.milestone_name} not updated. {exc.messages[0]}')
-                            return redirect('project_overview', project_id=project.project_id)
+                            return _milestone_refused_redirect(request, project)
                         # Blank means "no change", not "clear": the form pre-fills the
                         # stored amount but renders 0 as an empty box, so a blank here was
                         # also wiping a 0 on every description-only save. A PM can no
@@ -12348,7 +12400,14 @@ def project_overview(request, project_id):
                         # writes no line.
                         _log_milestone_changes(project, request.user.profile, milestone,
                                                _ms_logged_before, _ms_fields)
-                    messages.success(request, f'{milestone.milestone_name} updated.')
+                    # FIN-M-RT (ruling): a save that recorded a receipt says so; any other
+                    # save keeps "updated". Order: success, no-invoice warning, then the
+                    # task sync's own messages. The amount-not-changed warning only arises
+                    # on an already Received row, where neither of the others can fire.
+                    if _receipt_recorded:
+                        messages.success(request, f'{milestone.milestone_name} marked as Received.')
+                    else:
+                        messages.success(request, f'{milestone.milestone_name} updated.')
                     # FIN-M-B3b: a Finance receipt straight from Pending on M2/M3.
                     _warn_receipt_without_invoice(request, project,
                                                   milestone.milestone_name,
@@ -12356,9 +12415,17 @@ def project_overview(request, project_id):
                     if _amount_not_changed:
                         messages.warning(request, f'{milestone.milestone_name}: amount not '
                                                   f'changed — already Received.')
+                    if _receipt_recorded:
+                        # Milestone Received → Finance task Done, through the chokepoint
+                        # (FIN-M-B9a); see milestone_receive. The milestone was saved
+                        # above and is never undone from here.
+                        _sync_finance_task_from_milestone(
+                            request, project, milestone, request.user.profile)
+                    return _milestone_saved_redirect(request, project)
                 except PaymentMilestone.DoesNotExist:
                     messages.error(request, 'Milestone not found.')
-            return redirect('project_overview', project_id=project.project_id)
+            # A missing milestone_pk or a milestone not on this site: nothing was saved.
+            return _milestone_refused_redirect(request, project)
 
         # REFUSE, rather than fall through. `can_assign_design` is already False for
         # every OPEX site, so without this branch the POST would be silently ignored and
@@ -12506,6 +12573,11 @@ def project_overview(request, project_id):
                                                can_manage=is_assigned_pm)
     show_milestone_card = (milestone_card_mode is not None
                            and project.project_type == 'Residential')
+    # FIN-M-RT: the "return to Finance work" marker this page was opened with (the
+    # Finance work page's links, or a refused card save reopening it), cleaned. The
+    # card's forms carry it as hidden fields so their save goes back there. None
+    # without a valid marker or for a user that page does not admit. No query.
+    finance_return = _finance_return(request, request.GET) if show_milestone_card else None
 
     # FIN-M-B3 (R7): Finance's invoice controls. On the card, "Mark invoiced" on a Pending
     # M2/M3 and "Correct invoice" on an Invoiced one; on the phase list, the invoice modal
@@ -12926,6 +12998,8 @@ def project_overview(request, project_id):
         'contract_footer':             contract_footer,
         # FIN-M-C: None / 'read' / 'manager' / 'finance' / 'bd'; see where it is built.
         'milestone_card_mode':         milestone_card_mode,
+        # FIN-M-RT: {'return', 'rq'} or None; hidden fields on the card's forms.
+        'finance_return':              finance_return,
         # FIN-M-B3: Finance's invoice form on the card and the "Send Invoice" task modal.
         'can_invoice_milestones':      can_invoice_milestones,
         'invoice_task_prefill':        invoice_task_prefill,

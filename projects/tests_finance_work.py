@@ -286,7 +286,9 @@ class MilestoneTests(FinanceWorkFixture):
         self.assertIn('₹1,50,000', m2)          # M2's agreed amount, Indian grouping
 
     def test_finance_gets_verbs_readers_get_open_site_all_link_to_the_card(self):
-        anchor = reverse('project_overview', args=[self.s.project_id]) + '#payment-milestones'
+        # FIN-M-RT: every row's link carries the return marker (no filters set here).
+        anchor = (reverse('project_overview', args=[self.s.project_id])
+                  + '?return=finance_work#payment-milestones')
         fin = self.rows(self.ctx())[self.m2.pk]
         self.assertEqual(fin.action, 'Invoice M2 on the site page')
         self.assertEqual(fin.href, anchor)
