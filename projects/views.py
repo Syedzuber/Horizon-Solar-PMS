@@ -6929,6 +6929,14 @@ def _announce_phase_rule_overrides(request, subject_name, rows, may_explain):
     messages.warning(request, f"'{subject_name}' started early — {rules}. {tail}")
 
 
+def _not_applicable_refusal(task):
+    """The one wording for "this task is Not Applicable, so it cannot move" (FIN-M-RN2).
+    Shared by rung 0b of _apply_task_status_change() and by _approval_preconditions(),
+    so the status screens and the approval buttons cannot drift apart."""
+    return (f"'{task.task_name}' is marked Not Applicable. Un-mark it before changing "
+            f"its status. No change was made.")
+
+
 def _apply_task_status_change(task, new_status, profile, request, project, *,
                               from_milestone=False):
     """
@@ -7014,6 +7022,24 @@ def _apply_task_status_change(task, new_status, profile, request, project, *,
             f"workspace that owns the work and cannot be set here. It will update "
             f"itself when that record changes."
         )
+        return _TASK_STATUS_REFUSED
+
+    # RUNG 0b — A NOT APPLICABLE TASK DOES NOT MOVE (FIN-M-RN2). Who is blocked: everyone,
+    # on every path that reaches here — both status screens, approve and
+    # self-certification, reject's move back to In Progress, and the milestone syncs
+    # (which skip N/A tasks before calling, so this is their backstop). Why: the PM
+    # ruled the work out of scope, and a move would act on that ruling's behalf — an N/A
+    # trigger task's Done sent the "Invoice due" alert, an N/A confirmation task's Done
+    # marked the money Received, an N/A send-invoice task's Done recorded an invoice.
+    # Until now only the templates hid the controls; nothing here refused.
+    #
+    # Like rung 0, a question about the TASK with one answer for every new_status, so it
+    # sits above the transition table and above the inline due-date write below, and
+    # writes nothing. Below the mirror rung so a mirror (which only Django admin could
+    # mark N/A) keeps its more specific message. The PM un-marks the task
+    # (task_set_not_applicable) and every move is then judged as before.
+    if task.is_not_applicable:
+        messages.error(request, _not_applicable_refusal(task))
         return _TASK_STATUS_REFUSED
 
     valid_statuses = {s[0] for s in Task.STATUS_CHOICES}
@@ -7437,8 +7463,9 @@ def _apply_task_status_change(task, new_status, profile, request, project, *,
     #   * the matching milestone is Pending — once Invoiced or Received nothing is due;
     #   * sent once per site and milestone (ruling (b)): a reopened trigger task
     #     completed again sends nothing.
-    # A trigger marked Not Applicable never reaches Done, so it never alerts; the page
-    # still lists that milestone as due ("trigger N/A").
+    # A trigger marked Not Applicable cannot reach Done — rung 0b refuses every move of
+    # an N/A task (FIN-M-RN2; before that it could, and alerted) — so it never alerts
+    # from here; the Finance work page still lists that milestone as due ("trigger N/A").
     _due_label = _INVOICE_DUE_TRIGGER_TO_MILESTONE.get(task.task_name)
     if (_due_label is not None and new_status == Task.DONE and not from_milestone
             and project.project_type == 'Residential' and not project.is_deleted):
@@ -7706,10 +7733,10 @@ def _approval_preconditions(request, task, project):
     AT ALL, before any per-act state question is asked.
 
     Returns True when the task is eligible; otherwise emits the user-facing message
-    and returns False. Shared by all three approval views so the two refusals are
+    and returns False. Shared by all three approval views so the refusals are
     worded once.
 
-    TWO REFUSALS, IN THIS ORDER, MIRRORING THE STATUS LADDER:
+    THREE REFUSALS, IN THIS ORDER, MIRRORING THE STATUS LADDER:
 
       mirror   - a mirror's status is written by the object it follows, so there is
                  nothing for a person to submit or sign off. This is the same rule
@@ -7717,6 +7744,8 @@ def _approval_preconditions(request, task, project):
                  submit and reject never reach that function (neither changes the
                  status) and would otherwise be an unguarded way to write approval
                  columns onto a row no human may touch.
+
+      not applicable - rung 0b's rule (FIN-M-RN2), for the same reason as the mirror.
 
       not two-step - the feature covers OPEX and CAPEX (2.1 6; CAPEX-2), as
                  uses_two_step_completion() answers. A residential task has no
@@ -7730,6 +7759,14 @@ def _approval_preconditions(request, task, project):
             f"'{task.task_name}' is a mirror task - its status is derived from the "
             f"workspace that owns the work, so there is nothing to submit or approve."
         )
+        return False
+    # FIN-M-RN2 (ruling): a Not Applicable task is refused here too, in rung 0b's words.
+    # Who is blocked: everyone, on submit, approve and reject. Approve would be refused
+    # by rung 0b anyway (and roll back), but submit and reject never change the status:
+    # a submission would leave the task awaiting an approval that can never pass, and a
+    # rejection would raise a punch point against work ruled out of scope.
+    if task.is_not_applicable:
+        messages.error(request, _not_applicable_refusal(task))
         return False
     if not uses_two_step_completion(project):
         # The display label, never the stored code: the person reads "Residential",
@@ -11381,6 +11418,8 @@ def _sync_finance_task_from_milestone(request, project, milestone, profile, *,
       * A task the chokepoint refuses (Blocked: the transition table has no Blocked ->
         Done) stays as it is; the chokepoint's own refusal message and the warning below
         tell Finance. Not logged: a refusal is a rule working, not a fault.
+      * A task marked Not Applicable is never handed to the chokepoint (FIN-M-RN2): it is
+        left as it is and Finance is told so, without "tell Admin".
       * An exception is logged at ERROR with the tag and a traceback, and Finance is
         warned. Each task's move runs in its own savepoint, so a failure part-way leaves
         that task untouched (status, ledger row and activity line together) and its
@@ -11411,6 +11450,16 @@ def _sync_finance_task_from_milestone(request, project, milestone, profile, *,
         messages.warning(request, warning)
         return
     for task in tasks:
+        # FIN-M-RN2 (ruling b): a task the PM marked Not Applicable is skipped, not
+        # refused. The milestone is already saved; the PM's ruling stands; Finance is
+        # told plainly, with no "tell Admin", because nothing is broken. Asked here and
+        # not left to rung 0b, whose refusal message would read as a failure.
+        if task.is_not_applicable:
+            messages.warning(
+                request,
+                f"{milestone.milestone_name} saved. Its task '{task.task_name}' is marked "
+                f"Not Applicable, so it was left as it is.")
+            continue
         try:
             with transaction.atomic():
                 outcome = _apply_task_status_change(task, Task.DONE, profile, request,

@@ -9,7 +9,7 @@ from django.utils.functional import cached_property
 from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory, Program, BOQItemMaster, StockLocation, VENDOR_KIND_SUPPLIER
 from .utils import roles_for_phase
 from .permissions import (
-    PAYMENT_APPROVER_ROLES, qaqc_engineer_assignment_refusal,
+    PAYMENT_APPROVER_ROLES, qaqc_engineer_assignment_refusal, reserved_task_names,
 )
 
 
@@ -657,6 +657,23 @@ class TaskAddForm(forms.Form):
 
     def clean_due_date(self):
         return _clean_typed_date(self.cleaned_data.get('due_date'))
+
+    def clean_task_name(self):
+        """Refuse a name other code finds tasks by (FIN-M-RN2).
+
+        The invoice-due alert, the invoice step and the payment-confirmation sync look
+        their task up by name, so a second "Customer Handover" on a site would be matched
+        alongside the first. Same set and wording as the rename refusal (FIN-M-RN), and
+        the same case-insensitive comparison. Every project type, by ruling: the
+        task -> milestone receipt sync is not limited to Residential, so a stray
+        "Advance Payment Confirmation" could mark an M1 Received anywhere. The field has
+        already stripped surrounding spaces."""
+        name = self.cleaned_data.get('task_name', '')
+        if name.casefold() in reserved_task_names():
+            raise forms.ValidationError(
+                f'"{name}" is a name the finance workflow looks tasks up by. '
+                f'Choose a different name.')
+        return name
 
     def clean(self):
         cleaned = super().clean()
