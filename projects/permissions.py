@@ -4459,6 +4459,24 @@ DASHBOARD_PORTFOLIO_ROLES = frozenset({'CEO', 'Finance', 'SCM', 'Admin', 'System
 DASHBOARD_MANAGER_ROLES = frozenset({'PM', 'Project Coordinator'})
 
 
+def dashboard_live_sites():
+    """Return every Project the Site Dashboard can ever count, for no one in particular:
+    rule D9, not soft-deleted, not a test site, not Cancelled. Drafts are included.
+
+    THE ONE PLACE D9 is written. sites_visible_on_dashboard() narrows this by role, and
+    site_breakdown.site_breakdown() (TB-1) reads it for a tender's sites with no viewer, so
+    the tender page's "Sites in execution" and the dashboard tile cannot disagree. Pure
+    queryset, no role test: who may see a figure built on it is the caller's question.
+    """
+    # Import inside the function to avoid a circular import at module level: this module
+    # imports no models (see the note on its only top-level import), the same reason
+    # sites_visible_on_dashboard() imports Project at call time.
+    from .models import Project
+
+    return (Project.objects.filter(is_deleted=False, is_test=False)
+            .exclude(status='Cancelled'))
+
+
 def sites_visible_on_dashboard(user):
     """Return the Project queryset the common Site Dashboard shows `user` (DASH-B1).
 
@@ -4470,8 +4488,9 @@ def sites_visible_on_dashboard(user):
         System Admin, Design Head
         anyone else               none (Site Engineer, Design, BD, no profile)
 
-    THEN D9, applied here once for every role: test sites (is_test), soft-deleted sites
-    and Cancelled sites never appear. Drafts DO appear, at the bottom of every sort.
+    THEN D9, applied here once for every role through dashboard_live_sites(): test sites
+    (is_test), soft-deleted sites and Cancelled sites never appear. Drafts DO appear, at
+    the bottom of every sort.
 
     A QA/QC ENGINEER'S SITES ARE NOT ADDED. A PM who is the QA/QC engineer on a site
     someone else manages does not see that site here (ruling 4, 9 Nov); QA/QC grants
@@ -4493,8 +4512,7 @@ def sites_visible_on_dashboard(user):
     if profile is None:
         return Project.objects.none()
 
-    live = (Project.objects.filter(is_deleted=False, is_test=False)
-            .exclude(status='Cancelled'))
+    live = dashboard_live_sites()
 
     # Portfolio roles and the Design Head see every live site: their remit is the whole
     # portfolio, exactly as user_can_view_project() already answers for them. Design Head

@@ -1,6 +1,28 @@
 {% extends "base.html" %}
 {% block title %}{{ program.name }} — Program — SolarPMS{% endblock %}
 
+{% block extra_head %}
+{% comment %}TB-1 activated-site strip. Page-scoped CSS (every rule under .tb), the Site
+   Dashboard's brand colours copied as tokens so the two pages read alike. No script: every
+   figure is computed server-side by site_breakdown.site_breakdown().{% endcomment %}
+<style>
+  .tb { --tb-surface:#ffffff; --tb-ink:#16231b; --tb-muted:#56655c; --tb-faint:#7a887f;
+    --tb-line:#d9e0d7; --tb-brand:#1a7a4a; --tb-navy:#243a6b; --tb-info-bg:#e5eaf5;
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch; color: var(--tb-ink); }
+  .tb .chain { display: flex; flex-wrap: wrap; align-items: center; flex: 1 1 420px; min-width: 0;
+    background: var(--tb-surface); border: 1px solid var(--tb-line); border-radius: 12px; padding: 4px 6px; }
+  .tb .fig { padding: 8px 10px; min-width: 0; }
+  .tb .fig .v { font-size: 1.75rem; font-weight: 600; line-height: 1; }
+  .tb .fig .l { font-size: 12px; color: var(--tb-muted); margin-top: 2px; }
+  .tb .fig .d { font-size: 11px; color: var(--tb-faint); }
+  .tb .chain .fig:first-child .v { color: var(--tb-brand); }
+  .tb .arrow { font-size: 1.5rem; color: var(--tb-faint); padding: 0 2px; line-height: 1; }
+  .tb .apart { flex: 0 1 200px; background: var(--tb-info-bg); border: 1px solid var(--tb-line);
+    border-radius: 12px; padding: 4px 6px; display: flex; align-items: center; }
+  .tb .apart .v { color: var(--tb-navy); }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-3">
   <div>
@@ -33,17 +55,31 @@
   </div>
 </div>
 
-<!-- Aggregate rollup vs. planned targets -->
-<div class="row g-3 mb-4">
-  <div class="col-md-4">
-    <div class="card shadow-sm h-100"><div class="card-body">
-      <div class="text-muted small text-uppercase">Active sites (live)</div>
-      <div class="fs-3 fw-semibold">
-        {{ rollup.total }}{% if program.planned_site_count %}<span class="text-muted fs-6"> / {{ program.planned_site_count }} planned</span>{% endif %}
-      </div>
-    </div></div>
+{% comment %}
+TB-1: how far the tender's activated sites have moved. Mobilized and Active are a chain
+from Sites in execution; Active today stands apart because it is not a subset of Active
+(ruling B5). Whole tender for every viewer of this page (ruling P2).
+{% endcomment %}
+<section class="tb mb-4" aria-label="Activated sites">
+  <div class="chain">
+    <div class="fig"><div class="v">{{ breakdown.in_execution }}</div><div class="l">Sites in execution</div>{% if program.planned_site_count %}<div class="d">of {{ program.planned_site_count }} planned</div>{% endif %}</div>
+    <span class="arrow" aria-hidden="true">›</span>
+    <div class="fig"><div class="v">{{ breakdown.mobilized }}</div><div class="l">Mobilized</div><div class="d">DC + design started</div></div>
+    <span class="arrow" aria-hidden="true">›</span>
+    <div class="fig"><div class="v">{{ breakdown.active }}</div><div class="l">Active</div><div class="d">Civil In Progress/Done</div></div>
   </div>
-  <div class="col-md-4">
+  <div class="apart">
+    <div class="fig"><div class="v">{{ breakdown.active_today }}</div><div class="l">Active today</div><div class="d">any PMS update, last 24 h</div></div>
+  </div>
+</section>
+
+{% comment %}
+Aggregate rollup vs. planned targets. The "Active sites (live)" card stood first here and
+was removed in TB-1: it counted every non-deleted site, drafts, cancelled and test sites
+included, and "Sites in execution" above replaces it with the dashboard's count.
+{% endcomment %}
+<div class="row g-3 mb-4">
+  <div class="col-md-6">
     <div class="card shadow-sm h-100"><div class="card-body">
       <div class="text-muted small text-uppercase">Total planned capacity</div>
       <div class="fs-3 fw-semibold">{{ program.total_capacity|default:"—" }}{% if program.total_capacity %} MW{% endif %}</div>
@@ -54,7 +90,7 @@
   expected_completion_date in phase 1. The column remains and is empty on every
   row; re-add the card when the field returns to the form.
   {% endcomment %}
-  <div class="col-md-4">
+  <div class="col-md-6">
     <div class="card shadow-sm h-100"><div class="card-body">
       <div class="text-muted small text-uppercase">Status</div>
       <div class="fs-5 fw-semibold">{{ program.status }}</div>
@@ -65,8 +101,10 @@
 <!-- Stage breakdown (compute-live from child-site status) -->
 <div class="card shadow-sm mb-4"><div class="card-body">
   <h6 class="text-muted text-uppercase fw-semibold mb-3" style="font-size:.75rem;letter-spacing:.08em;">Stage breakdown</h6>
+  {% comment %}TB-1: the 'Active' status is shown as "Activated" on this page only, so it
+     is not read as the strip's "Active" (Civil started). The stored value is unchanged.{% endcomment %}
   {% for status, count in rollup.by_status.items %}
-    <span class="badge {% if count %}bg-primary{% else %}bg-light text-muted border{% endif %} me-1 mb-1">{{ status }}: {{ count }}</span>
+    <span class="badge {% if count %}bg-primary{% else %}bg-light text-muted border{% endif %} me-1 mb-1">{% if status == 'Active' %}Activated{% else %}{{ status }}{% endif %}: {{ count }}</span>
   {% endfor %}
 </div></div>
 

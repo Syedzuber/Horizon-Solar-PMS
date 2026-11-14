@@ -104,6 +104,8 @@ from .tender_stages import (
     STAGE_LABELS, STUCK_RULES, activated_progress, design_throughput, stage_summary,
     stuck_sites, tender_cards, tender_site_list,
 )
+# TB-1: the tender page's activated-site breakdown; the daily snapshot will share it.
+from .site_breakdown import site_breakdown
 from .approval_queries import (
     pending_approvals_card, tender_approvals_waiting, work_to_confirm_card,
 )
@@ -5376,12 +5378,24 @@ def program_list(request):
 @login_required
 @role_required(['Admin', 'PM', 'CEO'])
 def program_detail(request, pk):
-    """Program detail: live aggregate rollup vs. planned targets, plus the child-site
-    list (each linking to the existing project_overview). Read-only for CEO."""
+    """Program detail: the activated-site breakdown (TB-1), live aggregate rollup vs.
+    planned targets, plus the child-site list (each linking to the existing
+    project_overview). Read-only for CEO.
+
+    Access: Admin and CEO on every Program; a PM who manages a live site in it, or who
+    created it and has not handed it over (_can_access_program). Anyone else gets a 404,
+    so the URL does not reveal that the Program exists.
+    """
     program = get_object_or_404(Program, pk=pk, is_deleted=False)
+    # Admin / CEO always; a PM only through a site they manage or the creator fallback.
+    # Other roles are already refused by role_required; a PM with no seat in this tender
+    # is refused here with a 404 rather than a 403.
     if not _can_access_program(request, program):
         raise Http404
 
+    # TB-1: the WHOLE tender for everyone who can open the page (ruling P2), not only the
+    # sites a PM manages: the page lists every site to that PM already. One query.
+    breakdown = site_breakdown(program.sites.all(), timezone.now())
     rollup = get_program_rollup(program)
     sites = (
         program.sites.filter(is_deleted=False)
@@ -5391,6 +5405,7 @@ def program_detail(request, pk):
     role = _get_user_role(request)
     return render(request, 'projects/program_detail.html', {
         'program':   program,
+        'breakdown': breakdown,
         'rollup':    rollup,
         'sites':     sites,
         'can_edit':  role in ('Admin', 'PM'),

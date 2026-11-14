@@ -983,3 +983,12 @@ Incidental issues noticed during audits. Logged, not fixed. Each entry: file/lin
 - **The Railway CLI in this checkout is not linked to a project.** `railway status` on 14 Nov answered "No linked project found. Run railway link to connect to a project". It was not linked, because linking writes local config and needs a choice. So the latest read of the services is still the 9 Nov one recorded above (web, Postgres and `laudable-cat` at `30 4 * * *`; nothing at 20:00 IST).
 - **A Residential site cannot be on a Program.** `Project.save()` (`_validate_program_link`) refuses it, so the snapshot's rule "Residential goes to the Residential row even with a tender" (SNAP-1 Q4) is defensive only. The test sets the link with `.update()` to prove the rule.
 - **The local DB's newest ActivityLog rows are local work, not production.** On 14 Nov the newest was a login from 127.0.0.1 (13 Nov 15:30 IST), and before it Admin corrections on 12 Nov. Use the restore's own date, not `max(timestamp)`, to judge how current local figures are.
+
+## From TB-1 — activated-site breakdown on the tender page (2026-11-14)
+
+- **The Program rollup's site count includes test, Draft and Cancelled sites.** `get_program_rollup()` and `program_rollup_annotations()` count every non-deleted site. On `program_detail` this was the "Active sites (live)" card, now **removed** (Zuber, 14 Nov); the strip's "Sites in execution" replaces it. The same count is still used in three other places:
+  - **`program_list`, "Sites" column** (`p.site_total`, shown as "N / planned"), with "Active: N" in its stage badges (not relabelled: ruled for `program_detail` only).
+  - **`program_detail`, "Sites (N)" header over the site list.** It matches the rows listed below it, which also include test, Draft and Cancelled sites, so the header and the list agree with each other.
+  - **`opex_site_bulk_upload`, `existing_count` / `new_total` against `planned_site_count`.** This counts sites that exist against the planned figure, where counting drafts is arguably right. It was left alone.
+- **"N planned" is no longer shown on `program_detail`.** The removed card was the only place on that page that showed `planned_site_count` (MPUVL 94, IPGCLG 240 locally). It is still on `program_list`. **Resolved (Zuber, 14 Nov):** the strip now shows "of N planned" under "Sites in execution" when the tender has a planned count.
+- **The remaining two summary cards keep `col-md-4`**, so the row now has an empty third slot at desktop width. **Resolved (Zuber, 14 Nov):** both widened to `col-md-6`.
