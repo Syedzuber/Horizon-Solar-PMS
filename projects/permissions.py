@@ -2596,17 +2596,38 @@ def reserved_task_names():
         RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES   the payment-milestone sync matches
                                                       these by name, on any project type
         INVOICE_TASK_NAMES                            the Finance back-assignment matches
-                                                      these by name at activation
+                                                      these by name at activation, and
+                                                      the invoice recording (FIN-M-B3)
+                                                      matches two of them
+        INVOICE_DUE_TRIGGERS (values)                 the "Invoice due" alert and the
+                                                      Finance work page's "due" (FIN-M-B4,
+                                                      B8a) match these by name
+
+    DERIVED FROM THE LOOKUP TABLES THEMSELVES, NEVER A COPIED LIST (FIN-M-RN). A name
+    added to any of the three is reserved with no edit here. The views' maps
+    (_FINANCE_TASK_TO_MILESTONE, _INVOICE_TASK_TO_MILESTONE,
+    _INVOICE_DUE_TRIGGER_TO_MILESTONE) cannot be read from here, because views imports
+    this module; all but the first are built from these utils tables, and
+    tests_rename_protection asserts every key of all three is reserved, so a name added
+    only in views trips a test instead of going silently renamable.
+
+    Deliberately NOT reserved: the Gantt client labels (gantt_constants), whose lookup
+    falls back to the task's own name, so a rename costs a friendly label and breaks
+    nothing (Zuber's ruling, FIN-M-RN).
 
     IMPORTED HERE, NOT AT THE TOP OF THE MODULE. This module keeps its single `Q`
     import (see the note at the top); utils imports the models, so a module-level
     import would end that property and invite the circular imports it has avoided.
-    Both tuples are plain strings, so a call-time import costs nothing but the lookup.
-    Restating them here instead would be a second copy of names that already drift
-    once (the views' _FINANCE_TASK_TO_MILESTONE; a test pins the two together)."""
-    from .utils import INVOICE_TASK_NAMES, RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES
-    return frozenset(name.casefold() for name in
-                     INVOICE_TASK_NAMES + RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES)
+    The tables are plain strings, so a call-time import costs nothing but the lookup,
+    and reading them at call time is also what lets a test extend one and see it
+    reserved."""
+    from .utils import (
+        INVOICE_DUE_TRIGGERS, INVOICE_TASK_NAMES, RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES,
+    )
+    names = (tuple(INVOICE_TASK_NAMES)
+             + tuple(RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES)
+             + tuple(INVOICE_DUE_TRIGGERS.values()))
+    return frozenset(name.casefold() for name in names)
 
 
 def _project_allows_task_rename(user, project):
@@ -2634,14 +2655,23 @@ def _task_is_renamable(task):
                                           handed to the approver
         not a mirror                      its row is derived and nobody's to edit
         not a payment milestone           one event the finance side is watching
+        not Not Applicable                the PM ruled it out of scope; its name is the
+                                          record of what was ruled out (FIN-M-RN). The
+                                          PM un-marks it first, and it then renames as
+                                          any other task, unless its name is reserved
         name not reserved                 see reserved_task_names()
 
     Row fields only, no query. The checklist name fallback is the view's refusal, not
-    this one's: it needs a lookup per row, and the row filter must stay query-free."""
+    this one's: it needs a lookup per row, and the row filter must stay query-free.
+
+    Who is blocked by this half, and how: everyone, whatever their role. The row hides
+    the Rename button and both rename views 404 (FIN-M-RN ruling, option A: the same
+    treatment as a reserved name), so no refusal message is ever shown for these rules."""
     return (task.status != task.DONE
             and not task.is_awaiting_approval
             and not task.is_mirror
             and not task.is_payment_milestone
+            and not task.is_not_applicable
             and task.task_name.casefold() not in reserved_task_names())
 
 

@@ -37,7 +37,7 @@ from .models import (
 from .permissions import can_rename_task, reserved_task_names
 from .tests_checklist_task_link import _client_for, _profile, _seed_opex
 from .utils import (
-    INVOICE_TASK_NAMES, RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL,
+    INVOICE_DUE_TRIGGERS, INVOICE_TASK_NAMES, RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL,
     RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES,
 )
 from .views import TASK_NAME_MAX_LENGTH, _FINANCE_TASK_TO_MILESTONE, _checklist_for_task
@@ -282,9 +282,12 @@ class ReservedNamesTests(TestCase):
         self.assertEqual(set(RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES),
                          set(_FINANCE_TASK_TO_MILESTONE))
 
-    def test_reserved_names_are_both_lists_casefolded(self):
+    def test_reserved_names_are_the_three_tables_casefolded(self):
+        """FIN-M-RN: the R8 trigger names joined the two lists; see
+        tests_rename_protection for the derivation tests."""
         self.assertEqual(reserved_task_names(), {
-            n.casefold() for n in INVOICE_TASK_NAMES + RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES})
+            n.casefold() for n in INVOICE_TASK_NAMES + RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES
+            + tuple(INVOICE_DUE_TRIGGERS.values())})
 
 
 # ---------------------------------------------------------------------------
