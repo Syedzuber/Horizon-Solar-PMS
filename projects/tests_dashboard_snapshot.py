@@ -1,8 +1,21 @@
 """
-SNAP-1 — the daily Site Dashboard snapshot (snapshot.py, send_dashboard_snapshot) and the
-two additive chokepoint arguments it needed (attachments, named_recipients).
+SNAP-1 / SNAP-1b — the daily Site Dashboard snapshot (snapshot.py, send_dashboard_snapshot)
+and the two additive chokepoint arguments it needed (attachments, named_recipients).
 
-WHAT THIS PINS
+WHAT THIS PINS (SNAP-1b: what is drawn)
+    Sections       one per tender with a site in execution, none for Residential (even
+                   forced onto a tender), standalone CAPEX or no-tender RESCO; a CAPEX
+                   site on a tender is in it; each section's tiles equal kpi_tiles() over
+                   that tender's cards; its strip equals site_breakdown() over the same
+                   sites, as the tender page calls it, under the confirmed labels; the
+                   PM line names active PMs only, by site count
+    Arrows         per tender by Program id for tiles and strip; a tender missing from
+                   the previous payload (or a SNAP-1 payload) gets none
+    Images         at most 5 sections an image, never split; 6 tenders -> 2 images;
+                   width 1080; no qualifying tender -> no image, nothing sent, exit 0,
+                   the row still saved
+
+WHAT THIS PINS (SNAP-1: what is stored)
     Same figures   the organisation row equals the rendered page's tiles for a CEO, label,
                    value and sub-line; a PM row equals that PM's own page when they
                    manage by assignment only; a PM who also coordinates sees more on the
@@ -14,8 +27,9 @@ WHAT THIS PINS
     No money       no money key or text in the payload; kpi_tiles asked with
                    sees_payments False, while the CEO's page does show the payment tile
     Viewer         the lowest-pk active CEO; none -> SnapshotError -> non-zero exit
-    Images         valid PNG, width 1080, split above 18 rows, names cut with '…'
-    Arrows         differences vs the previous payload; none without one or when 0
+    Text           names cut with '…', never wrapped
+    Arrows         organisation differences vs the previous payload (stored arithmetic);
+                   none without one or when 0
     Command        dry run writes files and nothing else; a same-day re-run overwrites;
                    paused event -> 'skipped' row and exit 0; a sent email carries the
                    PNGs; a failed send exits non-zero; --to skips the named list
@@ -51,6 +65,7 @@ from .models import (DashboardSnapshot, Issue, Notification, NotificationEventSe
 from .notifications import _zeptomail_post, send_notification
 from .notify_admin import add_named_recipient
 from .notify_registry import get_event
+from .site_breakdown import site_breakdown
 from .tests_sched2_scheduler import FROZEN_TODAY
 from .tests_site_dashboard import DashFixture, _fresh
 from .tests_two_step_completion import _profile
@@ -274,13 +289,21 @@ class MoneyAndViewerTests(SnapshotFixture):
         payload = json.loads(json.dumps(self._collect()))   # as the JSONField stores it
         self.assertEqual(set(payload), {'snapshot_date', 'snapshot_date_label', 'taken_at',
                                         'taken_at_label', 'dates_as_of', 'viewer', 'org',
-                                        'pms', 'tenders'})
+                                        'pms', 'tenders', 'tender_sections'})
         self.assertEqual(set(payload['org']), {'tiles', 'dc_kwp_number'})
         for tile in payload['org']['tiles']:
             self.assertEqual(set(tile), {'key', 'label', 'value', 'detail', 'tone'})
         for row in payload['pms'] + payload['tenders']:
             self.assertEqual(set(row), {'id', 'name', 'values'})
             self.assertEqual(tuple(row['values']), S.FIGURE_KEYS)
+        self.assertTrue(payload['tender_sections'])
+        for section in payload['tender_sections'].values():
+            self.assertEqual(set(section), {'id', 'code', 'name', 'pms', 'tiles',
+                                            'dc_kwp_number', 'breakdown'})
+            self.assertEqual(tuple(t['key'] for t in section['tiles']), S.SECTION_KEYS)
+            for tile in section['tiles']:
+                self.assertEqual(set(tile), {'key', 'label', 'value', 'detail'})
+            self.assertEqual(tuple(section['breakdown']), S.STRIP_KEYS)
         for text in _walk(payload):
             self.assertIsNone(self.MONEY.search(text), text)
 
@@ -308,29 +331,146 @@ class MoneyAndViewerTests(SnapshotFixture):
         self.assertEqual(payload['snapshot_date'], '2026-11-09')
         self.assertEqual(payload['taken_at_label'], '9 Nov 2026, 8:00 PM IST')
         self.assertIn('text', payload['dates_as_of'])
-        self.assertEqual(S.headline(payload),
-                         '6 sites in execution · 1 overdue tasks · 0 gone quiet')
+        # SNAP-1b: the tenders drawn, with their sites; ALPHA is the fixture's only one.
+        self.assertEqual(S.headline(payload), 'ALPHA 2 sites')
 
 
 # ---------------------------------------------------------------------------
-# 4. Rendering and arrows (pure: no database)
+# 4. Tender sections (SNAP-1b): what each section holds, from the real data layer
 # ---------------------------------------------------------------------------
 
-def _payload(pm_rows=3, tender_rows=2, **org):
+class TenderSectionTests(SnapshotFixture):
+
+    def _alpha(self, payload=None):
+        payload = payload or self._collect()
+        return payload['tender_sections'][str(self.tender_a.pk)]
+
+    def _cards(self, program):
+        return [c for c in S.build_site_cards(_fresh(self.ceo.user), today=FROZEN_TODAY)
+                if not c.is_draft and c.program_id == program.pk]
+
+    def test_one_section_per_tender_none_for_residential_capex_or_resco(self):
+        payload = self._collect()
+        # ALPHA only: BETA's one site is Residential (forced on by update()), and the
+        # standalone CAPEX and no-tender RESCO sites have no tender at all.
+        self.assertEqual(set(payload['tender_sections']), {str(self.tender_a.pk)})
+        alpha = self._alpha(payload)
+        self.assertEqual((alpha['id'], alpha['code'], alpha['name']),
+                         (self.tender_a.pk, 'ALPHA', 'Tender Alpha'))
+        self.assertEqual(alpha['breakdown']['in_execution'], 2)
+
+    def test_a_capex_site_on_a_tender_is_in_that_tenders_section(self):
+        gamma = Program.objects.create(name='Tender Gamma', program_type='CAPEX',
+                                       client_name='C', status='Active',
+                                       short_tender_code='GAMMA')
+        self._bare(project_type='CAPEX', program=gamma)
+        sections = self._collect()['tender_sections']
+        self.assertEqual(set(sections), {str(self.tender_a.pk), str(gamma.pk)})
+        self.assertEqual(sections[str(gamma.pk)]['breakdown']['in_execution'], 1)
+
+    def test_section_tiles_equal_kpi_tiles_over_that_tenders_cards(self):
+        alpha = self._alpha()
+        cards = self._cards(self.tender_a)
+        self.assertEqual(len(cards), 2)
+        expected = [{'key': f['key'], 'label': f['label'], 'value': f['value'],
+                     'detail': f['detail']} for f in S._figures(cards) if f['key'] != 'sites']
+        self.assertEqual(alpha['tiles'], expected)
+        tiles = {t['key']: t for t in alpha['tiles']}
+        # The sub-lines are the subset's own, not the organisation's.
+        self.assertEqual((tiles['blocked']['value'], tiles['blocked']['detail']),
+                         (1, '1 site affected'))
+        self.assertEqual((tiles['overdue']['value'], tiles['overdue']['detail']),
+                         (0, 'across 0 sites'))
+        self.assertEqual(tiles['dc_kwp']['value'], '150')
+        self.assertEqual(alpha['dc_kwp_number'], 150)
+        self.assertNotIn('sites', tiles)        # the strip carries Sites in execution
+
+    def test_tile_colours_are_the_dashboards(self):
+        # The organisation row keeps kpi_tiles()' own tone, which the page sets only on a
+        # non-zero figure. Every toned tile there must carry the image's colour, and
+        # Blocked and Open issues (the two once drawn plain) must be among them.
+        page_tones = {t['key']: t['tone'] for t in self._collect()['org']['tiles']
+                      if t['tone']}
+        self.assertLessEqual({'overdue', 'blocked', 'issues'}, set(page_tones))
+        for key, tone in page_tones.items():
+            self.assertEqual(S.SECTION_TONES[key], tone, key)
+        self.assertEqual(S.SECTION_TONES, {'behind': 'crit', 'civil': 'warn',
+                                           'overdue': 'crit', 'blocked': 'crit',
+                                           'issues': 'warn', 'quiet': 'warn'})
+
+    def test_strip_equals_site_breakdown_as_the_tender_page_calls_it(self):
+        self._log(self.opex_a1, 'task_status_changed', NOW - timedelta(hours=2))
+        alpha = self._alpha()
+        # The tender page's own call (views.program_detail), at the same moment.
+        page = site_breakdown(self.tender_a.sites.all(), NOW)
+        self.assertEqual(alpha['breakdown'],
+                         {'in_execution': page.in_execution, 'mobilized': page.mobilized,
+                          'active': page.active, 'active_today': page.active_today})
+        self.assertEqual(alpha['breakdown']['active_today'], 1)
+        self.assertEqual([label for _, label, _ in S.STRIP],
+                         ['Sites in execution', 'Mobilized', 'Active', 'Active today'])
+        self.assertEqual([d for _, _, d in S.STRIP],
+                         [None, 'DC + design started', 'Civil In Progress/Done',
+                          'any PMS update, last 24 h'])
+
+    def test_pm_line_names_active_pms_only_by_site_count(self):
+        name = lambda p: p.user.get_full_name() or p.user.username   # noqa: E731
+        self._bare(project_type='OPEX', program=self.tender_a, pm=self.other_pm)
+        alpha = self._alpha()
+        # other_pm holds 2 of ALPHA's sites now, self.pm 1.
+        self.assertEqual(alpha['pms'], [name(self.other_pm), name(self.pm)])
+        self.assertEqual(S.pm_line(alpha), f'PM: {name(self.other_pm)}, {name(self.pm)}')
+        # A deactivated PM is never named; with no active PM left the line says so.
+        type(self.opex_a1).objects.filter(program=self.tender_a).update(
+            assigned_pm=self.gone_pm)
+        alpha = self._alpha()
+        self.assertEqual(alpha['pms'], [])
+        self.assertEqual(S.pm_line(alpha), S.NO_ACTIVE_PM)
+
+    def test_a_tender_with_no_site_in_execution_has_no_section(self):
+        type(self.opex_a1).objects.filter(program=self.tender_a).update(status='Cancelled')
+        self.assertEqual(self._collect()['tender_sections'], {})
+        self.assertEqual(S.render_snapshot_images(self._collect(), None), [])
+
+
+# ---------------------------------------------------------------------------
+# 5. Rendering and arrows (pure: no database)
+# ---------------------------------------------------------------------------
+
+LONG = 'with a name far too long to fit anywhere on the line it is drawn on at all'
+
+
+def _section(pid, code, overdue=3, quiet=5, dc_number=1234, **values):
+    """A synthetic tender section, in collect_snapshot()'s shape."""
+    tile_values = dict(dc_kwp=f'{dc_number:,}', behind=1, civil=2, overdue=overdue,
+                       blocked=0, issues=4, quiet=quiet)
+    strip = dict(in_execution=10, mobilized=4, active=2, active_today=1)
+    for key, value in values.items():
+        (strip if key in S.STRIP_KEYS else tile_values)[key] = value
+    return {'id': pid, 'code': code, 'name': f'{code} {LONG}', 'pms': [f'A PM {LONG}'],
+            'tiles': [{'key': key, 'label': label, 'value': tile_values[key],
+                       'detail': f'detail {LONG}'}
+                      for key, label, _ in S.FIGURES if key != 'sites'],
+            'dc_kwp_number': dc_number, 'breakdown': strip}
+
+
+def _payload(pm_rows=3, tender_rows=2, sections=3, **org):
     values = dict(sites=10, dc_kwp='1,234', behind=1, civil=2, overdue=3, blocked=0,
                   issues=4, quiet=5)
     values.update(org)
     tiles = [{'key': key, 'label': label, 'value': values[key], 'detail': 'detail',
-              'tone': S.TONES.get(key, '')} for key, label, _ in S.FIGURES]
+              'tone': ''} for key, label, _ in S.FIGURES]
 
     def rows(n, prefix):
-        return [{'id': i, 'name': f'{prefix} {i} with a name far too long to fit the column',
-                 'values': dict(values)} for i in range(n)]
+        return [{'id': i, 'name': f'{prefix} {i} {LONG}', 'values': dict(values)}
+                for i in range(n)]
     return {'snapshot_date': '2026-11-09', 'snapshot_date_label': '9 Nov 2026',
             'taken_at': NOW.isoformat(), 'taken_at_label': '9 Nov 2026, 8:00 PM IST',
             'dates_as_of': {'text': 'Dates as of 9 Nov, 06:31', 'stale': False},
             'viewer': 'ceo', 'org': {'tiles': tiles, 'dc_kwp_number': 1234},
-            'pms': rows(pm_rows, 'PM'), 'tenders': rows(tender_rows, 'Tender')}
+            'pms': rows(pm_rows, 'PM'), 'tenders': rows(tender_rows, 'Tender'),
+            'tender_sections': {str(n): _section(n, f'T{n}')
+                                for n in range(1, sections + 1)}}
 
 
 class RenderTests(SimpleTestCase):
@@ -340,28 +480,48 @@ class RenderTests(SimpleTestCase):
         self.assertTrue(png.startswith(PNG_SIGNATURE))
         return Image.open(io.BytesIO(png)).size
 
-    def test_two_valid_pngs_1080_wide(self):
-        images = S.render_snapshot_images(_payload(), None)
-        self.assertEqual(len(images), 2)
-        for png in images:
-            self.assertEqual(self._size(png)[0], S.IMAGE_WIDTH)
+    def test_up_to_five_tenders_one_png_1080_wide(self):
+        for count in (1, 3, 5):
+            with self.subTest(tenders=count):
+                images = S.render_snapshot_images(_payload(sections=count), None)
+                self.assertEqual(len(images), 1)
+                self.assertEqual(self._size(images[0]),
+                                 (S.IMAGE_WIDTH, S.image_height(count)))
+        self.assertEqual(S.image_title(1, 1), 'All tenders')
 
-    def test_eighteen_rows_fit_nineteen_split(self):
-        self.assertEqual(len(S.render_snapshot_images(_payload(pm_rows=18), None)), 2)
-        self.assertEqual(len(S.render_snapshot_images(_payload(pm_rows=19), None)), 3)
-        self.assertEqual(len(S.render_snapshot_images(_payload(pm_rows=19, tender_rows=37),
-                                                      None)), 5)
-        self.assertEqual(S._caption('By PM', 2, 2), 'By PM (2/2)')
-        self.assertEqual(S._caption('By PM', 1, 1), 'By PM')
+    def test_six_tenders_two_images_no_section_split(self):
+        payload = _payload(sections=6)
+        self.assertEqual([len(p) for p in S.section_pages(payload)], [5, 1])
+        images = S.render_snapshot_images(payload, None)
+        # Each image's height is whole sections only: no section is cut in two.
+        self.assertEqual([self._size(png) for png in images],
+                         [(S.IMAGE_WIDTH, S.image_height(5)),
+                          (S.IMAGE_WIDTH, S.image_height(1))])
+        self.assertEqual(S.image_title(2, 2), 'All tenders (2/2)')
+        self.assertEqual(len(S.render_snapshot_images(_payload(sections=11), None)), 3)
 
-    def test_empty_tables_still_render(self):
-        images = S.render_snapshot_images(_payload(pm_rows=0, tender_rows=0, sites=0), None)
-        self.assertEqual(len(images), 2)
+    def test_no_tender_no_image(self):
+        self.assertEqual(S.render_snapshot_images(_payload(sections=0), None), [])
+        self.assertEqual(S.headline(_payload(sections=0)),
+                         'no tender has a site in execution')
+
+    def test_sections_sort_by_overdue_then_gone_quiet_then_code(self):
+        payload = _payload(sections=0)
+        payload['tender_sections'] = {
+            '1': _section(1, 'ZED', overdue=5, quiet=1),
+            '2': _section(2, 'BRAVO', overdue=9, quiet=0),
+            '3': _section(3, 'ALPHA', overdue=5, quiet=1, in_execution=1),
+            '4': _section(4, 'CHARLIE', overdue=5, quiet=7),
+        }
+        self.assertEqual([s['code'] for s in S.ordered_sections(payload)],
+                         ['BRAVO', 'CHARLIE', 'ALPHA', 'ZED'])
+        self.assertEqual(S.headline(payload),
+                         'BRAVO 10 sites · CHARLIE 10 sites · ALPHA 1 site · ZED 10 sites')
 
     def test_long_names_are_cut_with_an_ellipsis_never_wrapped(self):
         from PIL import Image, ImageDraw
         draw = ImageDraw.Draw(Image.new('RGB', (10, 10)))
-        font = S._fonts().cell_bold
+        font = S._fonts().code
         cut = S.fit_text(draw, 'Rashtrapati Bhavan Estate Delhi Tender', font, 200)
         self.assertTrue(cut.endswith('…'))
         self.assertLessEqual(draw.textlength(cut, font=font), 200)
@@ -369,8 +529,40 @@ class RenderTests(SimpleTestCase):
 
     def test_rendering_reads_no_database(self):
         # SimpleTestCase refuses any query, so a renderer that touched the database
-        # would fail every test in this class; this one says so out loud.
-        S.render_snapshot_images(_payload(), _payload(overdue=1))
+        # would fail every test in this class; this one says so out loud. A stale
+        # "Dates as of" line and arrows on every figure are drawn too.
+        payload = _payload(sections=6)
+        payload['dates_as_of']['stale'] = True
+        previous = _payload(sections=6)
+        for section in previous['tender_sections'].values():
+            section['breakdown']['active'] = 0
+            section['dc_kwp_number'] = 1000
+        S.render_snapshot_images(payload, previous)
+
+    def test_section_deltas_by_program_id_for_tiles_and_strip(self):
+        now = _section(7, 'ALPHA', overdue=3, quiet=5, dc_number=1300, active=2,
+                       active_today=4)
+        before = _payload(sections=0)
+        before['tender_sections'] = {'7': _section(7, 'ALPHA', overdue=7, quiet=5,
+                                                   dc_number=1234, active=0,
+                                                   active_today=4)}
+        deltas = S.section_deltas(now, before)
+        self.assertEqual(set(deltas), set(S.SECTION_KEYS + S.STRIP_KEYS))
+        self.assertEqual(deltas['overdue'], -4)
+        self.assertEqual(deltas['dc_kwp'], 66)       # 1300 - 1234, the sums not the text
+        self.assertEqual(deltas['active'], 2)
+        self.assertIsNone(deltas['quiet'])           # no change: no arrow
+        self.assertIsNone(deltas['active_today'])
+
+    def test_a_tender_missing_from_the_previous_payload_gets_no_arrows(self):
+        now = _section(7, 'ALPHA', overdue=3)
+        other = _payload(sections=0)
+        other['tender_sections'] = {'8': _section(8, 'ALPHA', overdue=99)}
+        snap1_shape = _payload(sections=0)
+        del snap1_shape['tender_sections']          # a row stored before SNAP-1b
+        for previous in (None, other, snap1_shape):
+            with self.subTest(previous=bool(previous)):
+                self.assertEqual(set(S.section_deltas(now, previous).values()), {None})
 
     def test_deltas(self):
         now = _payload(sites=12, overdue=3, quiet=5)
@@ -390,7 +582,7 @@ class RenderTests(SimpleTestCase):
 
 
 # ---------------------------------------------------------------------------
-# 5. The command
+# 6. The command
 # ---------------------------------------------------------------------------
 
 @override_settings(ZEPTOMAIL_API_KEY='test-key', ZEPTOMAIL_FROM_EMAIL='from@example.com')
@@ -424,10 +616,14 @@ class CommandTests(SnapshotFixture):
         with mock.patch('projects.notifications._zeptomail_post') as post:
             out = self._call('--dry-run', '--out-dir', self.dir)
         files = sorted(Path(self.dir).glob('*.png'))
-        self.assertEqual(len(files), 2)
+        self.assertEqual(len(files), 1)     # one tender (ALPHA): one image
         self.assertTrue(files[0].read_bytes().startswith(PNG_SIGNATURE))
         self.assertIn('Dry run: no row written, nothing sent.', out)
-        self.assertIn('Overdue tasks', out)
+        # Per tender: heading, strip, tiles with sub-lines.
+        self.assertIn('ALPHA · Tender Alpha', out)
+        self.assertIn('Sites in execution 2 › Mobilized 0 › Active 0 | Active today 0', out)
+        self.assertIn('Blocked tasks', out)
+        self.assertIn('1 site affected', out)
         self.assertFalse(DashboardSnapshot.objects.exists())
         self.assertFalse(NotificationLog.objects.filter(event_code=EVENT).exists())
         self.assertFalse(Notification.objects.exists())
@@ -466,6 +662,35 @@ class CommandTests(SnapshotFixture):
         self.assertIn('previous snapshot: 2026-11-08', out)
         self.assertEqual(render.call_args.args[1]['org']['dc_kwp_number'], 1234)
 
+    def test_previous_day_arrows_are_per_tender_by_program_id(self):
+        before = S.collect_snapshot(NOW)
+        alpha = before['tender_sections'][str(self.tender_a.pk)]
+        next(t for t in alpha['tiles'] if t['key'] == 'blocked')['value'] = 4
+        alpha['breakdown']['in_execution'] = 5
+        DashboardSnapshot.objects.create(snapshot_date=FROZEN_TODAY - timedelta(days=1),
+                                         taken_at=NOW - timedelta(days=1),
+                                         payload=before, created_by_command='test')
+        out = self._call('--dry-run', '--out-dir', self.dir)
+        self.assertIn('Sites in execution 2 (▼ 3) › Mobilized 0', out)
+        self.assertRegex(out, r'Blocked tasks\s+1\s+▼ 3')
+        self.assertRegex(out, r'Overdue tasks\s+0\s{3,}across')   # unchanged: no arrow
+
+    def test_no_qualifying_tender_saves_the_row_sends_nothing_exit_zero(self):
+        type(self.opex_a1).objects.filter(program=self.tender_a).update(program=None)
+        self._switch_on()
+        with mock.patch('projects.notifications._zeptomail_post') as post:
+            out = self._call()
+        self.assertIn(S.NO_TENDER_SKIP, out)
+        self.assertEqual(DashboardSnapshot.objects.count(), 1)
+        self.assertEqual(DashboardSnapshot.objects.get().payload['tender_sections'], {})
+        self.assertFalse(NotificationLog.objects.filter(event_code=EVENT).exists())
+        self.assertFalse(Notification.objects.exists())
+        post.assert_not_called()
+        # A dry run says the same and writes no file.
+        out = self._call('--dry-run', '--out-dir', self.dir)
+        self.assertIn(S.NO_TENDER_SKIP, out)
+        self.assertEqual(list(Path(self.dir).glob('*.png')), [])
+
     def test_sent_email_carries_the_pngs(self):
         self._switch_on()
         with mock.patch('projects.notifications._zeptomail_post',
@@ -476,8 +701,9 @@ class CommandTests(SnapshotFixture):
         self.assertEqual(args[0], 'zuber@example.com')
         self.assertEqual(args[2], 'Site Dashboard – daily snapshot, 9 Nov 2026')
         files = kwargs['attachments']
-        self.assertEqual([f['name'] for f in files], ['site-dashboard-2026-11-09-1.png',
-                                                      'site-dashboard-2026-11-09-2.png'])
+        self.assertEqual([f['name'] for f in files], ['site-dashboard-2026-11-09-1.png'])
+        self.assertIn('The Site Dashboard figures for each tender as at 9 Nov 2026, '
+                      '8:00 PM IST are attached (1 image): ALPHA 2 sites.', args[3])
         for item in files:
             self.assertEqual(item['mime_type'], 'image/png')
             self.assertTrue(item['content'].startswith(PNG_SIGNATURE))
@@ -526,7 +752,7 @@ class CommandTests(SnapshotFixture):
 
 
 # ---------------------------------------------------------------------------
-# 6. The chokepoint stays as it was for every existing caller
+# 7. The chokepoint stays as it was for every existing caller
 # ---------------------------------------------------------------------------
 
 @override_settings(ZEPTOMAIL_API_KEY='k', ZEPTOMAIL_FROM_EMAIL='from@example.com',

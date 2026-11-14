@@ -1,5 +1,6 @@
 """
-SNAP-1 — the daily Site Dashboard snapshot: the figures, and the PNG images that carry them.
+SNAP-1 / SNAP-1b — the daily Site Dashboard snapshot: the figures, and the PNG images that
+carry them.
 
     payload = collect_snapshot(now)                         # reads the DASH-B1 layer only
     pngs = render_snapshot_images(payload, previous)        # pure: no database access
@@ -10,12 +11,26 @@ WHERE EVERY FIGURE COMES FROM. Nothing here works a figure out for itself:
                                            very function the page calls (_kpis)
     site_dashboard.capacity_totals()       the DC kWp number behind the tile's text, for
                                            the day-on-day difference only
+    site_breakdown.site_breakdown()        TB-1's in execution / Mobilized / Active /
+                                           Active today, the tender page's own strip
     views_site_dashboard.dates_as_of()     the page's "Dates as of" line
-The organisation row is kpi_tiles() over the CEO's non-draft cards: exactly the page's
-header with no filter. A PM row and a tender row are kpi_tiles() over a SUBSET of those
-same cards, so a row's figures are what the page shows for those sites. Each card's
-figures do not depend on who views it (the payment figure aside, which is never read),
-so cutting the CEO's cards gives what a PM sees for the same sites; the tests pin both.
+Each card's figures do not depend on who views it (the payment figure aside, which is
+never read), so cutting the CEO's cards gives what anyone sees for the same sites; the
+tests pin it.
+
+WHAT IS DRAWN (SNAP-1b, Zuber's rulings R1-R6, 14 Nov 2026). One image, "All tenders",
+with one section per tender that has at least one site in execution: a heading (code,
+name, the tender's active PMs), TB-1's breakdown strip over that tender's sites, and the
+dashboard tiles computed from that tender's cards only (the "Sites in execution" tile is
+left out; the strip carries it). No company-wide totals, no PM or tender table, no
+Residential, standalone CAPEX or no-tender RESCO section. More than
+MAX_SECTIONS_PER_IMAGE tenders continue on a second image; a section is never split.
+A Residential site is never counted in a tender section, even on a Program (Q1;
+Project.save() refuses one, so the rule is defensive, as _tender_key()'s).
+
+WHAT IS STORED BUT NOT DRAWN. The SNAP-1 organisation row and the By PM / By tender rows
+stay in the payload (and their tests), so the stored history keeps its shape; only
+`tender_sections` is drawn.
 
 WHOSE VIEW (SNAP-1 Q2). build_site_cards() needs a real user; the command has none. The
 lowest-pk active CEO is used: every CEO sees the same sites (DASH-B1 D1). Not the Design
@@ -26,57 +41,82 @@ NO MONEY (locked rule). kpi_tiles() is called with sees_payments=False, so the p
 tile is never built, and no card's payment_open is read. The payload's keys are pinned
 by tests_dashboard_snapshot.
 
-ROWS.
+ROWS (stored only).
     By PM      one row per ACTIVE PM (role PM, both active flags) who is the assigned PM
                of at least one site in execution. Coordinators are not rows (they would
                count their sites twice). Sites whose assigned PM is not an active PM go
-               to one "No active PM" row, drawn only when there is one (Q3).
+               to one "No active PM" row (Q3).
     By tender  Residential sites -> "Residential", even with a tender; else a site with a
                tender -> that tender's row; CAPEX without one -> "CAPEX (standalone)";
                RESCO (OPEX) without one -> "RESCO (no tender)" (Q4). Every site is in
                exactly one row.
 """
 import io
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
 from django.utils import timezone
 
 from .models import Project, UserProfile
+from .site_breakdown import site_breakdown
 from .site_dashboard import build_site_cards, capacity_totals
 from .views_site_dashboard import dates_as_of, kpi_tiles
 
 #: The image's fixed width (WhatsApp-friendly; SNAP-1 rendering rules).
 IMAGE_WIDTH = 1080
 
-#: A table longer than this continues on another image ("By PM (2/2)").
-MAX_TABLE_ROWS = 18
+#: R6: more tender sections than this continue on another image ("All tenders (2/2)").
+MAX_SECTIONS_PER_IMAGE = 5
 
-#: The 8 figures, in the dashboard's order: (payload key, the page's tile label, the
-#: table's two-line column heading). collect_snapshot() checks the labels against what
-#: kpi_tiles() returns, so a renamed or reordered tile stops the run instead of
-#: printing a figure under the wrong heading.
+#: The 8 figures, in the dashboard's order: (payload key, the page's tile label, a short
+#: heading). collect_snapshot() checks the labels against what kpi_tiles() returns, so a
+#: renamed or reordered tile stops the run instead of printing a figure under the wrong
+#: label.
 FIGURES = (
-    ('sites', 'Sites in execution', ('Sites', '')),
-    ('dc_kwp', 'DC kWp in execution', ('DC', 'kWp')),
-    ('behind', 'Behind plan', ('Behind', 'plan')),
-    ('civil', 'Needs Civil date', ('Needs', 'Civil')),
-    ('overdue', 'Overdue tasks', ('Overdue', 'tasks')),
-    ('blocked', 'Blocked tasks', ('Blocked', 'tasks')),
-    ('issues', 'Open issues', ('Open', 'issues')),
-    ('quiet', 'Gone quiet', ('Gone', 'quiet')),
+    ('sites', 'Sites in execution', 'Sites'),
+    ('dc_kwp', 'DC kWp in execution', 'DC kWp'),
+    ('behind', 'Behind plan', 'Behind'),
+    ('civil', 'Needs Civil date', 'Civil'),
+    ('overdue', 'Overdue tasks', 'Overdue'),
+    ('blocked', 'Blocked tasks', 'Blocked'),
+    ('issues', 'Open issues', 'Issues'),
+    ('quiet', 'Gone quiet', 'Quiet'),
 )
 FIGURE_KEYS = tuple(key for key, _, _ in FIGURES)
 
-#: The dashboard's tones for the six filter tiles (views_site_dashboard._kpis); a zero
-#: draws plain there, and here.
-TONES = {'behind': 'crit', 'civil': 'warn', 'overdue': 'crit', 'blocked': 'crit',
-         'issues': 'warn', 'quiet': 'warn'}
+#: A tender section's tiles: every figure but "Sites in execution", which the strip shows.
+SECTION_KEYS = tuple(key for key in FIGURE_KEYS if key != 'sites')
+
+#: The two rows of tiles in a section: four, then three wider ones (approved prototype).
+SECTION_TILE_ROWS = (('dc_kwp', 'overdue', 'behind', 'civil'),
+                     ('blocked', 'issues', 'quiet'))
+
+#: A section tile's colour, exactly as the Site Dashboard tones it (views_site_dashboard
+#: ._kpis): red for Behind plan, Overdue and Blocked tasks, amber for Needs Civil date,
+#: Open issues and Gone quiet, and plain when the figure is 0 (Zuber, 14 Nov). Kept as a
+#: constant because the stored tile carries no tone; tests_dashboard_snapshot pins it
+#: against kpi_tiles()' own tones so the two cannot drift apart.
+SECTION_TONES = {'behind': 'crit', 'civil': 'warn', 'overdue': 'crit', 'blocked': 'crit',
+                 'issues': 'warn', 'quiet': 'warn'}
+
+#: TB-1's strip: (SiteBreakdown attribute and payload key, label, grey definition).
+#: The labels were confirmed by Zuber, 14 Nov.
+STRIP = (
+    ('in_execution', 'Sites in execution', None),
+    ('mobilized', 'Mobilized', 'DC + design started'),
+    ('active', 'Active', 'Civil In Progress/Done'),
+    ('active_today', 'Active today', 'any PMS update, last 24 h'),
+)
+STRIP_KEYS = tuple(key for key, _, _ in STRIP)
 
 NO_ACTIVE_PM = 'No active PM'
 RESIDENTIAL_ROW = 'Residential'
 CAPEX_ROW = 'CAPEX (standalone)'
 RESCO_ROW = 'RESCO (no tender)'
+
+#: The command's one line when there is nothing to draw (exit 0).
+NO_TENDER_SKIP = 'skipped: no tender has a site in execution'
 
 #: The page's filters cleared: the header exactly as an unfiltered page draws it.
 #: kpi_tiles() builds each tile's link from these, which the snapshot never uses.
@@ -115,7 +155,7 @@ def _figures(cards):
 
 
 def _row(row_id, name, cards):
-    """One table row: who or what it is, and the 8 figures as the page prints them."""
+    """One stored row: who or what it is, and the 8 figures as the page prints them."""
     return {'id': row_id, 'name': name,
             'values': {f['key']: f['value'] for f in _figures(cards)}}
 
@@ -127,15 +167,12 @@ def _dc_number(cards):
     return round(total) if total is not None else 0
 
 
-def _person(user):
-    return (user.get_full_name() or user.username).strip()
-
-
-def _pm_rows(live):
-    """By PM (see the module docstring). Sorted by Overdue tasks, then Gone quiet, both
-    descending, then name; the No active PM row last."""
-    # Each live site's assigned PM, with what decides whether they get a row: role PM
-    # and both active flags (UserProfile.is_active is this app's deactivation, User's
+def _active_pm_owners(live):
+    """{site pk: (user id, name) of its assigned PM, or None when that PM is not an
+    active PM}. Shared by the By PM rows and the section headings (Q3), so both name the
+    same people."""
+    # Each live site's assigned PM, with what decides whether they count: role PM and
+    # both active flags (UserProfile.is_active is this app's deactivation, User's
     # Django's). One query for every site; no figure is read here, only who owns a site.
     owners = {}
     for pk, profile_pk, role, p_active, u_active, user_id, first, last, username in (
@@ -145,11 +182,15 @@ def _pm_rows(live):
                          'assigned_pm__user_id', 'assigned_pm__user__first_name',
                          'assigned_pm__user__last_name', 'assigned_pm__user__username')):
         if profile_pk is not None and role == 'PM' and p_active and u_active:
-            name = f'{first} {last}'.strip() or username
-            owners[pk] = (user_id, name)
+            owners[pk] = (user_id, f'{first} {last}'.strip() or username)
         else:
             owners[pk] = None
+    return owners
 
+
+def _pm_rows(live, owners):
+    """By PM (stored only; see the module docstring). Sorted by Overdue tasks, then Gone
+    quiet, both descending, then name; the No active PM row last."""
     by_pm, orphans = {}, []
     for card in live:
         owner = owners.get(card.id)
@@ -182,9 +223,9 @@ def _tender_key(card):
 
 
 def _tender_rows(live):
-    """By tender. Tenders sorted by Overdue tasks, then Gone quiet, both descending (as
-    the PM table), then name; Residential, CAPEX (standalone) and RESCO (no tender)
-    after them in that order, each only when it has a site."""
+    """By tender (stored only). Tenders sorted by Overdue tasks, then Gone quiet, both
+    descending, then name; Residential, CAPEX (standalone) and RESCO (no tender) after
+    them in that order, each only when it has a site."""
     groups = {}
     for card in live:
         groups.setdefault(_tender_key(card), []).append(card)
@@ -198,6 +239,50 @@ def _tender_rows(live):
     tenders.sort(key=lambda r: (-r['values']['overdue'], -r['values']['quiet'],
                                 r['name'].lower()))
     return tenders + [others[k] for k in ('residential', 'capex', 'resco') if k in others]
+
+
+def section_cards(live):
+    """{program id: that tender's cards} for every tender with a site in execution (R4).
+    A Residential site is never in a section, even on a Program (Q1); a CAPEX site on a
+    Program is in its tender (only CAPEX *without* a tender is "standalone")."""
+    groups = {}
+    for card in live:
+        if card.program_id is None or card.project_type == 'Residential':
+            continue
+        groups.setdefault(card.program_id, []).append(card)
+    return groups
+
+
+def _tender_sections(live, owners, now):
+    """SNAP-1b: one section per qualifying tender, keyed by the Program id as TEXT (a
+    JSONField turns int keys into strings anyway, so the stored and the fresh payload
+    match on the same key; Zuber, 14 Nov).
+
+    {'<program id>': {'id', 'code', 'name', 'pms', 'tiles', 'dc_kwp_number', 'breakdown'}}
+    """
+    sections = {}
+    for program_id, cards in section_cards(live).items():
+        figures = {f['key']: f for f in _figures(cards)}
+        # TB-1's helper over exactly these sites: the same call the tender page makes
+        # over program.sites.all() (Q2), one query per tender.
+        breakdown = site_breakdown([c.id for c in cards], now)
+        # The tender's active PMs by how many of its sites they hold, then name (Q3).
+        counts = Counter(owners[c.id] for c in cards if owners.get(c.id))
+        pms = [name for (_, name), _ in sorted(counts.items(),
+                                               key=lambda kv: (-kv[1], kv[0][1].lower()))]
+        first = cards[0]
+        sections[str(program_id)] = {
+            'id': program_id,
+            'code': first.program_code or '',
+            'name': first.program_name or '',
+            'pms': pms,
+            'tiles': [{'key': key, 'label': figures[key]['label'],
+                       'value': figures[key]['value'], 'detail': figures[key]['detail']}
+                      for key in SECTION_KEYS],
+            'dc_kwp_number': _dc_number(cards),
+            'breakdown': {key: getattr(breakdown, key) for key in STRIP_KEYS},
+        }
+    return sections
 
 
 def taken_at_label(moment):
@@ -218,7 +303,8 @@ def collect_snapshot(now=None):
     {'snapshot_date', 'snapshot_date_label', 'taken_at', 'taken_at_label',
      'dates_as_of': {'text', 'stale'}, 'viewer',
      'org': {'tiles': [...], 'dc_kwp_number'},
-     'pms': [{'id', 'name', 'values'}], 'tenders': [{'id', 'name', 'values'}]}
+     'pms': [{'id', 'name', 'values'}], 'tenders': [{'id', 'name', 'values'}],
+     'tender_sections': {'<program id>': {...}}}
     """
     now = now or timezone.now()
     today = timezone.localtime(now).date()
@@ -226,6 +312,7 @@ def collect_snapshot(now=None):
     # The dashboard's own build for that CEO, on the same IST day; drafts are not in
     # execution, so they count in no tile (views_site_dashboard.site_dashboard's `live`).
     live = [c for c in build_site_cards(viewer, today=today) if not c.is_draft]
+    owners = _active_pm_owners(live)
     return {
         'snapshot_date': today.isoformat(),
         'snapshot_date_label': date_label(today),
@@ -234,17 +321,50 @@ def collect_snapshot(now=None):
         'dates_as_of': dates_as_of(now),
         'viewer': viewer.username,
         'org': {'tiles': _figures(live), 'dc_kwp_number': _dc_number(live)},
-        'pms': _pm_rows(live),
+        'pms': _pm_rows(live, owners),
         'tenders': _tender_rows(live),
+        'tender_sections': _tender_sections(live, owners, now),
     }
 
 
+def section_value(section, key):
+    """A section's figure by key: a tile's value, or a strip value."""
+    if key in STRIP_KEYS:
+        return section.get('breakdown', {}).get(key)
+    for tile in section.get('tiles', ()):
+        if tile['key'] == key:
+            return tile['value']
+    return None
+
+
+def ordered_sections(payload):
+    """The tender sections in drawing order: Overdue tasks, then Gone quiet, both
+    descending, then tender code. A SNAP-1 payload (no sections) gives []."""
+    return sorted((payload.get('tender_sections') or {}).values(),
+                  key=lambda s: (-section_value(s, 'overdue'), -section_value(s, 'quiet'),
+                                 (s['code'] or s['name']).lower(), s['id']))
+
+
+def section_title(section):
+    """(code, name): the name only when it says more than the code."""
+    code = section['code'] or section['name']
+    name = section['name'] if section['name'] and section['name'] != code else ''
+    return code, name
+
+
+def pm_line(section):
+    """'PM: A, B', or 'No active PM' (Q3)."""
+    return 'PM: ' + ', '.join(section['pms']) if section['pms'] else NO_ACTIVE_PM
+
+
 def headline(payload):
-    """'142 sites in execution · 77 overdue tasks · 110 gone quiet', for the email and
-    the in-app line."""
-    values = {t['key']: t['value'] for t in payload['org']['tiles']}
-    return (f'{values["sites"]} sites in execution · {values["overdue"]} overdue tasks · '
-            f'{values["quiet"]} gone quiet')
+    """'MPUVL 94 sites · IPGCLG 20 sites · RUDEH 1 site', in drawing order, for the
+    email and the in-app line."""
+    parts = []
+    for section in ordered_sections(payload):
+        sites = section['breakdown']['in_execution']
+        parts.append(f'{section_title(section)[0]} {sites:,} site{"s" if sites != 1 else ""}')
+    return ' · '.join(parts) or 'no tender has a site in execution'
 
 
 # ---------------------------------------------------------------------------
@@ -262,18 +382,38 @@ def _org_number(payload, key):
     return None
 
 
+def _difference(now_value, before):
+    """now - before, or None when either is not a number or they are equal (no arrow)."""
+    if not isinstance(now_value, int) or not isinstance(before, int):
+        return None
+    return (now_value - before) or None
+
+
 def org_deltas(payload, previous):
     """{figure key: difference vs `previous`, or None}. None when there is no previous
-    payload, the figure is missing from it, or the difference is 0 (no arrow drawn)."""
-    deltas = {}
-    for key in FIGURE_KEYS:
-        now_value = _org_number(payload, key)
-        before = _org_number(previous, key) if previous else None
-        if not isinstance(now_value, int) or not isinstance(before, int):
-            deltas[key] = None
-            continue
-        deltas[key] = (now_value - before) or None
-    return deltas
+    payload, the figure is missing from it, or the difference is 0 (no arrow drawn).
+    Stored-row arithmetic only since SNAP-1b: the organisation row is not drawn."""
+    return {key: _difference(_org_number(payload, key),
+                             _org_number(previous, key) if previous else None)
+            for key in FIGURE_KEYS}
+
+
+def _section_number(section, key):
+    """A section figure as a number: the DC tile's text is replaced by its sum."""
+    if key == 'dc_kwp':
+        return section.get('dc_kwp_number')
+    return section_value(section, key)
+
+
+def section_deltas(section, previous_payload):
+    """{tile or strip key: difference vs the same tender (by Program id) in
+    `previous_payload`, or None}. No previous payload, a SNAP-1 payload without
+    sections, or a tender that had no section then: no arrows at all."""
+    sections = (previous_payload or {}).get('tender_sections') or {}
+    before = sections.get(str(section['id']))
+    return {key: _difference(_section_number(section, key),
+                             _section_number(before, key) if before else None)
+            for key in SECTION_KEYS + STRIP_KEYS}
 
 
 def delta_text(delta):
@@ -290,7 +430,8 @@ def delta_text(delta):
 #: DejaVu Sans, already committed with its licence for the checklist PDFs (checklist_pdf).
 FONT_DIR = Path(__file__).resolve().parent / 'fonts' / 'dejavu'
 
-# The Site Dashboard's palette (site_dashboard.html's --sd-* variables).
+# The Site Dashboard's palette (site_dashboard.html's --sd-* variables), plus the pale
+# greens of the approved prototype's strips.
 BRAND = '#1a7a4a'
 GOLD = '#f0a829'
 NAVY = '#243a6b'
@@ -298,38 +439,67 @@ INK = '#16231b'
 MUTED = '#56655c'
 FAINT = '#7a887f'
 LINE = '#d9e0d7'
-SURFACE_2 = '#edf1eb'
+PALE_GREEN = '#e8f4ec'
+PALE_GREEN_LINE = '#c6e0cf'
+ON_BRAND = '#d6ecdf'
 TONE_COLOURS = {'crit': '#c23b2a', 'warn': '#a86400'}
 
 MARGIN = 32
-NAME_COL = 248
-NUM_COL = (IMAGE_WIDTH - 2 * MARGIN - NAME_COL) // len(FIGURES)
-ROW_H = 40
-HEAD_H = 52
+
+# Vertical layout, in pixels. The image's height is PAGE_HEAD_H + sections x SECTION_H +
+# FOOTER_H, so a section never needs measuring before it is drawn.
+BAND_H = 124            # green band: kicker, title, collected line
+GOLD_H = 4
+STAMP_H = 40            # pale-green "Dates as of" strip
+PAGE_HEAD_H = BAND_H + GOLD_H + STAMP_H + 16
+HEADING_H = 64
+STRIP_TOP = HEADING_H + 12
+STRIP_H = 96
+TILES_TOP = STRIP_TOP + STRIP_H + 16
+TILE_H = 120
+TILE_GAP = 12
+SECTION_H = TILES_TOP + 2 * TILE_H + TILE_GAP + 36
+FOOTER_H = 56
+
+# The strip's columns: three chained figures with '›' between them, then a divider and
+# Active today, set apart (TB-1 B5: it is not part of the chain).
+STRIP_COL_W = 210
+STRIP_ARROW_W = 34
 
 
 @dataclass(frozen=True)
 class _Fonts:
+    kicker: object
     title: object
     sub: object
-    tile_value: object
+    stamp: object
+    code: object
+    name: object
+    pm: object
+    strip_label: object
+    strip_value: object
+    strip_def: object
+    chevron: object
     tile_label: object
+    tile_value: object
     tile_detail: object
-    head: object
-    cell: object
-    cell_bold: object
+    delta: object
 
 
 def _fonts():
     from PIL import ImageFont   # Lazy import: Pillow is needed only when rendering.
     regular = str(FONT_DIR / 'DejaVuSans.ttf')
     bold = str(FONT_DIR / 'DejaVuSans-Bold.ttf')
-    return _Fonts(title=ImageFont.truetype(bold, 30), sub=ImageFont.truetype(regular, 18),
-                  tile_value=ImageFont.truetype(bold, 34),
-                  tile_label=ImageFont.truetype(bold, 16),
-                  tile_detail=ImageFont.truetype(regular, 14),
-                  head=ImageFont.truetype(bold, 15), cell=ImageFont.truetype(regular, 18),
-                  cell_bold=ImageFont.truetype(bold, 18))
+
+    def r(size):
+        return ImageFont.truetype(regular, size)
+
+    def b(size):
+        return ImageFont.truetype(bold, size)
+    return _Fonts(kicker=b(15), title=b(34), sub=r(18), stamp=r(16),
+                  code=b(28), name=r(20), pm=r(16),
+                  strip_label=b(15), strip_value=b(30), strip_def=r(13), chevron=r(30),
+                  tile_label=b(16), tile_value=b(34), tile_detail=r(14), delta=r(15))
 
 
 def fit_text(draw, text, font, max_width):
@@ -342,94 +512,107 @@ def fit_text(draw, text, font, max_width):
     return text.rstrip() + '…'
 
 
-def _header(draw, fonts, title, lines, width):
-    """The green band with the title, and the grey lines under it. Returns the y after."""
-    draw.rectangle([0, 0, width, 64], fill=BRAND)
-    draw.rectangle([0, 64, width, 68], fill=GOLD)
-    draw.text((MARGIN, 16), fit_text(draw, title, fonts.title, width - 2 * MARGIN),
-              font=fonts.title, fill='white')
-    y = 84
-    for text, colour in lines:
-        draw.text((MARGIN, y), fit_text(draw, text, fonts.sub, width - 2 * MARGIN),
-                  font=fonts.sub, fill=colour)
-        y += 28
-    return y + 8
+def _number(value):
+    return f'{value:,}' if isinstance(value, int) else str(value)
 
 
-TILE_COLS = 4
-TILE_H = 116
+def _page_header(draw, fonts, payload, title):
+    """The green band and the "Dates as of" strip. Returns the y after (PAGE_HEAD_H)."""
+    width = IMAGE_WIDTH - 2 * MARGIN
+    draw.rectangle([0, 0, IMAGE_WIDTH, BAND_H], fill=BRAND)
+    draw.text((MARGIN, 18), 'SITE DASHBOARD · DAILY SNAPSHOT', font=fonts.kicker,
+              fill=ON_BRAND)
+    draw.text((MARGIN, 42), fit_text(draw, title, fonts.title, width), font=fonts.title,
+              fill='white')
+    draw.text((MARGIN, 90), f'Collected {payload["taken_at_label"]}', font=fonts.sub,
+              fill=ON_BRAND)
+    draw.rectangle([0, BAND_H, IMAGE_WIDTH, BAND_H + GOLD_H], fill=GOLD)
+    top = BAND_H + GOLD_H
+    draw.rectangle([0, top, IMAGE_WIDTH, top + STAMP_H], fill=PALE_GREEN)
+    stamp = payload['dates_as_of']
+    # Amber when the morning refresh has not run, as the page draws it.
+    draw.text((MARGIN, top + 10), fit_text(draw, stamp['text'], fonts.stamp, width),
+              font=fonts.stamp, fill=TONE_COLOURS['warn'] if stamp['stale'] else MUTED)
+    return PAGE_HEAD_H
 
 
-def _org_tiles(draw, fonts, payload, deltas, top):
-    """The 8 organisation tiles, 4 x 2, as the page draws them. Returns the y after."""
-    tile_w = (IMAGE_WIDTH - 2 * MARGIN) // TILE_COLS
-    for n, tile in enumerate(payload['org']['tiles']):
-        col, row = n % TILE_COLS, n // TILE_COLS
-        x, y = MARGIN + col * tile_w, top + row * TILE_H
-        draw.rectangle([x, y, x + tile_w, y + TILE_H], outline=LINE, fill='white')
-        inner = tile_w - 28
-        draw.text((x + 14, y + 10), fit_text(draw, tile['label'], fonts.tile_label, inner),
-                  font=fonts.tile_label, fill=MUTED)
-        # As the page: the tone only when the figure is not zero.
-        colour = TONE_COLOURS.get(tile['tone'], INK) if tile['value'] else INK
-        value = f'{tile["value"]:,}' if isinstance(tile['value'], int) else str(tile['value'])
-        draw.text((x + 14, y + 34), value, font=fonts.tile_value, fill=colour)
-        arrow = delta_text(deltas.get(tile['key']))
+def _heading(draw, fonts, section, top):
+    """Navy bar, code (bold) and name, and the PM line under them."""
+    draw.rectangle([MARGIN, top, MARGIN + 6, top + HEADING_H - 8], fill=NAVY)
+    x = MARGIN + 20
+    right = IMAGE_WIDTH - MARGIN
+    code, name = section_title(section)
+    code = fit_text(draw, code, fonts.code, right - x)
+    draw.text((x, top - 2), code, font=fonts.code, fill=NAVY)
+    if name:
+        nx = x + draw.textlength(code, font=fonts.code) + 14
+        if nx < right - 40:
+            draw.text((nx, top + 6), fit_text(draw, name, fonts.name, right - nx),
+                      font=fonts.name, fill=MUTED)
+    draw.text((x, top + 38), fit_text(draw, pm_line(section), fonts.pm, right - x),
+              font=fonts.pm, fill=MUTED)
+
+
+def _strip(draw, fonts, section, deltas, top):
+    """TB-1's breakdown strip: in execution › Mobilized › Active, then Active today."""
+    draw.rounded_rectangle([MARGIN, top, IMAGE_WIDTH - MARGIN, top + STRIP_H], radius=12,
+                           fill=PALE_GREEN, outline=PALE_GREEN_LINE, width=2)
+    x = MARGIN + 20
+    for key, label, definition in STRIP:
+        if key == 'active_today':
+            divider = x + 8
+            draw.line([divider, top + 16, divider, top + STRIP_H - 16],
+                      fill=PALE_GREEN_LINE, width=2)
+            x = divider + 28
+        draw.text((x, top + 12), label, font=fonts.strip_label, fill=MUTED)
+        value = _number(section['breakdown'][key])
+        draw.text((x, top + 32), value, font=fonts.strip_value, fill=INK)
+        arrow = delta_text(deltas.get(key))
         if arrow:
-            vx = x + 14 + draw.textlength(value, font=fonts.tile_value) + 10
-            draw.text((vx, y + 48), arrow, font=fonts.tile_detail, fill=FAINT)
-        if tile['detail']:
-            draw.text((x + 14, y + 84),
-                      fit_text(draw, tile['detail'], fonts.tile_detail, inner),
-                      font=fonts.tile_detail, fill=FAINT)
-    rows = -(-len(payload['org']['tiles']) // TILE_COLS)
-    return top + rows * TILE_H + 24
+            ax = x + draw.textlength(value, font=fonts.strip_value) + 8
+            draw.text((ax, top + 44), arrow, font=fonts.delta, fill=FAINT)
+        if definition:
+            draw.text((x, top + 72), fit_text(draw, definition, fonts.strip_def,
+                                              STRIP_COL_W - 8),
+                      font=fonts.strip_def, fill=FAINT)
+        x += STRIP_COL_W
+        if key in ('in_execution', 'mobilized'):
+            draw.text((x, top + 30), '›', font=fonts.chevron, fill=FAINT)
+            x += STRIP_ARROW_W
 
 
-def _table(draw, fonts, caption, rows, top):
-    """A caption, the two-line column headings and up to MAX_TABLE_ROWS rows."""
-    draw.text((MARGIN, top), caption, font=fonts.title, fill=NAVY)
-    y = top + 46
-    draw.rectangle([MARGIN, y, IMAGE_WIDTH - MARGIN, y + HEAD_H], fill=SURFACE_2)
-    x = MARGIN + NAME_COL
-    for _, _, (first, second) in FIGURES:
-        for line_no, word in enumerate((first, second)):
-            if word:
-                w = draw.textlength(word, font=fonts.head)
-                draw.text((x + NUM_COL - 10 - w, y + 8 + line_no * 18), word,
-                          font=fonts.head, fill=MUTED)
-        x += NUM_COL
-    y += HEAD_H
-    for n, row in enumerate(rows):
-        if n % 2:
-            draw.rectangle([MARGIN, y, IMAGE_WIDTH - MARGIN, y + ROW_H], fill='#f7f9f6')
-        draw.text((MARGIN + 10, y + 9),
-                  fit_text(draw, row['name'], fonts.cell_bold, NAME_COL - 20),
-                  font=fonts.cell_bold, fill=INK)
-        x = MARGIN + NAME_COL
-        for key in FIGURE_KEYS:
-            value = row['values'][key]
-            text = f'{value:,}' if isinstance(value, int) else str(value)
-            colour = TONE_COLOURS.get(TONES.get(key), INK) if value else INK
-            text = fit_text(draw, text, fonts.cell, NUM_COL - 14)
-            w = draw.textlength(text, font=fonts.cell)
-            draw.text((x + NUM_COL - 10 - w, y + 9), text, font=fonts.cell, fill=colour)
-            x += NUM_COL
-        draw.line([MARGIN, y + ROW_H, IMAGE_WIDTH - MARGIN, y + ROW_H], fill=LINE)
-        y += ROW_H
-    if not rows:
-        draw.text((MARGIN + 10, y + 9), 'No sites in execution', font=fonts.cell, fill=FAINT)
-        y += ROW_H
-    return y + 24
+def _tile(draw, fonts, tile, delta, x, y, width):
+    """One dashboard tile: label, value (toned when not zero), arrow, sub-line."""
+    draw.rounded_rectangle([x, y, x + width, y + TILE_H], radius=10, fill='white',
+                           outline=LINE, width=2)
+    inner = width - 32
+    draw.text((x + 16, y + 12), fit_text(draw, tile['label'], fonts.tile_label, inner),
+              font=fonts.tile_label, fill=MUTED)
+    tone = SECTION_TONES.get(tile['key'])
+    colour = TONE_COLOURS[tone] if tone and tile['value'] else INK
+    value = _number(tile['value'])
+    draw.text((x + 16, y + 36), value, font=fonts.tile_value, fill=colour)
+    arrow = delta_text(delta)
+    if arrow:
+        ax = x + 16 + draw.textlength(value, font=fonts.tile_value) + 10
+        draw.text((ax, y + 52), arrow, font=fonts.delta, fill=FAINT)
+    if tile['detail']:
+        draw.text((x + 16, y + 90), fit_text(draw, tile['detail'], fonts.tile_detail, inner),
+                  font=fonts.tile_detail, fill=FAINT)
 
 
-def _chunks(rows):
-    """`rows` in pieces of MAX_TABLE_ROWS; one empty piece for no rows."""
-    return [rows[i:i + MAX_TABLE_ROWS] for i in range(0, len(rows), MAX_TABLE_ROWS)] or [[]]
-
-
-def _caption(title, n, total):
-    return title if total == 1 else f'{title} ({n}/{total})'
+def _section(draw, fonts, section, deltas, top):
+    """One tender: heading, strip, 4 + 3 tiles. Returns the y after (top + SECTION_H)."""
+    _heading(draw, fonts, section, top)
+    _strip(draw, fonts, section, deltas, top + STRIP_TOP)
+    tiles = {tile['key']: tile for tile in section['tiles']}
+    for row_no, keys in enumerate(SECTION_TILE_ROWS):
+        y = top + TILES_TOP + row_no * (TILE_H + TILE_GAP)
+        width = (IMAGE_WIDTH - 2 * MARGIN - TILE_GAP * (len(keys) - 1)) / len(keys)
+        for n, key in enumerate(keys):
+            x = MARGIN + n * (width + TILE_GAP)
+            _tile(draw, fonts, tiles[key], deltas.get(key), round(x), y, round(width))
+    return top + SECTION_H
 
 
 def _png(height, draw_fn):
@@ -441,58 +624,46 @@ def _png(height, draw_fn):
     return out.getvalue()
 
 
-def _footer(draw, fonts, height, text):
-    draw.text((MARGIN, height - 34), text, font=fonts.tile_detail, fill=FAINT)
+FOOTER_TEXT = "Horizon Solar PMS · ▲▼ = change since yesterday's snapshot"
+
+
+def image_title(n, total):
+    return 'All tenders' if total == 1 else f'All tenders ({n}/{total})'
+
+
+def image_height(section_count):
+    return PAGE_HEAD_H + section_count * SECTION_H + FOOTER_H
+
+
+def section_pages(payload):
+    """The sections in drawing order, in pieces of MAX_SECTIONS_PER_IMAGE (R6)."""
+    sections = ordered_sections(payload)
+    return [sections[i:i + MAX_SECTIONS_PER_IMAGE]
+            for i in range(0, len(sections), MAX_SECTIONS_PER_IMAGE)]
 
 
 def render_snapshot_images(payload, previous_payload=None):
-    """The PNG images for `payload`, as a list of bytes, in sending order:
-
-        1   header, organisation tiles (with ▲/▼ vs `previous_payload`), By PM
-        2.. By PM continued, when it has more than MAX_TABLE_ROWS rows
-        then By tender, split the same way
+    """The PNG images for `payload`, as a list of bytes, in sending order: up to
+    MAX_SECTIONS_PER_IMAGE tender sections each, never splitting one, with ▲/▼ against
+    the same tender in `previous_payload`. No qualifying tender: [] (nothing to send).
 
     Pure: reads nothing but its arguments and the bundled font.
     """
+    pages = section_pages(payload)
+    if not pages:
+        return []
     fonts = _fonts()
-    deltas = org_deltas(payload, previous_payload)
-    stamp = payload['dates_as_of']
-    lines = [(f'Figures as at {payload["taken_at_label"]} · all live sites, '
-              f'test sites excluded', MUTED),
-             (stamp['text'], TONE_COLOURS['warn'] if stamp['stale'] else FAINT)]
-    footer = ('Horizon Solar PMS · the same figures as the Site Dashboard · ▲▼ change '
-              'since the previous snapshot')
-    pm_pages, tender_pages = _chunks(payload['pms']), _chunks(payload['tenders'])
-
-    def table_height(rows):
-        return 46 + HEAD_H + max(len(rows), 1) * ROW_H + 24
-
     images = []
-    first_top = 84 + 28 * len(lines) + 8
-    tiles_h = -(-len(payload['org']['tiles']) // TILE_COLS) * TILE_H + 24
-    height = first_top + tiles_h + table_height(pm_pages[0]) + 48
+    for n, chunk in enumerate(pages, start=1):
+        height = image_height(len(chunk))
 
-    def first(draw):
-        y = _header(draw, fonts, 'Site Dashboard · Daily snapshot · '
-                    f'{payload["snapshot_date_label"]}', lines, IMAGE_WIDTH)
-        y = _org_tiles(draw, fonts, payload, deltas, y)
-        _table(draw, fonts, _caption('By PM', 1, len(pm_pages)), pm_pages[0], y)
-        _footer(draw, fonts, height, footer)
-    images.append(_png(height, first))
-
-    def page(title, n, total, rows):
-        short = [(f'Figures as at {payload["taken_at_label"]}', MUTED)]
-        h = 84 + 28 + 8 + table_height(rows) + 48
-
-        def draw_fn(draw):
-            y = _header(draw, fonts, f'Site Dashboard · {payload["snapshot_date_label"]}',
-                        short, IMAGE_WIDTH)
-            _table(draw, fonts, _caption(title, n, total), rows, y)
-            _footer(draw, fonts, h, footer)
-        return _png(h, draw_fn)
-
-    for n, rows in enumerate(pm_pages[1:], start=2):
-        images.append(page('By PM', n, len(pm_pages), rows))
-    for n, rows in enumerate(tender_pages, start=1):
-        images.append(page('By tender', n, len(tender_pages), rows))
+        def draw_fn(draw, chunk=chunk, n=n, height=height):
+            y = _page_header(draw, fonts, payload, image_title(n, len(pages)))
+            for section in chunk:
+                y = _section(draw, fonts, section, section_deltas(section, previous_payload),
+                             y)
+            draw.line([MARGIN, height - FOOTER_H + 8, IMAGE_WIDTH - MARGIN,
+                       height - FOOTER_H + 8], fill=LINE)
+            draw.text((MARGIN, height - 34), FOOTER_TEXT, font=fonts.tile_detail, fill=FAINT)
+        images.append(_png(height, draw_fn))
     return images

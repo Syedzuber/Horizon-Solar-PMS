@@ -1,5 +1,6 @@
 """
-Management command: the daily Site Dashboard snapshot, emailed as PNG images (SNAP-1).
+Management command: the daily Site Dashboard snapshot, emailed as PNG images (SNAP-1;
+one section per tender since SNAP-1b).
 
     python manage.py send_dashboard_snapshot                         # the 8 PM run
     python manage.py send_dashboard_snapshot --dry-run --out-dir DIR # files only
@@ -11,6 +12,10 @@ render the images with yesterday's row for the ▲/▼ arrows, and send the even
 daily_dashboard_snapshot through notify_now() with the images attached. Recipients are the
 event's Admin-named list; the code names nobody.
 
+    No tender with a site in execution   the row is still saved, nothing is sent, and
+                                         the one line is snapshot.NO_TENDER_SKIP, exit 0
+                                         (Zuber, 14 Nov).
+
     Same IST date twice  today's row is OVERWRITTEN, never duplicated, and the output
                          says so. Tomorrow's arrows then compare against the last
                          figures sent.
@@ -18,7 +23,8 @@ event's Admin-named list; the code names nobody.
                          against the last day that ran.
 
 --dry-run   collect and render only: no row written, nothing sent. Needs --out-dir;
-            prints each file's path and the raw figures as a table.
+            prints each file's path and, per tender, the strip, the tiles and their
+            sub-lines.
 --to USER   send only to that active user, skipping the named list. The email master
             switch and the event's pause still apply: they are checked inside the
             chokepoint (send_notification / notify), which this does not go around.
@@ -38,8 +44,9 @@ from django.utils import timezone
 
 from projects.models import DashboardSnapshot, NotificationLog, UserProfile
 from projects.notify import notify_now
-from projects.snapshot import (FIGURES, SnapshotError, collect_snapshot, headline,
-                               render_snapshot_images)
+from projects.snapshot import (NO_TENDER_SKIP, STRIP, SnapshotError, collect_snapshot,
+                               delta_text, headline, ordered_sections, pm_line,
+                               render_snapshot_images, section_deltas, section_title)
 
 EVENT = 'daily_dashboard_snapshot'
 COMMAND_NAME = 'send_dashboard_snapshot'
@@ -88,17 +95,26 @@ class Command(BaseCommand):
         previous = previous_row.payload if previous_row else None
         images = render_snapshot_images(payload, previous)
         self.stdout.write(f'Collected {payload["taken_at_label"]} as {payload["viewer"]}; '
+                          f'{len(payload["tender_sections"])} tender(s), '
                           f'{len(images)} image(s); previous snapshot: '
                           f'{previous_row.snapshot_date if previous_row else "none"}.')
 
         if out_dir:
             self._write_files(out_dir, payload, images)
         if dry_run:
-            self._print_figures(payload)
+            self._print_figures(payload, previous)
+            if not images:
+                self.stdout.write(NO_TENDER_SKIP)
             self.stdout.write('Dry run: no row written, nothing sent.')
             return
 
+        # The row is saved even when nothing is drawn, so the day keeps its record
+        # (Zuber, 14 Nov); tomorrow's arrows then find no section for a tender that had
+        # none today and draw nothing for it.
         self._save(payload, now)
+        if not images:
+            self.stdout.write(NO_TENDER_SKIP)
+            return
         self._send(payload, images, recipient)
 
     def _recipient(self, username):
@@ -177,17 +193,24 @@ class Command(BaseCommand):
             path.write_bytes(content)
             self.stdout.write(f'Wrote {path} ({len(content):,} bytes)')
 
-    def _print_figures(self, payload):
-        """The raw figures as a table: the organisation row, every PM, every tender."""
-        short = ['Sites', 'DC kWp', 'Behind', 'Civil', 'Overdue', 'Blocked', 'Issues', 'Quiet']
+    def _print_figures(self, payload, previous):
+        """What the images draw, as text: per tender in drawing order, the heading, the
+        strip and the 7 tiles with their sub-lines and arrows."""
         self.stdout.write('')
-        self.stdout.write('Organisation (' + payload['dates_as_of']['text'] + ')')
-        for tile in payload['org']['tiles']:
-            self.stdout.write(f'  {tile["label"]:22} {str(tile["value"]):>8}   '
-                              f'{tile["detail"] or ""}')
-        for title, rows in (('By PM', payload['pms']), ('By tender', payload['tenders'])):
+        self.stdout.write(payload['dates_as_of']['text'])
+        for section in ordered_sections(payload):
+            deltas = section_deltas(section, previous)
+            code, name = section_title(section)
             self.stdout.write('')
-            self.stdout.write(f'{title:34}' + ''.join(f'{h:>9}' for h in short))
-            for row in rows:
-                self.stdout.write(f'{row["name"][:34]:34}' + ''.join(
-                    f'{str(row["values"][key]):>9}' for key, _, _ in FIGURES))
+            self.stdout.write(f'{code}{" · " + name if name else ""} (Program '
+                              f'{section["id"]}) | {pm_line(section)}')
+            strip = []
+            for key, label, _ in STRIP:
+                arrow = delta_text(deltas[key])
+                strip.append(f'{label} {section["breakdown"][key]}'
+                             f'{" (" + arrow + ")" if arrow else ""}')
+            self.stdout.write('  ' + ' › '.join(strip[:3]) + ' | ' + strip[3])
+            for tile in section['tiles']:
+                arrow = delta_text(deltas[tile['key']])
+                self.stdout.write(f'  {tile["label"]:22} {str(tile["value"]):>8} '
+                                  f'{arrow:>7}   {tile["detail"] or ""}')

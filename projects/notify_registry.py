@@ -1721,16 +1721,18 @@ NOTIFICATION_EVENTS = _build_registry([
                      '14 Nov 2026'),
             Variable('taken_at', 'When the figures were collected, in IST',
                      '14 Nov 2026, 8:00 PM IST'),
-            Variable('headline', 'Three organisation figures in one line',
-                     '142 sites in execution · 77 overdue tasks · 110 gone quiet'),
-            Variable('image_count', 'How many images are attached, in words',
-                     '2 images'),
+            # SNAP-1b: one entry per tender drawn, in the image's order; no company total.
+            Variable('headline', 'Each tender in the images with its sites in execution',
+                     'MPUVL 94 sites · IPGCLG 20 sites · RUDEH 1 site'),
+            Variable('image_count', 'How many images are attached, in words '
+                     '(a second image only beyond five tenders)',
+                     '1 image'),
         ),
         in_app_text=('Site Dashboard snapshot {{ snapshot_date }}: {{ headline }}. '
                      'Open the Site Dashboard for the detail.'),
         default_subject='Site Dashboard – daily snapshot, {{ snapshot_date }}',
-        default_body=('The Site Dashboard figures as at {{ taken_at }} are attached '
-                      '({{ image_count }}): {{ headline }}.'),
+        default_body=('The Site Dashboard figures for each tender as at {{ taken_at }} '
+                      'are attached ({{ image_count }}): {{ headline }}.'),
         button_label='Open the Site Dashboard',
         recipients_rule=('Only the named recipients below; the code names nobody. Sent '
                          'once a day by the send_dashboard_snapshot command (8 PM IST '
