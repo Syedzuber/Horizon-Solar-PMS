@@ -811,6 +811,9 @@ def _role_tiles(strips):
 segments_for_card = _segments
 schedule_line = _schedule_line
 dates_as_of = _dates_as_of
+# SNAP-1: the daily snapshot image (snapshot.py) prints these same tiles and sub-lines;
+# tests_dashboard_snapshot pins its figures to the rendered page.
+kpi_tiles = _kpis
 
 
 @login_required

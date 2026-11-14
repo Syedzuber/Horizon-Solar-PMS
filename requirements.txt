@@ -13,3 +13,4 @@ supabase==2.31.0
 requests==2.32.3
 xhtml2pdf==0.2.24
 reportlab==5.0.1
+Pillow==12.3.0

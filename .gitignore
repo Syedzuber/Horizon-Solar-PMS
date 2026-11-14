@@ -21,3 +21,6 @@ docs/QA QC Check List_Final/
 .scratch/
 
 *.dump
+
+# SNAP-1 dry-run images (send_dashboard_snapshot --dry-run --out-dir snapshot_out).
+snapshot_out/

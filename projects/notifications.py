@@ -13,6 +13,7 @@ Layer 5 guardrails:
   - whatsapp_enabled / email_enabled default False — flip ON only after live test.
 """
 
+import base64
 import logging
 import re
 
@@ -47,6 +48,7 @@ def send_notification(
     log_row_id=None,
     whatsapp_language='en',
     whatsapp_strict_phone=False,
+    attachments=None,
 ):
     """
     Send a notification to recipient on one or more channels.
@@ -80,6 +82,10 @@ def send_notification(
         whatsapp_strict_phone : True refuses a number that is not a valid Indian mobile
                           after normalising (ruling W5). Passed only by notify()'s
                           WhatsApp leg; legacy callers keep the old, looser check.
+        attachments     : email only. A list of {'name', 'mime_type', 'content' (bytes)}
+                          files to attach (SNAP-1: the daily snapshot PNGs). None, the
+                          default every other caller keeps, sends exactly the payload it
+                          always did, with no 'attachments' key.
     """
     from .models import Notification, NotificationLog, SystemSettings
 
@@ -133,7 +139,8 @@ def send_notification(
             if not recipient.email_notifications:
                 _log(_base, 'email', 'skipped', 'User preference off')
                 continue
-            _send_email(recipient, subject, message, _base, html_message)
+            _send_email(recipient, subject, message, _base, html_message,
+                        attachments=attachments)
 
 
 # ---------------------------------------------------------------------------
@@ -268,8 +275,13 @@ def _send_whatsapp(recipient, template, template_params, base, language='en',
     return result
 
 
-def _zeptomail_post(to_email, to_name, subject, text_body, html_body=None):
+def _zeptomail_post(to_email, to_name, subject, text_body, html_body=None,
+                    attachments=None):
     """Low-level ZeptoMail HTTP send. Returns (ok: bool, detail: str).
+
+    `attachments` (SNAP-1) is a list of {'name', 'mime_type', 'content' (bytes)}; each is
+    base64-encoded into ZeptoMail's `attachments` array. Without it the payload has no
+    'attachments' key, byte-identical to before (tests_dashboard_snapshot pins it).
 
     Single home for the ZeptoMail endpoint + payload shape, shared by _send_email
     (per-user notifications) and send_aggregate_email (company-wide digest) so neither
@@ -298,6 +310,12 @@ def _zeptomail_post(to_email, to_name, subject, text_body, html_body=None):
     # that can render HTML use htmlbody; the rest fall back to the plain-text message.
     if html_body:
         payload['htmlbody'] = html_body
+    if attachments:
+        payload['attachments'] = [
+            {'name': item['name'], 'mime_type': item['mime_type'],
+             'content': base64.b64encode(item['content']).decode('ascii')}
+            for item in attachments
+        ]
 
     try:
         resp = requests.post(
@@ -316,14 +334,21 @@ def _zeptomail_post(to_email, to_name, subject, text_body, html_body=None):
         return False, str(e)
 
 
-def _send_email(recipient, subject, message, base, html_message=None):
+def _send_email(recipient, subject, message, base, html_message=None, attachments=None):
     email = (recipient.user.email or '').strip()
     if not email:
         _log(base, 'email', 'failed', 'Recipient has no email address')
         return
 
     display_name = recipient.user.get_full_name() or recipient.user.username
-    ok, detail = _zeptomail_post(email, display_name, subject, message, html_message)
+    # Attachments are passed only when there are some, so every existing caller makes
+    # exactly the call it always made (and the tests that patch _zeptomail_post with a
+    # five-argument stand-in keep working).
+    if attachments:
+        ok, detail = _zeptomail_post(email, display_name, subject, message, html_message,
+                                     attachments=attachments)
+    else:
+        ok, detail = _zeptomail_post(email, display_name, subject, message, html_message)
     _log(base, 'email', 'sent' if ok else 'failed', '' if ok else detail)
 
     # --- SendGrid fallback (commented out; uncomment if ZeptoMail domain verification stalls) ---

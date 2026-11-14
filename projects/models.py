@@ -2883,6 +2883,28 @@ class SystemSettings(models.Model):
         return obj
 
 
+class DashboardSnapshot(models.Model):
+    """One day's Site Dashboard figures, as the daily snapshot image printed them (SNAP-1).
+
+    Written only by the send_dashboard_snapshot command, one row per IST date: a second
+    run on the same date overwrites that date's row (the command says so in its output),
+    so tomorrow's image always compares against the last figures sent today. Read back
+    only for the "change vs yesterday" arrows. The payload holds counts and capacities
+    only, never a money figure (tests_dashboard_snapshot pins its keys).
+    """
+
+    snapshot_date      = models.DateField(unique=True)  # IST date of collection; the day-on-day key
+    taken_at           = models.DateTimeField()  # the moment the figures were collected (the image's time label)
+    payload            = models.JSONField()  # {'org': {...}, 'pms': [...], 'tenders': [...]} from snapshot.collect_snapshot
+    created_by_command = models.CharField(max_length=100)  # the management command that wrote the row
+
+    class Meta:
+        ordering = ['-snapshot_date']
+
+    def __str__(self):
+        return f'Dashboard snapshot {self.snapshot_date}'
+
+
 class PaymentRequest(models.Model):
     """A vendor payment request raised by SCM, confirmed by Finance, visible to PM. No edit/cancel by design.
 

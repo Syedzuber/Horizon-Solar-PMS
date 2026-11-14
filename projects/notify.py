@@ -372,7 +372,7 @@ def _whatsapp_plan(event):
 
 
 def _send_to_one(event, recipient, values, actor, related_project, link, plan, log_label,
-                 wa_plan=None, wa_seen=None):
+                 wa_plan=None, wa_seen=None, attachments=None):
     """In-app, then email, then WhatsApp, for one person. The channels are independent
     (ruling Q4): a failure on one is logged and the others are still attempted.
 
@@ -382,7 +382,8 @@ def _send_to_one(event, recipient, values, actor, related_project, link, plan, l
 
     `wa_plan` is _whatsapp_plan()'s answer, None for an event without a WhatsApp leg.
     `wa_seen` is the set of numbers already handed off in this send (W9), shared by
-    every recipient of one notify() call.
+    every recipient of one notify() call. `attachments` reach the email leg only
+    (SNAP-1); None for every caller before it.
     """
     name = recipient.user.get_full_name() or recipient.user.username
     # NTF-DCG 3b (Q3): the first name, for a WhatsApp greeting. A key no other event
@@ -411,17 +412,21 @@ def _send_to_one(event, recipient, values, actor, related_project, link, plan, l
 
     if plan is not None:
         _email_leg(event, recipient, values, actor, related_project, link, plan,
-                   log_label, base)
+                   log_label, base, attachments=attachments)
     if wa_plan is not None:
         _whatsapp_leg(event, recipient, values, wa_plan, base,
                       set() if wa_seen is None else wa_seen)
 
 
 def _email_leg(event, recipient, values, actor, related_project, link, plan, log_label,
-               base):
+               base, attachments=None):
     """The email of one person. The body _send_to_one() always had for it, moved here
-    unchanged (S3a) so that its early returns end the email leg only, not WhatsApp."""
+    unchanged (S3a) so that its early returns end the email leg only, not WhatsApp.
+
+    `attachments` (SNAP-1) are added to the send only when there are some, so every
+    other event calls send_notification() with exactly the arguments it always did."""
     state, payload = plan
+    extra = {'attachments': attachments} if attachments else {}
     if state == 'paused':
         _log(base, 'email', 'skipped', 'event paused', event_code=event.code)
         return
@@ -441,7 +446,7 @@ def _email_leg(event, recipient, values, actor, related_project, link, plan, log
             notify_deferred.defer(
                 recipient=recipient, channel='email', row_fields=row_fields,
                 send_kwargs=dict(message=text, channels=['email'], subject=subject,
-                                 html_message=html, template=log_label))
+                                 html_message=html, template=log_label, **extra))
             return
         send_notification(
             recipient=recipient,
@@ -454,6 +459,7 @@ def _email_leg(event, recipient, values, actor, related_project, link, plan, log
             actor=actor,
             event_code=event.code,
             template_version=payload,
+            **extra,
         )
     except Exception as exc:
         logger.exception('notify: email %s to %s failed', event.code, recipient.pk)
@@ -515,14 +521,15 @@ def _whatsapp_leg(event, recipient, values, plan, base, seen):
              event_code=event.code)
 
 
-def _send(event, recipients, values, actor, related_project, link, log_label):
+def _send(event, recipients, values, actor, related_project, link, log_label,
+          attachments=None):
     plan = _email_plan(event) if 'email' in event.channels else None
     wa_plan = _whatsapp_plan(event) if event.whatsapp is not None else None
     wa_seen = set()   # W9: numbers already handed off in THIS send
     for recipient in recipients:
         try:
             _send_to_one(event, recipient, values, actor, related_project, link, plan,
-                         log_label, wa_plan, wa_seen)
+                         log_label, wa_plan, wa_seen, attachments=attachments)
         except Exception:
             # _send_to_one already catches per channel; this is the backstop for
             # anything outside those (reading the recipient's name, say), so one
@@ -531,7 +538,7 @@ def _send(event, recipients, values, actor, related_project, link, log_label):
 
 
 def notify_now(event_code, *, recipients, values, actor=None, related_project=None, link='',
-               log_label=None):
+               log_label=None, attachments=None, named_recipients=True):
     """notify(), sent NOW rather than after commit: the same recipients rule, rendering,
     channels and log rows.
 
@@ -550,11 +557,15 @@ def notify_now(event_code, *, recipients, values, actor=None, related_project=No
     channel passes through: notify() reaches it after commit, the assignment cooldown
     calls it directly. _send() then takes each merged person through in-app, email and
     WhatsApp, deferred or not, exactly as a code-resolved one.
+
+    `named_recipients=False` (SNAP-1) skips that merge for this one send: a deliberate
+    send to one person, such as send_dashboard_snapshot --to. True, the default every
+    other caller keeps, merges as always. `attachments` reach the email leg only.
     """
     event = get_event(event_code)
     try:
         targets = resolve_recipients(recipients, actor)
-        if event.named_recipients:
+        if event.named_recipients and named_recipients:
             try:
                 targets, inactive = merge_named_recipients(event, targets)
             except Exception:
@@ -569,13 +580,13 @@ def notify_now(event_code, *, recipients, values, actor=None, related_project=No
                     logger.exception('notify_now: could not log inactive %s', profile.pk)
         if targets:
             _send(event, targets, dict(values or {}), actor, related_project, link,
-                  log_label)
+                  log_label, attachments=attachments)
     except Exception:
         logger.exception('notify_now: %s failed', event_code)
 
 
 def notify(event_code, *, recipients, values, actor=None, related_project=None, link='',
-           log_label=None):
+           log_label=None, attachments=None, named_recipients=True):
     """Send `event_code` to `recipients` after the current transaction commits.
 
     recipients      : iterable of UserProfile. De-duplicated; the actor and anyone
@@ -591,6 +602,10 @@ def notify(event_code, *, recipients, values, actor=None, related_project=None, 
                       notify() passes the label it logged before, so the readers and
                       filters keyed on that column keep working; event_code is recorded
                       beside it either way. None leaves the column blank.
+    attachments     : SNAP-1. Files for the email only, as send_notification() takes
+                      them; None (every caller before SNAP-1) attaches nothing.
+    named_recipients: SNAP-1. False skips the event's Admin-named list for this send
+                      only (send_dashboard_snapshot --to). True, the default, merges it.
 
     Raises KeyError for an unknown event code (a programmer error, caught by any test
     that fires the event). Nothing after that raises.
@@ -605,9 +620,18 @@ def notify(event_code, *, recipients, values, actor=None, related_project=None, 
         targets = resolve_recipients(recipients, actor)
         # NTF-DCG 5b (ruling 5b-Q4): an opted-in event is scheduled even when its code
         # resolves nobody, because its named recipients are read in notify_now().
-        if not targets and not event.named_recipients:
+        # SNAP-1: a send that skips the named list (named_recipients=False) has nobody to
+        # read later, so it returns here like any event without one.
+        if not targets and not (event.named_recipients and named_recipients):
             return
         frozen = dict(values or {})
+        # SNAP-1: passed on only when not the default, so every existing caller's
+        # notify_now() call is exactly what it was.
+        extra = {}
+        if attachments:
+            extra['attachments'] = attachments
+        if not named_recipients:
+            extra['named_recipients'] = False
         # After commit, so a rolled-back action sends nothing; outside a transaction
         # Django runs it at once. Robust, so a failure here is logged and never reaches
         # the committed action. A lambda, not functools.partial: robust on_commit names
@@ -615,7 +639,7 @@ def notify(event_code, *, recipients, values, actor=None, related_project=None, 
         transaction.on_commit(
             lambda: notify_now(event_code, recipients=targets, values=frozen, actor=actor,
                                related_project=related_project, link=link,
-                               log_label=log_label),
+                               log_label=log_label, **extra),
             robust=True)
     except Exception:
         logger.exception('notify: could not schedule %s', event_code)

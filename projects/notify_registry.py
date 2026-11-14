@@ -1701,6 +1701,44 @@ NOTIFICATION_EVENTS = _build_registry([
         deferred=True,
         named_recipients=True,
     ),
+
+    # --- SNAP-1: the daily Site Dashboard snapshot ------------------------------------
+    # Sent by the send_dashboard_snapshot command (8 PM IST Railway cron) with the PNG
+    # images attached. The code resolves nobody: the named recipients are the whole
+    # list (Zuber only, to start). The email starts PAUSED and Admin switches it on
+    # after a test send; in-app is never paused, so the one-line notice links to the
+    # Site Dashboard to be worth having. NOT deferred (SNAP-1 Q5): no request waits on
+    # a cron job, and the command needs the send's outcome for its exit code.
+    # No variable carries a money figure (tests_dashboard_snapshot pins the payload).
+    NotificationEvent(
+        code='daily_dashboard_snapshot',
+        label='Site Dashboard daily snapshot',
+        module='Dashboard',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('snapshot_date', 'The date of the figures, e.g. 14 Nov 2026',
+                     '14 Nov 2026'),
+            Variable('taken_at', 'When the figures were collected, in IST',
+                     '14 Nov 2026, 8:00 PM IST'),
+            Variable('headline', 'Three organisation figures in one line',
+                     '142 sites in execution · 77 overdue tasks · 110 gone quiet'),
+            Variable('image_count', 'How many images are attached, in words',
+                     '2 images'),
+        ),
+        in_app_text=('Site Dashboard snapshot {{ snapshot_date }}: {{ headline }}. '
+                     'Open the Site Dashboard for the detail.'),
+        default_subject='Site Dashboard – daily snapshot, {{ snapshot_date }}',
+        default_body=('The Site Dashboard figures as at {{ taken_at }} are attached '
+                      '({{ image_count }}): {{ headline }}.'),
+        button_label='Open the Site Dashboard',
+        recipients_rule=('Only the named recipients below; the code names nobody. Sent '
+                         'once a day by the send_dashboard_snapshot command (8 PM IST '
+                         'cron). Its --to option sends to one person instead of the '
+                         'list.'),
+        default_state='paused',
+        named_recipients=True,
+    ),
 ])
 
 

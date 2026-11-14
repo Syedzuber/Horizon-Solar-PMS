@@ -558,12 +558,13 @@ class SeedCommandTests(Base):
 
 
 class ShippedRegistryTests(TestCase):
-    """5b was infrastructure only; NTF-DCG 5c's goods-receipt email is the one event that
-    opts in (ruling R5: Finance recipients are named by Admin, not coded)."""
+    """5b was infrastructure only. Two events opt in: NTF-DCG 5c's goods-receipt email
+    (ruling R5: Finance recipients are named by Admin, not coded) and SNAP-1's daily
+    dashboard snapshot, whose named list is its only audience (the code names nobody)."""
 
-    def test_only_the_grn_email_takes_named_recipients(self):
+    def test_the_events_that_take_named_recipients(self):
         self.assertEqual([c for c, e in NOTIFICATION_EVENTS.items() if e.named_recipients],
-                         ['grn_recorded'])
+                         ['grn_recorded', 'daily_dashboard_snapshot'])
 
     def test_the_flag_defaults_to_false(self):
         field = {f.name: f for f in dataclasses.fields(NotificationEvent)}
