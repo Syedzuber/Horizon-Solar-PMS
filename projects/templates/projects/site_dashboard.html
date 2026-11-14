@@ -39,6 +39,10 @@
   .sd .kpi .d { font-size: 11px; color: var(--sd-faint); }
   .sd .kpi.crit .v { color: var(--sd-crit); }
   .sd .kpi.warn .v { color: var(--sd-warn); }
+  /* TB-2: the activated-site strip, the tile card's full-width first row. The include's
+     own mb-4 (kept for the tender page) is cancelled here; the row draws the tiles' rule. */
+  .sd .kpis .strip-row { grid-column: 1 / -1; padding: 10px 12px; min-width: 0; box-shadow: 0 1px 0 var(--sd-line); }
+  .sd .kpis .strip-row .tb { margin-bottom: 0 !important; }
 
   /* Controls */
   .sd .listhead { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
@@ -192,9 +196,14 @@
 
   {% comment %}KPI strip (E5). Counted from the same cards the list below is cut from. A filter
      tile is a link that adds ?filter=; on the active tile the link removes it again.{% endcomment %}
+  {% comment %}TB-2: the activated-site strip heads the tile card, over the same sites as the
+     "Sites in execution" tile (views_site_dashboard._breakdown_strip). That tile is still in
+     kpis, which the daily snapshot reads, and is skipped below because the strip shows it.{% endcomment %}
   <div class="kpis" id="kpis">
+    <div class="strip-row">{% include "projects/_site_breakdown_strip.html" with breakdown=breakdown note=breakdown.note %}</div>
     {% for t in kpis %}
-      {% if t.key %}
+      {% if t.label == 'Sites in execution' %}
+      {% elif t.key %}
         <a class="kpi {{ t.tone }}" href="{{ t.href }}" aria-pressed="{% if t.active %}true{% else %}false{% endif %}"
            data-filter="{{ t.key }}" data-sites="{{ t.sites }}"
            title="{% if t.active %}Clear this filter{% else %}Show only these {{ t.sites }} site{{ t.sites|pluralize }}{% endif %}">

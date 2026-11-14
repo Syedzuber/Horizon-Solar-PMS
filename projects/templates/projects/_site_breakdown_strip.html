@@ -1,0 +1,54 @@
+{% comment %}
+TB-1 / TB-2: the activated-site strip, shared by the tender page (program_detail) and the
+Site Dashboard, so the two always look and read alike. Every figure is computed
+server-side; there is no script.
+
+Takes:
+    breakdown   anything with in_execution, mobilized, active, active_today:
+                site_breakdown.SiteBreakdown on the tender page, the dashboard's
+                views_site_dashboard.StripFigures on the Site Dashboard. mobilized / active
+                may be None, drawn as a dash (TB-2 ruling P3: no RESCO site in the set)
+    planned     optional: the tender's planned site count, "of N planned" under Sites in
+                execution (tender page only, ruling D4)
+    note        optional: one grey line under the strip (TB-2 ruling P3)
+
+Mobilized and Active are a chain from Sites in execution; Active today stands apart
+because it is not a subset of Active (TB-1 ruling B5).
+
+The <style> travels with the markup so neither page can draw the strip unstyled. Every
+rule is under .tb; the Site Dashboard's brand colours are copied as tokens.
+
+The <section> below must render byte-for-byte as it did inside program_detail.html before
+TB-2 (tests_dashboard_breakdown pins it), which is why the dash and the note are written
+inline on existing lines rather than on lines of their own.
+{% endcomment %}
+<style>
+  .tb { --tb-surface:#ffffff; --tb-ink:#16231b; --tb-muted:#56655c; --tb-faint:#7a887f;
+    --tb-line:#d9e0d7; --tb-brand:#1a7a4a; --tb-navy:#243a6b; --tb-info-bg:#e5eaf5;
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch; color: var(--tb-ink); }
+  .tb .chain { display: flex; flex-wrap: wrap; align-items: center; flex: 1 1 420px; min-width: 0;
+    background: var(--tb-surface); border: 1px solid var(--tb-line); border-radius: 12px; padding: 4px 6px; }
+  .tb .fig { padding: 8px 10px; min-width: 0; }
+  .tb .fig .v { font-size: 1.75rem; font-weight: 600; line-height: 1; }
+  .tb .fig .l { font-size: 12px; color: var(--tb-muted); margin-top: 2px; }
+  .tb .fig .d { font-size: 11px; color: var(--tb-faint); }
+  .tb .chain .fig:first-child .v { color: var(--tb-brand); }
+  .tb .arrow { font-size: 1.5rem; color: var(--tb-faint); padding: 0 2px; line-height: 1; }
+  .tb .apart { flex: 0 1 200px; background: var(--tb-info-bg); border: 1px solid var(--tb-line);
+    border-radius: 12px; padding: 4px 6px; display: flex; align-items: center; }
+  .tb .apart .v { color: var(--tb-navy); }
+  .tb .note { flex: 1 1 100%; margin: 0 4px; font-size: 11px; color: var(--tb-faint); }
+</style>
+<section class="tb mb-4" aria-label="Activated sites">
+  <div class="chain">
+    <div class="fig"><div class="v">{{ breakdown.in_execution }}</div><div class="l">Sites in execution</div>{% if planned %}<div class="d">of {{ planned }} planned</div>{% endif %}</div>
+    <span class="arrow" aria-hidden="true">›</span>
+    <div class="fig"><div class="v">{% if breakdown.mobilized is None %}—{% else %}{{ breakdown.mobilized }}{% endif %}</div><div class="l">Mobilized</div><div class="d">DC + design started</div></div>
+    <span class="arrow" aria-hidden="true">›</span>
+    <div class="fig"><div class="v">{% if breakdown.active is None %}—{% else %}{{ breakdown.active }}{% endif %}</div><div class="l">Active</div><div class="d">Civil In Progress/Done</div></div>
+  </div>
+  <div class="apart">
+    <div class="fig"><div class="v">{{ breakdown.active_today }}</div><div class="l">Active today</div><div class="d">any PMS update, last 24 h</div></div>
+  </div>{% if note %}
+  <p class="note" data-breakdown-note>{{ note }}</p>{% endif %}
+</section>

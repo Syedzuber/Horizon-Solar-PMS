@@ -1,28 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ program.name }} — Program — SolarPMS{% endblock %}
 
-{% block extra_head %}
-{% comment %}TB-1 activated-site strip. Page-scoped CSS (every rule under .tb), the Site
-   Dashboard's brand colours copied as tokens so the two pages read alike. No script: every
-   figure is computed server-side by site_breakdown.site_breakdown().{% endcomment %}
-<style>
-  .tb { --tb-surface:#ffffff; --tb-ink:#16231b; --tb-muted:#56655c; --tb-faint:#7a887f;
-    --tb-line:#d9e0d7; --tb-brand:#1a7a4a; --tb-navy:#243a6b; --tb-info-bg:#e5eaf5;
-    display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch; color: var(--tb-ink); }
-  .tb .chain { display: flex; flex-wrap: wrap; align-items: center; flex: 1 1 420px; min-width: 0;
-    background: var(--tb-surface); border: 1px solid var(--tb-line); border-radius: 12px; padding: 4px 6px; }
-  .tb .fig { padding: 8px 10px; min-width: 0; }
-  .tb .fig .v { font-size: 1.75rem; font-weight: 600; line-height: 1; }
-  .tb .fig .l { font-size: 12px; color: var(--tb-muted); margin-top: 2px; }
-  .tb .fig .d { font-size: 11px; color: var(--tb-faint); }
-  .tb .chain .fig:first-child .v { color: var(--tb-brand); }
-  .tb .arrow { font-size: 1.5rem; color: var(--tb-faint); padding: 0 2px; line-height: 1; }
-  .tb .apart { flex: 0 1 200px; background: var(--tb-info-bg); border: 1px solid var(--tb-line);
-    border-radius: 12px; padding: 4px 6px; display: flex; align-items: center; }
-  .tb .apart .v { color: var(--tb-navy); }
-</style>
-{% endblock %}
-
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-3">
   <div>
@@ -56,22 +34,11 @@
 </div>
 
 {% comment %}
-TB-1: how far the tender's activated sites have moved. Mobilized and Active are a chain
-from Sites in execution; Active today stands apart because it is not a subset of Active
-(ruling B5). Whole tender for every viewer of this page (ruling P2).
+TB-1: how far the tender's activated sites have moved. Whole tender for every viewer of
+this page (ruling P2). The markup and its CSS live in the shared include (TB-2), which the
+Site Dashboard draws too; the rendered strip is byte-identical to what stood here before.
 {% endcomment %}
-<section class="tb mb-4" aria-label="Activated sites">
-  <div class="chain">
-    <div class="fig"><div class="v">{{ breakdown.in_execution }}</div><div class="l">Sites in execution</div>{% if program.planned_site_count %}<div class="d">of {{ program.planned_site_count }} planned</div>{% endif %}</div>
-    <span class="arrow" aria-hidden="true">›</span>
-    <div class="fig"><div class="v">{{ breakdown.mobilized }}</div><div class="l">Mobilized</div><div class="d">DC + design started</div></div>
-    <span class="arrow" aria-hidden="true">›</span>
-    <div class="fig"><div class="v">{{ breakdown.active }}</div><div class="l">Active</div><div class="d">Civil In Progress/Done</div></div>
-  </div>
-  <div class="apart">
-    <div class="fig"><div class="v">{{ breakdown.active_today }}</div><div class="l">Active today</div><div class="d">any PMS update, last 24 h</div></div>
-  </div>
-</section>
+{% include "projects/_site_breakdown_strip.html" with breakdown=breakdown planned=program.planned_site_count %}
 
 {% comment %}
 Aggregate rollup vs. planned targets. The "Active sites (live)" card stood first here and

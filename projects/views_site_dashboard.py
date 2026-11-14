@@ -9,6 +9,7 @@ WHERE EVERY FIGURE COMES FROM (E1)
     sort_cards()         the two orders, drafts last (E4)
     capacity_totals()    the DC / AC tile
     programs_on_cards()  the tender filter's options
+    site_breakdown()     the activated-site strip (TB-2, _breakdown_strip below): 1 query
 The view's only queries of its own are the QA/QC strip's (qaqc_views'
 qaqc_engineer_dashboard_context: one query for someone checking no site, a fixed few
 otherwise; PM and coordinator viewers only, ruling 3) and one for "Dates as of" (below). Search, type,
@@ -75,6 +76,8 @@ from .punch_points import open_punch_point_counts
 from .qaqc_views import last_visit_lines, qaqc_engineer_dashboard_context
 from .scheduling import (BAND_LABELS, ELIGIBLE_PROJECT_TYPE, REASON_EXCLUDED,
                          REASON_NEEDS_ANCHOR, REASON_NEEDS_CAPACITY, REASON_NOT_ELIGIBLE)
+# TB-2: the tender page's activated-site breakdown, drawn here over the tile's own sites.
+from .site_breakdown import site_breakdown
 from .site_dashboard import (EXECUTION_LANE_NAME, LANE_DONE, LANE_EMPTY, LANE_IN_PROGRESS,
                              ORDER_LATEST, ORDER_URGENT, ORDERS, REASON_SCHEDULED,
                              build_site_cards, capacity_totals, programs_on_cards,
@@ -619,6 +622,50 @@ def _kpis(live, params, sees_payments):
     return tiles
 
 
+@dataclass(frozen=True)
+class StripFigures:
+    """The activated-site strip as the Site Dashboard draws it (TB-2), read by the shared
+    include projects/_site_breakdown_strip.html. mobilized / active are None when the
+    viewer's sites hold no RESCO site, drawn as a dash."""
+    in_execution: int
+    mobilized: object      # int, or None: no RESCO site in the set
+    active: object         # int, or None: no RESCO site in the set
+    active_today: int
+    note: object           # the grey line under the strip, or None
+
+
+def _breakdown_strip(live, now):
+    """TB-2: the activated-site strip over exactly the sites the "Sites in execution" tile
+    counts for this viewer and filter (`live`: visible, then search / type / tender, less
+    drafts), from TB-1's site_breakdown() so no rule is restated. One query; none when
+    `live` is empty (Django skips an empty pk__in).
+
+    RESCO ONLY FOR MOBILIZED AND ACTIVE (Zuber, ruling P3(c) and refinements, 14 Nov).
+    TB-1's two chain rules cannot be met by a Residential or CAPEX site: neither type ever
+    has a DesignAssignment (design is a task there), the Residential template has no Civil
+    anchor, and CAPEX has no schedule blocks. Counted over every site they would read as a
+    stalled portfolio (a Residential PM's "24 › 0 › 0"), so:
+        all RESCO (or no site)  the four figures, no note
+        mixed                   Mobilized and Active over the RESCO sites, note with the base
+        no RESCO site           Mobilized and Active drawn as a dash, note says why
+    Sites in execution and Active today stay over every site. The RESCO cut is made here
+    on the helper's own id lists (no second query), so it stays explicit even if a CAPEX
+    template one day gains schedule blocks.
+    """
+    b = site_breakdown([c.id for c in live], now)
+    resco = {c.id for c in live if c.project_type == ELIGIBLE_PROJECT_TYPE}
+    mobilized = sum(1 for pk in b.mobilized_ids if pk in resco)
+    active = sum(1 for pk in b.active_ids if pk in resco)
+    note = None
+    if live and not resco:
+        mobilized = active = None
+        note = 'Mobilized and Active apply to RESCO sites only'
+    elif len(resco) < len(live):
+        note = f'Mobilized and Active count RESCO sites only ({len(resco)} of {len(live)})'
+    return StripFigures(in_execution=b.in_execution, mobilized=mobilized, active=active,
+                        active_today=b.active_today, note=note)
+
+
 def _dates_as_of(now):
     """E8 / SCHED-R: the "Dates as of" line under the title, from the stamp the daily
     `schedule_sites --all --apply` run writes. Returns {'text', 'stale'}; stale draws amber.
@@ -873,7 +920,11 @@ def site_dashboard(request):
                   for c in sort_cards(listed, params['sort'])],
         'drafts': [_view(c, now, sees_payments, extras)
                    for c in sort_cards(drafts, params['sort'])],
+        # kpis is passed whole, "Sites in execution" included: the template skips that tile
+        # because the strip shows it (TB-2 ruling D3), and kpi_tiles() stays exactly what
+        # the daily snapshot reads.
         'kpis': kpis + _role_tiles(strips),
+        'breakdown': _breakdown_strip(live, now),
         'more_groups': _more_links(request.user, profile),
         **strips,
         'params': params,
