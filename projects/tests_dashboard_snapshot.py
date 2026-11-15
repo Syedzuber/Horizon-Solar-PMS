@@ -816,18 +816,22 @@ class ChokepointTests(TestCase):
         self.assertTrue(Notification.objects.filter(recipient=named).exists())
 
     def test_named_recipients_false_skips_the_list_for_that_send_only(self):
+        # SNAP-2: notify() now refuses the snapshot event (command_only), so the notify()
+        # keyword is shown on grn_recorded, the other named-list event; the snapshot's
+        # own --to path is CommandTests.test_to_sends_to_that_user_only_not_the_named_list.
+        code = 'grn_recorded'
         admin = _profile('snap_cp_admin2', 'Admin')
         named = _profile('snap_cp_named2', 'Finance')
         other = _profile('snap_cp_other', 'SCM')
-        add_named_recipient(EVENT, named, admin, 'Daily snapshot recipient here')
-        values = {k: v for k, v in get_event(EVENT).samples().items()
+        add_named_recipient(code, named, admin, 'Finance reconciles receipts')
+        values = {k: v for k, v in get_event(code).samples().items()
                   if k not in ('link', 'recipient_name')}
         with self.captureOnCommitCallbacks(execute=True):
-            N.notify(EVENT, recipients=[other], values=values, named_recipients=False)
+            N.notify(code, recipients=[other], values=values, named_recipients=False)
         self.assertFalse(Notification.objects.filter(recipient=named).exists())
         self.assertTrue(Notification.objects.filter(recipient=other).exists())
         with self.captureOnCommitCallbacks(execute=True):
-            N.notify(EVENT, recipients=[], values=values)
+            N.notify(code, recipients=[], values=values)
         self.assertTrue(Notification.objects.filter(recipient=named).exists())
 
     def test_only_the_snapshot_command_passes_the_new_arguments(self):
@@ -847,5 +851,7 @@ class ChokepointTests(TestCase):
 
     def test_the_event_is_registered_paused_not_deferred_named(self):
         event = get_event(EVENT)
+        # SNAP-2: WhatsApp added; command_only is what lets it stay not deferred.
         self.assertEqual((event.channels, event.default_state, event.deferred,
-                          event.named_recipients), (('email',), 'paused', False, True))
+                          event.named_recipients, event.command_only),
+                         (('email', 'whatsapp'), 'paused', False, True, True))

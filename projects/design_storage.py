@@ -314,6 +314,30 @@ def upload_design_file(file_obj, path):
     return DESIGN_BUCKET, path
 
 
+def upload_private_bytes(path, content, content_type):
+    """
+    Upload bytes the app made itself to the PRIVATE design bucket (SNAP-2: the daily
+    snapshot PNGs sent on WhatsApp). Returns (bucket, path), never a URL; the caller
+    signs a link with get_design_file_url().
+
+    Not for a person's upload: those go through upload_design_file()'s validation. The
+    caller chooses the path. The upload never overwrites (storage3's default x-upsert
+    false), so an object already at that path makes this raise instead of replacing an
+    image a phone may already have fetched. Raises DesignStorageError on any failure,
+    with a short message that carries nothing secret.
+    """
+    if not path or not content:
+        raise DesignStorageError('Nothing to upload.')
+    try:
+        _client().storage.from_(DESIGN_BUCKET).upload(
+            path=path, file=content, file_options={'content-type': content_type})
+    except DesignStorageError:
+        raise
+    except Exception as exc:
+        raise DesignStorageError(f'Upload to storage failed: {type(exc).__name__}')
+    return DESIGN_BUCKET, path
+
+
 def delete_design_objects(objects):
     """
     Delete stored objects from the PRIVATE design bucket. Used by

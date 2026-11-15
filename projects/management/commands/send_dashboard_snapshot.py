@@ -29,10 +29,22 @@ event's Admin-named list; the code names nobody.
             switch and the event's pause still apply: they are checked inside the
             chokepoint (send_notification / notify), which this does not go around.
 
+WHATSAPP (SNAP-2). The same event also sends the Interakt template daily_snapshot_pm to
+each recipient: its header is one image, its body the collection time as the image
+prints it. Each PNG is uploaded to the PRIVATE design bucket at
+snapshots/<IST date>/site-dashboard-<IST date>-<n>-<HHMMSS>.png (a new object every
+run, never overwritten) and a link signed for SNAPSHOT_LINK_SECONDS (7 days) is the
+header; one message per image per recipient, in order. Nothing is uploaded while the
+event's WhatsApp is paused or the master switch is off. The log rows name the storage
+path, never the link. Email is unchanged.
+
+--dry-run   also prints, per named recipient, the WhatsApp that would be sent (template,
+            "signed URL for <path>", the body value). Nothing is uploaded.
+
 EXIT CODE (Railway cron log, SNAP-1 ruling). 0 when sent, and 0 with one "skipped:"
-line when nothing could go out by design (event paused, master switch off, the
-person's email preference off, nobody on the named list). Non-zero, with one line
-saying why, for a real error or any failed send.
+line per channel when nothing could go out by design (event paused, master switch off,
+the person's preference off, nobody on the named list). Non-zero, with one line per
+failure saying why, for a real error or any failed send on either channel (SNAP-2 W7).
 """
 import sys
 from pathlib import Path
@@ -42,14 +54,54 @@ from django.db import transaction
 from django.urls import reverse
 from django.utils import timezone
 
-from projects.models import DashboardSnapshot, NotificationLog, UserProfile
-from projects.notify import notify_now
+from projects.design_storage import (DesignStorageError, get_design_file_url,
+                                     upload_private_bytes)
+from projects.models import DashboardSnapshot, NotificationLog, SystemSettings, UserProfile
+from projects.notifications import NO_VALID_WHATSAPP_NUMBER, valid_whatsapp_number
+from projects.notify import channel_is_active, merge_named_recipients, notify_now
+from projects.notify_registry import WHATSAPP, get_event
 from projects.snapshot import (NO_TENDER_SKIP, STRIP, SnapshotError, collect_snapshot,
                                delta_text, headline, ordered_sections, pm_line,
                                render_snapshot_images, section_deltas, section_title)
+from projects.whatsapp_params import sanitise_params
 
 EVENT = 'daily_dashboard_snapshot'
 COMMAND_NAME = 'send_dashboard_snapshot'
+
+# W3: how long the WhatsApp image link works. Interakt fetches the image when it sends,
+# and a recipient may open the message days later; a week covers both, and the link
+# then dies, so a forwarded copy of it does not open the bucket for good.
+SNAPSHOT_LINK_SECONDS = 7 * 24 * 60 * 60
+
+
+def snapshot_object_path(moment, number, name='site-dashboard'):
+    """The bucket path of one image, from the IST collection moment: a new object every
+    run (the time is in the name), so a same-day re-run never collides with or replaces
+    an image already sent."""
+    local = timezone.localtime(moment)
+    day = f'{local:%Y-%m-%d}'
+    return f'snapshots/{day}/{name}-{day}-{number}-{local:%H%M%S}.png'
+
+
+def upload_snapshot_image(path, content):
+    """Upload one PNG and sign it: {'path', 'url', 'error'}. Never raises; a failure is
+    the plain reason in 'error' (url None), so the caller still sends the email and the
+    WhatsApp leg writes a 'failed' row naming it. Shared with test_whatsapp --image."""
+    try:
+        bucket, path = upload_private_bytes(path, content, 'image/png')
+        url = get_design_file_url(bucket, path, SNAPSHOT_LINK_SECONDS)
+    except DesignStorageError as exc:
+        return {'path': path, 'url': None, 'error': str(exc)}
+    if not url:
+        return {'path': path, 'url': None, 'error': 'storage returned no signed link'}
+    return {'path': path, 'url': url, 'error': ''}
+
+
+def whatsapp_will_send(event):
+    """Whether this run's WhatsApp can go out at all: the event's channel switched on by
+    Admin and the master switch on. When not, nothing is uploaded (Zuber, 15 Nov) and
+    the leg writes its 'skipped' rows as usual."""
+    return channel_is_active(event, WHATSAPP) and SystemSettings.get().whatsapp_enabled
 
 
 class Command(BaseCommand):
@@ -105,6 +157,9 @@ class Command(BaseCommand):
             self._print_figures(payload, previous)
             if not images:
                 self.stdout.write(NO_TENDER_SKIP)
+            else:
+                self._print_whatsapp(payload, images, now)
+                self.stdout.write('Dry run: nothing uploaded.')
             self.stdout.write('Dry run: no row written, nothing sent.')
             return
 
@@ -115,7 +170,7 @@ class Command(BaseCommand):
         if not images:
             self.stdout.write(NO_TENDER_SKIP)
             return
-        self._send(payload, images, recipient)
+        self._send(payload, images, recipient, now)
 
     def _recipient(self, username):
         profile = (UserProfile.objects.select_related('user')
@@ -141,7 +196,7 @@ class Command(BaseCommand):
         self.stdout.write(f'{"Saved" if created else "Overwrote"} the snapshot row for '
                           f'{row.snapshot_date} (#{row.pk}).')
 
-    def _send(self, payload, images, recipient):
+    def _send(self, payload, images, recipient, now):
         date = payload['snapshot_date']
         attachments = [{'name': f'site-dashboard-{date}-{n}.png', 'mime_type': 'image/png',
                         'content': content} for n, content in enumerate(images, start=1)]
@@ -155,35 +210,93 @@ class Command(BaseCommand):
         # outcome, because notify_now() never raises once the event code is known.
         before = NotificationLog.objects.order_by('-pk').values_list('pk', flat=True).first() or 0
         extra = {'named_recipients': False} if recipient else {}
+        # SNAP-2: upload only when the WhatsApp can go out; otherwise pass no images and
+        # the leg writes its 'skipped' rows (paused, or master switch off).
+        if whatsapp_will_send(get_event(EVENT)):
+            extra['whatsapp_images'] = self._upload(images, now)
         # notify_now(), not notify(): there is no action here to wait for. The snapshot
         # row is already committed (its own atomic block above) and nothing else is open,
         # so notify() would only register an on_commit callback that runs at once. Calling
-        # notify_now() directly says so, and the event (not deferred) has finished
-        # sending when it returns, so the rows read below are the outcome.
+        # notify_now() directly says so, and the event (not deferred; its WhatsApp sent on
+        # this thread because it is command_only) has finished sending when it returns,
+        # so the rows read below are the outcome. notify() refuses this event anyway.
         notify_now(EVENT, recipients=[recipient] if recipient else [], values=values,
                    link=reverse('site_dashboard'), log_label=EVENT, attachments=attachments,
                    **extra)
         self._report(before)
 
+    def _upload(self, images, now):
+        """Each PNG to the private bucket with a signed link, in image order. A failed
+        upload is kept in the list with its reason, so every recipient gets a 'failed'
+        row for that image and the run exits non-zero; the email is not held back."""
+        uploaded = []
+        for number, content in enumerate(images, start=1):
+            image = upload_snapshot_image(snapshot_object_path(now, number), content)
+            uploaded.append(image)
+            if image['error']:
+                self.stdout.write(f'Upload failed for {image["path"]}: {image["error"]}')
+            else:
+                self.stdout.write(f'Uploaded {image["path"]} (link valid 7 days).')
+        return uploaded
+
     def _report(self, before):
+        # The rows this run wrote on the two external channels, in the order written.
         rows = list(NotificationLog.objects.filter(pk__gt=before, event_code=EVENT,
-                                                   channel='email')
-                    .values_list('status', 'error_detail', 'recipient__user__username'))
-        for status, detail, username in rows:
-            self.stdout.write(f'  email {status:8} {username}{": " + detail if detail else ""}')
-        failed = [r for r in rows if r[0] == 'failed']
+                                                   channel__in=('email', WHATSAPP))
+                    .order_by('pk')
+                    .values_list('channel', 'status', 'error_detail',
+                                 'recipient__user__username'))
+        for channel, status, detail, username in rows:
+            self.stdout.write(f'  {channel:8} {status:8} {username}'
+                              f'{": " + detail if detail else ""}')
+        failed = [r for r in rows if r[1] == 'failed']
         if failed:
-            raise CommandError(f'{len(failed)} of {len(rows)} email(s) failed: '
-                               f'{failed[0][1] or "no detail"}')
-        sent = sum(1 for r in rows if r[0] == 'sent')
-        if sent:
-            self.stdout.write(f'Sent {sent} email(s).')
-            return
+            # W7: one line per failure, so the cron log says which send failed and why.
+            lines = [f'{channel} to {username} failed: {detail or "no detail"}'
+                     for channel, _, detail, username in failed]
+            raise CommandError(f'{len(failed)} of {len(rows)} send(s) failed.\n'
+                               + '\n'.join(lines))
         if not rows:
             self.stdout.write('skipped: nobody to send to (the named list is empty).')
             return
-        reasons = sorted({detail or status for status, detail, _ in rows})
-        self.stdout.write(f'skipped: {"; ".join(reasons)}.')
+        for channel, noun, title in (('email', 'email(s)', 'Email'),
+                                     (WHATSAPP, 'WhatsApp message(s)', 'WhatsApp')):
+            mine = [r for r in rows if r[0] == channel]
+            sent = sum(1 for r in mine if r[1] == 'sent')
+            if sent:
+                self.stdout.write(f'Sent {sent} {noun}.')
+            elif mine:
+                reasons = sorted({detail or status for _, status, detail, _ in mine})
+                self.stdout.write(f'{title} skipped: {"; ".join(reasons)}.')
+
+    def _print_whatsapp(self, payload, images, now):
+        """The dry run's WhatsApp: per named recipient, what would be sent. Reads the
+        list and the switches only; uploads nothing, signs nothing."""
+        event = get_event(EVENT)
+        spec = event.whatsapp
+        # The body exactly as a real send would clean it; the header slot is left empty
+        # because no link is signed in a dry run.
+        body = sanitise_params(['', *spec.params({'taken_at': payload['taken_at_label']})],
+                               body_fixed_chars=spec.body_fixed_chars, media_header=True)[1:]
+        self.stdout.write('')
+        self.stdout.write(f'WhatsApp: channel {"active" if channel_is_active(event, WHATSAPP) else "paused"}, '
+                          f'master switch {"ON" if SystemSettings.get().whatsapp_enabled else "OFF"}; '
+                          f'template {spec.template} ({spec.language}), '
+                          f'{len(images)} message(s) per recipient')
+        people, inactive = merge_named_recipients(event, [])
+        if not people and not inactive:
+            self.stdout.write('  nobody on the named list')
+        for profile in inactive:
+            self.stdout.write(f'  {profile.user.username}: inactive, nothing sent')
+        for profile in people:
+            name = profile.user.username
+            if valid_whatsapp_number(profile.phone_number) is None:
+                self.stdout.write(f'  {name}: {NO_VALID_WHATSAPP_NUMBER} (would fail)')
+                continue
+            for number in range(1, len(images) + 1):
+                self.stdout.write(f'  {name} #{number}: header: signed URL for '
+                                  f'{snapshot_object_path(now, number)} | body {{{{1}}}}: '
+                                  f'{body[0]!r}')
 
     def _write_files(self, out_dir, payload, images):
         folder = Path(out_dir)

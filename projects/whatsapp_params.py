@@ -81,17 +81,28 @@ def _level(lengths, budget):
     return low
 
 
-def sanitise_params(params, *, header_fixed_chars=0, body_fixed_chars=0):
+def sanitise_params(params, *, header_fixed_chars=0, body_fixed_chars=0,
+                    media_header=False):
     """[header, *body] cleaned and cut by the W4 rules, as a new list of str.
 
     params             : the builder's output, header first (ruling W1).
     header_fixed_chars : characters of the approved header outside its variable.
     body_fixed_chars   : characters of the approved body outside its variables.
+    media_header       : SNAP-2. True when params[0] is the URL of an image header, not
+                         header text: it is returned as given, only trimmed. A signed
+                         link cut to HEADER_LIMIT, or with its characters "cleaned", no
+                         longer opens, and Meta's text rules are about text a person
+                         reads. The body values go through every rule as always. False,
+                         the default every text-header event keeps, is unchanged.
     """
-    values = [clean_value(v) for v in params]
+    if media_header and params:
+        values = ['' if params[0] is None else str(params[0]).strip()]
+        values += [clean_value(v) for v in params[1:]]
+    else:
+        values = [clean_value(v) for v in params]
     if not values:
         return values
-    header = cut(values[0], HEADER_LIMIT - header_fixed_chars)
+    header = values[0] if media_header else cut(values[0], HEADER_LIMIT - header_fixed_chars)
     body = [cut(v, BODY_VALUE_LIMIT) for v in values[1:]]
     budget = BODY_LIMIT - body_fixed_chars
     if body and sum(len(v) for v in body) > budget:

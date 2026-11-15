@@ -24,6 +24,11 @@ finished by send_notification(). The values are cleaned and cut by
 whatsapp_params.sanitise_params() first, and within one send a phone number gets one
 message however many recipients share it (W9).
 
+SNAP-2: a command_only event (fired by a management command through notify_now(), and
+refused by notify()) sends its WhatsApp at once on that thread instead, so the command
+reads the finished rows; and an image-header event sends one message per image the
+caller supplies (whatsapp_images), logging each image's storage path, never its link.
+
 DEFERRED EVENTS (NTF-DCG S2). For an event registered with deferred=True, the email is
 rendered here as usual and then handed to notify_deferred, which writes a 'pending' row
 and makes the send_notification() call from a background thread. In-app, recipients and
@@ -50,7 +55,8 @@ from django.utils.html import escape
 from django.utils.safestring import mark_safe
 
 from . import notify_deferred
-from .models import NotificationEventRecipient, NotificationEventSetting, NotificationTemplate
+from .models import (NotificationEventRecipient, NotificationEventSetting, NotificationTemplate,
+                     SystemSettings)
 from .notifications import _log, send_notification, valid_whatsapp_number
 from .notify_registry import IDENTIFIER_RE, PLACEHOLDER_RE, WHATSAPP, EmailTable, get_event
 from .whatsapp_params import describe_params, sanitise_params
@@ -372,7 +378,7 @@ def _whatsapp_plan(event):
 
 
 def _send_to_one(event, recipient, values, actor, related_project, link, plan, log_label,
-                 wa_plan=None, wa_seen=None, attachments=None):
+                 wa_plan=None, wa_seen=None, attachments=None, whatsapp_images=None):
     """In-app, then email, then WhatsApp, for one person. The channels are independent
     (ruling Q4): a failure on one is logged and the others are still attempted.
 
@@ -383,7 +389,8 @@ def _send_to_one(event, recipient, values, actor, related_project, link, plan, l
     `wa_plan` is _whatsapp_plan()'s answer, None for an event without a WhatsApp leg.
     `wa_seen` is the set of numbers already handed off in this send (W9), shared by
     every recipient of one notify() call. `attachments` reach the email leg only
-    (SNAP-1); None for every caller before it.
+    (SNAP-1); None for every caller before it. `whatsapp_images` reach the WhatsApp leg
+    only (SNAP-2); None for every caller but send_dashboard_snapshot.
     """
     name = recipient.user.get_full_name() or recipient.user.username
     # NTF-DCG 3b (Q3): the first name, for a WhatsApp greeting. A key no other event
@@ -415,7 +422,7 @@ def _send_to_one(event, recipient, values, actor, related_project, link, plan, l
                    log_label, base, attachments=attachments)
     if wa_plan is not None:
         _whatsapp_leg(event, recipient, values, wa_plan, base,
-                      set() if wa_seen is None else wa_seen)
+                      set() if wa_seen is None else wa_seen, images=whatsapp_images)
 
 
 def _email_leg(event, recipient, values, actor, related_project, link, plan, log_label,
@@ -467,8 +474,12 @@ def _email_leg(event, recipient, values, actor, related_project, link, plan, log
              event_code=event.code, template_version=payload)
 
 
-def _whatsapp_leg(event, recipient, values, plan, base, seen):
+def _whatsapp_leg(event, recipient, values, plan, base, seen, images=None):
     """The WhatsApp of one person (NTF-DCG S3a, W2-W5, W9). Never raises.
+
+    SNAP-2: an image-header event sends one message per entry of `images` (notify_now's
+    whatsapp_images) after the one W9 check for the person (_image_messages); a
+    command_only event sends at once instead of deferring (_hand_off).
 
     Paused ⇒ a 'skipped' row and nothing else, as for email. Otherwise the builder's
     values are checked against param_count, sanitised (W4) and handed to the deferred
@@ -502,34 +513,102 @@ def _whatsapp_leg(event, recipient, values, plan, base, seen):
                      event_code=event.code)
                 return
             seen.add(digits)
+        if spec.image_header:
+            _image_messages(event, recipient, values, spec, wa_base, images)
+            return
         raw = list(spec.params(values))
         if len(raw) != spec.param_count:
             raise ValueError(f'params builder returned {len(raw)} values, '
                              f'param_count is {spec.param_count}')
         params = sanitise_params(raw, header_fixed_chars=spec.header_fixed_chars,
                                  body_fixed_chars=spec.body_fixed_chars)
-        text = describe_params(params)
-        notify_deferred.defer(
-            recipient=recipient, channel=WHATSAPP,
-            row_fields=dict(wa_base, message=text, event_code=event.code),
-            send_kwargs=dict(message=text, channels=[WHATSAPP], template=spec.template,
-                             template_params=params, whatsapp_language=spec.language,
-                             whatsapp_strict_phone=True))
+        _hand_off(event, recipient, spec, wa_base, params, describe_params(params))
     except Exception as exc:
         logger.exception('notify: WhatsApp %s to %s failed', event.code, recipient.pk)
         _log(wa_base, WHATSAPP, 'failed', f'{type(exc).__name__}: {exc}',
              event_code=event.code)
 
 
+# The reasons an image-header message was not attempted (SNAP-2), on its 'failed' row.
+NO_IMAGE_SUPPLIED = 'no image supplied for the image header'
+IMAGE_NOT_UPLOADED = 'image not uploaded'
+
+
+def _image_messages(event, recipient, values, spec, wa_base, images):
+    """One message per image for an image-header event (SNAP-2, W4), in the order given,
+    each with the same body. `images` is notify_now()'s whatsapp_images: a list of
+    {'path', 'url', 'error'}. Each image has its own try, so one failure is that image's
+    row only and the next image is still sent.
+
+    The row records the image's STORAGE PATH, never its signed link (Zuber, 15 Nov): a
+    link in NotificationLog would be a working 7-day key to the picture for whoever
+    reads the log.
+    """
+    if not images:
+        # The command uploads nothing while the master switch is off (Zuber, 15 Nov), so
+        # say so as send_notification() would, rather than call it a failure.
+        if not SystemSettings.get().whatsapp_enabled:
+            _log(wa_base, WHATSAPP, 'skipped', 'Master switch off', event_code=event.code)
+        else:
+            _log(wa_base, WHATSAPP, 'failed', NO_IMAGE_SUPPLIED, event_code=event.code)
+        return
+    body = list(spec.params(values))
+    if len(body) != spec.param_count - 1:
+        raise ValueError(f'params builder returned {len(body)} values, '
+                         f'param_count is {spec.param_count} (image header: body only)')
+    for image in images:
+        path = image.get('path') or '(no path)'
+        try:
+            if image.get('error'):
+                _log(dict(wa_base, message=f'header: image {path}'), WHATSAPP, 'failed',
+                     f'{IMAGE_NOT_UPLOADED}: {image["error"]}', event_code=event.code)
+                continue
+            url = image.get('url') or ''
+            # Only a signed https link is ever sent as the header (W3).
+            if not url.startswith('https://'):
+                raise ValueError(f'the image link for {path} is not an https URL')
+            params = sanitise_params([url, *body], body_fixed_chars=spec.body_fixed_chars,
+                                     media_header=True)
+            text = describe_params([f'image {path}', *params[1:]])
+            _hand_off(event, recipient, spec, wa_base, params, text)
+        except Exception as exc:
+            logger.exception('notify: WhatsApp %s image %s to %s failed', event.code,
+                             path, recipient.pk)
+            _log(dict(wa_base, message=f'header: image {path}'), WHATSAPP, 'failed',
+                 f'{type(exc).__name__}: {exc}', event_code=event.code)
+
+
+def _hand_off(event, recipient, spec, wa_base, params, text):
+    """Send one WhatsApp: through the deferred pool (every event before SNAP-2, the call
+    exactly as it was), or, for a command_only event, at once on this thread, so the
+    command reads the finished row (SNAP-2, ruling P2). Either way send_notification()
+    applies the master switch, the person's preference and the strict number check, and
+    writes the one row; `text` is that row's message."""
+    if event.deferred:
+        notify_deferred.defer(
+            recipient=recipient, channel=WHATSAPP,
+            row_fields=dict(wa_base, message=text, event_code=event.code),
+            send_kwargs=dict(message=text, channels=[WHATSAPP], template=spec.template,
+                             template_params=params, whatsapp_language=spec.language,
+                             whatsapp_strict_phone=True))
+        return
+    send_notification(
+        recipient=recipient, message=text, channels=[WHATSAPP], template=spec.template,
+        template_params=params, related_project=wa_base['related_project'],
+        actor=wa_base['actor'], event_code=event.code, whatsapp_language=spec.language,
+        whatsapp_strict_phone=True)
+
+
 def _send(event, recipients, values, actor, related_project, link, log_label,
-          attachments=None):
+          attachments=None, whatsapp_images=None):
     plan = _email_plan(event) if 'email' in event.channels else None
     wa_plan = _whatsapp_plan(event) if event.whatsapp is not None else None
     wa_seen = set()   # W9: numbers already handed off in THIS send
     for recipient in recipients:
         try:
             _send_to_one(event, recipient, values, actor, related_project, link, plan,
-                         log_label, wa_plan, wa_seen, attachments=attachments)
+                         log_label, wa_plan, wa_seen, attachments=attachments,
+                         whatsapp_images=whatsapp_images)
         except Exception:
             # _send_to_one already catches per channel; this is the backstop for
             # anything outside those (reading the recipient's name, say), so one
@@ -538,7 +617,7 @@ def _send(event, recipients, values, actor, related_project, link, log_label,
 
 
 def notify_now(event_code, *, recipients, values, actor=None, related_project=None, link='',
-               log_label=None, attachments=None, named_recipients=True):
+               log_label=None, attachments=None, named_recipients=True, whatsapp_images=None):
     """notify(), sent NOW rather than after commit: the same recipients rule, rendering,
     channels and log rows.
 
@@ -561,6 +640,10 @@ def notify_now(event_code, *, recipients, values, actor=None, related_project=No
     `named_recipients=False` (SNAP-1) skips that merge for this one send: a deliberate
     send to one person, such as send_dashboard_snapshot --to. True, the default every
     other caller keeps, merges as always. `attachments` reach the email leg only.
+
+    `whatsapp_images` (SNAP-2): for an event whose WhatsApp header is an image, a list
+    of {'path', 'url', 'error'}, one message per entry to each recipient, in order. Only
+    send_dashboard_snapshot passes it; None everywhere else.
     """
     event = get_event(event_code)
     try:
@@ -580,7 +663,7 @@ def notify_now(event_code, *, recipients, values, actor=None, related_project=No
                     logger.exception('notify_now: could not log inactive %s', profile.pk)
         if targets:
             _send(event, targets, dict(values or {}), actor, related_project, link,
-                  log_label, attachments=attachments)
+                  log_label, attachments=attachments, whatsapp_images=whatsapp_images)
     except Exception:
         logger.exception('notify_now: %s failed', event_code)
 
@@ -614,8 +697,18 @@ def notify(event_code, *, recipients, values, actor=None, related_project=None, 
     HERE, before the callback, as before T3b, so who is told is decided by the state at
     the time of the act. notify_now() resolves the same profile objects again, which reads
     the flags already loaded and drops nobody new.
+
+    SNAP-2: raises ValueError for a command_only event, as for an unknown code (a
+    programmer error, caught by any test that fires it). Such an event sends WhatsApp on
+    the caller's thread, so a view firing it would make the request wait on Interakt;
+    only its management command may send it, through notify_now().
     """
     event = get_event(event_code)
+    # Who may fire a command_only event: its management command, via notify_now().
+    # Everyone else is refused here because notify() is the path every view uses.
+    if event.command_only:
+        raise ValueError(f'{event_code!r} is command-only: its management command sends '
+                         f'it with notify_now(), never notify().')
     try:
         targets = resolve_recipients(recipients, actor)
         # NTF-DCG 5b (ruling 5b-Q4): an opted-in event is scheduled even when its code

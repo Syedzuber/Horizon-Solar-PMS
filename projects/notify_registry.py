@@ -23,6 +23,14 @@ declared only so the import-time check can verify the counts and Meta's layout r
 against what was approved. A WhatsApp channel starts PAUSED whatever the event's
 default_state (default_state_for) and is switched on by Admin only.
 
+SNAP-2: two additive exceptions, each opt-in per event and declared here in code.
+  * header_media='image' on a WhatsAppSpec: the template's header is an image whose URL
+    the sender supplies per send (notify_now's whatsapp_images), not text.
+  * command_only=True on an event: it is fired only by a management command, through
+    notify_now(), and so may send WhatsApp WITHOUT being deferred: no request waits on
+    a cron job, and the command needs the outcome rows for its exit code. notify(), the
+    path every view uses, refuses such an event.
+
 This module imports nothing from the app except whatsapp_params, which is pure and
 imports nothing itself, so models.py, notify.py and notify_admin.py can all import it
 without a cycle.
@@ -62,6 +70,11 @@ _WA_ADJACENT_RE = re.compile(r'\{\{\s*\d+\s*\}\}\s*\{\{\s*\d+\s*\}\}')
 # The channel whose default is always paused (ruling W2): a new WhatsApp leg sends
 # nothing until Admin switches it on, after a real-phone test (notify_admin.set_state).
 WHATSAPP = 'whatsapp'
+
+# SNAP-2: WhatsAppSpec.header_media for a template whose header is an image. '' (the
+# default) is a text header with one variable, as every template before SNAP-2.
+HEADER_MEDIA_IMAGE = 'image'
+HEADER_MEDIA_KINDS = ('', HEADER_MEDIA_IMAGE)
 
 
 @dataclass(frozen=True)
@@ -129,7 +142,17 @@ class WhatsAppSpec:
     header_fixed_chars: int  # Characters of header_text outside its variable; checked against the text
     body_fixed_chars: int    # Characters of body_text outside its variables; checked against the text
     param_count: int         # 1 header value + n body values; the builder must return exactly this many
-    params: object           # Callable(values) -> [header, *body]
+    params: object           # Callable(values) -> [header, *body]; [*body] only for an image header
+    # SNAP-2: '' = a text header (header_text holds its {{1}}); HEADER_MEDIA_IMAGE = an
+    # image header, whose URL is supplied per send by the caller (notify_now's
+    # whatsapp_images), never by the builder: header_text is then '' with 0 fixed chars,
+    # param_count still counts the header, and the builder returns the body values only.
+    header_media: str = ''
+
+    @property
+    def image_header(self):
+        """True when the header is an image supplied per send (SNAP-2)."""
+        return self.header_media == HEADER_MEDIA_IMAGE
 
     def fixed_chars(self, text):
         """`text` without its variables, as Interakt counts the rendered length."""
@@ -169,6 +192,12 @@ class NotificationEvent:
     # resolves; notify_now() merges them into every send. False refuses such rows on add.
     # Opt-in per event: no event shipped in 5b sets it (5c's GRN email is the first).
     named_recipients: bool = False
+    # SNAP-2 (ruling P2, option a): True = fired only by a management command, through
+    # notify_now(); notify() refuses it, so no view can fire it. The one event that may
+    # declare WhatsApp without being deferred (its WhatsApp is sent on the command's own
+    # thread, so the command reads the outcome rows for its exit code). Must not be
+    # deferred. Only daily_dashboard_snapshot sets it.
+    command_only: bool = False
 
     def default_state_for(self, channel):
         """The state of `channel` when Admin has never switched it: WhatsApp is always
@@ -236,9 +265,11 @@ def _whatsapp_errors(event, where):
     errors = []
     if not isinstance(spec, WhatsAppSpec):
         return [f'{where}: whatsapp must be a WhatsAppSpec']
-    if not event.deferred:
+    if not event.deferred and not event.command_only:
         # W1: WhatsApp is sent only through the deferred path, so the request never
-        # waits on Interakt and every send has a pending row.
+        # waits on Interakt and every send has a pending row. SNAP-2: the one allowance
+        # is an event only a management command fires (command_only), where no request
+        # is waiting and the command needs the outcome on its own thread.
         errors.append(f'{where}: declares WhatsApp but is not deferred')
     if not listed:
         errors.append(f'{where}: declares WhatsApp but does not list the whatsapp channel')
@@ -246,16 +277,29 @@ def _whatsapp_errors(event, where):
         errors.append(f'{where}: whatsapp template and language are required')
     if not callable(spec.params):
         errors.append(f'{where}: whatsapp params must be callable')
+    if event.command_only and event.deferred:
+        # SNAP-2: command_only exists only to send on the command's own thread.
+        errors.append(f'{where}: a command_only event is sent at once and may not be '
+                      f'deferred')
     if not isinstance(spec.param_count, int) or spec.param_count < 1:
         # The header value is always params[0] (W1), so at least one value.
         return errors + [f'{where}: whatsapp param_count must be at least 1']
     body_count = spec.param_count - 1
-    errors += _wa_text_errors(where, 'header', spec.header_text, 1, spec.header_fixed_chars,
-                              check_ends=False)
+    if spec.header_media not in HEADER_MEDIA_KINDS:
+        return errors + [f'{where}: whatsapp header_media must be one of {HEADER_MEDIA_KINDS}']
+    if spec.image_header:
+        # SNAP-2: an image header has no text, so there is nothing for Meta's text rules
+        # or the 60-character limit to check; its URL comes from the sender per send.
+        if spec.header_text or spec.header_fixed_chars:
+            errors.append(f'{where}: an image header has no text: header_text must be '
+                          f"'' and header_fixed_chars 0")
+    else:
+        errors += _wa_text_errors(where, 'header', spec.header_text, 1,
+                                  spec.header_fixed_chars, check_ends=False)
     errors += _wa_text_errors(where, 'body', spec.body_text, body_count, spec.body_fixed_chars)
     # Room for the values once the fixed text is counted: at least one character each,
     # or sanitise_params() could not keep a rendered message under Interakt's limits.
-    if HEADER_LIMIT - spec.header_fixed_chars < 1:
+    if not spec.image_header and HEADER_LIMIT - spec.header_fixed_chars < 1:
         errors.append(f'{where}: whatsapp header text leaves no room for its value')
     if BODY_LIMIT - spec.body_fixed_chars < body_count:
         errors.append(f'{where}: whatsapp body text leaves no room for its values')
@@ -266,10 +310,14 @@ def _whatsapp_errors(event, where):
             errors.append(f'{where}: whatsapp params builder fails on the samples: '
                           f'{type(exc).__name__}: {exc}')
         else:
-            if not isinstance(out, (list, tuple)) or len(out) != spec.param_count:
+            # An image header's builder returns the body only (SNAP-2): the header value
+            # is the URL the sender supplies, so one fewer than param_count.
+            expected = body_count if spec.image_header else spec.param_count
+            if not isinstance(out, (list, tuple)) or len(out) != expected:
                 got = len(out) if isinstance(out, (list, tuple)) else type(out).__name__
+                image = ' (image header: body values only)' if spec.image_header else ''
                 errors.append(f'{where}: whatsapp params builder returns {got} values, '
-                              f'param_count is {spec.param_count}')
+                              f'param_count is {spec.param_count}{image}')
     return errors
 
 
@@ -332,6 +380,20 @@ DC_UPDATED_BODY = (
     'Please refer to the latest challan before receiving the material: {{6}}.\n\n'
     'Thanks'
 )
+
+
+# --- SNAP-2: the approved daily snapshot template -------------------------------------
+# daily_snapshot_pm, English, UTILITY, as on the Interakt screen on 15 Nov 2026 (quoted,
+# not edited): an IMAGE header (the snapshot PNG, supplied per send), no footer, no
+# buttons, and this body with one variable, the collection time as the image prints it.
+SNAPSHOT_WA_TEMPLATE = 'daily_snapshot_pm'
+SNAPSHOT_WA_BODY = 'Daily site status as of {{1}}. Figures are from Horizon PMS.\n- Thanks'
+
+
+def _snapshot_whatsapp_params(values):
+    """The body of daily_snapshot_pm: [taken_at]. No header value: the header is the
+    image, whose signed link the command supplies per image (header_media='image')."""
+    return [values['taken_at']]
 
 
 def _dc_whatsapp_params(values):
@@ -1710,12 +1772,15 @@ NOTIFICATION_EVENTS = _build_registry([
     # Site Dashboard to be worth having. NOT deferred (SNAP-1 Q5): no request waits on
     # a cron job, and the command needs the send's outcome for its exit code.
     # No variable carries a money figure (tests_dashboard_snapshot pins the payload).
+    # SNAP-2: also WhatsApp, template daily_snapshot_pm, one message per image per
+    # recipient, the image's signed link as the header. command_only is what lets a
+    # non-deferred event declare WhatsApp; the channel starts paused (default_state_for).
     NotificationEvent(
         code='daily_dashboard_snapshot',
         label='Site Dashboard daily snapshot',
         module='Dashboard',
         tier=TIER_KNOW,
-        channels=('email',),
+        channels=('email', 'whatsapp'),
         variables=(
             Variable('snapshot_date', 'The date of the figures, e.g. 14 Nov 2026',
                      '14 Nov 2026'),
@@ -1737,9 +1802,16 @@ NOTIFICATION_EVENTS = _build_registry([
         recipients_rule=('Only the named recipients below; the code names nobody. Sent '
                          'once a day by the send_dashboard_snapshot command (8 PM IST '
                          'cron). Its --to option sends to one person instead of the '
-                         'list.'),
+                         'list. WhatsApp: one message per image to each named '
+                         'recipient\'s own number (Interakt cannot post to a group).'),
         default_state='paused',
         named_recipients=True,
+        command_only=True,
+        whatsapp=WhatsAppSpec(
+            template=SNAPSHOT_WA_TEMPLATE, language='en',
+            header_text='', body_text=SNAPSHOT_WA_BODY,
+            header_fixed_chars=0, body_fixed_chars=64, param_count=2,
+            params=_snapshot_whatsapp_params, header_media=HEADER_MEDIA_IMAGE),
     ),
 ])
 

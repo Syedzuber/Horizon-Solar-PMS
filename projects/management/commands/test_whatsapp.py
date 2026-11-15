@@ -36,6 +36,16 @@ REGISTRY EVENT MODE (NTF-DCG S3a, ruling W7):
     starting '[TEST] '. A 'sent' row of the event's current template from the last 14
     days is what notify_admin.set_state() needs to switch the WhatsApp channel on.
     --dry-run prints the values and payload and sends and writes nothing.
+
+IMAGE HEADER (SNAP-2):
+    python manage.py test_whatsapp --event daily_dashboard_snapshot --user <username> --image FILE.png
+
+    An event whose template header is an image (daily_dashboard_snapshot) needs --image:
+    a PNG on this machine, e.g. one written by send_dashboard_snapshot --dry-run
+    --out-dir. It is uploaded to the private bucket under snapshots/, a link signed for
+    7 days is the header, and the body is the event's sample. Only after the master
+    switch and preference checks, so a refused test uploads nothing; --dry-run uploads
+    nothing. The row and the printed payload name the storage path, never the link.
 """
 
 import json
@@ -50,6 +60,9 @@ from projects.models import UserProfile, NotificationLog, SystemSettings
 from projects.notifications import (
     NO_VALID_WHATSAPP_NUMBER, _send_whatsapp, interakt_payload, send_notification,
     valid_whatsapp_number,
+)
+from projects.management.commands.send_dashboard_snapshot import (
+    snapshot_object_path, upload_snapshot_image,
 )
 from projects.notify import absolute_url
 from projects.notify_admin import WHATSAPP_TEST_MARKER
@@ -102,14 +115,19 @@ class Command(BaseCommand):
         parser.add_argument(
             '--dry-run', action='store_true',
             help="With --event: print the values and payload; send and write nothing.")
+        parser.add_argument(
+            '--image', default='', metavar='PNG_FILE',
+            help="With --event, for an event whose header is an image (SNAP-2): the PNG "
+                 "to send as the header. Uploaded to the private bucket and signed.")
 
     def handle(self, *args, **options):
-        if options['event'] or options['user'] or options['dry_run']:
-            return self.handle_event(options['event'], options['user'], options['dry_run'])
+        if options['event'] or options['user'] or options['dry_run'] or options['image']:
+            return self.handle_event(options['event'], options['user'], options['dry_run'],
+                                     options['image'])
         return self.handle_legacy()
 
     # ------------------------------------------------------------------ W7
-    def handle_event(self, event_code, username, dry_run):
+    def handle_event(self, event_code, username, dry_run, image_file=''):
         """One registry event's WhatsApp to one user (W7). Refusals are CommandErrors and
         write nothing; past them, the send writes exactly one NotificationLog row."""
         if not event_code or not username:
@@ -123,6 +141,14 @@ class Command(BaseCommand):
         spec = event.whatsapp
         if spec is None:
             raise CommandError(f'Event {event_code!r} does not declare WhatsApp.')
+        # SNAP-2: an image header needs a real image, and only an image header takes one.
+        if spec.image_header and not image_file:
+            raise CommandError(f'Event {event_code!r} has an image header: give the PNG '
+                               f'with --image.')
+        if image_file and not spec.image_header:
+            raise CommandError(f'--image is only for an event whose header is an image; '
+                               f'{event_code!r} has a text header.')
+        image_bytes = self._read_png(image_file) if image_file else None
         profile = (UserProfile.objects.select_related('user')
                    .filter(user__username=username).first())
         if profile is None:
@@ -139,11 +165,21 @@ class Command(BaseCommand):
         values = dict(event.samples())
         values['link'] = absolute_url(values.get('link', ''))
         raw = list(spec.params(values))
-        if len(raw) != spec.param_count:
+        # An image header's builder returns the body only (SNAP-2).
+        expected = spec.param_count - 1 if spec.image_header else spec.param_count
+        if len(raw) != expected:
             raise CommandError(f'The params builder returned {len(raw)} values; '
                                f'param_count is {spec.param_count}.')
-        params = sanitise_params(raw, header_fixed_chars=spec.header_fixed_chars,
-                                 body_fixed_chars=spec.body_fixed_chars)
+        if spec.image_header:
+            # The header slot holds what is printed until the real link is signed, after
+            # the switch checks below; the link itself is never printed or logged.
+            image_path = snapshot_object_path(timezone.now(), 1, name='whatsapp-test')
+            shown_header = f'signed URL for {image_path}'
+            params = sanitise_params([shown_header, *raw], media_header=True,
+                                     body_fixed_chars=spec.body_fixed_chars)
+        else:
+            params = sanitise_params(raw, header_fixed_chars=spec.header_fixed_chars,
+                                     body_fixed_chars=spec.body_fixed_chars)
 
         settings_row = SystemSettings.objects.filter(pk=1).first()
         master_on = bool(settings_row and settings_row.whatsapp_enabled)
@@ -172,16 +208,33 @@ class Command(BaseCommand):
             raise CommandError(f'User {username!r} has WhatsApp notifications off; '
                                f'nothing sent.')
 
+        logged = params
+        if spec.image_header:
+            # SNAP-2: uploaded only now, past every refusal, so a refused test leaves no
+            # object in the bucket. A failed upload sends nothing and writes no row.
+            uploaded = upload_snapshot_image(image_path, image_bytes)
+            if uploaded['error']:
+                raise CommandError(f'Upload failed for {image_path}: {uploaded["error"]}; '
+                                   f'nothing sent.')
+            out(f'Uploaded          : {image_path} (link valid 7 days)')
+            params = [uploaded['url'], *params[1:]]
+            logged = [f'image {image_path}', *params[1:]]
+
         # _send_whatsapp() itself, so the test posts the bytes a real send of this event
         # would post and its row is logged by the same code. The base marks it a test.
         base = dict(recipient=profile, related_project=None, actor=None,
-                    message=WHATSAPP_TEST_MARKER + describe_params(params),
+                    message=WHATSAPP_TEST_MARKER + describe_params(logged),
                     template_name=spec.template, event_code=event.code)
         mark = NotificationLog.objects.order_by('-pk').values_list('pk', flat=True).first() or 0
         result = _send_whatsapp(profile, spec.template, params, base,
                                 language=spec.language, strict_phone=True)
         if result['payload'] is not None:
-            out(f'PAYLOAD  : {json.dumps(result["payload"], ensure_ascii=False)}')
+            shown = result['payload']
+            if spec.image_header:
+                # The console shows the storage path in the header slot, not the link.
+                shown = json.loads(json.dumps(shown))
+                shown['template']['headerValues'] = [shown_header]
+            out(f'PAYLOAD  : {json.dumps(shown, ensure_ascii=False)}')
         out(f'HTTP     : {result["status_code"]}')
         out(f'RESPONSE : {result["response_text"]}')
         row = (NotificationLog.objects.filter(pk__gt=mark, recipient=profile,
@@ -191,6 +244,18 @@ class Command(BaseCommand):
             out(f'LOG ROW  : #{row.pk} status={row.status} '
                 f'interakt_message_id={row.interakt_message_id!r} '
                 f'error={row.error_detail!r}')
+
+    def _read_png(self, image_file):
+        """The bytes of `image_file`, refused unless it is a PNG (the snapshot's format;
+        the bucket object is stored as image/png)."""
+        try:
+            with open(image_file, 'rb') as handle:
+                content = handle.read()
+        except OSError as exc:
+            raise CommandError(f'--image: cannot read {image_file!r}: {exc.strerror}.')
+        if not content.startswith(b'\x89PNG\r\n\x1a\n'):
+            raise CommandError(f'--image: {image_file!r} is not a PNG.')
+        return content
 
     # ------------------------------------------------------------------ legacy
     def handle_legacy(self):
