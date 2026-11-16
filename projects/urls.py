@@ -16,6 +16,7 @@ from . import views_tender_documents  # TD-B2 tender documents manage page — s
 from . import views_site_dashboard  # DASH-B2 Site Dashboard page — separate module, same pattern
 from . import views_tenders_gantt  # DASH-B3 Tenders Gantt page — separate module, same pattern
 from . import views_finance_work  # FIN-M-B8a Finance work page — separate module, same pattern
+from . import views_finance_head  # FIN-H-B3 Finance Head page — separate module, same pattern
 from . import video_proto  # GRN-V0 throwaway video prototype — delete with the prototype
 
 urlpatterns = [
@@ -60,6 +61,9 @@ urlpatterns = [
     # FIN-M-B8a Finance work page — Finance works from it; CEO, Admin and System Admin read
     # it (permissions.user_can_view_finance_work); everyone else 403. GET only.
     path('finance/work/',            views_finance_work.finance_work, name='finance_work'),
+    # FIN-H-B3 Finance Head page — the Finance Head, CEO, Admin and System Admin
+    # (permissions.user_can_view_finance_head_page, H12); everyone else 403. GET only.
+    path('finance/head/',            views_finance_head.finance_head, name='finance_head'),
 
     # ---------------------------------------------------------------------------
     # User management — Admin only

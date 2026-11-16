@@ -254,21 +254,23 @@ class MoreRowTests(B4Fixture):
                                     'Vendor attendance · 0 sites · 0 people']},
             # FIN-M-B8b ruling (b): "Finance work" heads the Finance group for everyone the
             # Finance work page admits (Finance, CEO, Admin, System Admin).
+            # FIN-H-B3: "Finance Head" comes first for everyone the Finance Head page admits
+            # (CEO, Admin, System Admin here; a plain Finance user is not one of them).
             self.finance:  {'Tasks': self.TASKS,
                             'Finance': ['Finance work', 'Payments queue · to pay']},
             self.ceo:      {'Tasks': self.TASKS,
-                            'Finance': ['Finance work', 'Payments queue · to pay'],
+                            'Finance': ['Finance Head', 'Finance work', 'Payments queue · to pay'],
                             'CEO': ['Portfolio analytics (Residential)', 'Tenders overview',
                                     'Overdue tasks list']},
             self.admin:    {'Tasks': self.TASKS,
                             'SCM': ['Contractors to map',
                                     'Vendor attendance · 0 sites · 0 people'],
-                            'Finance': ['Finance work', 'Payments queue · to pay'],
+                            'Finance': ['Finance Head', 'Finance work', 'Payments queue · to pay'],
                             'Admin': ['Manage users', 'Activity log', 'Admin panel'],
                             'CEO': ['Portfolio analytics (Residential)', 'Tenders overview',
                                     'Overdue tasks list']},
             self.sysadmin: {'Tasks': self.TASKS,
-                            'Finance': ['Finance work', 'Payments queue · to pay'],
+                            'Finance': ['Finance Head', 'Finance work', 'Payments queue · to pay'],
                             'Admin': ['Sub-admin portal'],
                             'CEO': ['Portfolio analytics (Residential)', 'Tenders overview',
                                     'Overdue tasks list']},

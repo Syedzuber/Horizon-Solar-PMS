@@ -10,7 +10,9 @@ from django.http import HttpResponseForbidden
 # land on the Site Dashboard" (DASH-B4 R1), the same helper that page itself calls;
 # user_can_view_finance_work is the Finance work page's own check (FIN-M-B8b), asked
 # before Finance is sent there so the landing can never be a page that refuses them.
-from .permissions import user_can_view_finance_work, user_can_view_site_dashboard
+# user_is_finance_head (FIN-H-B3, H13) sends the Finance Head to their own page instead.
+from .permissions import (user_can_view_finance_work, user_can_view_site_dashboard,
+                          user_is_finance_head)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,11 @@ SITE_DASHBOARD_URL = '/dashboard/sites/'
 #: urls.py imports views, which import this module; tests_finance_landing pins it equal
 #: to reverse('finance_work').
 FINANCE_WORK_URL = '/finance/work/'
+
+#: The Finance Head page (FIN-H-B3, views_finance_head.finance_head): the Finance Head's
+#: landing page and Home link (H13). Written out for the same reason as FINANCE_WORK_URL;
+#: tests_finance_head_page pins it equal to reverse('finance_head').
+FINANCE_HEAD_URL = '/finance/head/'
 
 # Maps every role to its landing dashboard URL.
 # Used by login_view and role_required to redirect users after auth.
@@ -102,10 +109,19 @@ def get_user_dashboard(user, context=None):
     # is one click away from it. Decided by role alone (ruling 13 Nov): CEO, Admin and
     # System Admin may READ the Finance work page too, but their landing stays the Site
     # Dashboard, and no flag (is_payment_approver, is_design_head, ...) moves Finance
-    # elsewhere. Asked of the page's own helper as well, so Home and every back link can
+    # elsewhere — except the Finance Head flag (FIN-H-B3, H13), answered just below.
+    # Asked of the page's own helper as well, so Home and every back link can
     # never point Finance at a page that refuses them. Before the Site Dashboard check
     # below, which also admits Finance. A context argument is not carried: the Finance
     # work page has no Residential / Tenders split.
+    #
+    # FIN-H-B3 (H13): the one exception to the 13 Nov rule above — a Finance user holding
+    # the Finance Head flag lands on the Finance Head page. Asked of user_is_finance_head,
+    # which re-checks role, flag and active login and profile, so a stale flag never moves
+    # anyone; every Finance Head passes user_can_view_finance_head_page, so the landing
+    # never refuses them. Only role 'Finance' reaches it: no other role's landing changes.
+    if role == 'Finance' and user_is_finance_head(user):
+        return FINANCE_HEAD_URL
     if role == 'Finance' and user_can_view_finance_work(user):
         return FINANCE_WORK_URL
 
@@ -130,7 +146,8 @@ def get_post_login_url(user):
 
     DASH-B4 (R1): the role's own dashboard for everyone, which is the Site Dashboard for
     every role user_can_view_site_dashboard() admits except Finance, who land on the
-    Finance work page (FIN-M-B8b). The CEO / Finance / SCM context chooser (/landing/) is
+    Finance work page (FIN-M-B8b) — or, for the Finance Head, on the Finance Head page
+    (FIN-H-B3, H13). The CEO / Finance / SCM context chooser (/landing/) is
     no longer a stop on the way in.
 
     0.2 lockdown: profile-less resolves to NO_PROFILE_URL for the same reason
@@ -154,7 +171,8 @@ def retired_for_site_dashboard(serve_if=None):
 
         Site Dashboard roles (R1)  302 to get_user_dashboard(user), whichever old URL it
                                    is: SITE_DASHBOARD_URL for every R1 role but Finance,
-                                   FINANCE_WORK_URL for Finance (FIN-M-B8b, option A)
+                                   FINANCE_WORK_URL for Finance (FIN-M-B8b, option A),
+                                   FINANCE_HEAD_URL for the Finance Head (FIN-H-B3, H13)
         everyone else              falls through to @role_required: today's 403 unchanged
 
     The name is kept from DASH-B4: who is redirected is still decided by the Site
@@ -169,7 +187,8 @@ def retired_for_site_dashboard(serve_if=None):
     exercising the pages until the deletion commit removes those views, those tests and
     this switch together (ruling 3). Read per request, so override_settings takes effect.
     Turning it off restores the old pages only; login and Home still go to each user's
-    landing (get_user_dashboard: the Site Dashboard, or Finance work for Finance).
+    landing (get_user_dashboard: the Site Dashboard, or Finance work for Finance, or the
+    Finance Head page for the Finance Head).
     """
     def decorator(view_func):
         @wraps(view_func)

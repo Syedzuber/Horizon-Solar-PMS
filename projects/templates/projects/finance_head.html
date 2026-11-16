@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Finance Head — SolarPMS{% endblock %}
+
+{% block extra_head %}
+{% comment %}FIN-H-B3. The Finance work page's stack: Bootstrap 5.3.3 from base.html, page-scoped
+   CSS under .sd, Alpine 3.14.8 for the chart's picked week only. No fetch, no XHR, no form:
+   the period switch is three links (H2: read only).
+   CSS load order is REQUIRED (FIN-H-B0 finding): sd_base.css, then this page's inline rules,
+   then sd_queue.css, so the 760 px phone rules in sd_queue win over inline widths.
+   The inline block repeats Finance work's own differing rules (.head, .meta, .seg, .seg a,
+   .pill, .kv) because those are not in the shared files, then this page's rules: panels,
+   ageing bars, chart, net cards. Light only: neither shared file has a dark theme.{% endcomment %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<link rel="stylesheet" href="{% static 'projects/css/sd_base.css' %}?v=20261116">
+<style>
+  .sd .head { display: flex; gap: 12px; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; margin-bottom: 16px; }
+  .sd .meta { font-size: 12px; color: var(--sd-muted); display: block; min-width: 0; }
+  .sd .seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--sd-line); border-radius: 8px; overflow: hidden; background: var(--sd-surface); }
+  .sd .seg a { padding: 6px 11px; color: var(--sd-muted); text-decoration: none; font-size: .875rem; white-space: nowrap; }
+  .sd .pill { font-size: 11.5px; padding: 2px 7px; border-radius: 99px; white-space: nowrap; font-weight: 500; display: inline-block; }
+  .sd .kv { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 5px 10px; font-size: 12.5px; margin: 0; }
+
+  /* Ageing: one hue, four steps light to full --sd-crit (#c23b2a), grey for unknown. */
+  .sd { --age-1: #f0ceca; --age-2: #e19d95; --age-3: #d16c5f; --age-4: #c23b2a; --age-unk: #aab3ad;
+        --fh-in: #1a7a4a; --fh-out: #3a5fb0; }
+  .sd .ctrl { display: flex; gap: 8px 12px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+  .sd .kpi .v.msg { font-size: .95rem; font-weight: 600; line-height: 1.25; color: var(--sd-muted); }
+
+  .sd .panels { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px; margin-bottom: 22px; }
+  .sd .panel { background: var(--sd-surface); border: 1px solid var(--sd-line); border-radius: 12px; padding: 14px 16px; min-width: 0; }
+  .sd .panel h2 { margin-bottom: 10px; }
+  .sd .flow { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+  .sd .flow > li { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 2px 12px; padding: 9px 0; border-bottom: 1px solid var(--sd-line); }
+  .sd .flow > li:last-child { border-bottom: 0; }
+  .sd .flow .lbl { font-weight: 500; font-size: 13.5px; }
+  .sd .flow .lbl a { color: inherit; }
+  .sd .flow .amt { text-align: right; }
+  .sd .flow .meta { grid-column: 1 / -1; overflow-wrap: anywhere; }
+  .sd .flow .types { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; }
+  .sd .flow .types a { color: var(--sd-navy); }
+  .sd .flow .apart { margin-top: 6px; border-top: 1px dashed var(--sd-line); border-bottom: 0; }
+  .sd .unset { color: var(--sd-warn); font-weight: 600; }
+  .sd .empty { padding: 14px; color: var(--sd-muted); background: var(--sd-surface-2); border-radius: 10px; font-size: 13px; font-weight: 500; }
+  .sd .fixed { font-size: 12px; color: var(--sd-faint); margin: 10px 0 0; }
+
+  .sd .age { margin-top: 12px; }
+  .sd .age h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: var(--sd-faint); font-weight: 600; margin: 0 0 6px; }
+  .sd .agebar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: var(--sd-surface-2); }
+  .sd .agebar span { display: block; height: 100%; }
+  .sd .s1 { background: var(--age-1); } .sd .s2 { background: var(--age-2); }
+  .sd .s3 { background: var(--age-3); } .sd .s4 { background: var(--age-4); }
+  .sd .sunk { background: var(--age-unk); }
+  .sd .legend { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--sd-muted); }
+  .sd .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+  .sd .legend b { color: var(--sd-ink); font-weight: 600; }
+
+  .sd .chartbox { background: var(--sd-surface); border: 1px solid var(--sd-line); border-radius: 12px; padding: 14px 16px; margin-bottom: 22px; }
+  .sd .chartlegend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12.5px; color: var(--sd-muted); margin: 4px 0 6px; }
+  .sd .chartlegend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 5px; vertical-align: -2px; }
+  .sd .tip { font-size: 13px; min-height: 1.4em; margin-bottom: 8px; font-weight: 500; }
+  .sd .tip.idle { color: var(--sd-faint); font-weight: 400; }
+  .sd .chart { display: flex; align-items: stretch; gap: 4px; height: 170px; border-bottom: 1px solid var(--sd-line); }
+  .sd .wk { flex: 1 1 0; min-width: 0; display: flex; align-items: flex-end; justify-content: center; gap: 3px; background: none; border: 0; padding: 0 2px; border-radius: 6px 6px 0 0; cursor: pointer; }
+  .sd .wk:hover, .sd .wk[aria-pressed="true"] { background: var(--sd-surface-2); }
+  .sd .bar { width: min(18px, 42%); border-radius: 4px 4px 0 0; }
+  .sd .bar.in { background: var(--fh-in); } .sd .bar.out { background: var(--fh-out); }
+  .sd .wklabels { display: flex; gap: 4px; margin-top: 4px; }
+  .sd .wklabels span { flex: 1 1 0; min-width: 0; text-align: center; font-size: 11px; color: var(--sd-faint); white-space: nowrap; overflow: hidden; }
+  .sd details.numbers { margin-top: 12px; font-size: 13px; }
+  .sd details.numbers summary { cursor: pointer; color: var(--sd-navy); }
+  .sd .numbers table { width: 100%; margin-top: 8px; border-collapse: collapse; }
+  .sd .numbers th, .sd .numbers td { padding: 4px 6px; border-bottom: 1px solid var(--sd-line); text-align: right; }
+  .sd .numbers th:first-child, .sd .numbers td:first-child { text-align: left; }
+
+  .sd .cards { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
+  .sd .card-t { background: var(--sd-surface); border: 1px solid var(--sd-line); border-radius: 12px; padding: 12px 14px; min-width: 0; }
+  .sd .card-t h3 { font-size: 1rem; font-weight: 600; margin: 0 0 8px; }
+  .sd .card-t dd { overflow-wrap: anywhere; }
+  .sd .card-t .netrow dt, .sd .card-t .netrow dd { font-weight: 600; color: var(--sd-ink); }
+  .sd .card-t .neg { color: var(--sd-crit); }
+  .sd .words { color: var(--sd-muted); font-weight: 400 !important; }
+
+  @media (max-width: 760px) {
+    .sd .panels, .sd .cards { grid-template-columns: minmax(0,1fr); }
+    .sd .head .wbtns { width: 100%; }
+  }
+</style>
+<link rel="stylesheet" href="{% static 'projects/css/sd_queue.css' %}?v=20261116">
+{% endblock %}
+
+{% block content %}
+<!-- fh:start -->
+<div class="sd" id="finance-head">
+  <div class="head">
+    <div>
+      <div class="eyebrow">Finance Head · all sites</div>
+      <h1>Finance — money in and out</h1>
+      <p class="sub">{{ period_label }}: {{ recorded_label }}. Read only — every row links to the screen where the work is done.</p>
+    </div>
+    <div class="wbtns">
+      <a class="wbtn pri" href="{% url 'finance_work' %}" data-finance-work>Finance work →</a>
+      <a class="wbtn" href="{% url 'site_dashboard' %}" data-site-list>Site Dashboard →</a>
+    </div>
+  </div>
+
+  <div class="ctrl">
+    <nav class="seg" aria-label="Period">
+      {% for p in periods %}<a href="{{ p.href }}" aria-current="{% if p.active %}true{% else %}false{% endif %}" data-period="{{ p.value }}">{{ p.label }}</a>{% endfor %}
+    </nav>
+  </div>
+
+  {% comment %}Tiles (top). No net tile (H9). A tile with work behind it is a link to that
+     work; the rest are plain. Short figure on the tile, full figure in its title.{% endcomment %}
+  <div class="kpis" id="kpis">
+    {% for t in tiles %}
+      {% if t.href %}<a class="kpi {{ t.tone }}" href="{{ t.href }}" data-tile="{{ t.key }}">{% else %}<div class="kpi" data-tile="{{ t.key }}">{% endif %}
+        {% if t.message %}<span class="v msg" data-empty>{{ t.message }}</span>{% else %}<span class="v num" data-value{% if t.title %} title="{{ t.title }}"{% endif %}>{{ t.value }}</span>{% endif %}
+        <span class="l">{{ t.label }}</span>{% if t.detail and not t.message %}<span class="d">{{ t.detail }}</span>{% endif %}
+      {% if t.href %}</a>{% else %}</div>{% endif %}
+    {% endfor %}
+  </div>
+
+  <div class="panels">
+    <section class="panel" id="incoming" aria-labelledby="h-incoming">
+      <h2 id="h-incoming">Incoming · Residential</h2>
+      <ul class="flow">
+        {% for r in incoming %}
+        <li data-row="{{ r.key }}">
+          <span class="lbl">{% if r.href %}<a href="{{ r.href }}">{{ r.label }}</a>{% else %}{{ r.label }}{% endif %}</span>
+          <span class="amt">{{ r.amount }}</span>
+          <span class="meta">{{ r.count }}{% for n in r.notes %}{% if n %} · {% if 'not set on' in n %}<span class="unset">{{ n }}</span>{% else %}{{ n }}{% endif %}{% endif %}{% endfor %}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      <div class="age" id="receivables-ageing">
+        <h3>Receivables ageing</h3>
+        {% if receivables.empty %}<p class="meta">Nothing invoiced and unpaid.</p>{% else %}
+        <div class="agebar" aria-hidden="true">{% for p in receivables.parts %}{% if p.count %}<span class="s{{ p.step }}" style="width: {{ p.pct }}%"></span>{% endif %}{% endfor %}</div>
+        <ul class="legend">{% for p in receivables.parts %}<li data-bucket="{{ p.key }}"><i class="s{{ p.step }}"></i>{{ p.label }} <b>{{ p.amount }}</b> · {{ p.count }}</li>{% endfor %}</ul>
+        {% endif %}
+        {% if receivables_unset %}<p class="meta"><span class="unset" data-receivables-unset>{{ receivables_unset }}</span></p>{% endif %}
+        <p class="fixed">Aged from the invoice date; from the trigger date where none was recorded.</p>
+      </div>
+      <p class="fixed">Tender billing (RESCO, CAPEX clients) is not in PMS yet.</p>
+    </section>
+
+    <section class="panel" id="outgoing" aria-labelledby="h-outgoing">
+      <h2 id="h-outgoing">Outgoing · all types</h2>
+      {% if has_payment_data %}
+      <ul class="flow">
+        {% for r in outgoing %}
+        <li data-row="{{ r.key }}">
+          <span class="lbl"><a href="{{ r.href }}">{{ r.label }}</a></span>
+          <span class="amt">{{ r.amount }}</span>
+          <span class="meta">{{ r.count }}{% for n in r.notes %} · {{ n }}{% endfor %}</span>
+          <span class="types">{% for t in r.types %}<a href="{{ t.href }}" data-type-link="{{ r.key }}">{{ t.label }} {{ t.amount }}</a>{% endfor %}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <div class="empty" data-outgoing-empty>{{ no_payments }}</div>
+      {% endif %}
+      {% comment %}H19: bills come from bill approvals, not payment requests, so the row is
+         drawn whenever one is waiting, even under H21's empty message (B3 follow-up 2).{% endcomment %}
+      {% if has_payment_data or bills.n %}
+      <ul class="flow">
+        <li class="apart" data-row="bills">
+          <span class="lbl">{% if bills.href %}<a href="{{ bills.href }}" data-bills-link>Approved bills not yet sent to Finance</a>{% else %}Approved bills not yet sent to Finance{% endif %}</span>
+          <span class="amt">{{ bills.amount }}</span>
+          <span class="meta">{{ bills.count }} · not in "to pay" until SCM sends the payment request</span>
+        </li>
+      </ul>
+      {% endif %}
+      {% if has_payment_data %}
+      <div class="age" id="payables-ageing">
+        <h3>Payables ageing</h3>
+        {% if payables.empty %}<p class="meta">Nothing awaiting approval, on hold or to pay.</p>{% else %}
+        <div class="agebar" aria-hidden="true">{% for p in payables.parts %}{% if p.count %}<span class="s{{ p.step }}" style="width: {{ p.pct }}%"></span>{% endif %}{% endfor %}</div>
+        <ul class="legend">{% for p in payables.parts %}<li data-bucket="{{ p.key }}"><i class="s{{ p.step }}"></i>{{ p.label }} <b>{{ p.amount }}</b> · {{ p.count }}</li>{% endfor %}</ul>
+        {% endif %}
+      </div>
+      {% endif %}
+      <p class="fixed">Salaries, rent, GST and loans are not in PMS.</p>
+    </section>
+  </div>
+
+  {% comment %}Weekly chart: server-drawn bars, one scale for both series. Alpine holds only
+     the picked week; every figure is already in the page. The table below repeats the
+     chart for screen readers and for anyone who wants the numbers.{% endcomment %}
+  <section class="chartbox" id="weekly" aria-labelledby="h-weekly" x-data="{ sel: null }">
+    <h2 id="h-weekly">Last 8 weeks</h2>
+    <div class="chartlegend" aria-hidden="true">
+      <span><i style="background: var(--fh-in)"></i>Money in (recorded, Residential)</span>
+      <span><i style="background: var(--fh-out)"></i>Money out (paid, all types){% if not has_payment_data %} — {{ no_payments }}{% endif %}</span>
+    </div>
+    <div class="tip idle" x-show="sel === null">Tap or hover a week for its figures.</div>
+    {% for w in weeks %}<div class="tip" x-show="sel === {{ w.i }}" x-cloak>{{ w.tip }}</div>{% endfor %}
+    <div class="chart" role="group" aria-label="Money in and out per week" @mouseleave="sel = null">
+      {% for w in weeks %}
+      <button type="button" class="wk" @mouseenter="sel = {{ w.i }}" @focus="sel = {{ w.i }}" @click="sel = (sel === {{ w.i }} ? null : {{ w.i }})"
+              :aria-pressed="sel === {{ w.i }} ? 'true' : 'false'" aria-pressed="false" aria-label="{{ w.tip }}">
+        <span class="bar in" style="height: {{ w.in_pct }}%"></span>
+        {% if has_payment_data %}<span class="bar out" style="height: {{ w.out_pct }}%" data-out-bar></span>{% endif %}
+      </button>
+      {% endfor %}
+    </div>
+    <div class="wklabels" aria-hidden="true">{% for w in weeks %}<span>{{ w.label }}</span>{% endfor %}</div>
+    <details class="numbers">
+      <summary>Show numbers</summary>
+      <table>
+        <thead><tr><th scope="col">Week of</th><th scope="col">In</th><th scope="col">Out</th></tr></thead>
+        <tbody>
+          {% for w in weeks %}<tr><td>{{ w.label }}</td><td class="num">{{ w.in }}</td><td class="num">{% if w.out %}{{ w.out }}{% else %}—{% endif %}</td></tr>{% endfor %}
+        </tbody>
+      </table>
+      {% if not has_payment_data %}<p class="fixed">{{ no_payments }}</p>{% endif %}
+    </details>
+  </section>
+
+  {% comment %}Net by project type (H9), below the chart. None in the data reads as words,
+     never 0 (H8); the Residential net appears only once money out exists (H37).{% endcomment %}
+  <section id="net" aria-labelledby="h-net">
+    <div class="qhead"><h2 id="h-net">Net by project type · {{ recorded_label }}</h2></div>
+    <div class="cards">
+      {% for c in cards %}
+      <div class="card-t" data-card="{{ c.key }}">
+        <h3>{{ c.label }}</h3>
+        <dl class="kv">
+          <dt>Received</dt><dd{% if c.in == 'Not in PMS yet' %} class="words"{% endif %} data-in>{{ c.in }}</dd>
+          <dt>Paid</dt><dd>{{ c.out }}</dd>
+          <dt class="netrow">Net</dt><dd class="netrow{% if not c.net_is_figure %} words{% endif %}{% if c.net_negative %} neg{% endif %}"{% if c.net_is_figure %} data-net{% endif %}>{{ c.net }}</dd>
+          <dt>To collect (due + invoiced)</dt><dd{% if not c.collect_note and c.collect == 'Not in PMS yet' %} class="words"{% endif %}>{{ c.collect }}{% if c.collect_note %}<span class="meta unset">{{ c.collect_note }}</span>{% endif %}</dd>
+          <dt>To pay · awaiting</dt><dd>{{ c.pay }}</dd>
+        </dl>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+</div>
+<!-- fh:end -->
+{% endblock %}
