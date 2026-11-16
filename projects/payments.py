@@ -22,6 +22,9 @@ Three things live here, and all three are here because more than one door reache
     with test-site payments dropped, in four buckets. A separate function, so the
     queue and Finance keep counting every row.
 
+  * exclude_test_site_payments() / committed_total_subquery() (FIN-H-B2-0) — the strip's
+    test-site rule, and models.committed_total() as SQL, for the Finance Head data layer.
+
   * send_payment_notices() — who hears about a payment's move. It is called from ONE
     place: a post_save receiver on StatusTransition (signals.py), because a payment's
     status only ever moves where record_transition() writes its ledger row. Hooking the
@@ -37,7 +40,8 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Count, DecimalField, Exists, F, Min, OuterRef, Q, Sum
+from django.db.models import (Count, DecimalField, Exists, F, Min, OuterRef, Q, Subquery,
+                              Sum, Value)
 from django.db.models.functions import Coalesce
 from django.urls import reverse
 from django.utils import timezone
@@ -117,6 +121,66 @@ def payment_counts(project_types=None):
 StripBucket = namedtuple('StripBucket', 'count amount days partial')
 
 
+def exclude_test_site_payments(payment_qs):
+    """`payment_qs` (PaymentRequest) without the requests that belong only to test sites
+    (Project.is_test). Returns the queryset.
+
+    Extracted in FIN-H-B2-0 from ceo_payment_strip(); used by ceo_payment_strip() and,
+    next, by the Finance Head data layer (FIN-H-B2). The rule is S2's (ruling Q2):
+      * an order's payment is dropped when EVERY site its order was sized against is a
+        test site. One real site keeps it, and so does an order that names no site at
+        all: "no project link" is not evidence of test data.
+      * a contractor bill's payment (5a) is dropped when the bill's one site is a test
+        site.
+    payment_counts() does NOT apply this: the queue and Finance count every row.
+    """
+    # Two Exists rather than a join through vendor_order__sites: a join multiplies each
+    # request by its site count and every Sum a caller takes would count it that many
+    # times. A bill's payment has no order sites, so this term never drops it; the next
+    # one does.
+    order_sites = VendorOrderSite.objects.filter(order=OuterRef('vendor_order'))
+    payment_qs = payment_qs.exclude(
+        Exists(order_sites) & ~Exists(order_sites.filter(project__is_test=False)))
+    # A bill names one site through a many-to-one chain, so this is a join, not a
+    # multiplier; a PO/PI payment has no bill and is never dropped by it.
+    return payment_qs.exclude(contractor_bill__project__is_test=True)
+
+
+def committed_total_subquery():
+    """The committed total of a contractor bill as an SQL expression, for annotating a
+    ContractorBillDetail queryset: the sum of the bill's payment requests that are not
+    REJECTED, each at its effective amount (approved_amount when set, else amount), 0
+    when there are none. Matches the bill through OuterRef('pk').
+
+        ContractorBillDetail.objects.annotate(committed=committed_total_subquery())
+
+    Extracted in FIN-H-B2-0 for the Finance Head data layer (FIN-H-B2); no existing
+    caller uses it yet.
+
+    IT MIRRORS models.committed_total() — THE TWO MUST STAY IN STEP. committed_total()
+    is the one rule and sums rows in Python (create_bill_payment uses it under the bill's
+    row lock, and keeps doing so); this is the same rule for readers that sum in SQL.
+    tests_fin_h_helpers proves the two agree; a change to either rule must change both.
+
+    The REJECTED filter goes on the queryset, not on the aggregate, because
+    effective_amount_sum() takes no filter — the same pattern as payment_views'
+    per-order sum. values('contractor_bill') groups by the bill, so the subquery
+    yields one row.
+    """
+    per_bill = (PaymentRequest.objects
+                .filter(contractor_bill=OuterRef('pk'))
+                .exclude(status=PaymentRequest.REJECTED)
+                # Meta.ordering (-requested_date) cleared so it can never join the GROUP
+                # BY and split one bill into several rows.
+                .order_by()
+                .values('contractor_bill')
+                .annotate(s=effective_amount_sum())
+                .values('s'))
+    money = DecimalField(max_digits=14, decimal_places=2)
+    return Coalesce(Subquery(per_bill, output_field=money), Value(Decimal('0')),
+                    output_field=money)
+
+
 def ceo_payment_strip(project_types, today):
     """The CEO Tenders payment strip (S2): {'awaiting', 'on_hold', 'approved',
     'paid_month'} -> StripBucket. TWO queries.
@@ -145,15 +209,7 @@ def ceo_payment_strip(project_types, today):
     queryset = PaymentRequest.objects.all()
     if project_types is not None:
         queryset = queryset.filter(payment_type_q(project_types))
-    # Two Exists rather than a join through vendor_order__sites: a join multiplies each
-    # request by its site count and every Sum below would be counted that many times.
-    # A bill's payment has no order sites, so this term never drops it; the next one does.
-    order_sites = VendorOrderSite.objects.filter(order=OuterRef('vendor_order'))
-    queryset = queryset.exclude(
-        Exists(order_sites) & ~Exists(order_sites.filter(project__is_test=False)))
-    # A bill names one site through a many-to-one chain, so this is a join, not a
-    # multiplier; a PO/PI payment has no bill and is never dropped by it.
-    queryset = queryset.exclude(contractor_bill__project__is_test=True)
+    queryset = exclude_test_site_payments(queryset)
 
     month_start = today.replace(day=1)
     next_month_start = (month_start + timedelta(days=32)).replace(day=1)

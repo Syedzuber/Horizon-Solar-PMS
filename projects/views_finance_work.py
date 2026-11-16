@@ -52,8 +52,7 @@ from datetime import timedelta
 from decimal import Decimal
 from urllib.parse import urlencode
 
-from django.db.models import (BooleanField, CharField, Exists, OuterRef, Q, Subquery,
-                              Value, Case, When)
+from django.db.models import Exists, OuterRef, Q
 from django.http import QueryDict
 from django.shortcuts import render
 from django.urls import reverse
@@ -65,6 +64,7 @@ from .decorators import _forbidden, login_required
 from .models import (DCLineDamagePhoto, DeliveryChallanAttachment, GoodsReceipt,
                      GoodsReceiptLine, PaymentMilestone, PaymentRequest, Task, VendorOrder,
                      GOODS_RECEIPT_CORRECTION, GOODS_RECEIPT_IMPORTED, GOODS_RECEIPT_RECEIPT)
+from .milestone_queries import annotate_trigger_done
 from .payments import payment_counts, payment_type_q
 from .permissions import (milestone_card_mode, user_can_invoice_milestone,
                           user_can_see_contract_value, user_can_view_finance_work,
@@ -194,28 +194,20 @@ def _milestone_queryset():
     leave soft-deleted sites out (R3) and anything not Residential (R2). Received
     milestones are done and are not fetched.
 
-    trigger_name is annotated first so the subqueries can match the task by OuterRef to
-    it; M1 gets '' and so matches no task (it has no trigger, R4). order_by('pk') makes
-    [:1] deterministic should a site ever carry two tasks of that name.
+    The trigger state (trigger_name, trigger_status, trigger_na, trigger_done_at) comes
+    from milestone_queries.annotate_trigger_done, which documents how it is matched.
     """
-    trigger_name = Case(
-        *[When(milestone_name=name, then=Value(task)) for name, task in TRIGGER_TASKS.items()],
-        default=Value(''), output_field=CharField())
-    trigger = (Task.objects
-               .filter(phase__project=OuterRef('project'), task_name=OuterRef('trigger_name'))
-               .order_by('pk'))
-    return (PaymentMilestone.objects
-            .filter(project__project_type='Residential', project__is_deleted=False)
-            .filter((Q(status=PaymentMilestone.PENDING)
-                     & ~Q(project__status__in=NOT_ACTIONABLE_STATUSES))
-                    | Q(status=PaymentMilestone.INVOICED))
-            .select_related('project', 'project__assigned_pm__user')
-            .annotate(trigger_name=trigger_name)
-            .annotate(trigger_status=Subquery(trigger.values('status')[:1]),
-                      trigger_na=Subquery(trigger.values('is_not_applicable')[:1],
-                                          output_field=BooleanField()),
-                      trigger_done_at=Subquery(trigger.values('completed_at')[:1]))
-            .order_by('project__project_id', 'milestone_name'))
+    # FIN-H-B2-0: the trigger annotations live in milestone_queries.annotate_trigger_done
+    # (shared with the Finance Head data layer); the filters, select_related and ordering
+    # below are this page's own and stay here.
+    return annotate_trigger_done(
+        PaymentMilestone.objects
+        .filter(project__project_type='Residential', project__is_deleted=False)
+        .filter((Q(status=PaymentMilestone.PENDING)
+                 & ~Q(project__status__in=NOT_ACTIONABLE_STATUSES))
+                | Q(status=PaymentMilestone.INVOICED))
+        .select_related('project', 'project__assigned_pm__user')
+    ).order_by('project__project_id', 'milestone_name')
 
 
 def _site_code(project):
