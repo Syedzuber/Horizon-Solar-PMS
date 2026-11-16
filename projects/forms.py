@@ -9,6 +9,7 @@ from django.utils.functional import cached_property
 from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory, Program, BOQItemMaster, StockLocation, VENDOR_KIND_SUPPLIER
 from .utils import roles_for_phase
 from .permissions import (
+    FINANCE_HEAD_HOLDER_ROLES,
     PAYMENT_APPROVER_ROLES, qaqc_engineer_assignment_refusal, reserved_task_names,
 )
 
@@ -196,6 +197,15 @@ class AdminUserEditForm(forms.Form):
                    'Finance and CEO users only.'),
         widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
     )
+    # FIN-H-B1 (H10). Separate from is_payment_approver above: ticking one never ticks,
+    # clears or requires the other.
+    is_finance_head = forms.BooleanField(
+        required=False,
+        label='Finance Head',
+        help_text=('Finance Head: sees the Finance Head dashboard. Finance role only. '
+                   'Does not grant payment approval.'),
+        widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
+    )
     new_password = forms.CharField(
         min_length=8,
         required=False,
@@ -260,6 +270,13 @@ class AdminUserEditForm(forms.Form):
             self.add_error('is_payment_approver',
                            f'Only a Finance or CEO user may be a payment approver. '
                            f'Untick "Payment approver" to save this user as {role}.')
+        # FIN-H-B1 (H10): only a Finance user may hold Finance Head. Checked against the
+        # role being SAVED in this same submission, as O6 does above, so moving a Finance
+        # Head to another role is refused until the box is cleared. Other roles are
+        # refused because the flag means "Head of the Finance team" and nothing else.
+        if cleaned.get('is_finance_head') and role and role not in FINANCE_HEAD_HOLDER_ROLES:
+            self.add_error('is_finance_head',
+                           'Finance Head can only be set on a Finance user.')
         if role == 'Admin' and self._instance_user:
             already_exists = UserProfile.objects.filter(role='Admin').exclude(
                 user=self._instance_user

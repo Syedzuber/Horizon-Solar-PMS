@@ -16889,6 +16889,10 @@ def admin_user_edit(request, user_id):
             # O4, and the same rule a fourth time: the box is rendered, so an unchecked
             # one is a real "off" and not a field that was never on the form.
             profile.is_payment_approver = cd['is_payment_approver']
+            # FIN-H-B1, the same reading again: user_edit.html renders this box on every
+            # save, so unticked is a real "off". The form has already refused it on a
+            # non-Finance role. Independent of is_payment_approver above.
+            profile.is_finance_head = cd['is_finance_head']
             profile.save()
 
             log_activity(
@@ -16923,6 +16927,7 @@ def admin_user_edit(request, user_id):
                 'is_qaqc':        profile.is_qaqc,
                 'is_warehouse_keeper': profile.is_warehouse_keeper,
                 'is_payment_approver': profile.is_payment_approver,
+                'is_finance_head':     profile.is_finance_head,
             },
             instance_user=target_user,
         )

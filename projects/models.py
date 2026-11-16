@@ -887,6 +887,23 @@ class UserProfile(models.Model):
     # ON ITS OWN IT STILL GRANTS NOTHING, and in particular it does not let its holder
     # approve a request THEY raised — every approver predicate refuses the requester.
     is_payment_approver     = models.BooleanField(default=False)
+    # FIN-H-B1 (rulings H10, H12) — marks a Finance user as a Finance Head. A FLAG, NOT A
+    # ROLE, for the same 6.5a reasons as every flag above: a new ROLE_CHOICES value would
+    # cost the holder every 'Finance' role gate. SEVERAL HOLDERS ARE ALLOWED. Set by the
+    # Admin only (Admin Panel user edit + Django admin), never the System Admin screen.
+    #
+    # FINANCE ROLE ONLY, and the role is re-checked on every read: the Admin form refuses
+    # the tick on a non-Finance user, but the Departments screens can change a role
+    # without clearing flags, so permissions.user_is_finance_head() ignores a flag left
+    # on a non-Finance profile rather than trusting it.
+    #
+    # SEPARATE FROM is_payment_approver: neither flag implies the other, and no code reads
+    # one to decide the other.
+    is_finance_head         = models.BooleanField(
+        default=False,
+        help_text='Finance Head: sees the Finance Head dashboard. Finance role only. '
+                  'Does not grant payment approval.',
+    )
 
     email_notifications     = models.BooleanField(default=True)
     whatsapp_notifications  = models.BooleanField(default=True)

@@ -3294,6 +3294,79 @@ def user_is_payment_approver(user):
     return bool(profile.is_payment_approver)
 
 
+# ---------------------------------------------------------------------------
+# FIN-H-B1 — the Finance Head flag (rulings H10, H12)
+#
+# A FLAG ON A FINANCE USER, NOT A ROLE, and several people may hold it. It is read here
+# and nowhere else, and it is DELIBERATELY UNRELATED to is_payment_approver above:
+# neither predicate reads the other's flag, so being Finance Head never admits anyone to
+# approve a payment, and approving payments never opens the Finance Head page.
+#
+# ACTIVE ON BOTH MODELS, unlike user_is_design_head() and user_is_payment_approver(),
+# which read the flag alone. The page these gate lists portfolio money, and a
+# deactivated profile keeps its login (nothing refuses it at sign-in), so both
+# User.is_active and UserProfile.is_active are asked — the pattern at
+# user_has_dc_read_role()'s Finance branch.
+# ---------------------------------------------------------------------------
+
+#: The only roles that may HOLD the Finance Head flag (H10). AdminUserEditForm refuses
+#: the tick for any other role, and user_is_finance_head() re-checks it on every read,
+#: because the Departments screens can change a role without clearing the flag.
+FINANCE_HEAD_HOLDER_ROLES = frozenset({'Finance'})
+
+#: The roles that open the Finance Head page by role alone (H12) — they read every
+#: other money screen already. Plain Finance is NOT here: a Finance user gets in only by
+#: holding the flag (user_is_finance_head), which is the point of the flag.
+FINANCE_HEAD_PAGE_ROLES = frozenset({'CEO', 'Admin', 'System Admin'})
+
+
+def _user_and_profile_active(user):
+    """Return the profile of an authenticated user whose login AND profile are active,
+    else None. Shared by the two Finance Head predicates so both apply the same rule."""
+    if not getattr(user, 'is_authenticated', False):
+        return None
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return None
+    if not (user.is_active and profile.is_active):
+        return None
+    return profile
+
+
+def user_is_finance_head(user):
+    """Return True if `user` is a Finance Head (FIN-H-B1, rulings H10 and H12).
+
+    Allowed: an authenticated user whose login and profile are both active, whose role
+    is in FINANCE_HEAD_HOLDER_ROLES ('Finance'), and who holds UserProfile.is_finance_head.
+    Blocked: anyone else. A flag left on after the user's role changed away from Finance
+    is IGNORED, not trusted — only the Admin form checks the role when the flag is set,
+    and the Departments screens change roles without touching flags.
+
+    Does not read or imply is_payment_approver. Reads the profile already on `user`; no
+    query beyond that one-to-one load.
+    """
+    profile = _user_and_profile_active(user)
+    if profile is None:
+        return False
+    return profile.role in FINANCE_HEAD_HOLDER_ROLES and bool(profile.is_finance_head)
+
+
+def user_can_view_finance_head_page(user):
+    """Return True if `user` may open the Finance Head page (FIN-H-B1, ruling H12).
+
+    Allowed: a Finance Head (user_is_finance_head), or an active CEO, Admin or System
+    Admin (FINANCE_HEAD_PAGE_ROLES), who read every money screen already. Blocked: plain
+    Finance users without the flag — the page is the Head's, and the Finance work page
+    is theirs — and every other role (PM, SCM, Coordinator, BD, Design, Site Engineer),
+    which do not read portfolio money (AF-1). Inactive users of any role are blocked.
+    The payment-approver flag does not admit. No query beyond the profile load.
+    """
+    profile = _user_and_profile_active(user)
+    if profile is None:
+        return False
+    return profile.role in FINANCE_HEAD_PAGE_ROLES or user_is_finance_head(user)
+
+
 def _payment_approver_other_than_requester(user, payment_request):
     """The two terms every approver predicate shares: the flag, and not being the person
     who raised this request.

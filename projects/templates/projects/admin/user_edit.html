@@ -137,6 +137,20 @@
           </div>
           {% if form.is_payment_approver.errors %}<p class="col-span-2 text-xs text-red-600">{{ form.is_payment_approver.errors|join:", " }}</p>{% endif %}
 
+          <!-- Finance Head (FIN-H-B1) -- Finance role only; several holders allowed.
+               Rendered unconditionally like every flag here: an unrendered box would
+               post nothing and clear the flag on save. Separate from Payment approver. -->
+          <div class="col-span-2 flex items-center gap-2 pt-1">
+            <input type="checkbox" name="is_finance_head" id="id_is_finance_head"
+                   {% if form.is_finance_head.value %}checked{% endif %}
+                   class="form-check-input">
+            <label for="id_is_finance_head" class="text-sm text-gray-700">
+              Finance Head — sees the Finance Head dashboard. Finance role only. Does not
+              grant payment approval.
+            </label>
+          </div>
+          {% if form.is_finance_head.errors %}<p class="col-span-2 text-xs text-red-600">{{ form.is_finance_head.errors|join:", " }}</p>{% endif %}
+
           <!-- Design QC (Part 9) — the FIRST of the two OPEX design review gates -->
           <div class="col-span-2 flex items-center gap-2 pt-1">
             <input type="checkbox" name="is_design_qc" id="id_is_design_qc"
