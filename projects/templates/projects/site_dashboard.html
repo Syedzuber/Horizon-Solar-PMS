@@ -1,44 +1,22 @@
 {% extends "base.html" %}
+{% load static %}
 {% block title %}Site Dashboard — SolarPMS{% endblock %}
 
 {% block extra_head %}
 {% comment %}DASH-B2. Bootstrap 5.3.3 comes from base.html; this page adds page-scoped CSS (every
    rule under .sd), Alpine 3.14.8 for open/closed state only, and Lucide pinned to an exact
    version (ruling 4). Layout follows the approved prototype "Horizon Site Dashboards" v3,
-   Site Dashboard tab. No fetch, no XHR, no polling: every filter is a link or a GET form.{% endcomment %}
+   Site Dashboard tab. No fetch, no XHR, no polling: every filter is a link or a GET form.
+   FIN-H-B0: the rules this page shares with the Finance work page are in the static
+   file projects/css/sd_base.css, linked just before the <style> below so the page-only
+   rules keep coming after them; only rules no other page uses stay inline.{% endcomment %}
 <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
 <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<link rel="stylesheet" href="{% static 'projects/css/sd_base.css' %}?v=20261116">
 <style>
-  [x-cloak] { display: none !important; }
-  .sd {
-    --sd-surface:#ffffff; --sd-surface-2:#edf1eb; --sd-ink:#16231b; --sd-muted:#56655c;
-    --sd-faint:#7a887f; --sd-line:#d9e0d7; --sd-brand:#1a7a4a; --sd-brand-2:#7cb847;
-    --sd-gold:#f0a829; --sd-navy:#243a6b; --sd-ok:#1f8a4c; --sd-warn:#a86400; --sd-crit:#c23b2a;
-    --sd-ok-bg:#e2f2e7; --sd-warn-bg:#fcefd6; --sd-crit-bg:#fae3df; --sd-info-bg:#e5eaf5;
-    color: var(--sd-ink); padding-bottom: 48px;
-  }
-  .sd .num { font-variant-numeric: tabular-nums; }
   .sd .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
-  .sd :focus-visible { outline: 2px solid var(--sd-gold); outline-offset: 2px; }
-  .sd .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--sd-faint); font-weight: 600; }
-  .sd h1 { font-size: 1.6rem; font-weight: 600; margin: 0; }
-  .sd .sub { color: var(--sd-muted); margin: 2px 0 0; font-size: .9rem; }
   .sd .head { margin-bottom: 16px; }
 
-  /* KPI strip (E5): tiles wrap at any width; a filter tile is a link. */
-  /* Each tile draws its own right and bottom rule, so a part-filled last row leaves white
-     space rather than the grey a 1px-gap grid would show through. */
-  .sd .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    background: var(--sd-surface); border: 1px solid var(--sd-line); border-radius: 12px; overflow: hidden; margin-bottom: 16px; }
-  .sd .kpi { background: var(--sd-surface); padding: 12px 14px; display: flex; flex-direction: column; gap: 2px;
-    color: inherit; text-decoration: none; min-width: 0; box-shadow: 1px 0 0 var(--sd-line), 0 1px 0 var(--sd-line); }
-  .sd a.kpi:hover { background: var(--sd-surface-2); }
-  .sd a.kpi[aria-pressed="true"] { background: var(--sd-info-bg); box-shadow: inset 0 -3px 0 var(--sd-navy); }
-  .sd .kpi .v { font-size: 1.75rem; font-weight: 600; line-height: 1; }
-  .sd .kpi .l { font-size: 12px; color: var(--sd-muted); }
-  .sd .kpi .d { font-size: 11px; color: var(--sd-faint); }
-  .sd .kpi.crit .v { color: var(--sd-crit); }
-  .sd .kpi.warn .v { color: var(--sd-warn); }
   /* TB-2: the activated-site strip, the tile card's full-width first row. The include's
      own mb-4 (kept for the tender page) is cancelled here; the row draws the tiles' rule. */
   .sd .kpis .strip-row { grid-column: 1 / -1; padding: 10px 12px; min-width: 0; box-shadow: 0 1px 0 var(--sd-line); }
@@ -51,7 +29,6 @@
   .sd .ctrl input[type=search] { width: 220px; }
   .sd .seg { display: inline-flex; border: 1px solid var(--sd-line); border-radius: 8px; overflow: hidden; background: var(--sd-surface); }
   .sd .seg a { padding: 6px 11px; color: var(--sd-muted); text-decoration: none; font-size: .875rem; }
-  .sd .seg a[aria-current="true"] { background: var(--sd-ink); color: var(--sd-surface); }
 
   /* Site list: five columns on a desktop, two on a tablet, one on a phone (E9). */
   .sd .cols { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,2fr) 120px 140px minmax(0,1.3fr) 20px; gap: 16px; align-items: center; }
@@ -64,11 +41,8 @@
   .sd .row { width: 100%; background: none; border: 0; text-align: left; padding: 12px 16px; cursor: pointer; border-radius: 10px; color: inherit; margin: 0; }
   .sd .row:hover { background: #f6f8f5; }
   .sd .row > span, .sd .row .blk { display: block; min-width: 0; }
-  .sd .code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-weight: 600; font-size: 13px; }
   .sd .place { font-weight: 600; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sd .meta { font-size: 12px; color: var(--sd-muted); display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .sd .tag { display: inline-block; font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
-    padding: 1px 6px; border-radius: 4px; background: var(--sd-surface-2); color: var(--sd-muted); vertical-align: 1px; margin-left: 4px; }
   .sd .tag.draft { background: var(--sd-warn-bg); color: var(--sd-warn); }
   .sd .tag.capex { background: var(--sd-info-bg); color: var(--sd-navy); }
   .sd .tag.ext { background: var(--sd-info-bg); color: var(--sd-navy); text-transform: none; letter-spacing: 0; }
@@ -94,18 +68,11 @@
   .sd .sched.mut { color: var(--sd-faint); }
   .sd .flags { display: flex; gap: 4px; flex-wrap: wrap; }
   .sd .pill { font-size: 11.5px; padding: 2px 7px; border-radius: 99px; white-space: nowrap; font-weight: 500; }
-  .sd .pill.crit { background: var(--sd-crit-bg); color: var(--sd-crit); }
-  .sd .pill.warn { background: var(--sd-warn-bg); color: var(--sd-warn); }
-  .sd .pill.ok { background: var(--sd-ok-bg); color: var(--sd-ok); }
-  .sd .pill.mut { background: var(--sd-surface-2); color: var(--sd-muted); }
-  .sd .pill.info { background: var(--sd-info-bg); color: var(--sd-navy); }
   .sd .att { display: block; font-size: 11.5px; color: var(--sd-muted); margin-top: 4px; }
   .sd .att.no { color: var(--sd-warn); }
   .sd .when { font-size: 12px; font-weight: 600; display: block; }
   .sd .when.stale { color: var(--sd-warn); }
   .sd .what { font-size: 12.5px; color: var(--sd-muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .sd .chev { width: 16px; height: 16px; transition: transform .15s; color: var(--sd-faint); }
-  .sd [aria-expanded="true"] .chev { transform: rotate(180deg); }
 
   /* Expanded card (E7) */
   .sd .detail { border-top: 1px dashed var(--sd-line); padding: 14px 16px 16px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 20px; }
@@ -115,8 +82,6 @@
   .sd .feed .tm { color: var(--sd-faint); font-size: 11.5px; }
   .sd .feed .who { font-weight: 600; }
   .sd .kv { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 5px 10px; font-size: 12.5px; margin: 0; }
-  .sd .kv dt { color: var(--sd-muted); font-weight: 400; }
-  .sd .kv dd { margin: 0; text-align: right; font-weight: 500; }
   .sd .kv .late { color: var(--sd-crit); }
   .sd .open-site { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
   .sd .open-site a { color: var(--sd-brand); font-weight: 600; text-decoration: none; }
@@ -181,7 +146,6 @@
     .sd .ctrl .form-select { flex: 1 1 140px; }
     .sd h1 { font-size: 1.4rem; }
   }
-  @media (prefers-reduced-motion: reduce) { .sd .chev { transition: none; } }
 </style>
 {% endblock %}
 

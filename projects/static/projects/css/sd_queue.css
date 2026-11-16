@@ -1,0 +1,46 @@
+/* FIN-H-B0 — the Finance work page's own .sd rules (FIN-M-B8a), moved verbatim out of
+   finance_work.html: h2, .amt, .na, the .q* work sections, .wbtn*, .lines* and the 760 px
+   phone block. Load order matters: sd_base.css, then the page's inline differing rules,
+   then this file. The 760 px search rule here must win over the inline 260 px width. */
+.sd h2 { font-size: 1.1rem; font-weight: 600; margin: 0; display: flex; align-items: center; gap: 8px; }
+.sd .amt { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
+.sd .na { color: var(--sd-warn); font-weight: 600; }
+
+/* Work sections (prototype's .qsec / .qrow): rows collapsed by default, click to open. */
+.sd .qsec { margin-bottom: 26px; }
+.sd .qhead { display: flex; align-items: baseline; gap: 6px 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.sd .qhead .right { margin-left: auto; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.sd .qn { font-size: 13px; font-weight: 600; background: var(--sd-gold); color: #241a00; border-radius: 99px; padding: 1px 8px; min-width: 24px; text-align: center; }
+.sd .qn.z { background: var(--sd-surface-2); color: var(--sd-faint); }
+.sd .qcols, .sd .qrow { display: grid; grid-template-columns: var(--cols) 18px; gap: 14px; align-items: center; }
+.sd .qcols { padding: 0 14px 5px; font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--sd-faint); font-weight: 600; }
+.sd .qlist { display: flex; flex-direction: column; gap: 5px; }
+.sd .qitem { background: var(--sd-surface); border: 1px solid var(--sd-line); border-radius: 10px; }
+.sd .qitem.crit { box-shadow: inset 4px 0 0 var(--sd-crit); }
+.sd .qitem.warn { box-shadow: inset 4px 0 0 var(--sd-warn); }
+.sd .qrow { width: 100%; background: none; border: 0; text-align: left; padding: 10px 14px; cursor: pointer; border-radius: 10px; color: inherit; margin: 0; }
+.sd .qrow:hover { background: #f6f8f5; }
+.sd .qrow > * { min-width: 0; }
+.sd .qdet { border-top: 1px dashed var(--sd-line); padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 12px; }
+.sd .qempty { padding: 16px; color: var(--sd-muted); background: var(--sd-surface); border: 1px dashed var(--sd-line); border-radius: 10px; font-size: 13px; }
+.sd .qfoot { font-size: 12.5px; color: var(--sd-muted); margin-top: 6px; }
+.sd .wbtns { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.sd .wbtn { border: 1px solid var(--sd-line); background: var(--sd-surface); border-radius: 8px; padding: 6px 12px; font-weight: 500; font-size: 13px; color: var(--sd-ink); text-decoration: none; }
+.sd .wbtn:hover { background: var(--sd-surface-2); }
+.sd .wbtn.pri { background: var(--sd-brand); border-color: var(--sd-brand); color: #fff; }
+.sd .lines { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; max-width: 620px; }
+.sd .lines li { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--sd-line); padding-bottom: 5px; }
+.sd .lines li span:first-child { min-width: 0; overflow-wrap: anywhere; }
+
+/* Phone (E9-style): rows stack, the column headings go, the chevron stays top right. */
+@media (max-width: 760px) {
+  .sd .qcols { display: none; }
+  .sd .qrow { display: flex; flex-wrap: wrap; gap: 6px 12px; padding-right: 40px; position: relative; }
+  .sd .qrow > * { flex: 1 1 auto; }
+  .sd .qrow > *:first-child { flex: 1 1 100%; }
+  .sd .qrow > .chev { position: absolute; top: 12px; right: 14px; flex: none; }
+  .sd .qhead .right { margin-left: 0; }
+  .sd .ctrl input[type=search] { width: 100%; }
+  .sd .ctrl, .sd .ctrl form { width: 100%; }
+  .sd h1 { font-size: 1.4rem; }
+}
