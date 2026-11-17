@@ -38,7 +38,7 @@ TB-1: how far the tender's activated sites have moved. Whole tender for every vi
 this page (ruling P2). The markup and its CSS live in the shared include (TB-2), which the
 Site Dashboard draws too; the rendered strip is byte-identical to what stood here before.
 {% endcomment %}
-{% include "projects/_site_breakdown_strip.html" with breakdown=breakdown planned=program.planned_site_count %}
+{% include "projects/_site_breakdown_strip.html" with breakdown=breakdown planned=program.planned_site_count show_extra=True %}
 
 {% comment %}
 Aggregate rollup vs. planned targets. The "Active sites (live)" card stood first here and

@@ -25,21 +25,53 @@ THE FOUR FIGURES (Zuber's rulings B1-B4, 14 Nov 2026)
                   rule). Money rows count: only the number is shown, never the row.
                   NOT a subset of `active`: shown apart from the chain (B5).
 
+TB-3 — DESIGN, PROCUREMENT AND ATTENDANCE (Zuber's rulings G1-G6 and Q1-Q3, 17 Nov 2026)
+Over the same sites in execution (G1). The tender page shows them; TB-4 (Site Dashboard)
+and SNAP-1c (snapshot) will read the same fields.
+    design_not_started / _in_progress / _released
+                  the site's DesignAssignment status, bucketed by its CEO pipeline stage
+                  (tender_stages.STATUS_TO_STAGE): S0-S1 not started (Design Hold is S0),
+                  S2-S4 in progress, S5 released. Looked up at call time, so a status moved
+                  in the mapping moves here too. A site with no DesignAssignment is in none.
+    received / pending
+                  among MOBILIZED sites only (G3): received = any line in the four component
+                  categories with a received quantity above 0, on a challan of ANY status,
+                  Rejected included — models.first_component_received(), the phase rule R3
+                  (ruling Q1: Rejected is repurposed to "shortfall AND damage", so material
+                  can be on site under a Rejected challan). pending = mobilized - received.
+    dcs_to_confirm / dcs_overdue
+                  COUNTS OF CHALLANS (G4), not sites: Expected or Partially Received, i.e.
+                  the SE still has receipts to record; overdue when expected_delivery_date
+                  is before today (IST). No expected date is never overdue. The id lists are
+                  the sites holding them (ruling Q3: one query cannot list challan ids).
+    attendance_today
+                  a non-voided ContractorAttendance dated today, the IST calendar day of
+                  `now` (G5) — the "logged" half of attendance_alerts.sites_missing_attendance.
+
 ONE QUERY whatever the number of sites: every condition is an Exists / Subquery / join on
 the same statement over the sites in execution. tests_site_breakdown pins it at 1 for 1 and
-for 50 sites.
+for 50 sites; tests_site_breakdown_extra pins it again with the TB-3 columns.
+
+TWO RULES ARE COPIED, NOT CALLED (ruling Q2). first_component_received() and the
+attendance check inside sites_missing_attendance() each answer for one site, or inside a
+query of their own; calling them would cost a query per site. Each copy below names its
+original, and tests_site_breakdown_extra asserts the copy agrees with the original on
+every test site, so a change to either side fails a test.
 """
 from dataclasses import dataclass
 from datetime import timedelta
 
-from django.db.models import Exists, F, OuterRef, Subquery
+from django.db.models import Count, Exists, F, IntegerField, OuterRef, Subquery, Value
+from django.db.models.functions import Coalesce
+from django.utils import timezone
 
-from .models import ActivityLog, DeliveryChallan, Task
+from .models import (DC_CATEGORY_TO_MIRROR_CODE, ActivityLog, ContractorAttendance,
+                     DCLineItem, DeliveryChallan, Task)
 from .permissions import dashboard_live_sites
 from .scheduling import ANCHOR_TASK_CODE
 from .site_dashboard import human_activity_q, in_block_q
-from .tender_stages import (STAGE_AWAITING_PM, STAGE_IN_DESIGN, STAGE_IN_QC, STAGE_RELEASED,
-                            STATUS_TO_STAGE)
+from .tender_stages import (STAGE_AWAITING_PM, STAGE_IN_DESIGN, STAGE_IN_QC, STAGE_NO_SURVEY,
+                            STAGE_RELEASED, STAGE_SURVEY_ON_FILE, STATUS_TO_STAGE)
 
 #: A Draft site is not in execution: the dashboard's SiteCard.is_draft test
 #: (site_dashboard._card, `status == 'Draft'`), whose cards the view leaves out of the
@@ -64,14 +96,70 @@ CIVIL_STARTED_STATUSES = (Task.IN_PROGRESS, Task.DONE)
 #: 8 PM snapshot still counts an update made at 9 PM the evening before (ruling B4).
 ACTIVE_TODAY_WINDOW = timedelta(hours=24)
 
+#: TB-3 design buckets, as CEO pipeline STAGES (ruling G2). The statuses in each are read
+#: from STATUS_TO_STAGE when site_breakdown runs (design_bucket), never listed here.
+#: In progress + released is exactly DESIGN_STARTED_STAGES above.
+DESIGN_NOT_STARTED_STAGES = frozenset({STAGE_NO_SURVEY, STAGE_SURVEY_ON_FILE})
+DESIGN_IN_PROGRESS_STAGES = frozenset({STAGE_IN_DESIGN, STAGE_IN_QC, STAGE_AWAITING_PM})
+DESIGN_RELEASED_STAGES = frozenset({STAGE_RELEASED})
+
+BUCKET_NOT_STARTED, BUCKET_IN_PROGRESS, BUCKET_RELEASED = 'not_started', 'in_progress', 'released'
+
+#: The challan states that leave the site engineer receipts to record (ruling G4).
+#: Received and Rejected are closed.
+DC_TO_CONFIRM_STATUSES = (DeliveryChallan.EXPECTED, DeliveryChallan.PARTIALLY_RECEIVED)
+
+
+def design_bucket(status):
+    """The TB-3 design bucket of a DesignAssignment status, or None for no assignment.
+
+    Indexes STATUS_TO_STAGE rather than .get(), as tender_stages does: an unmapped status
+    must fail loudly, not fall into a bucket by default."""
+    if status is None:
+        return None
+    stage = STATUS_TO_STAGE[status]
+    if stage in DESIGN_NOT_STARTED_STAGES:
+        return BUCKET_NOT_STARTED
+    if stage in DESIGN_IN_PROGRESS_STAGES:
+        return BUCKET_IN_PROGRESS
+    if stage in DESIGN_RELEASED_STAGES:
+        return BUCKET_RELEASED
+    # S6 / S7 are never values of STATUS_TO_STAGE (groups and activation override it in
+    # tender_stages._stage_of), so this is a mapping change nobody has ruled on.
+    raise ValueError(f'design status {status!r} maps to stage {stage!r}, which has no TB-3 bucket')
+
+
+def _challan_count(challans):
+    """A per-site count of `challans` (a queryset correlated on OuterRef('pk')) as one
+    column of the outer statement, 0 when the site has none. Grouped by project inside the
+    subquery so it never fans out the site rows."""
+    return Coalesce(Subquery(challans.order_by().values('project_id')
+                             .annotate(n=Count('pk')).values('n')[:1],
+                             output_field=IntegerField()),
+                    Value(0))
+
 
 @dataclass(frozen=True)
 class SiteBreakdown:
-    """The four figures as tuples of site pks (ascending); the counts are their lengths."""
+    """The figures as tuples of site pks (ascending); the counts are their lengths, except
+    dcs_to_confirm / dcs_overdue, which count challans (TB-3 ruling G4).
+
+    The TB-3 fields have defaults so a caller (or a test stub) building the TB-1 four
+    positionally still works; site_breakdown() always fills every field."""
     in_execution_ids: tuple
     mobilized_ids: tuple
     active_ids: tuple
     active_today_ids: tuple
+    design_not_started_ids: tuple = ()
+    design_in_progress_ids: tuple = ()
+    design_released_ids: tuple = ()
+    received_ids: tuple = ()
+    pending_ids: tuple = ()
+    dcs_to_confirm_site_ids: tuple = ()   # sites holding a challan to confirm
+    dcs_overdue_site_ids: tuple = ()      # sites holding an overdue one
+    attendance_today_ids: tuple = ()
+    dcs_to_confirm: int = 0               # challans, not sites
+    dcs_overdue: int = 0                  # challans, not sites
 
     @property
     def in_execution(self):
@@ -89,6 +177,30 @@ class SiteBreakdown:
     def active_today(self):
         return len(self.active_today_ids)
 
+    @property
+    def design_not_started(self):
+        return len(self.design_not_started_ids)
+
+    @property
+    def design_in_progress(self):
+        return len(self.design_in_progress_ids)
+
+    @property
+    def design_released(self):
+        return len(self.design_released_ids)
+
+    @property
+    def received(self):
+        return len(self.received_ids)
+
+    @property
+    def pending(self):
+        return len(self.pending_ids)
+
+    @property
+    def attendance_today(self):
+        return len(self.attendance_today_ids)
+
 
 def site_breakdown(projects, now):
     """Break `projects` down into in execution / mobilized / active / active today as of
@@ -99,6 +211,13 @@ def site_breakdown(projects, now):
     are simply not counted, so a caller never has to pre-filter.
     """
     since = now - ACTIVE_TODAY_WINDOW
+    # The IST calendar day of `now` (settings.TIME_ZONE), not of the server clock: the
+    # attendance day and the overdue cut-off follow the caller's moment, like `since`.
+    today = timezone.localdate(now)
+
+    # Challans the site engineer still has receipts to record on (TB-3 ruling G4).
+    to_confirm = DeliveryChallan.objects.filter(project_id=OuterRef('pk'),
+                                                status__in=DC_TO_CONFIRM_STATUSES)
 
     # The site's Civil anchor, chosen exactly as site_dashboard._schedule_reasons() and
     # scheduling._plan() choose it: in an active block, built from a template row, not a
@@ -130,18 +249,66 @@ def site_breakdown(projects, now):
                                .filter(project_id=OuterRef('pk'), timestamp__gt=since,
                                        timestamp__lte=now)
                                .filter(human_activity_q())),
+                # COPY OF models.first_component_received() (phase rule R3), as a column so
+                # one statement answers for every site (ruling Q2): a line in a
+                # DC_CATEGORY_TO_MIRROR_CODE category with received_quantity > 0, on a
+                # challan of ANY status — Rejected included (ruling Q1, 20 Oct rule). Keep
+                # the two in step; tests_site_breakdown_extra fails if they disagree.
+                material_received=Exists(DCLineItem.objects.filter(
+                    challan__project_id=OuterRef('pk'),
+                    boq_category__in=list(DC_CATEGORY_TO_MIRROR_CODE),
+                    received_quantity__gt=0)),
+                dcs_to_confirm=_challan_count(to_confirm),
+                dcs_overdue=_challan_count(to_confirm.filter(expected_delivery_date__lt=today)),
+                # COPY OF the "logged" check inside attendance_alerts.sites_missing_attendance()
+                # (its `logged_today`): a non-voided ContractorAttendance dated `today`. That
+                # check lives inside the alert's own query, so there is nothing to call
+                # (ruling Q2). tests_site_breakdown_extra fails if the two disagree.
+                attended=Exists(ContractorAttendance.objects.filter(
+                    project_id=OuterRef('pk'), date=today, is_voided=False)),
             )
             .order_by('pk')
-            .values('pk', 'has_dc', 'design_status', 'civil_status', 'civil_na', 'touched'))
+            .values('pk', 'has_dc', 'design_status', 'civil_status', 'civil_na', 'touched',
+                    'material_received', 'dcs_to_confirm', 'dcs_overdue', 'attended'))
 
     in_execution, mobilized, active, active_today = [], [], [], []
+    design = {BUCKET_NOT_STARTED: [], BUCKET_IN_PROGRESS: [], BUCKET_RELEASED: []}
+    received, pending, attendance_today = [], [], []
+    to_confirm_sites, overdue_sites = [], []
+    dcs_to_confirm = dcs_overdue = 0
     for row in rows:
-        in_execution.append(row['pk'])
+        pk = row['pk']
+        in_execution.append(pk)
         if row['has_dc'] and row['design_status'] in DESIGN_STARTED_STATUSES:
-            mobilized.append(row['pk'])
+            mobilized.append(pk)
+            # Received / pending split Mobilized and nothing else (ruling G3), so the two
+            # always add up to it; material on a site that is not mobilized is in neither.
+            (received if row['material_received'] else pending).append(pk)
         if row['civil_status'] in CIVIL_STARTED_STATUSES and not row['civil_na']:
-            active.append(row['pk'])
+            active.append(pk)
         if row['touched']:
-            active_today.append(row['pk'])
-    return SiteBreakdown(tuple(in_execution), tuple(mobilized), tuple(active),
-                         tuple(active_today))
+            active_today.append(pk)
+        bucket = design_bucket(row['design_status'])
+        if bucket is not None:
+            design[bucket].append(pk)
+        if row['dcs_to_confirm']:
+            to_confirm_sites.append(pk)
+            dcs_to_confirm += row['dcs_to_confirm']
+        if row['dcs_overdue']:
+            overdue_sites.append(pk)
+            dcs_overdue += row['dcs_overdue']
+        if row['attended']:
+            attendance_today.append(pk)
+    return SiteBreakdown(
+        tuple(in_execution), tuple(mobilized), tuple(active), tuple(active_today),
+        design_not_started_ids=tuple(design[BUCKET_NOT_STARTED]),
+        design_in_progress_ids=tuple(design[BUCKET_IN_PROGRESS]),
+        design_released_ids=tuple(design[BUCKET_RELEASED]),
+        received_ids=tuple(received),
+        pending_ids=tuple(pending),
+        dcs_to_confirm_site_ids=tuple(to_confirm_sites),
+        dcs_overdue_site_ids=tuple(overdue_sites),
+        attendance_today_ids=tuple(attendance_today),
+        dcs_to_confirm=dcs_to_confirm,
+        dcs_overdue=dcs_overdue,
+    )
