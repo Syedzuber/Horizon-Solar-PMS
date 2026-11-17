@@ -239,4 +239,106 @@
   </section>
 </div>
 <!-- fh:end -->
+
+{% comment %}FIN-H-B4 — "Every item": every money item the page counts (Residential milestones,
+   payment requests, approved contractor bills not yet forwarded), filterable, each expandable
+   to its history. Data: finance_head_items.finance_head_items() (seven queries, fixed).
+   Filters are a GET form and paging is plain links; both keep ?period= and land on #items.
+   Alpine holds only which rows are open; every history line is already in the page.
+   PLACED AFTER the fh markers, in its own .sd wrapper: B3's test pins "no <form>" between
+   them (H2: read only), and this section's form is a read-only GET search. The <style>
+   here comes after sd_queue.css on purpose and sets no display or grid rule on .qrow, so
+   the shared 760 px phone rules still stack the rows.{% endcomment %}
+<!-- fhi:start -->
+<div class="sd" id="finance-head-items">
+<style>
+  #finance-head-items .fhi-filters { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: flex-end; margin-bottom: 12px; }
+  #finance-head-items .fhi-filters label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--sd-muted); min-width: 0; margin: 0; }
+  #finance-head-items .fhi-filters select { width: auto; max-width: 100%; }
+  #finance-head-items .fhi-filters .fhi-q { flex: 1 1 200px; }
+  #finance-head-items .fhi-filters input[type=search] { width: 100%; }
+  #finance-head-items .dir { font-size: 11.5px; font-weight: 600; white-space: nowrap; margin-right: 4px; }
+  #finance-head-items .dir-in { color: var(--sd-brand); }
+  #finance-head-items .dir-out { color: var(--sd-navy); }
+  #finance-head-items .qrow .meta, #finance-head-items .qrow .code { overflow-wrap: anywhere; }
+  #finance-head-items .hist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+  #finance-head-items .hist li { display: grid; grid-template-columns: 130px minmax(0,1fr); gap: 2px 10px; border-bottom: 1px solid var(--sd-line); padding-bottom: 5px; }
+  #finance-head-items .hist .when { color: var(--sd-muted); white-space: nowrap; }
+  #finance-head-items .hist .what { overflow-wrap: anywhere; }
+  #finance-head-items .hist .meta { grid-column: 2; }
+  #finance-head-items .fhi-pages { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  @media (max-width: 760px) {
+    #finance-head-items .fhi-filters label { flex: 1 1 40%; }
+    #finance-head-items .fhi-filters select { width: 100%; }
+    #finance-head-items .hist li { grid-template-columns: minmax(0,1fr); }
+    #finance-head-items .hist .meta { grid-column: 1; }
+  }
+</style>
+<section class="qsec" id="items" aria-labelledby="h-items">
+  <div class="qhead">
+    <h2 id="h-items">Every item <span class="qn num{% if not items.count %} z{% endif %}">{{ items.count }}</span></h2>
+    <span class="meta" data-items-count>{{ items.count }} item{{ items.count|pluralize }}{% if items.filters.windowed %} · open, or moved in the last 30 days{% endif %} · newest movement first unless sorted otherwise</span>
+  </div>
+
+  <form method="get" action="#items" class="ctrl fhi-filters" role="search" aria-label="Filter every item">
+    <input type="hidden" name="period" value="{{ period }}">
+    <label>Direction
+      <select name="dir" class="form-select form-select-sm">{% for o in items.filters.directions %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}</select>
+    </label>
+    <label>Status
+      <select name="status" class="form-select form-select-sm">
+        <option value=""{% if not items.filters.values.status %} selected{% endif %}>Open + last 30 days</option>
+        {% for g in items.filters.status_groups %}<optgroup label="{{ g.label }}">{% for o in g.options %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}</optgroup>{% endfor %}
+      </select>
+    </label>
+    <label>Type
+      <select name="type" class="form-select form-select-sm">{% for o in items.filters.types %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}</select>
+    </label>
+    <label>Sort
+      <select name="sort" class="form-select form-select-sm">{% for o in items.filters.sorts %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}</select>
+    </label>
+    <label class="fhi-q">Search
+      <input type="search" name="q" value="{{ items.filters.values.q }}" class="form-control form-control-sm" maxlength="100"
+             placeholder="Site, customer, vendor, invoice, bill, PO/PI, PR-12">
+    </label>
+    <button type="submit" class="btn btn-sm btn-brand">Apply</button>
+    {% if items.filters.filtered %}<a href="{{ items.filters.clear_href }}" class="btn btn-sm btn-outline-secondary" data-items-clear>Clear</a>{% endif %}
+  </form>
+
+  <div class="qcols" style="--cols: minmax(0,1.4fr) minmax(0,1.1fr) minmax(0,.9fr) minmax(0,.9fr) minmax(0,1fr);" aria-hidden="true">
+    <div>Item</div><div>Party</div><div>Amount</div><div>Status</div><div>Last movement</div>
+  </div>
+  <div class="qlist" id="item-rows">
+    {% for i in items.items %}
+    <div class="qitem" x-data="{ open: false }" data-item="{{ i.key }}" data-kind="{{ i.kind }}" data-status="{{ i.status }}">
+      <button type="button" class="qrow" style="--cols: minmax(0,1.4fr) minmax(0,1.1fr) minmax(0,.9fr) minmax(0,.9fr) minmax(0,1fr);"
+              @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="false" aria-controls="it-{{ i.key }}">
+        <span><span class="dir dir-{{ i.direction }}" data-dir="{{ i.direction }}">{{ i.mark }}</span><span class="code" data-ref>{{ i.reference }}</span><span class="meta">{{ i.type_label }}{% if i.detail %} · {{ i.detail }}{% endif %}</span></span>
+        <span>{{ i.party|default:"—" }}</span>
+        <span>{% if i.amount_text %}<span class="amt" data-amount>{{ i.amount_text }}</span>{% else %}<span class="na" data-unset>amount not set</span>{% endif %}<span class="meta">{{ i.amount_label }}</span></span>
+        <span><span class="pill {{ i.tone }}">{{ i.status_label }}</span>{% if i.age is not None %}<span class="meta" data-age>open {{ i.age }} day{{ i.age|pluralize }}</span>{% endif %}</span>
+        <span>{% if i.last_date %}{{ i.last_date|date:"j M Y" }}{% else %}—{% endif %}{% if i.last_who %}<span class="meta" data-last-who>{{ i.last_who }}</span>{% endif %}</span>
+        <i data-lucide="chevron-down" class="chev" aria-hidden="true"></i>
+      </button>
+      <div class="qdet" id="it-{{ i.key }}" x-show="open" x-cloak>
+        <ol class="hist" aria-label="History, newest first" data-history>
+          {% for h in i.history %}<li data-line><span class="when">{{ h.when|default:"date not recorded" }}</span><span class="what">{{ h.text }}{% if h.note %} <span class="tag" data-note>{{ h.note }}</span>{% endif %}</span>{% if h.who_text %}<span class="meta" data-who>{{ h.who_text }}</span>{% endif %}</li>
+          {% empty %}<li class="meta">No history recorded.</li>{% endfor %}
+        </ol>
+        {% if i.links %}<div class="wbtns">{% for l in i.links %}<a class="wbtn" href="{{ l.href }}" data-link="{{ l.kind }}">{{ l.label }} →</a>{% endfor %}</div>{% endif %}
+      </div>
+    </div>
+    {% empty %}
+    <div class="qempty" data-items-empty>Nothing matches these filters.</div>
+    {% endfor %}
+  </div>
+
+  <nav class="fhi-pages" aria-label="Item pages">
+    {% if items.filters.prev_href %}<a class="wbtn" href="{{ items.filters.prev_href }}" rel="prev" data-prev>← Previous</a>{% endif %}
+    <span class="meta" data-page>Page {{ items.page }} of {{ items.pages }} · {{ items.count }} item{{ items.count|pluralize }}</span>
+    {% if items.filters.next_href %}<a class="wbtn" href="{{ items.filters.next_href }}" rel="next" data-next>Next →</a>{% endif %}
+  </nav>
+</section>
+</div>
+<!-- fhi:end -->
 {% endblock %}

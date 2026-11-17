@@ -36,6 +36,11 @@ Indian grouping, whole rupees).
 
 STATE LIVES IN THE URL: ?period=month|30d|fy. Alpine holds only which chart week is
 picked. No fetch, no XHR.
+
+FIN-H-B4 adds the "Every item" list at the bottom: finance_head_items.finance_head_items()
+(seven more queries, fixed). Its filters (dir, status, type, q, sort, page) are GET
+parameters checked by finance_head_items.clean_item_params; every filter and paging link
+keeps ?period= and lands on #items. Alpine holds only which rows are expanded.
 """
 from decimal import ROUND_HALF_UP, Decimal
 from urllib.parse import urlencode
@@ -47,6 +52,7 @@ from django.views.decorators.http import require_safe
 
 from .decorators import _forbidden, login_required
 from .finance_head import BUCKETS, PERIODS, TYPES, finance_head_summary
+from .finance_head_items import clean_item_params, finance_head_items
 from .models import APPROVAL_APPROVED, APPROVAL_KIND_CONTRACTOR_BILL, PaymentRequest
 from .permissions import user_can_view_approval_list, user_can_view_finance_head_page
 # Finance work's rupees() is the page family's one full-figure format (views._format_inr
@@ -360,7 +366,8 @@ def _period(request):
 def finance_head(request):
     """
     The Finance Head page: money in and out for the chosen period, receivables and
-    payables with ageing, an 8-week chart and net by project type (FIN-H-B3).
+    payables with ageing, an 8-week chart and net by project type (FIN-H-B3), then the
+    "Every item" list with each item's history (FIN-H-B4).
     Access: the Finance Head, CEO, Admin and System Admin
     (permissions.user_can_view_finance_head_page, H12); everyone else gets the 403 page.
     GET only (require_safe): it reads, never writes (H2). never_cache, because Back from
@@ -381,10 +388,18 @@ def finance_head(request):
     # authority — not Finance — so the bills row is a link only for a viewer it admits
     # (B3 answer 4); for the Finance Head it is plain text. May cost one query (the
     # Design Head deputy check) for a role outside the list's roles; fixed, not per row.
+    # FIN-H-B4: asked ONCE and reused by the item list (R-B4-7), so the list's bill links
+    # follow the same rule as the bills row and cost no second check.
+    can_open_approvals = user_can_view_approval_list(request.user)
     bills_href = None
-    if user_can_view_approval_list(request.user):
+    if can_open_approvals:
         bills_href = (f'{reverse("approval_list")}?'
                       f'{urlencode({"kind": APPROVAL_KIND_CONTRACTOR_BILL, "status": APPROVAL_APPROVED})}')
+
+    # FIN-H-B4: the "Every item" list. Its GET parameters are cleaned (unknown values fall
+    # back to defaults) and the period rides along so every list link keeps it.
+    items = finance_head_items({**clean_item_params(request.GET), 'period': period},
+                               can_open_approvals)
 
     bills = s['bills_not_forwarded']
     return render(request, 'projects/finance_head.html', {
@@ -409,4 +424,5 @@ def finance_head(request):
                   'n': bills['count'], 'href': bills_href},
         'weeks': _weekly(s),
         'cards': _net_cards(s),
+        'items': items,
     })

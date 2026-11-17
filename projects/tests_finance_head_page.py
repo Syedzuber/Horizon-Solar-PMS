@@ -319,10 +319,18 @@ class MarkupTests(PageFixture):
         self.assertLess(inline, queue)
         self.assertNotIn('<link', html[base + 1:inline])
 
-    def test_the_page_has_no_form(self):
-        html = self.page()
-        self.assertNotIn('<form', html)
-        self.assertNotIn('method="post"', html.lower())
+    def test_the_page_has_no_post_form(self):
+        """H2: read only. Narrowed in FIN-H-B4 (answer 1): a GET search form is allowed
+        (the "Every item" filters, after the fh markers); a POST form is not, in either
+        part of the page. base.html's own POST form (Block Task modal) sits outside both."""
+        html = self.get(self.head).content.decode()
+        page = html.split('<!-- fh:start -->', 1)[1].split('<!-- fh:end -->', 1)[0]
+        items = html.split('<!-- fhi:start -->', 1)[1].split('<!-- fhi:end -->', 1)[0]
+        forms = re.findall(r'<form\b[^>]*>', page + items, flags=re.IGNORECASE)
+        self.assertTrue(forms)                      # the item filters' form is there
+        for tag in forms:
+            self.assertRegex(tag, r'method="get"')
+            self.assertNotIn('method="post"', tag.lower())
 
     def test_a_tile_shows_the_short_figure_with_the_full_one_as_title(self):
         site = self.site()
