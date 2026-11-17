@@ -240,6 +240,66 @@
 </div>
 <!-- fh:end -->
 
+{% comment %}FIN-H-B5 — "Who recorded what" (the period) and "Can these numbers be trusted?"
+   (eight all-time checks). Data: finance_head_checks.finance_head_checks() (four queries,
+   fixed). Own .sd wrapper and markers after fh:end, as the item list has, so the B3 tests
+   over the fh markers are untouched. No form: each check count is a plain link to the item
+   list below (?check=<key>#items); a count of 0 is grey text, not a link. The table scrolls
+   sideways inside its own box at phone width; the page itself never does. Rows are
+   alphabetical with no totals, percentages or colour scale (workload, not a ranking).{% endcomment %}
+<!-- fht:start -->
+<div class="sd" id="finance-head-trust">
+<style>
+  #finance-head-trust .fht-box { background: var(--sd-surface); border: 1px solid var(--sd-line); border-radius: 12px; padding: 14px 16px; margin-bottom: 22px; min-width: 0; }
+  #finance-head-trust .fht-box h2 { margin-bottom: 4px; }
+  #finance-head-trust .fht-scroll { overflow-x: auto; max-width: 100%; margin-top: 8px; }
+  #finance-head-trust .fht-table { width: 100%; min-width: 640px; border-collapse: collapse; font-size: 13px; }
+  #finance-head-trust .fht-table th, #finance-head-trust .fht-table td { padding: 7px 8px; border-bottom: 1px solid var(--sd-line); text-align: left; vertical-align: top; }
+  #finance-head-trust .fht-table thead th { font-size: 12px; color: var(--sd-muted); font-weight: 600; white-space: nowrap; }
+  #finance-head-trust .fht-table tbody th { font-weight: 500; }
+  #finance-head-trust .fht-table tbody tr:last-child th, #finance-head-trust .fht-table tbody tr:last-child td { border-bottom: 0; }
+  #finance-head-trust .fht-checks { list-style: none; margin: 8px 0 0; padding: 0; }
+  #finance-head-trust .fht-checks li { display: grid; grid-template-columns: 52px minmax(0,1fr); gap: 2px 12px; padding: 9px 0; border-bottom: 1px solid var(--sd-line); align-items: start; }
+  #finance-head-trust .fht-checks li:last-child { border-bottom: 0; }
+  #finance-head-trust .fht-n { font-size: 1.15rem; font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; line-height: 1.3; }
+  #finance-head-trust a.fht-n { color: var(--sd-crit); }
+  #finance-head-trust .fht-checks li.zero, #finance-head-trust .fht-checks li.zero .fht-n { color: var(--sd-faint); }
+  #finance-head-trust .fht-checks .lbl { font-weight: 500; font-size: 13.5px; display: block; }
+  #finance-head-trust .fht-checks .meta { overflow-wrap: anywhere; }
+</style>
+<section class="fht-box" id="who" aria-labelledby="h-who">
+  <h2 id="h-who">Who recorded what · {{ recorded_label }}</h2>
+  <p class="meta">Each person's own entries in the period, alphabetical. Workload, not a ranking.</p>
+  {% if not who.has_payment_data %}<p class="meta" data-who-no-payments>{{ no_payments }}</p>{% endif %}
+  <div class="fht-scroll" role="region" aria-labelledby="h-who" tabindex="0">
+    <table class="fht-table">
+      <thead><tr><th scope="col">Person</th><th scope="col">Money received</th><th scope="col">Invoices raised</th><th scope="col">Approvals</th><th scope="col">Paid out</th></tr></thead>
+      <tbody>
+        {% for r in who.rows %}<tr data-who="{{ r.key }}">
+          <th scope="row">{{ r.name }}{% if r.head %} <span class="pill info" data-head>Head</span>{% endif %}<span class="meta" data-role>{{ r.role }}</span></th>
+          <td{% if r.unset %} data-unset{% endif %}>{{ r.money }}</td><td>{{ r.invoices }}</td><td>{{ r.approvals }}</td><td>{{ r.paid }}</td>
+        </tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="fixed">{{ who.footnote }}</p>
+</section>
+
+<section class="fht-box" id="trust" aria-labelledby="h-trust">
+  <h2 id="h-trust">Can these numbers be trusted?</h2>
+  <p class="meta">All time, every site the page counts. A count opens its items in the list below.</p>
+  <ul class="fht-checks">
+    {% for c in trust %}
+    <li data-check="{{ c.key }}"{% if not c.count %} class="zero"{% endif %}>
+      {% if c.href %}<a class="fht-n" href="{{ c.href }}" data-check-link aria-label="{{ c.count }}: {{ c.label }} — show these items">{{ c.count }}</a>{% else %}<span class="fht-n" data-check-zero>0</span>{% endif %}
+      <span><span class="lbl">{{ c.label }}</span><span class="meta">{{ c.why }}</span>{% if c.extra %}<span class="meta" data-check-extra>{{ c.extra }}</span>{% endif %}</span>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+</div>
+<!-- fht:end -->
+
 {% comment %}FIN-H-B4 — "Every item": every money item the page counts (Residential milestones,
    payment requests, approved contractor bills not yet forwarded), filterable, each expandable
    to its history. Data: finance_head_items.finance_head_items() (seven queries, fixed).
@@ -279,9 +339,14 @@
     <h2 id="h-items">Every item <span class="qn num{% if not items.count %} z{% endif %}">{{ items.count }}</span></h2>
     <span class="meta" data-items-count>{{ items.count }} item{{ items.count|pluralize }}{% if items.filters.windowed %} · open, or moved in the last 30 days{% endif %} · newest movement first unless sorted otherwise</span>
   </div>
+  {% if items.filters.check %}<p class="meta" data-items-check>Check: <b>{{ items.filters.check.label }}</b> — every item it counts, whatever the direction or status. <a href="{{ items.filters.check.clear_href }}" data-check-clear>Show every item</a></p>{% endif %}
 
   <form method="get" action="#items" class="ctrl fhi-filters" role="search" aria-label="Filter every item">
     <input type="hidden" name="period" value="{{ period }}">
+    {% if items.filters.check %}<input type="hidden" name="check" value="{{ items.filters.check.key }}">{% endif %}
+    {% comment %}FIN-H-B5 answer 2: a chosen check ignores direction and status, so the two
+       dropdowns are hidden under it (the banner above says so and links back).{% endcomment %}
+    {% if not items.filters.check %}
     <label>Direction
       <select name="dir" class="form-select form-select-sm">{% for o in items.filters.directions %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}</select>
     </label>
@@ -291,6 +356,7 @@
         {% for g in items.filters.status_groups %}<optgroup label="{{ g.label }}">{% for o in g.options %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}</optgroup>{% endfor %}
       </select>
     </label>
+    {% endif %}
     <label>Type
       <select name="type" class="form-select form-select-sm">{% for o in items.filters.types %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}</select>
     </label>
@@ -313,7 +379,7 @@
     <div class="qitem" x-data="{ open: false }" data-item="{{ i.key }}" data-kind="{{ i.kind }}" data-status="{{ i.status }}">
       <button type="button" class="qrow" style="--cols: minmax(0,1.4fr) minmax(0,1.1fr) minmax(0,.9fr) minmax(0,.9fr) minmax(0,1fr);"
               @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="false" aria-controls="it-{{ i.key }}">
-        <span><span class="dir dir-{{ i.direction }}" data-dir="{{ i.direction }}">{{ i.mark }}</span><span class="code" data-ref>{{ i.reference }}</span><span class="meta">{{ i.type_label }}{% if i.detail %} · {{ i.detail }}{% endif %}</span></span>
+        <span><span class="dir dir-{{ i.direction }}" data-dir="{{ i.direction }}">{{ i.mark }}</span><span class="code" data-ref>{{ i.reference }}</span><span class="meta">{{ i.type_label }}{% if i.detail %} · {{ i.detail }}{% endif %}</span>{% if i.check_note %}<span class="meta" data-check-note>{{ i.check_note }}</span>{% endif %}</span>
         <span>{{ i.party|default:"—" }}</span>
         <span>{% if i.amount_text %}<span class="amt" data-amount>{{ i.amount_text }}</span>{% else %}<span class="na" data-unset>amount not set</span>{% endif %}<span class="meta">{{ i.amount_label }}</span></span>
         <span><span class="pill {{ i.tone }}">{{ i.status_label }}</span>{% if i.age is not None %}<span class="meta" data-age>open {{ i.age }} day{{ i.age|pluralize }}</span>{% endif %}</span>

@@ -6,8 +6,14 @@ here (views_finance_head draws it).
 PUBLIC
     clean_item_params(data)   the list's GET parameters, every value checked; anything
                               unknown falls back to its default, so no parameter raises
-    finance_head_items(params, viewer_can_open_approvals, today=None)
+    finance_head_items(params, viewer_can_open_approvals, today=None, checks=None)
                               {count, page, pages, items, filters, merged}
+
+?check=<key> (FIN-H-B5): `checks` is finance_head_checks.check_filters(), worked out by
+the view from its own queries; the list adds none. A known key keeps exactly that check's
+items (each with its note), lifts the 30-day window and ignores direction and status;
+search and type still apply (B5 answer 8). An unknown key is ignored. This module never
+imports finance_head_checks (that module imports this one).
 
 THE THREE KINDS (R-B4-1). Scopes are IMPORTED from finance_head, never copied, so the
 list holds exactly the rows the page's figures count:
@@ -85,6 +91,8 @@ from .views_finance_work import TYPE_LABELS, rupees
 
 PAGE_SIZE = 25
 SEARCH_MAX = 100
+#: A ?check= value is a short lower-case key; anything else is dropped before lookup.
+CHECK_RE = re.compile(r'[a-z_]{1,40}')
 #: A4: a log line and a transition at most this far apart are the same event.
 SAME_EVENT_SECONDS = 60
 
@@ -157,6 +165,7 @@ def clean_item_params(data):
         page = int(data.get('page', '') or 1)
     except (TypeError, ValueError):
         page = 1
+    check = (data.get('check', '') or '').strip()
     return {
         'dir': pick('dir', DIRECTIONS),
         'status': pick('status', STATUS_LABELS),
@@ -164,6 +173,9 @@ def clean_item_params(data):
         'q': (data.get('q', '') or '').strip()[:SEARCH_MAX],
         'sort': pick('sort', SORTS, DEFAULT_SORT),
         'page': max(page, 1),
+        # Only the shape is checked here; finance_head_items drops a key the page's
+        # checks do not know.
+        'check': check if CHECK_RE.fullmatch(check) else '',
     }
 
 
@@ -232,6 +244,7 @@ class Item:
     history: list = field(default_factory=list)
     last_date: object = None
     last_who: str = ''
+    check_note: str = ''      # FIN-H-B5: why this item is in the chosen ?check=
 
     @property
     def key(self):
@@ -465,8 +478,16 @@ def _bill_items(rows):
 # Filter, sort, page
 # ---------------------------------------------------------------------------
 
-def _keep(item, p, window_start):
-    """R-B4-2 / R-B4-3 for one item."""
+def _keep(item, p, window_start, check=None):
+    """R-B4-2 / R-B4-3 for one item; under a ?check= (FIN-H-B5) only the check's own
+    items, then type and search (B5 answer 8: direction, status and the window are
+    ignored, so the count on the check equals the items it opens)."""
+    if check is not None:
+        if item.key not in check['items']:
+            return False
+        if p['type'] and item.ptype != p['type']:
+            return False
+        return not p['q'] or p['q'].lower() in item.haystack
     if p['dir'] and item.direction != p['dir']:
         return False
     if p['type'] and item.ptype != p['type']:
@@ -859,7 +880,7 @@ def _href(period, p, **changes):
     kept, landing on #items."""
     merged = {**p, **changes}
     query = {'period': period} if period else {}
-    for key in ('dir', 'status', 'type', 'q', 'sort'):
+    for key in ('dir', 'status', 'type', 'q', 'sort', 'check'):
         value = merged.get(key)
         if value and not (key == 'sort' and value == DEFAULT_SORT):
             query[key] = value
@@ -868,7 +889,7 @@ def _href(period, p, **changes):
     return f'?{urlencode(query)}#items' if query else '?#items'
 
 
-def _filters(p, period, page, pages):
+def _filters(p, period, page, pages, check=None):
     return {
         'values': p,
         'period': period,
@@ -884,8 +905,12 @@ def _filters(p, period, page, pages):
         'sorts': [{'value': v, 'label': l, 'selected': v == p['sort']}
                   for v, l in SORTS.items()],
         'filtered': bool(p['dir'] or p['status'] or p['type'] or p['q']
-                         or p['sort'] != DEFAULT_SORT),
-        'windowed': not p['status'] and not p['q'],
+                         or p['sort'] != DEFAULT_SORT or p['check']),
+        'windowed': not p['status'] and not p['q'] and not p['check'],
+        # FIN-H-B5: the chosen check, with a link that drops only the check.
+        'check': ({'key': p['check'], 'label': check['label'],
+                   'clear_href': _href(period, p, check='', page=1)}
+                  if check is not None else None),
         'prev_href': _href(period, p, page=page - 1) if page > 1 else None,
         'next_href': _href(period, p, page=page + 1) if page < pages else None,
         'clear_href': _href(period, {}),
@@ -896,7 +921,7 @@ def _filters(p, period, page, pages):
 # Public
 # ---------------------------------------------------------------------------
 
-def finance_head_items(params, viewer_can_open_approvals, today=None):
+def finance_head_items(params, viewer_can_open_approvals, today=None, checks=None):
     """The "Every item" list for cleaned `params` (clean_item_params; 'period' may ride
     along and is kept in every link). SEVEN queries whatever the data size (module
     docstring). `viewer_can_open_approvals` decides whether an unforwarded bill links to
@@ -904,14 +929,20 @@ def finance_head_items(params, viewer_can_open_approvals, today=None):
 
     Returns {count, page, pages, items, filters, merged}: `items` are the shown page's
     Item objects with links and history; `merged` is how many duplicate lines A4 took
-    out of the shown page's history."""
+    out of the shown page's history.
+
+    `checks` (FIN-H-B5) is {key: check} from finance_head_checks.check_filters(); the
+    ?check= value picks one (module docstring). No query: the check's items are ids."""
     p = {**clean_item_params({}), **params}
+    check = (checks or {}).get(p['check'])
+    if check is None:
+        p['check'] = ''                     # unknown key: ignored
     today = today or timezone.localdate()
     window_start = period_start('30d', today)
 
     items = (_milestone_items(_milestone_rows()) + _payment_items(_payment_rows())
              + _bill_items(_bill_rows()))
-    kept = _sort([i for i in items if _keep(i, p, window_start)], p['sort'])
+    kept = _sort([i for i in items if _keep(i, p, window_start, check)], p['sort'])
 
     count = len(kept)
     pages = max(1, -(-count // PAGE_SIZE))
@@ -920,8 +951,10 @@ def finance_head_items(params, viewer_can_open_approvals, today=None):
     for item in shown:
         item.age = (today - item.since).days if item.is_open and item.since else None
         item.links = _links(item, viewer_can_open_approvals)
+        if check is not None:
+            item.check_note = check['items'].get(item.key, '')
     merged = _load_history(shown)
 
     return {'count': count, 'page': page, 'pages': pages, 'items': shown,
-            'filters': _filters(p, params.get('period', ''), page, pages),
+            'filters': _filters(p, params.get('period', ''), page, pages, check),
             'merged': merged}

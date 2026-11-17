@@ -41,6 +41,13 @@ FIN-H-B4 adds the "Every item" list at the bottom: finance_head_items.finance_he
 (seven more queries, fixed). Its filters (dir, status, type, q, sort, page) are GET
 parameters checked by finance_head_items.clean_item_params; every filter and paging link
 keeps ?period= and lands on #items. Alpine holds only which rows are expanded.
+
+FIN-H-B5 adds two sections before the list: "Who recorded what" (the period's receipts,
+invoices, approvals, holds and payments per person, alphabetical, workload not a
+ranking) and "Can these numbers be trusted?" (eight all-time checks, each count opening
+its items in the list through ?check=<key>#items). Both come from
+finance_head_checks.finance_head_checks() (four more queries, fixed: 23 in all); the
+list's check filter reuses its results and adds none.
 """
 from decimal import ROUND_HALF_UP, Decimal
 from urllib.parse import urlencode
@@ -52,6 +59,7 @@ from django.views.decorators.http import require_safe
 
 from .decorators import _forbidden, login_required
 from .finance_head import BUCKETS, PERIODS, TYPES, finance_head_summary
+from .finance_head_checks import check_filters, finance_head_checks
 from .finance_head_items import clean_item_params, finance_head_items
 from .models import APPROVAL_APPROVED, APPROVAL_KIND_CONTRACTOR_BILL, PaymentRequest
 from .permissions import user_can_view_approval_list, user_can_view_finance_head_page
@@ -69,6 +77,11 @@ DEFAULT_PERIOD = 'month'
 NO_PAYMENTS = 'No payment requests in PMS yet.'
 #: H37: in place of the Residential net while money out is not recorded.
 NO_MONEY_OUT = 'Money out is not recorded in PMS yet.'
+#: FIN-H-B5: the who-recorded-what footnote (ruling wording).
+WHO_FOOTNOTE = ('From PMS records. Older receipts (before mid-September) show the role '
+                'written in the log at the time.')
+#: An empty cell in the who-recorded-what table.
+NONE_MARK = '—'
 #: H8: money in, to collect and net for RESCO / CAPEX (None in the data).
 NOT_IN_PMS = 'Not in PMS yet'
 NOT_COMPARABLE = 'Not comparable'
@@ -350,6 +363,48 @@ def _net_cards(s):
     return cards
 
 
+def _trust(checks, period):
+    """FIN-H-B5 "Can these numbers be trusted?": each check as drawn. A count above 0
+    links to the item list filtered to exactly those items (?check=); 0 has no link."""
+    return [{'key': c['key'], 'label': c['label'], 'why': c['why'], 'count': c['count'],
+             'extra': c['extra'],
+             'href': (f'?{urlencode({"period": period, "check": c["key"]})}#items'
+                      if c['count'] else None)}
+            for c in checks]
+
+
+def _who_rows(who):
+    """FIN-H-B5 "Who recorded what": each row's cells as text, '—' for nothing. Money
+    received shows the rupee sum only when at least one receipt has an amount, so a
+    column of blanks never reads as ₹0 (H4); "N without amount" says how many have none.
+    H21: with no payment request in PMS, Approvals and Paid out read '—' for everyone
+    (the section says why once)."""
+    has_payments = who['has_payment_data']
+    rows = []
+    for r in who['rows']:
+        money = NONE_MARK
+        if r['received_n']:
+            parts = [str(r['received_n'])]
+            if r['received_n'] > r['received_unset']:
+                parts.append(rupees(r['received_sum']))
+            if r['received_unset']:
+                parts.append(f'{r["received_unset"]} without amount')
+            money = ' · '.join(parts)
+        approvals = paid = NONE_MARK
+        if has_payments:
+            if r['approvals_n'] or r['held_n']:
+                approvals = str(r['approvals_n']) + (f' · {r["held_n"]} held'
+                                                     if r['held_n'] else '')
+            if r['paid_n']:
+                paid = f'{r["paid_n"]} · {rupees(r["paid_sum"])}'
+        rows.append({'key': r['key'], 'name': r['name'], 'role': ' / '.join(r['roles']),
+                     'head': r['head'], 'finance': r['finance'], 'older': r['older'],
+                     'money': money, 'unset': r['received_unset'],
+                     'invoices': str(r['invoices_n']) if r['invoices_n'] else NONE_MARK,
+                     'approvals': approvals, 'paid': paid})
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # The request
 # ---------------------------------------------------------------------------
@@ -367,7 +422,8 @@ def finance_head(request):
     """
     The Finance Head page: money in and out for the chosen period, receivables and
     payables with ageing, an 8-week chart and net by project type (FIN-H-B3), then the
-    "Every item" list with each item's history (FIN-H-B4).
+    "Every item" list with each item's history (FIN-H-B4), with "Who recorded what" and
+    the data-trust checks before it (FIN-H-B5).
     Access: the Finance Head, CEO, Admin and System Admin
     (permissions.user_can_view_finance_head_page, H12); everyone else gets the 403 page.
     GET only (require_safe): it reads, never writes (H2). never_cache, because Back from
@@ -396,10 +452,15 @@ def finance_head(request):
         bills_href = (f'{reverse("approval_list")}?'
                       f'{urlencode({"kind": APPROVAL_KIND_CONTRACTOR_BILL, "status": APPROVAL_APPROVED})}')
 
+    # FIN-H-B5: trust checks (all-time) and who recorded what (the period). Worked out
+    # once, before the list, because the list's ?check= filter reads these results
+    # instead of querying again.
+    checks = finance_head_checks(period)
+
     # FIN-H-B4: the "Every item" list. Its GET parameters are cleaned (unknown values fall
     # back to defaults) and the period rides along so every list link keeps it.
     items = finance_head_items({**clean_item_params(request.GET), 'period': period},
-                               can_open_approvals)
+                               can_open_approvals, checks=check_filters(checks['checks']))
 
     bills = s['bills_not_forwarded']
     return render(request, 'projects/finance_head.html', {
@@ -425,4 +486,8 @@ def finance_head(request):
         'weeks': _weekly(s),
         'cards': _net_cards(s),
         'items': items,
+        'trust': _trust(checks['checks'], period),
+        'who': {'rows': _who_rows(checks['who']),
+                'has_payment_data': checks['who']['has_payment_data'],
+                'footnote': WHO_FOOTNOTE},
     })

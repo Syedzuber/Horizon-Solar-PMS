@@ -19,7 +19,10 @@ THE RULES PINNED HERE (rulings R-B4-1 to R-B4-9, answers A1-A6):
   * "amount not set", never ₹0.
   * Links (A5): bill link for a viewer of the approvals list only; order payment to the
     order page's anchor.
-  * The whole page costs exactly 19 queries at 3/0, 30/0 and 30/10 (A6).
+  * The whole page costs exactly 23 queries at 3/0, 30/0 and 30/10 (A6; 19 before
+    FIN-H-B5 added its four, answer 11).
+  * FIN-H-B5 ?check=: exactly the check's items, count == items opened for every check;
+    search and type apply, direction and status ignored; unknown key ignored.
 
 Real fixtures throughout (the FIN-H-B2 / B3 builders).
 
@@ -35,6 +38,7 @@ from django.test.utils import CaptureQueriesContext
 from . import finance_head as finance_head_module
 from . import finance_head_items as items_module
 from .finance_head import finance_head_summary
+from .finance_head_checks import check_filters, finance_head_checks
 from .finance_head_items import (PAGE_SIZE, SAME_EVENT_SECONDS, clean_item_params,
                                  finance_head_items)
 from .models import (SUBJECT_PAYMENT_MILESTONE, SUBJECT_PAYMENT_REQUEST, SUBJECT_TASK,
@@ -195,8 +199,10 @@ class FilterTests(ItemsFixture):
                                    page='abc'), default)
         p = clean_item_params({'dir': 'x', 'status': 'y', 'type': 'z', 'sort': 'w',
                                'page': '-4', 'q': '  hz-77  '})
+        # FIN-H-B5 added 'check' (only its shape is checked here; an unknown key is
+        # dropped by finance_head_items, CheckFilterTests).
         self.assertEqual(p, {'dir': '', 'status': '', 'type': '', 'q': 'hz-77',
-                             'sort': 'latest', 'page': 1})
+                             'sort': 'latest', 'page': 1, 'check': ''})
 
     def test_search(self):
         self.assertEqual(set(self.keys(q='hz-77')),
@@ -455,7 +461,8 @@ class PageSectionTests(ItemsFixture):
 
 
 class QueryCountTests(ItemsFixture):
-    """A6: 12 for the B3 page + 7 for the list = 19, whatever the size."""
+    """A6: 12 for the B3 page + 4 for the FIN-H-B5 checks + 7 for the list = 23, whatever
+    the size (B5 answer 11 repinned 19 -> 23)."""
 
     def add_sites(self, n):
         for _ in range(n):
@@ -473,7 +480,7 @@ class QueryCountTests(ItemsFixture):
         self.assertEqual(response.status_code, 200)
         return len(ctx.captured_queries)
 
-    def test_exactly_19_at_3_0_30_0_and_30_10(self):
+    def test_exactly_23_at_3_0_30_0_and_30_10(self):
         self.add_sites(3)
         small = self.count()
         self.add_sites(27)
@@ -489,11 +496,119 @@ class QueryCountTests(ItemsFixture):
                      hold_at=self.ago(1) if i == 2 else None)
         with_payments = self.count()
         print(f'\nFIN-H-B4 queries: 3/0={small}, 30/0={large}, 30/10={with_payments}')
-        self.assertEqual((small, large, with_payments), (19, 19, 19))
+        self.assertEqual((small, large, with_payments), (23, 23, 23))
 
-    def test_19_when_the_filters_leave_nothing(self):
+    def test_23_when_the_filters_leave_nothing(self):
         self.add_sites(3)
         client = self.client_for(self.head)
         with CaptureQueriesContext(connection) as ctx:
             client.get(URL + '?status=paid&q=nothing-matches')
-        self.assertEqual(len(ctx.captured_queries), 19)
+        self.assertEqual(len(ctx.captured_queries), 23)
+
+
+# ---------------------------------------------------------------------------
+# FIN-H-B5: ?check= (B5 answers 4 and 8)
+# ---------------------------------------------------------------------------
+
+class CheckFilterTests(ItemsFixture):
+
+    def checked(self, **params):
+        filters = check_filters(finance_head_checks('month', today=self.today)['checks'])
+        return finance_head_items(clean_item_params(params), False, today=self.today,
+                                  checks=filters), filters
+
+    def build_one_of_each(self):
+        old = self.old_site()
+        self.received(old, 'M1', None, self.today - timedelta(days=60))   # 2 + 1
+        not_due = self.old_site()
+        self.milestone(not_due, 'M2')                                     # 1, not due
+        self.trigger(not_due, PO_BC, status=Task.IN_PROGRESS)
+        late = self.old_site()
+        self.milestone(late, 'M3', amount=D('9'))
+        self.trigger(late, HANDOVER, done_days_ago=10)                    # 6
+        self.milestone(self.old_site(), 'M2', status=PaymentMilestone.INVOICED,
+                       amount=D('5'))                                     # 4
+        coord = self.received(self.old_site(), 'M1', '5', self.today - timedelta(days=50))
+        self.transition(SUBJECT_PAYMENT_MILESTONE, coord.pk, PaymentMilestone.RECEIVED,
+                        actor=self.coord, role='Project Coordinator', at=self.ago(50))   # 3
+        changed = self.received(self.old_site(), 'M1', '5', self.today - timedelta(days=40))
+        self.transition(SUBJECT_PAYMENT_MILESTONE, changed.pk, PaymentMilestone.RECEIVED,
+                        at=self.ago(40))
+        line = ActivityLog.objects.create(project=changed.project, actor=self.pm,
+                                          action='M1: amount ₹1 → ₹2', entity_type='Milestone',
+                                          entity_id=changed.pk,
+                                          action_code='milestone_amounts_set')
+        ActivityLog.objects.filter(pk=line.pk).update(timestamp=self.ago(5))            # 8
+        self.pay(sites=[self.old_site()], status=PaymentRequest.APPROVED, approved='10',
+                 approved_at=self.ago(9))                                               # 5 + 7
+        self.milestone(self.old_site(status='Draft'), 'M1')    # H26: in no check, no list
+
+    def test_every_check_opens_exactly_its_items_count_equals_opened(self):
+        self.build_one_of_each()
+        result, filters = self.checked()
+        for key, check in filters.items():
+            with self.subTest(check=key):
+                self.assertGreater(check['count'], 0)
+                opened, _ = self.checked(check=key)
+                self.assertEqual({i.key for i in opened['items']}, set(check['items']))
+                self.assertEqual(opened['count'], check['count'])
+
+    def test_direction_status_and_window_ignored_type_and_search_apply(self):
+        self.build_one_of_each()
+        plain, filters = self.checked(check='no_amount')
+        wanted = set(filters['no_amount']['items'])
+        ignored, _ = self.checked(check='no_amount', dir='out', status='paid')
+        self.assertEqual({i.key for i in ignored['items']}, wanted)
+        self.assertEqual(self.checked(check='no_amount', type='OPEX')[0]['count'], 0)
+        self.assertEqual(self.checked(check='no_amount', q='nothing-like-this')[0]['count'], 0)
+        self.assertEqual(plain['filters']['windowed'], False)
+        self.assertEqual(plain['filters']['check']['label'], 'Milestone amount not set')
+        self.assertIn('check=no_amount', plain['filters']['next_href'] or
+                      plain['filters']['clear_href'] + 'check=no_amount')
+
+    def test_unknown_or_malformed_key_is_ignored(self):
+        self.build_one_of_each()
+        default, _ = self.checked()
+        for value in ('nope', 'NO_AMOUNT', 'x' * 60, '<script>'):
+            with self.subTest(value=value):
+                result, _ = self.checked(check=value)
+                self.assertEqual([i.key for i in result['items']],
+                                 [i.key for i in default['items']])
+                self.assertIsNone(result['filters']['check'])
+
+    def test_each_item_carries_its_note(self):
+        self.build_one_of_each()
+        result, _ = self.checked(check='by_coordinator')
+        self.assertEqual([i.check_note for i in result['items']],
+                         ['Recorded by Fw_Coord (Project Coordinator)'])
+
+    def test_the_section_says_which_check_and_keeps_it_in_links(self):
+        self.build_one_of_each()
+        html = self.client_for(self.head).get(URL + '?period=fy&check=late_payment').content.decode()
+        section = html.split('<!-- fhi:start -->', 1)[1].split('<!-- fhi:end -->', 1)[0]
+        self.assertIn('data-items-check', section)
+        self.assertIn('Approved, not paid 7+ days', section)
+        self.assertIn('<input type="hidden" name="check" value="late_payment">', section)
+        self.assertIn('href="?period=fy#items"', section)                # clear the check
+        self.assertIn('data-check-note', section)
+
+    def test_direction_and_status_hidden_under_a_check_shown_without(self):
+        # B5 follow-up answer 2: a check ignores both, so neither dropdown is drawn; the
+        # banner and its "Show every item" link stay. Type, sort and search remain.
+        self.build_one_of_each()
+        client = self.client_for(self.head)
+
+        def section(query):
+            html = client.get(URL + query).content.decode()
+            return html.split('<!-- fhi:start -->', 1)[1].split('<!-- fhi:end -->', 1)[0]
+
+        checked = section('?check=no_amount')
+        self.assertNotIn('name="dir"', checked)
+        self.assertNotIn('name="status"', checked)
+        for kept in ('name="type"', 'name="sort"', 'name="q"', 'data-items-check',
+                     'data-check-clear'):
+            self.assertIn(kept, checked)
+        plain = section('')
+        self.assertIn('name="dir"', plain)
+        self.assertIn('name="status"', plain)
+        self.assertNotIn('data-items-check', plain)

@@ -3319,6 +3319,11 @@ FINANCE_HEAD_HOLDER_ROLES = frozenset({'Finance'})
 #: holding the flag (user_is_finance_head), which is the point of the flag.
 FINANCE_HEAD_PAGE_ROLES = frozenset({'CEO', 'Admin', 'System Admin'})
 
+#: Roles expected to record client money (FIN-H-B5). A receipt recorded by any other
+#: role at the time (Coordinator, PM, an automatic move) is flagged on the Finance Head
+#: page's "Recorded outside Finance" check. Read only by finance_head_checks.
+MONEY_RECORDER_ROLES = frozenset({'Finance'})
+
 
 def _user_and_profile_active(user):
     """Return the profile of an authenticated user whose login AND profile are active,
