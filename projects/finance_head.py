@@ -217,12 +217,16 @@ def _milestone_rows():
         'trigger_status', 'trigger_na', 'trigger_done_at')
 
 
-def _due_state(row):
+def due_state(row):
     """('due', since) or ('not_due', None) for one Pending milestone on an actionable
     site, read in Finance work's order (views_finance_work._milestone_rows, H25):
     M1 is due from activation; for M2/M3 a missing task is due, Done is due from its
     date (checked BEFORE Not Applicable, so a Done+N/A task keeps its date), N/A is due,
-    anything else is not yet due. `since` None = due with no date to count from."""
+    anything else is not yet due. `since` None = due with no date to count from.
+
+    `row` needs milestone_name, project__activated_at and the annotate_trigger_done
+    values trigger_status, trigger_na and trigger_done_at. Public since FIN-H-B4-1: the
+    B2 figures and the FIN-H-B4 item list both call it, so "due" is one rule, not two."""
     if row['milestone_name'] == PaymentMilestone.M1:
         return 'due', _local(row['project__activated_at'])
     if row['trigger_status'] is None:
@@ -257,7 +261,7 @@ def _incoming(today, start):
         if status == PaymentMilestone.PENDING:
             if row['project__status'] in NOT_ACTIONABLE_STATUSES:
                 continue                                             # H26
-            state, since = _due_state(row)
+            state, since = due_state(row)
             target = due if state == 'due' else not_due
             target['count'] += 1
             target['sum'] += amount or ZERO

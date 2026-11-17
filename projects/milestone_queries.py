@@ -24,6 +24,9 @@ def annotate_trigger_done(milestone_qs):
         trigger_na       the task's Not Applicable flag, None when there is no task
         trigger_done_at  the task's completed_at, None when there is no task or it was
                          never completed
+        trigger_task_id  the task's pk, None when there is no task (FIN-H-B4-1: the
+                         Finance Head item list reads the Done transition of this very
+                         task for its history; Finance work and the B2 figures ignore it)
 
     HOW FINANCE WORK READS THEM (views_finance_work._milestone_rows, R8 + ruling 4), in
     this order — a reader that wants the same "due" must keep it:
@@ -39,11 +42,12 @@ def annotate_trigger_done(milestone_qs):
     trigger_name is annotated first so the subqueries can match the task through
     OuterRef('trigger_name'). Each subquery is ordered by pk and takes [:1], so when a
     site carries two tasks of the trigger name the OLDEST (lowest pk) is read — the
-    three values always come from the same task.
+    four values always come from the same task.
 
     Adds annotations only: no filter on status or project status, no select_related, no
-    ordering. Those are each caller's own. Three correlated subqueries, so it adds no
-    query of its own, whatever the number of milestones.
+    ordering. Those are each caller's own. Four correlated subqueries, so it adds no
+    query of its own, whatever the number of milestones. A caller that ends in
+    .values(...) without naming trigger_task_id leaves it out of its SELECT.
     """
     trigger_name = Case(
         *[When(milestone_name=name, then=Value(task))
@@ -59,4 +63,5 @@ def annotate_trigger_done(milestone_qs):
             .annotate(trigger_status=Subquery(trigger.values('status')[:1]),
                       trigger_na=Subquery(trigger.values('is_not_applicable')[:1],
                                           output_field=BooleanField()),
-                      trigger_done_at=Subquery(trigger.values('completed_at')[:1])))
+                      trigger_done_at=Subquery(trigger.values('completed_at')[:1]),
+                      trigger_task_id=Subquery(trigger.values('pk')[:1])))

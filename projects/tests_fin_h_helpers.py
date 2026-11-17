@@ -4,7 +4,8 @@ the extraction is behaviour-neutral and the helpers keep their rules once B2 use
 
 THE RULES PINNED HERE:
   * milestone_queries.annotate_trigger_done() annotates trigger_name, trigger_status,
-    trigger_na and trigger_done_at, and adds no filter or ordering of its own. Finance
+    trigger_na, trigger_done_at and (FIN-H-B4-1) trigger_task_id, and adds no filter or
+    ordering of its own. Finance
     work reads them as: no task = due ("no trigger task"), Done = due from its date
     (Done before Not Applicable), Not Applicable = due ("trigger N/A"), else not due.
     M1 has no trigger. Two tasks of the trigger name: the oldest (lowest pk) is read.
@@ -56,6 +57,7 @@ class TriggerDoneTests(FinanceWorkFixture):
         self.assertEqual(m.trigger_status, Task.DONE)
         self.assertEqual(m.trigger_done_at, task.completed_at)
         self.assertIs(m.trigger_na, False)
+        self.assertEqual(m.trigger_task_id, task.pk)
 
     def test_trigger_in_progress_has_no_done_time(self):
         site = self.site()
@@ -70,8 +72,8 @@ class TriggerDoneTests(FinanceWorkFixture):
         site = self.site()
         m2 = self.milestone(site, 'M2')
         m = self.annotated(m2)
-        self.assertEqual((m.trigger_name, m.trigger_status, m.trigger_na, m.trigger_done_at),
-                         (PO_BC, None, None, None))
+        self.assertEqual((m.trigger_name, m.trigger_status, m.trigger_na, m.trigger_done_at,
+                          m.trigger_task_id), (PO_BC, None, None, None, None))
         row = {r.milestone.pk: r for r in self.ctx()['to_act']}[m2.pk]
         self.assertEqual((row.kind, row.note, row.since), ('invoice', 'no trigger task', None))
 
@@ -101,8 +103,8 @@ class TriggerDoneTests(FinanceWorkFixture):
         self.trigger(site, PO_BC)
         self.trigger(site, HANDOVER)
         m = self.annotated(m1)
-        self.assertEqual((m.trigger_name, m.trigger_status, m.trigger_na, m.trigger_done_at),
-                         ('', None, None, None))
+        self.assertEqual((m.trigger_name, m.trigger_status, m.trigger_na, m.trigger_done_at,
+                          m.trigger_task_id), ('', None, None, None, None))
 
     def test_two_tasks_of_the_trigger_name_read_the_oldest(self):
         site = self.site()
@@ -110,7 +112,9 @@ class TriggerDoneTests(FinanceWorkFixture):
         first = self.trigger(site, PO_BC, done_days_ago=9)
         self.trigger(site, PO_BC, status=Task.IN_PROGRESS)
         m = self.annotated(m2)
-        self.assertEqual((m.trigger_status, m.trigger_done_at), (Task.DONE, first.completed_at))
+        # The pk comes from the same task as the state: the oldest one.
+        self.assertEqual((m.trigger_status, m.trigger_done_at, m.trigger_task_id),
+                         (Task.DONE, first.completed_at, first.pk))
 
     def test_it_adds_no_filter_and_costs_one_query(self):
         # A Received milestone on a Draft OPEX site is outside every Finance work filter;

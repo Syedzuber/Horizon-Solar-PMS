@@ -74,9 +74,9 @@ from django.db.models import OuterRef, Q, Subquery
 from django.urls import reverse
 from django.utils import timezone
 
-from .finance_head import (NOT_ACTIONABLE_STATUSES, TYPES, live_residential_milestones,
-                           payment_type_expr, period_start, scoped_payments,
-                           unforwarded_bills)
+from .finance_head import (NOT_ACTIONABLE_STATUSES, TYPES, due_state,
+                           live_residential_milestones, payment_type_expr, period_start,
+                           scoped_payments, unforwarded_bills)
 from .milestone_queries import annotate_trigger_done
 from .models import (ACTOR_ROLE_SYSTEM, SUBJECT_PAYMENT_MILESTONE, SUBJECT_PAYMENT_REQUEST,
                      SUBJECT_TASK, ActivityLog, PaymentMilestone, PaymentRequest,
@@ -268,16 +268,11 @@ class Item:
 
 def _milestone_rows():
     """Query 1. Every live Residential milestone (finance_head scope), light, with the R8
-    trigger state (milestone_queries.annotate_trigger_done) and three more correlated
-    subqueries, not queries: the trigger task's pk (matched exactly as
-    annotate_trigger_done matches it, oldest pk of the trigger name on the site, so the
-    history reads the Done of the very task the due rule read), and the latest
-    transition and latest entity-linked log line, for movement. order_by() clears
-    Meta.ordering: the list is sorted in Python."""
-    trigger_pk = Subquery(
-        Task.objects.filter(phase__project=OuterRef('project'),
-                            task_name=OuterRef('trigger_name'))
-        .order_by('pk').values('pk')[:1])
+    trigger state and the trigger task's pk (milestone_queries.annotate_trigger_done:
+    trigger_task_id comes from the same subquery as the state, so the history reads the
+    Done of the very task the due rule read) and two more correlated subqueries, not
+    queries: the latest transition and latest entity-linked log line, for movement.
+    order_by() clears Meta.ordering: the list is sorted in Python."""
     last_transition = Subquery(
         StatusTransition.objects.filter(subject_type=SUBJECT_PAYMENT_MILESTONE,
                                         subject_id=OuterRef('pk'))
@@ -286,35 +281,14 @@ def _milestone_rows():
         ActivityLog.objects.filter(entity_type=MILESTONE_ENTITY, entity_id=OuterRef('pk'))
         .order_by('-timestamp').values('timestamp')[:1])
     return (annotate_trigger_done(live_residential_milestones())
-            .annotate(trigger_pk=trigger_pk, last_transition=last_transition,
-                      last_log=last_log)
+            .annotate(last_transition=last_transition, last_log=last_log)
             .order_by()
             .values('pk', 'milestone_name', 'status', 'amount', 'amount_received',
                     'invoice_amount', 'invoice_date', 'invoice_number', 'received_date',
                     'project', 'project__project_id', 'project__site_code',
                     'project__customer_name', 'project__site_name', 'project__status',
                     'project__activated_at', 'trigger_name', 'trigger_status', 'trigger_na',
-                    'trigger_done_at', 'trigger_pk', 'last_transition', 'last_log'))
-
-
-def _pending_state(row):
-    """('due', since) or ('not_due', None) for a Pending milestone on an actionable site.
-
-    THE SAME RULE AS finance_head._due_state (H25, Finance work's order), restated here
-    because that function is private to finance_head and this session may only import
-    its public helpers. tests_finance_head_items pins the two to the same due / not-due
-    counts. M1 is due from activation; an M2/M3 with no trigger task is due (no date);
-    Done is due from its date and is read BEFORE Not Applicable; N/A is due (no date);
-    anything else is not yet due."""
-    if row['milestone_name'] == PaymentMilestone.M1:
-        return 'due', _local(row['project__activated_at'])
-    if row['trigger_status'] is None:
-        return 'due', None
-    if row['trigger_status'] == Task.DONE:
-        return 'due', _local(row['trigger_done_at'])
-    if row['trigger_na']:
-        return 'due', None
-    return 'not_due', None
+                    'trigger_done_at', 'trigger_task_id', 'last_transition', 'last_log'))
 
 
 def _milestone_items(rows):
@@ -325,7 +299,9 @@ def _milestone_items(rows):
         if status == PaymentMilestone.PENDING:
             if r['project__status'] in NOT_ACTIONABLE_STATUSES:
                 continue                    # H26: counted in neither due nor not due
-            key, since = _pending_state(r)
+            # The B2 figures' own rule (finance_head.due_state), so the list's due /
+            # not-due always matches the tiles.
+            key, since = due_state(r)
             amount = r['amount']
         elif status == PaymentMilestone.INVOICED:
             key = 'invoiced'
@@ -585,7 +561,7 @@ def _milestone_history(item, transitions, task_done, entity_logs, site_logs):
     # The trigger task's Done (M2/M3). Task has no completed_by, so the person is read
     # from the task's own Done transition: the one closest to completed_at.
     if r['trigger_status'] == Task.DONE and r['trigger_done_at'] is not None:
-        done = task_done.get(r['trigger_pk'], [])
+        done = task_done.get(r['trigger_task_id'], [])
         closest = min(done, key=lambda t: abs((t['occurred_at'] - r['trigger_done_at'])
                                               .total_seconds()), default=None)
         records.append(_event(
@@ -742,7 +718,7 @@ def _load_history(shown):
     pays = [i for i in shown if i.kind == 'payment']
     ms_ids = _ids(i.pk for i in ms)
     pay_ids = _ids(i.pk for i in pays)
-    trigger_ids = _ids(i.row['trigger_pk'] for i in ms)
+    trigger_ids = _ids(i.row['trigger_task_id'] for i in ms)
     project_ids = _ids(i.row['project'] for i in ms)
 
     # 4. Every transition the shown page needs, in one read: the milestones', the

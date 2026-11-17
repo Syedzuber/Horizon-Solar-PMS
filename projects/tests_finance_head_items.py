@@ -31,6 +31,9 @@ from decimal import Decimal
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 
+# Module aliases: finance_head_items is also the name of the function imported below.
+from . import finance_head as finance_head_module
+from . import finance_head_items as items_module
 from .finance_head import finance_head_summary
 from .finance_head_items import (PAGE_SIZE, SAME_EVENT_SECONDS, clean_item_params,
                                  finance_head_items)
@@ -258,8 +261,9 @@ class ScopeTests(ItemsFixture):
                          (D('60'), 'not yet sent to Finance'))
 
     def test_due_and_not_due_agree_with_the_figures(self):
-        """_pending_state restates finance_head._due_state (private there); the two must
-        give the same counts."""
+        """FIN-H-B4-1: the list imports finance_head.due_state, the figures' own rule, so
+        there is one due rule; the list's due / not-due still match the figures."""
+        self.assertIs(items_module.due_state, finance_head_module.due_state)
         s1 = self.site()
         self.milestone(s1, 'M1')
         s2 = self.site()
