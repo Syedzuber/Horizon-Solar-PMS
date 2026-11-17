@@ -3,9 +3,18 @@ Finance Head data layer (FIN-H-B2): every figure the Finance Head page shows, co
 read-only with a FIXED number of queries (six, whatever the number of sites, milestones
 or payments). No page, URL or template here: those are FIN-H-B3.
 
-ONE PUBLIC FUNCTION: finance_head_summary(period='month', today=None). It returns plain
-dicts: Decimal money, int counts, `date` dates. It takes no user, so it holds no role
-rule; whoever draws the page decides who may see it.
+PUBLIC: finance_head_summary(period='month', today=None). It returns plain dicts: Decimal
+money, int counts, `date` dates. It takes no user, so it holds no role rule; whoever
+draws the page decides who may see it.
+
+PUBLIC SCOPE HELPERS (FIN-H-B4-0), so the Finance Head item list (FIN-H-B4) reads exactly
+the rows these figures count, without copying a rule:
+    live_residential_milestones()  milestones on live, real Residential sites
+    scoped_payments()              payment requests in scope (H14, R3/H28, B2 answer 2)
+    unforwarded_bills()            approved contractor bills with remainder > 0 (H19)
+    payment_type_expr()            a payment's project type as an SQL expression
+Each returns a queryset or expression and runs no query of its own. Change a scope rule
+here and both the figures and the list follow it.
 
 THE SIX QUERIES
     1. _booked             aggregate over live Residential projects
@@ -187,14 +196,21 @@ def _booked():
 # 2. Incoming (Residential milestones)
 # ---------------------------------------------------------------------------
 
+def live_residential_milestones():
+    """Every PaymentMilestone, all statuses, on a Residential site that is not
+    soft-deleted (R3) and not a test site (H14). The milestone scope of every money-in
+    figure here and of the FIN-H-B4 item list. A queryset; no query until evaluated.
+    No ordering is set beyond Meta's; callers that group or sum clear it."""
+    return PaymentMilestone.objects.filter(project__project_type=RESIDENTIAL,
+                                           project__is_deleted=False, project__is_test=False)
+
+
 def _milestone_rows():
     """Every milestone on a live Residential site, all statuses, with the site's status
     and activation time and the R8 trigger state. ONE query: annotate_trigger_done adds
     three correlated subqueries, not queries. order_by() clears Meta.ordering, which
     this read does not need."""
-    qs = annotate_trigger_done(
-        PaymentMilestone.objects.filter(project__project_type=RESIDENTIAL,
-                                        project__is_deleted=False, project__is_test=False))
+    qs = annotate_trigger_done(live_residential_milestones())
     return qs.order_by().values(
         'milestone_name', 'status', 'amount', 'amount_received', 'invoice_amount',
         'invoice_date', 'received_date', 'project__status', 'project__activated_at',
@@ -314,10 +330,11 @@ def scoped_payments():
     return qs.exclude(contractor_bill__project__is_deleted=True)
 
 
-def _payment_type():
-    """The payment's project type as a value, the same rule as payment_type_q(): the
-    order's type, or the bill site's type. Exactly one side is set
-    (payment_request_order_xor_bill), and both joins are many-to-one."""
+def payment_type_expr():
+    """The payment's project type as an SQL expression for annotate(), the same rule as
+    payment_type_q(): the order's type, or the bill site's type. Exactly one side is set
+    (payment_request_order_xor_bill), and both joins are many-to-one, so it never
+    repeats a row. Public since FIN-H-B4-0 (the item list labels each payment's type)."""
     return Coalesce('vendor_order__project_type', 'contractor_bill__project__project_type',
                     output_field=CharField())
 
@@ -340,7 +357,7 @@ def _outgoing(today, start):
     b30, b60, b90 = (_ist_midnight(today - timedelta(days=d)) for d in (30, 60, 90))
     qs = (scoped_payments()
           .annotate(
-              ptype=_payment_type(),
+              ptype=payment_type_expr(),
               backing=Case(When(contractor_bill__isnull=False, then=Value('bill')),
                            default=Value('order'), output_field=CharField()),
               age_from=Case(
@@ -409,20 +426,27 @@ def _outgoing(today, start):
 # 4. Approved contractor bills not yet forwarded (H19)
 # ---------------------------------------------------------------------------
 
-def _bills_not_forwarded():
-    """Approved contractor bills on live, real sites whose amount is not yet fully
-    covered by payment requests: remainder = amount - committed total (every payment on
-    the bill but REJECTED, at effective amount; payments.committed_total_subquery, which
-    mirrors models.committed_total). Grouped by the bill site's type. ONE query; the
-    subquery is correlated per bill, not a query per bill."""
-    rows = (ContractorBillDetail.objects
+def unforwarded_bills():
+    """Approved contractor bills on live, real sites (R3, H14) of the three types whose
+    amount is not yet fully covered by payment requests, each annotated `remainder` =
+    amount - committed total (every payment on the bill but REJECTED, at effective
+    amount; payments.committed_total_subquery, which mirrors models.committed_total).
+    Only remainder > 0 (H19). One row per bill, not grouped; a queryset, no query until
+    evaluated. The subquery is correlated per bill, not a query per bill."""
+    return (ContractorBillDetail.objects
             .filter(request__kind=APPROVAL_KIND_CONTRACTOR_BILL,
                     request__status=APPROVAL_APPROVED,
                     project__project_type__in=TYPES,
                     project__is_deleted=False, project__is_test=False)
             .annotate(remainder=ExpressionWrapper(
                 F('amount') - committed_total_subquery(), output_field=MONEY))
-            .filter(remainder__gt=0)
+            .filter(remainder__gt=0))
+
+
+def _bills_not_forwarded():
+    """unforwarded_bills() grouped by the bill site's type: count and remainder sum.
+    ONE query."""
+    rows = (unforwarded_bills()
             .order_by()
             .values('project__project_type')
             .annotate(n=Count('pk'), s=Sum('remainder')))
@@ -453,9 +477,8 @@ def _weekly(today):
     first = starts[0]
 
     money_in = {}
-    for row in (PaymentMilestone.objects
-                .filter(project__project_type=RESIDENTIAL, project__is_deleted=False,
-                        project__is_test=False, status=PaymentMilestone.RECEIVED,
+    for row in (live_residential_milestones()
+                .filter(status=PaymentMilestone.RECEIVED,
                         received_date__gte=first, received_date__lte=today)
                 .annotate(week=TruncWeek('received_date'))
                 .order_by().values('week')
@@ -466,7 +489,7 @@ def _weekly(today):
     for row in (scoped_payments()
                 .filter(status=PaymentRequest.CONFIRMED,
                         payment_date__gte=first, payment_date__lte=today)
-                .annotate(week=TruncWeek('payment_date'), ptype=_payment_type())
+                .annotate(week=TruncWeek('payment_date'), ptype=payment_type_expr())
                 .order_by().values('week', 'ptype')
                 .annotate(n=Count('pk'), s=effective_amount_sum())):
         money_out[(_week_key(row['week']), row['ptype'])] = (row['n'], row['s'] or ZERO)
