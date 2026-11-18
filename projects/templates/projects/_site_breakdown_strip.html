@@ -31,6 +31,12 @@ pluralize gives "" for None.
 Mobilized and Active are a chain from Sites in execution; Active today stands apart
 because it is not a subset of Active (TB-1 ruling B5).
 
+TB-6 STRIPS: the Design and Procurement rows are each a tinted strip so they are not missed.
+Their rules sit in the show_extra <style> only, so the plain output (and its sha256 pins)
+does not move. The data-tb3-* attribute stays last on each row because
+tests_dashboard_snapshot reads "data-tb3-design><span" to compare the snapshot's words.
+Below 576 px the label always sits above the figures, so both strips keep one shape.
+
 The <style> travels with the markup so neither page can draw the strip unstyled. Every
 rule is under .tb; the Site Dashboard's brand colours are copied as tokens.
 
@@ -57,11 +63,17 @@ inline on existing lines rather than on lines of their own.
 </style>{% if show_extra %}
 <style>
   .tbx > .tb { flex: 1 1 520px; margin-bottom: 0 !important; }
-  .tbx .tbx-lines { flex: 1 1 100%; background: var(--tb-surface); border: 1px solid var(--tb-line);
-    border-radius: 12px; padding: 8px 14px; font-size: 13px; color: var(--tb-muted); }
-  .tbx .tbx-line + .tbx-line { margin-top: 4px; border-top: 1px solid var(--tb-line); padding-top: 4px; }
-  .tbx .tbx-line .k { display: inline-block; min-width: 92px; font-weight: 600; color: var(--tb-ink); }
-  .tbx .tbx-line b { color: var(--tb-ink); font-weight: 600; }
+  /* TB-6 phase strips: the bars are .k0 (Design) and .k2 (Procure) in tenders_gantt.html; the
+     backgrounds are darker shades of the same hues, so white text clears 4.5:1 (6.9 and 6.0). */
+  .tbx { --tbx-design-bg:#2c5f80; --tbx-design-bar:#3d7ea6; --tbx-proc-bg:#2f6e63; --tbx-proc-bar:#4a9c8c; }
+  .tbx .tbx-lines { flex: 1 1 100%; display: flex; flex-direction: column; gap: 8px;
+    font-size: 15px; line-height: 1.4; color: #fff; }
+  .tbx .tbx-line { border-radius: 12px; border-left: 4px solid; padding: 10px 16px; }
+  .tbx .tbx-line--design { background: var(--tbx-design-bg); border-left-color: var(--tbx-design-bar); }
+  .tbx .tbx-line--procurement { background: var(--tbx-proc-bg); border-left-color: var(--tbx-proc-bar); }
+  .tbx .tbx-line .k { display: inline-block; min-width: 110px; font-weight: 600; }
+  .tbx .tbx-line b { font-weight: 700; }
+  @media (max-width: 575.98px) { .tbx .tbx-line .k { display: block; min-width: 0; } }
 </style>
 <div class="tb tbx mb-4">{% endif %}
 <section class="tb mb-4" aria-label="Activated sites">
@@ -81,7 +93,7 @@ inline on existing lines rather than on lines of their own.
     <div class="fig"><div class="v">{{ breakdown.attendance_today }}</div><div class="l">Attendance today</div><div class="d">contractor entry, IST day</div></div>
   </div>
   <div class="tbx-lines">
-    <div class="tbx-line" data-tb3-design><span class="k">Design</span> <b>{{ breakdown.design_not_started|default_if_none:"—" }}</b> not started · <b>{{ breakdown.design_in_progress|default_if_none:"—" }}</b> in progress · <b>{{ breakdown.design_released|default_if_none:"—" }}</b> released + BOQ</div>
-    <div class="tbx-line" data-tb3-procurement><span class="k">Procurement</span> <b>{{ breakdown.received|default_if_none:"—" }}</b> received of {{ breakdown.mobilized|default_if_none:"—" }} mobilized · <b>{{ breakdown.pending|default_if_none:"—" }}</b> pending · <b>{{ breakdown.dcs_to_confirm|default_if_none:"—" }}</b> DC{% if breakdown.dcs_to_confirm is None %}s{% else %}{{ breakdown.dcs_to_confirm|pluralize }}{% endif %} to confirm, <b>{{ breakdown.dcs_overdue|default_if_none:"—" }}</b> overdue</div>
+    <div class="tbx-line tbx-line--design" data-tb3-design><span class="k">Design</span> <b>{{ breakdown.design_not_started|default_if_none:"—" }}</b> not started · <b>{{ breakdown.design_in_progress|default_if_none:"—" }}</b> in progress · <b>{{ breakdown.design_released|default_if_none:"—" }}</b> released + BOQ</div>
+    <div class="tbx-line tbx-line--procurement" data-tb3-procurement><span class="k">Procurement</span> <b>{{ breakdown.received|default_if_none:"—" }}</b> received of {{ breakdown.mobilized|default_if_none:"—" }} mobilized · <b>{{ breakdown.pending|default_if_none:"—" }}</b> pending · <b>{{ breakdown.dcs_to_confirm|default_if_none:"—" }}</b> DC{% if breakdown.dcs_to_confirm is None %}s{% else %}{{ breakdown.dcs_to_confirm|pluralize }}{% endif %} to confirm, <b>{{ breakdown.dcs_overdue|default_if_none:"—" }}</b> overdue</div>
   </div>
 </div>{% endif %}

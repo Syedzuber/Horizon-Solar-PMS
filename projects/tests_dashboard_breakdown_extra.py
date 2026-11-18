@@ -12,7 +12,9 @@ WHAT THIS PINS (each test fails if its rule is wrong)
                      Attendance shown; the note says why (Q2)
     Per-site counts  dcs_*_by_site sum to the existing totals and list the same sites
     ?tender=         the dashboard's extra block equals the tender page's, byte for byte
-    Tender page      the extra block renders exactly as TB-3 shipped it (TB3_EXTRA)
+    Tender page      the extra block renders exactly as TB-3 shipped it (TB3_EXTRA), with
+                     TB-6's two row classes
+    Both pages       carry the TB-6 row classes and their tint rules (one partial, S4)
     Query budget     still exactly +1 query for the strip
 
 The snapshot is no longer pinned here: SNAP-1c (Zuber, 17 Nov, Q1) put the TB-3 figures
@@ -45,14 +47,17 @@ NOTE_NONE = 'Mobilized, Active, Design and Procurement apply to RESCO sites only
 
 #: The show_extra block as TB-3 shipped it (8963dfd), verbatim from the closing </section>
 #: to the end of the include. The tender page must keep rendering exactly this.
+#: TB-6 (18 Nov 2026) re-took it with the two row classes tbx-line--design and
+#: tbx-line--procurement: with those two tokens and the show_extra <style> removed, the new
+#: output of both pages equals 8963dfd's byte for byte, so no word or figure moved.
 TB3_EXTRA = (
     '\n'
     '  <div class="apart" data-tb3-attendance>\n'
     '    <div class="fig"><div class="v">{{ breakdown.attendance_today }}</div><div class="l">Attendance today</div><div class="d">contractor entry, IST day</div></div>\n'
     '  </div>\n'
     '  <div class="tbx-lines">\n'
-    '    <div class="tbx-line" data-tb3-design><span class="k">Design</span> <b>{{ breakdown.design_not_started }}</b> not started · <b>{{ breakdown.design_in_progress }}</b> in progress · <b>{{ breakdown.design_released }}</b> released + BOQ</div>\n'
-    '    <div class="tbx-line" data-tb3-procurement><span class="k">Procurement</span> <b>{{ breakdown.received }}</b> received of {{ breakdown.mobilized }} mobilized · <b>{{ breakdown.pending }}</b> pending · <b>{{ breakdown.dcs_to_confirm }}</b> DC{{ breakdown.dcs_to_confirm|pluralize }} to confirm, <b>{{ breakdown.dcs_overdue }}</b> overdue</div>\n'
+    '    <div class="tbx-line tbx-line--design" data-tb3-design><span class="k">Design</span> <b>{{ breakdown.design_not_started }}</b> not started · <b>{{ breakdown.design_in_progress }}</b> in progress · <b>{{ breakdown.design_released }}</b> released + BOQ</div>\n'
+    '    <div class="tbx-line tbx-line--procurement" data-tb3-procurement><span class="k">Procurement</span> <b>{{ breakdown.received }}</b> received of {{ breakdown.mobilized }} mobilized · <b>{{ breakdown.pending }}</b> pending · <b>{{ breakdown.dcs_to_confirm }}</b> DC{{ breakdown.dcs_to_confirm|pluralize }} to confirm, <b>{{ breakdown.dcs_overdue }}</b> overdue</div>\n'
     '  </div>\n'
     '</div>\n'
 )
@@ -243,6 +248,21 @@ class TenderPageTests(Fixture):
         rendered = Template(TB3_EXTRA).render(Context({'breakdown': response.context['breakdown']}))
         start = html.index('</section>', html.index('<section class="tb mb-4"')) + len('</section>')
         self.assertEqual(html[start:start + len(rendered)], rendered)
+
+    def test_both_pages_draw_design_and_procurement_as_tinted_strips(self):
+        # TB-6 (S4): one partial styles both pages, so each page carries the two row
+        # classes once and the show_extra rules that tint them.
+        pages = {'tender': self._tender_page().content.decode(),
+                 'dashboard': self._get(self.ceo).content.decode()}
+        for name, html in pages.items():
+            with self.subTest(page=name):
+                self.assertEqual(html.count('<div class="tbx-line tbx-line--design" '
+                                            'data-tb3-design>'), 1)
+                self.assertEqual(html.count('<div class="tbx-line tbx-line--procurement" '
+                                            'data-tb3-procurement>'), 1)
+                self.assertIn('.tbx .tbx-line--design { background: var(--tbx-design-bg);', html)
+                self.assertIn('.tbx .tbx-line--procurement { background: var(--tbx-proc-bg);',
+                              html)
 
     def test_include_renders_tb3_bytes_for_any_numbers(self):
         # pluralize's singular and plural, and zeros, through the TB-4 dash handling.
