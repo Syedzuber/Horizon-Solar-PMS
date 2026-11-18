@@ -44,6 +44,11 @@ and SNAP-1c (snapshot) will read the same fields.
                   the SE still has receipts to record; overdue when expected_delivery_date
                   is before today (IST). No expected date is never overdue. The id lists are
                   the sites holding them (ruling Q3: one query cannot list challan ids).
+    dcs_to_confirm_by_site / dcs_overdue_by_site
+                  TB-4 (ruling Q1(a), 17 Nov): the same counts per site, as (site pk, n)
+                  pairs, so the Site Dashboard can cut them to RESCO sites. The per-site
+                  numbers were already columns of the query; they are now kept rather than
+                  only summed. Their n's add up to dcs_to_confirm / dcs_overdue.
     attendance_today
                   a non-voided ContractorAttendance dated today, the IST calendar day of
                   `now` (G5) — the "logged" half of attendance_alerts.sites_missing_attendance.
@@ -160,6 +165,8 @@ class SiteBreakdown:
     attendance_today_ids: tuple = ()
     dcs_to_confirm: int = 0               # challans, not sites
     dcs_overdue: int = 0                  # challans, not sites
+    dcs_to_confirm_by_site: tuple = ()    # TB-4: (site pk, challans) for each site holding any
+    dcs_overdue_by_site: tuple = ()       # TB-4: (site pk, overdue challans), same shape
 
     @property
     def in_execution(self):
@@ -274,6 +281,7 @@ def site_breakdown(projects, now):
     in_execution, mobilized, active, active_today = [], [], [], []
     design = {BUCKET_NOT_STARTED: [], BUCKET_IN_PROGRESS: [], BUCKET_RELEASED: []}
     received, pending, attendance_today = [], [], []
+    # (pk, n) per site, kept for TB-4's RESCO cut; the site lists are their first elements.
     to_confirm_sites, overdue_sites = [], []
     dcs_to_confirm = dcs_overdue = 0
     for row in rows:
@@ -292,10 +300,10 @@ def site_breakdown(projects, now):
         if bucket is not None:
             design[bucket].append(pk)
         if row['dcs_to_confirm']:
-            to_confirm_sites.append(pk)
+            to_confirm_sites.append((pk, row['dcs_to_confirm']))
             dcs_to_confirm += row['dcs_to_confirm']
         if row['dcs_overdue']:
-            overdue_sites.append(pk)
+            overdue_sites.append((pk, row['dcs_overdue']))
             dcs_overdue += row['dcs_overdue']
         if row['attended']:
             attendance_today.append(pk)
@@ -306,9 +314,11 @@ def site_breakdown(projects, now):
         design_released_ids=tuple(design[BUCKET_RELEASED]),
         received_ids=tuple(received),
         pending_ids=tuple(pending),
-        dcs_to_confirm_site_ids=tuple(to_confirm_sites),
-        dcs_overdue_site_ids=tuple(overdue_sites),
+        dcs_to_confirm_site_ids=tuple(pk for pk, _ in to_confirm_sites),
+        dcs_overdue_site_ids=tuple(pk for pk, _ in overdue_sites),
         attendance_today_ids=tuple(attendance_today),
         dcs_to_confirm=dcs_to_confirm,
         dcs_overdue=dcs_overdue,
+        dcs_to_confirm_by_site=tuple(to_confirm_sites),
+        dcs_overdue_by_site=tuple(overdue_sites),
     )

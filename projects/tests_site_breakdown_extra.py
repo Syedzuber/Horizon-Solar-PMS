@@ -19,8 +19,9 @@ WHAT THIS PINS (each test fails if its rule is wrong)
                    for the same day (Q2 tie-test)
     Exclusions     test, draft, cancelled and deleted sites in no TB-3 figure
     Query budget   still 1 query for 1 and for 50 sites with every TB-3 condition present
-    Pages          the Site Dashboard strip renders byte-for-byte as before TB-3; the tender
-                   page shows the attendance figure and the Design / Procurement rows
+    Pages          the strip without show_extra renders byte-for-byte as before TB-3; the
+                   tender page shows the attendance figure and the Design / Procurement rows
+                   (the Site Dashboard shows them too since TB-4: tests_dashboard_breakdown_extra)
 
 Run with:
     python manage.py test projects.tests_site_breakdown_extra --settings=solarpms.test_settings
@@ -58,9 +59,9 @@ DAY = date(2026, 11, 9)          # the IST day of NOW (8 PM IST, 9 Nov 2026)
 NOT_STARTED = {DESIGN_AWAITING_SURVEY, DESIGN_AWAITING_ALLOCATION, DESIGN_SURVEY_RETURNED}
 RELEASED = {DESIGN_RELEASED}
 
-#: sha256 and length of _site_breakdown_strip.html rendered as the Site Dashboard renders
-#: it (no show_extra), taken at c31c2e5 before TB-3 touched the template. TB-4 owns any
-#: change to the dashboard's strip; until then these must not move.
+#: sha256 and length of _site_breakdown_strip.html rendered without show_extra, as the Site
+#: Dashboard rendered it before TB-4, taken at c31c2e5 before TB-3 touched the template. The
+#: dashboard passes show_extra since TB-4; these still pin the include's plain output.
 DASHBOARD_STRIP_BEFORE_TB3 = {
     'full': (1899, '6ab05170de3b6fd04899d661d353736de7095bb87a9457ce2107faf3a828f2f3'),
     'dash': (1988, 'd8454a9d892bf0d7803b1352460148eee281adf2317e28ff865b75d51c788377'),
@@ -418,19 +419,6 @@ class PageTests(ExtraFixture):
                 html = render_to_string('projects/_site_breakdown_strip.html', context)
                 self.assertEqual((len(html), hashlib.sha256(html.encode()).hexdigest()),
                                  DASHBOARD_STRIP_BEFORE_TB3[name])
-
-    def test_the_site_dashboard_page_carries_no_tb3_markup(self):
-        site = self._mobilized(self._resco())
-        self._attendance(site)
-        client = Client()
-        client.force_login(_fresh(self.ceo.user))
-        html = client.get(reverse('site_dashboard')).content.decode()
-        self.assertIn('Sites in execution', html)
-        # The site cards have their own "Attendance today: N people" line, so the check is
-        # on TB-3's label markup, not the words.
-        for text in ('data-tb3', 'tbx', '<div class="l">Attendance today</div>',
-                     '>Procurement<'):
-            self.assertNotIn(text, html)
 
     def test_the_tender_page_shows_attendance_and_the_two_rows(self):
         # program_detail passes the real timezone.now(); the fixture freezes only the

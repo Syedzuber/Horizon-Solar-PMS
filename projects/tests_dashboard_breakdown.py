@@ -55,7 +55,8 @@ TB1_STRIP = (
     '</section>'
 )
 
-NOTE_NONE = 'Mobilized and Active apply to RESCO sites only'
+# TB-4 (ruling Q2): the note names Design and Procurement too, which follow the same rule.
+NOTE_NONE = 'Mobilized, Active, Design and Procurement apply to RESCO sites only'
 
 
 def _section(html):
@@ -247,9 +248,11 @@ class RescoRuleTests(DashboardStripFixture):
         self.assertIn(res.pk, site_breakdown([res.pk], timezone.now()).mobilized_ids)
         response, b = self._strip()
         self.assertEqual(_figures(b), (3, 1, 1, 2))     # Active today: RESCO + Residential
-        self.assertEqual(b.note, 'Mobilized and Active count RESCO sites only (1 of 3)')
-        self.assertIn('<p class="note" data-breakdown-note>Mobilized and Active count RESCO '
-                      'sites only (1 of 3)</p>', response.content.decode())
+        self.assertEqual(b.note, 'Mobilized, Active, Design and Procurement count RESCO '
+                                 'sites only (1 of 3)')
+        self.assertIn('<p class="note" data-breakdown-note>Mobilized, Active, Design and '
+                      'Procurement count RESCO sites only (1 of 3)</p>',
+                      response.content.decode())
 
     def test_no_resco_site_draws_dashes_and_says_why(self):
         self._bare(pm=self.other_pm)

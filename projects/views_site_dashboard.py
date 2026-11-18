@@ -625,14 +625,26 @@ def _kpis(live, params, sees_payments):
 
 @dataclass(frozen=True)
 class StripFigures:
-    """The activated-site strip as the Site Dashboard draws it (TB-2), read by the shared
-    include projects/_site_breakdown_strip.html. mobilized / active are None when the
-    viewer's sites hold no RESCO site, drawn as a dash."""
+    """The activated-site strip as the Site Dashboard draws it (TB-2, TB-4), read by the
+    shared include projects/_site_breakdown_strip.html. Every RESCO-only figure (mobilized,
+    active, the design buckets, received / pending and the two challan counts) is None
+    when the viewer's sites hold no RESCO site, drawn as a dash.
+
+    The TB-4 fields have defaults so the TB-2 five can still be built positionally
+    (tests_site_breakdown_extra renders the strip that way)."""
     in_execution: int
     mobilized: object      # int, or None: no RESCO site in the set
     active: object         # int, or None: no RESCO site in the set
     active_today: int
     note: object           # the grey line under the strip, or None
+    design_not_started: object = None   # TB-4, RESCO only; None = dash
+    design_in_progress: object = None   # TB-4, RESCO only; None = dash
+    design_released: object = None      # TB-4, RESCO only; None = dash
+    received: object = None             # TB-4, RESCO only; None = dash
+    pending: object = None              # TB-4, RESCO only; None = dash
+    dcs_to_confirm: object = None       # TB-4, challans on RESCO sites; None = dash
+    dcs_overdue: object = None          # TB-4, challans on RESCO sites; None = dash
+    attendance_today: int = 0           # TB-4, every site type (ruling E3), never a dash
 
 
 def _breakdown_strip(live, now):
@@ -652,19 +664,43 @@ def _breakdown_strip(live, now):
     Sites in execution and Active today stay over every site. The RESCO cut is made here
     on the helper's own id lists (no second query), so it stays explicit even if a CAPEX
     template one day gains schedule blocks.
+
+    TB-4 (rulings E1-E4 and Q1-Q2, 17 Nov): the tender page's Design and Procurement rows
+    follow the same RESCO rule as Mobilized / Active, for the same reason (Residential and
+    CAPEX never have a DesignAssignment, and Received / Pending split Mobilized), and the
+    note names all four. The two challan counts are cut on the helper's per-site pairs
+    (dcs_*_by_site), because a Residential site can hold a challan too. Attendance today
+    counts every site type: every type logs contractor attendance (E3).
     """
     b = site_breakdown([c.id for c in live], now)
     resco = {c.id for c in live if c.project_type == ELIGIBLE_PROJECT_TYPE}
-    mobilized = sum(1 for pk in b.mobilized_ids if pk in resco)
-    active = sum(1 for pk in b.active_ids if pk in resco)
+
+    def sites(ids):
+        return sum(1 for pk in ids if pk in resco)
+
+    def challans(by_site):
+        return sum(n for pk, n in by_site if pk in resco)
+
+    rows = {
+        'mobilized': sites(b.mobilized_ids),
+        'active': sites(b.active_ids),
+        'design_not_started': sites(b.design_not_started_ids),
+        'design_in_progress': sites(b.design_in_progress_ids),
+        'design_released': sites(b.design_released_ids),
+        'received': sites(b.received_ids),
+        'pending': sites(b.pending_ids),
+        'dcs_to_confirm': challans(b.dcs_to_confirm_by_site),
+        'dcs_overdue': challans(b.dcs_overdue_by_site),
+    }
     note = None
     if live and not resco:
-        mobilized = active = None
-        note = 'Mobilized and Active apply to RESCO sites only'
+        rows = dict.fromkeys(rows)      # every RESCO-only figure drawn as a dash
+        note = 'Mobilized, Active, Design and Procurement apply to RESCO sites only'
     elif len(resco) < len(live):
-        note = f'Mobilized and Active count RESCO sites only ({len(resco)} of {len(live)})'
-    return StripFigures(in_execution=b.in_execution, mobilized=mobilized, active=active,
-                        active_today=b.active_today, note=note)
+        note = (f'Mobilized, Active, Design and Procurement count RESCO sites only '
+                f'({len(resco)} of {len(live)})')
+    return StripFigures(in_execution=b.in_execution, active_today=b.active_today, note=note,
+                        attendance_today=b.attendance_today, **rows)
 
 
 def _dates_as_of(now):

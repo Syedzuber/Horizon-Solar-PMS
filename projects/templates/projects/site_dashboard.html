@@ -162,9 +162,11 @@
      tile is a link that adds ?filter=; on the active tile the link removes it again.{% endcomment %}
   {% comment %}TB-2: the activated-site strip heads the tile card, over the same sites as the
      "Sites in execution" tile (views_site_dashboard._breakdown_strip). That tile is still in
-     kpis, which the daily snapshot reads, and is skipped below because the strip shows it.{% endcomment %}
+     kpis, which the daily snapshot reads, and is skipped below because the strip shows it.
+     TB-4: show_extra adds the tender page's Attendance today box and Design / Procurement
+     rows over the same sites (ruling E1).{% endcomment %}
   <div class="kpis" id="kpis">
-    <div class="strip-row">{% include "projects/_site_breakdown_strip.html" with breakdown=breakdown note=breakdown.note %}</div>
+    <div class="strip-row">{% include "projects/_site_breakdown_strip.html" with breakdown=breakdown note=breakdown.note show_extra=True %}</div>
     {% for t in kpis %}
       {% if t.label == 'Sites in execution' %}
       {% elif t.key %}

@@ -7,20 +7,26 @@ Takes:
     breakdown   anything with in_execution, mobilized, active, active_today:
                 site_breakdown.SiteBreakdown on the tender page, the dashboard's
                 views_site_dashboard.StripFigures on the Site Dashboard. mobilized / active
-                may be None, drawn as a dash (TB-2 ruling P3: no RESCO site in the set)
+                may be None, drawn as a dash (TB-2 ruling P3: no RESCO site in the set);
+                so may the Design and Procurement figures (TB-4 ruling E2)
     planned     optional: the tender's planned site count, "of N planned" under Sites in
                 execution (tender page only, ruling D4)
     note        optional: one grey line under the strip (TB-2 ruling P3)
-    show_extra  optional, tender page only (TB-3): adds Attendance today as a fifth figure
-                set apart after Active today, and the Design and Procurement rows below.
-                `breakdown` must then be a SiteBreakdown (it carries the TB-3 fields).
+    show_extra  optional, tender page (TB-3) and Site Dashboard (TB-4): adds Attendance
+                today as a fifth figure set apart after Active today, and the Design and
+                Procurement rows below. `breakdown` must then carry the TB-3 fields
+                (SiteBreakdown, or StripFigures with its TB-4 fields filled).
 
 TB-3 MARKUP IS OUTSIDE THE <section>, IN "if show_extra" BLOCKS OPENED INLINE ON EXISTING
-LINES. Without show_extra (the Site Dashboard) they render zero bytes, so that page's
-output is unchanged (tests_site_breakdown_extra pins it). With it, a wrapper <div> opens
+LINES. Without show_extra they render zero bytes (tests_site_breakdown_extra pins that
+output). With it, a wrapper <div> opens
 before the <section> and the new pieces follow its </section>, so the <section> itself
 still renders as TB-1 shipped it (TB1_STRIP). The wrapper reuses .tb for its tokens and
 its flex row; .tbx rules only place the pieces.
+
+TB-4 DASHES use default_if_none, which prints a number unchanged, so the tender page (always
+numbers) renders byte-for-byte as TB-3 shipped it. "DCs" stays plural under a dash, because
+pluralize gives "" for None.
 
 Mobilized and Active are a chain from Sites in execution; Active today stands apart
 because it is not a subset of Active (TB-1 ruling B5).
@@ -75,7 +81,7 @@ inline on existing lines rather than on lines of their own.
     <div class="fig"><div class="v">{{ breakdown.attendance_today }}</div><div class="l">Attendance today</div><div class="d">contractor entry, IST day</div></div>
   </div>
   <div class="tbx-lines">
-    <div class="tbx-line" data-tb3-design><span class="k">Design</span> <b>{{ breakdown.design_not_started }}</b> not started · <b>{{ breakdown.design_in_progress }}</b> in progress · <b>{{ breakdown.design_released }}</b> released + BOQ</div>
-    <div class="tbx-line" data-tb3-procurement><span class="k">Procurement</span> <b>{{ breakdown.received }}</b> received of {{ breakdown.mobilized }} mobilized · <b>{{ breakdown.pending }}</b> pending · <b>{{ breakdown.dcs_to_confirm }}</b> DC{{ breakdown.dcs_to_confirm|pluralize }} to confirm, <b>{{ breakdown.dcs_overdue }}</b> overdue</div>
+    <div class="tbx-line" data-tb3-design><span class="k">Design</span> <b>{{ breakdown.design_not_started|default_if_none:"—" }}</b> not started · <b>{{ breakdown.design_in_progress|default_if_none:"—" }}</b> in progress · <b>{{ breakdown.design_released|default_if_none:"—" }}</b> released + BOQ</div>
+    <div class="tbx-line" data-tb3-procurement><span class="k">Procurement</span> <b>{{ breakdown.received|default_if_none:"—" }}</b> received of {{ breakdown.mobilized|default_if_none:"—" }} mobilized · <b>{{ breakdown.pending|default_if_none:"—" }}</b> pending · <b>{{ breakdown.dcs_to_confirm|default_if_none:"—" }}</b> DC{% if breakdown.dcs_to_confirm is None %}s{% else %}{{ breakdown.dcs_to_confirm|pluralize }}{% endif %} to confirm, <b>{{ breakdown.dcs_overdue|default_if_none:"—" }}</b> overdue</div>
   </div>
 </div>{% endif %}
