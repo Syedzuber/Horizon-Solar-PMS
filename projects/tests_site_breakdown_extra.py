@@ -62,9 +62,12 @@ RELEASED = {DESIGN_RELEASED}
 #: sha256 and length of _site_breakdown_strip.html rendered without show_extra, as the Site
 #: Dashboard rendered it before TB-4, taken at c31c2e5 before TB-3 touched the template. The
 #: dashboard passes show_extra since TB-4; these still pin the include's plain output.
+#: TB-5 (18 Nov 2026) re-took both with "any PMS update, today" for "..., last 24 h": the
+#: new output with the old text put back still hashed to c31c2e5's pins (1899 / 6ab05170…,
+#: 1988 / d8454a9d…), so nothing else in the plain output moved.
 DASHBOARD_STRIP_BEFORE_TB3 = {
-    'full': (1899, '6ab05170de3b6fd04899d661d353736de7095bb87a9457ce2107faf3a828f2f3'),
-    'dash': (1988, 'd8454a9d892bf0d7803b1352460148eee281adf2317e28ff865b75d51c788377'),
+    'full': (1895, '7932086f4d12731d99d17606b5689b22402099658efe408189823a7899548415'),
+    'dash': (1984, '86697329ec0d5a05043f9fa6c19e09736d4e0335a8e6a5a5595b2c8aeb2c8dc6'),
 }
 
 

@@ -429,7 +429,7 @@ class TenderSectionTests(SnapshotFixture):
                           'Attendance today'])
         self.assertEqual([d for _, _, d in S.STRIP],
                          [None, 'DC + design started', 'Civil In Progress/Done',
-                          'any PMS update, last 24 h', 'contractor entry, IST day'])
+                          'any PMS update, today', 'contractor entry, IST day'])
 
     def test_pm_line_names_active_pms_only_by_site_count(self):
         name = lambda p: p.user.get_full_name() or p.user.username   # noqa: E731

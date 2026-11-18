@@ -73,7 +73,7 @@ inline on existing lines rather than on lines of their own.
     <div class="fig"><div class="v">{% if breakdown.active is None %}—{% else %}{{ breakdown.active }}{% endif %}</div><div class="l">Active</div><div class="d">Civil In Progress/Done</div></div>
   </div>
   <div class="apart">
-    <div class="fig"><div class="v">{{ breakdown.active_today }}</div><div class="l">Active today</div><div class="d">any PMS update, last 24 h</div></div>
+    <div class="fig"><div class="v">{{ breakdown.active_today }}</div><div class="l">Active today</div><div class="d">any PMS update, today</div></div>
   </div>{% if note %}
   <p class="note" data-breakdown-note>{{ note }}</p>{% endif %}
 </section>{% if show_extra %}

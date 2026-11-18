@@ -122,7 +122,7 @@ STRIP = (
     ('in_execution', 'Sites in execution', None),
     ('mobilized', 'Mobilized', 'DC + design started'),
     ('active', 'Active', 'Civil In Progress/Done'),
-    ('active_today', 'Active today', 'any PMS update, last 24 h'),
+    ('active_today', 'Active today', 'any PMS update, today'),
     ('attendance_today', 'Attendance today', 'contractor entry, IST day'),
 )
 STRIP_KEYS = tuple(key for key, _, _ in STRIP)
@@ -562,8 +562,9 @@ FOOTER_H = 56
 
 # The strip's columns: three chained figures with '›' between them, then Active today and
 # Attendance today, each set apart behind a divider (TB-1 B5; SNAP-1c S1). Widths are per
-# column so five fit in 1080 px: each fits its label and grey definition (the widest, "any
-# PMS update, last 24 h", is 168 px), and a 3-digit figure with a 3-digit arrow.
+# column so five fit in 1080 px: each fits its label and grey definition (sized when the
+# widest was "any PMS update, last 24 h" at 168 px; TB-5's shorter "any PMS update, today"
+# left the widths as they were), and a 3-digit figure with a 3-digit arrow.
 STRIP_COL_W = {'in_execution': 176, 'mobilized': 150, 'active': 160, 'active_today': 182,
                'attendance_today': 176}
 STRIP_ARROW_W = 30

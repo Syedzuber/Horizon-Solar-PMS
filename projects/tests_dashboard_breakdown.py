@@ -18,7 +18,6 @@ WHAT THIS PINS (each test fails if its rule is wrong)
 Run with:
     python manage.py test projects.tests_dashboard_breakdown --settings=solarpms.test_settings
 """
-from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
 
@@ -38,8 +37,9 @@ from .views_site_dashboard import _params, kpi_tiles
 
 URL = reverse('site_dashboard')
 
-#: The strip as TB-1 shipped it inside program_detail.html (248f52d), verbatim. The shared
-#: include must render this byte for byte on the tender page.
+#: The strip as TB-1 shipped it inside program_detail.html (248f52d), verbatim but for
+#: TB-5's definition text ("last 24 h" became "today", 18 Nov 2026). The shared include
+#: must render this byte for byte on the tender page.
 TB1_STRIP = (
     '<section class="tb mb-4" aria-label="Activated sites">\n'
     '  <div class="chain">\n'
@@ -50,7 +50,7 @@ TB1_STRIP = (
     '    <div class="fig"><div class="v">{{ breakdown.active }}</div><div class="l">Active</div><div class="d">Civil In Progress/Done</div></div>\n'
     '  </div>\n'
     '  <div class="apart">\n'
-    '    <div class="fig"><div class="v">{{ breakdown.active_today }}</div><div class="l">Active today</div><div class="d">any PMS update, last 24 h</div></div>\n'
+    '    <div class="fig"><div class="v">{{ breakdown.active_today }}</div><div class="l">Active today</div><div class="d">any PMS update, today</div></div>\n'
     '  </div>\n'
     '</section>'
 )
@@ -82,7 +82,9 @@ class DashboardStripFixture(BreakdownFixture):
         return next(t for t in response.context['kpis'] if t['label'] == 'Sites in execution')
 
     def _activity(self, site):
-        self._log(site, 'task_status_done', timezone.now() - timedelta(hours=1), actor=self.pm)
+        # "Now", not an hour ago: Active today is the IST calendar day since TB-5, so an hour
+        # ago is yesterday when the suite runs between 00:00 and 01:00 IST.
+        self._log(site, 'task_status_done', timezone.now(), actor=self.pm)
 
     def _active(self, site):
         """`site` (activated, so it has the Civil anchor) Mobilized and Active."""

@@ -20,7 +20,10 @@ THE FOUR FIGURES (Zuber's rulings B1-B4, 14 Nov 2026)
                   Done and not N/A. A due date alone does not count; Blocked does not count
                   (the dashboard's lane rule starts a lane on In Progress / Done only).
     active_today  in execution AND a human activity row (site_dashboard.human_activity_q,
-                  the dashboard's "Latest activity" rule) in the 24 hours up to `now`.
+                  the dashboard's "Latest activity" rule) on the IST calendar day of `now`,
+                  from 00:00 IST up to `now` (TB-5 ruling A1, 18 Nov 2026; it was the 24
+                  hours up to `now` until then). The day is TB-3's attendance day, so Active
+                  today and Attendance today cut at the same midnight (A2).
                   Contractor attendance writes no ActivityLog, so it never counts (5 Nov
                   rule). Money rows count: only the number is shown, never the row.
                   NOT a subset of `active`: shown apart from the chain (B5).
@@ -64,7 +67,7 @@ original, and tests_site_breakdown_extra asserts the copy agrees with the origin
 every test site, so a change to either side fails a test.
 """
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, time
 
 from django.db.models import Count, Exists, F, IntegerField, OuterRef, Subquery, Value
 from django.db.models.functions import Coalesce
@@ -96,10 +99,6 @@ DESIGN_STARTED_STATUSES = frozenset(
 
 #: The Civil task states that make a site Active.
 CIVIL_STARTED_STATUSES = (Task.IN_PROGRESS, Task.DONE)
-
-#: "Active today" looks back this far from `now`: rolling, not the calendar day, so the
-#: 8 PM snapshot still counts an update made at 9 PM the evening before (ruling B4).
-ACTIVE_TODAY_WINDOW = timedelta(hours=24)
 
 #: TB-3 design buckets, as CEO pipeline STAGES (ruling G2). The statuses in each are read
 #: from STATUS_TO_STAGE when site_breakdown runs (design_bucket), never listed here.
@@ -217,10 +216,14 @@ def site_breakdown(projects, now):
     a list of Projects or a list of pks. Sites outside dashboard_live_sites() or in Draft
     are simply not counted, so a caller never has to pre-filter.
     """
-    since = now - ACTIVE_TODAY_WINDOW
     # The IST calendar day of `now` (settings.TIME_ZONE), not of the server clock: the
-    # attendance day and the overdue cut-off follow the caller's moment, like `since`.
+    # attendance day, the overdue cut-off and Active today all follow the caller's moment.
     today = timezone.localdate(now)
+    # Active today starts at 00:00 IST on that same `today` (TB-5 ruling A2), built from it
+    # rather than computed apart, so it can never cut at a different midnight from
+    # Attendance today. A known gap, accepted by Zuber: the 8 PM snapshot counts 00:00-20:00,
+    # so an update made after 20:00 IST appears in no snapshot.
+    day_start = timezone.make_aware(datetime.combine(today, time.min))
 
     # Challans the site engineer still has receipts to record on (TB-3 ruling G4).
     to_confirm = DeliveryChallan.objects.filter(project_id=OuterRef('pk'),
@@ -251,9 +254,11 @@ def site_breakdown(projects, now):
                 civil_na=Subquery(anchor.values('is_not_applicable')[:1]),
                 # The dashboard's latest-activity rows (human_activity_q), with no money
                 # filter: the money rule hides a row's content, and only a count is shown.
+                # Today's rows only: from 00:00 IST (inclusive) up to `now`. A range on the
+                # raw timestamp rather than timestamp__date, so no per-row time-zone cast.
                 # Bounded above by `now` so a fixed `now` (the snapshot, tests) is honest.
                 touched=Exists(ActivityLog.objects
-                               .filter(project_id=OuterRef('pk'), timestamp__gt=since,
+                               .filter(project_id=OuterRef('pk'), timestamp__gte=day_start,
                                        timestamp__lte=now)
                                .filter(human_activity_q())),
                 # COPY OF models.first_component_received() (phase rule R3), as a column so

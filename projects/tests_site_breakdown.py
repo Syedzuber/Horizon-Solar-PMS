@@ -8,8 +8,10 @@ WHAT THIS PINS (each test fails if its rule is wrong)
                    a Rejected-only challan, or no DesignAssignment does not count
     Active         the Civil ANCHOR task In Progress or Done; Not Started with a date,
                    Blocked, N/A, or only a location copy started does not count
-    Active today   a human activity row in the 24 h up to `now`; 25 h ago, attendance only,
-                   scheduler / *_opened rows and rows after `now` do not count
+    Active today   a human activity row on the IST day of `now`, 00:00 IST up to `now` (TB-5);
+                   yesterday 23:59 IST, attendance only, scheduler / *_opened rows and rows
+                   after `now` do not count; a UTC-aware `now` is read on its IST date, the
+                   same date Attendance today uses
     Extraction     sites_visible_on_dashboard() returns exactly what it did before the D9
                    rule moved into dashboard_live_sites()
     Query budget   1 query for 1 site and for 50
@@ -21,6 +23,7 @@ Run with:
     python manage.py test projects.tests_site_breakdown --settings=solarpms.test_settings
 """
 from datetime import date, datetime, timedelta
+from datetime import timezone as dt_timezone
 
 from django.contrib.auth.models import User
 from django.db import connection
@@ -43,6 +46,13 @@ from .tests_site_dashboard import DashFixture
 #: 8 PM IST on the fixture's frozen day (SchedFixture freezes localdate at 9 Nov 2026):
 #: the moment the daily snapshot is sent.
 NOW = timezone.make_aware(datetime(2026, 11, 9, 20, 0))
+
+
+def _ist(day, hour, minute, second=0):
+    """`hour:minute` IST on `day` Nov 2026 as a UTC-aware datetime, the form timezone.now()
+    hands the views, so a rule that read the UTC date would be caught (TB-3's lesson)."""
+    return (timezone.make_aware(datetime(2026, 11, day, hour, minute, second))
+            .astimezone(dt_timezone.utc))
 
 
 def _fresh(user):
@@ -294,17 +304,53 @@ class ActiveTodayTests(BreakdownFixture):
     def _today(self, now=NOW):
         return self._b(self.site, now=now).active_today
 
-    def test_an_update_23_hours_ago_counts(self):
-        self._log(self.site, 'task_status_changed', NOW - timedelta(hours=23))
+    # TB-5 (ruling A1): today's IST calendar date, not the 24 hours up to `now`.
+
+    def test_an_update_earlier_today_counts(self):
+        self._log(self.site, 'task_status_changed', _ist(9, 0, 1))
         self.assertEqual(self._today(), 1)
 
-    def test_an_update_25_hours_ago_does_not(self):
-        self._log(self.site, 'task_status_changed', NOW - timedelta(hours=25))
+    def test_an_update_at_midnight_ist_exactly_counts(self):
+        self._log(self.site, 'task_status_changed', _ist(9, 0, 0))
+        self.assertEqual(self._today(), 1)
+
+    def test_an_update_at_23_59_ist_yesterday_does_not(self):
+        self._log(self.site, 'task_status_changed', _ist(8, 23, 59, 59))
         self.assertEqual(self._today(), 0)
 
-    def test_an_update_at_9_pm_the_evening_before_counts_at_8_pm(self):
-        self._log(self.site, '', timezone.make_aware(datetime(2026, 11, 8, 21, 0)))
-        self.assertEqual(self._today(), 1)
+    def test_an_update_at_9_pm_the_evening_before_no_longer_counts_at_8_pm(self):
+        # Under TB-1's 24 h window this counted; it is yesterday now.
+        self._log(self.site, '', _ist(8, 21, 0))
+        self.assertEqual(self._today(), 0)
+
+    def test_a_utc_now_just_after_ist_midnight_reads_the_ist_date(self):
+        # 00:30 IST on 10 Nov is 19:00 UTC on 9 Nov. Read on its UTC date, 9 Nov's 20:00 IST
+        # update would count; on its IST date (10 Nov) only the 00:10 update does.
+        now = _ist(10, 0, 30)
+        self.assertEqual(now.date(), date(2026, 11, 9))
+        self._log(self.site, '', _ist(9, 20, 0))
+        self.assertEqual(self._today(now=now), 0)
+        self._log(self.site, '', _ist(10, 0, 10))
+        self.assertEqual(self._today(now=now), 1)
+
+    def test_active_today_and_attendance_today_use_the_same_date(self):
+        # One site touched and attended on 9 Nov (23:55 IST), one on 10 Nov (00:05 IST). At
+        # every moment around midnight, as UTC-aware datetimes, the two figures name the same
+        # sites: they cut at the same midnight (ruling A2).
+        late, early = self.site, self._resco()
+        for site, day, moment in ((late, 9, _ist(9, 23, 55)), (early, 10, _ist(10, 0, 5))):
+            self._log(site, '', moment)
+            ContractorAttendance.objects.create(
+                project=site, date=date(2026, 11, day), trade='CIVIL', headcount=4,
+                time_in='09:00', recorded_by=self.pm, unlisted_contractor_name='Crew')
+        # 05:29 IST on 10 Nov is still 9 Nov in UTC.
+        cases = ((_ist(9, 23, 58), (late.pk,)), (_ist(10, 0, 7), (early.pk,)),
+                 (_ist(10, 5, 29), (early.pk,)))
+        for now, expected in cases:
+            with self.subTest(now=now):
+                b = self._b(late, early, now=now)
+                self.assertEqual(b.active_today_ids, expected)
+                self.assertEqual(b.attendance_today_ids, expected)
 
     def test_attendance_only_does_not_count(self):
         ContractorAttendance.objects.create(project=self.site, date=date(2026, 11, 9),
@@ -370,7 +416,9 @@ class TenderPageTests(BreakdownFixture):
 
     def setUp(self):
         self.mine = self._mobilized(self._resco())
-        self._log(self.mine, '', timezone.now() - timedelta(hours=1))
+        # The page reads the real clock. "Now", not an hour ago: an hour ago is yesterday
+        # when the suite runs between 00:00 and 01:00 IST (TB-5's calendar day).
+        self._log(self.mine, '', timezone.now())
         # Another PM's site in the same tender: the strip counts the whole tender.
         self.theirs = self._resco(pm=self.other_pm)
         self._resco(status='Draft')
@@ -392,8 +440,9 @@ class TenderPageTests(BreakdownFixture):
                 html = response.content.decode()
                 for text in ('Sites in execution', '>Mobilized<', '>Active<', '>Active today<',
                              'DC + design started', 'Civil In Progress/Done',
-                             'any PMS update, last 24 h'):
+                             'any PMS update, today'):
                     self.assertIn(text, html)
+                self.assertNotIn('last 24 h', html)
 
     def test_the_planned_count_shows_under_sites_in_execution_when_set(self):
         Program.objects.filter(pk=self.program.pk).update(planned_site_count=94)
