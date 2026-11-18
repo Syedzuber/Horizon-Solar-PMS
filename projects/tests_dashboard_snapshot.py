@@ -1,6 +1,7 @@
 """
-SNAP-1 / SNAP-1b — the daily Site Dashboard snapshot (snapshot.py, send_dashboard_snapshot)
-and the two additive chokepoint arguments it needed (attachments, named_recipients).
+SNAP-1 / SNAP-1b / SNAP-1c — the daily Site Dashboard snapshot (snapshot.py,
+send_dashboard_snapshot) and the two additive chokepoint arguments it needed (attachments,
+named_recipients).
 
 WHAT THIS PINS (SNAP-1b: what is drawn)
     Sections       one per tender with a site in execution, none for Residential (even
@@ -11,9 +12,23 @@ WHAT THIS PINS (SNAP-1b: what is drawn)
                    PM line names active PMs only, by site count
     Arrows         per tender by Program id for tiles and strip; a tender missing from
                    the previous payload (or a SNAP-1 payload) gets none
-    Images         at most 5 sections an image, never split; 6 tenders -> 2 images;
-                   width 1080; no qualifying tender -> no image, nothing sent, exit 0,
-                   the row still saved
+    Images         at most 3 sections an image (SNAP-1c S5), never split; 4 tenders ->
+                   2 images, 7 -> 3; sections 628 px; width 1080; no qualifying tender ->
+                   no image, nothing sent, exit 0, the row still saved
+
+WHAT THIS PINS (SNAP-1c: Design, Procurement and Attendance today)
+    Same figures   every new payload figure equals site_breakdown() over the tender, as
+                   the tender page calls it (Q1: the opposite of TB-4's old pin)
+    Same words     the Design and Procurement rows read exactly as the tender page's
+                   rendered rows, Procurement's line break standing for its ' · ' (S2, Q2);
+                   Attendance today's label and definition are the page's
+    Colours        released / received green, pending / DCs / overdue amber, each only
+                   when not 0; "of N mobilized" plain (S3, Q4)
+    Arrows         every new figure by Program id; none for "of N mobilized" (Q4); none
+                   against a payload from before SNAP-1c (Q4)
+    Fit            five strip columns and the rows fit 1080 px with 3-digit figures and
+                   arrows, nothing cut
+    Dry run        prints the rows the image draws
 
 WHAT THIS PINS (SNAP-1: what is stored)
     Same figures   the organisation row equals the rendered page's tiles for a CEO, label,
@@ -53,6 +68,7 @@ from pathlib import Path
 from unittest import mock
 
 from django.core.management import call_command
+from django.template.loader import render_to_string
 from django.core.management.base import CommandError
 from django.test import Client, SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
@@ -65,8 +81,10 @@ from .models import (DashboardSnapshot, Issue, Notification, NotificationEventSe
 from .notifications import _zeptomail_post, send_notification
 from .notify_admin import add_named_recipient
 from .notify_registry import get_event
-from .site_breakdown import site_breakdown
+from .models import DESIGN_RELEASED, DESIGN_SURVEY_RETURNED
+from .site_breakdown import SiteBreakdown, site_breakdown
 from .tests_sched2_scheduler import FROZEN_TODAY
+from .tests_site_breakdown_extra import DAY, ExtraFixture
 from .tests_site_dashboard import DashFixture, _fresh
 from .tests_two_step_completion import _profile
 
@@ -303,7 +321,7 @@ class MoneyAndViewerTests(SnapshotFixture):
             self.assertEqual(tuple(t['key'] for t in section['tiles']), S.SECTION_KEYS)
             for tile in section['tiles']:
                 self.assertEqual(set(tile), {'key', 'label', 'value', 'detail'})
-            self.assertEqual(tuple(section['breakdown']), S.STRIP_KEYS)
+            self.assertEqual(tuple(section['breakdown']), S.BREAKDOWN_KEYS)
         for text in _walk(payload):
             self.assertIsNone(self.MONEY.search(text), text)
 
@@ -404,14 +422,14 @@ class TenderSectionTests(SnapshotFixture):
         # The tender page's own call (views.program_detail), at the same moment.
         page = site_breakdown(self.tender_a.sites.all(), NOW)
         self.assertEqual(alpha['breakdown'],
-                         {'in_execution': page.in_execution, 'mobilized': page.mobilized,
-                          'active': page.active, 'active_today': page.active_today})
+                         {key: getattr(page, key) for key in S.BREAKDOWN_KEYS})
         self.assertEqual(alpha['breakdown']['active_today'], 1)
         self.assertEqual([label for _, label, _ in S.STRIP],
-                         ['Sites in execution', 'Mobilized', 'Active', 'Active today'])
+                         ['Sites in execution', 'Mobilized', 'Active', 'Active today',
+                          'Attendance today'])
         self.assertEqual([d for _, _, d in S.STRIP],
                          [None, 'DC + design started', 'Civil In Progress/Done',
-                          'any PMS update, last 24 h'])
+                          'any PMS update, last 24 h', 'contractor entry, IST day'])
 
     def test_pm_line_names_active_pms_only_by_site_count(self):
         name = lambda p: p.user.get_full_name() or p.user.username   # noqa: E731
@@ -444,9 +462,11 @@ def _section(pid, code, overdue=3, quiet=5, dc_number=1234, **values):
     """A synthetic tender section, in collect_snapshot()'s shape."""
     tile_values = dict(dc_kwp=f'{dc_number:,}', behind=1, civil=2, overdue=overdue,
                        blocked=0, issues=4, quiet=quiet)
-    strip = dict(in_execution=10, mobilized=4, active=2, active_today=1)
+    strip = dict(in_execution=10, mobilized=4, active=2, active_today=1, attendance_today=3,
+                 design_not_started=1, design_in_progress=6, design_released=3, received=3,
+                 pending=1, dcs_to_confirm=2, dcs_overdue=1)
     for key, value in values.items():
-        (strip if key in S.STRIP_KEYS else tile_values)[key] = value
+        (strip if key in S.BREAKDOWN_KEYS else tile_values)[key] = value
     return {'id': pid, 'code': code, 'name': f'{code} {LONG}', 'pms': [f'A PM {LONG}'],
             'tiles': [{'key': key, 'label': label, 'value': tile_values[key],
                        'detail': f'detail {LONG}'}
@@ -480,8 +500,8 @@ class RenderTests(SimpleTestCase):
         self.assertTrue(png.startswith(PNG_SIGNATURE))
         return Image.open(io.BytesIO(png)).size
 
-    def test_up_to_five_tenders_one_png_1080_wide(self):
-        for count in (1, 3, 5):
+    def test_up_to_three_tenders_one_png_1080_wide(self):
+        for count in (1, 2, 3):
             with self.subTest(tenders=count):
                 images = S.render_snapshot_images(_payload(sections=count), None)
                 self.assertEqual(len(images), 1)
@@ -489,16 +509,23 @@ class RenderTests(SimpleTestCase):
                                  (S.IMAGE_WIDTH, S.image_height(count)))
         self.assertEqual(S.image_title(1, 1), 'All tenders')
 
-    def test_six_tenders_two_images_no_section_split(self):
-        payload = _payload(sections=6)
-        self.assertEqual([len(p) for p in S.section_pages(payload)], [5, 1])
+    def test_four_tenders_two_images_no_section_split(self):
+        payload = _payload(sections=4)
+        self.assertEqual([len(p) for p in S.section_pages(payload)], [3, 1])
         images = S.render_snapshot_images(payload, None)
         # Each image's height is whole sections only: no section is cut in two.
         self.assertEqual([self._size(png) for png in images],
-                         [(S.IMAGE_WIDTH, S.image_height(5)),
+                         [(S.IMAGE_WIDTH, S.image_height(3)),
                           (S.IMAGE_WIDTH, S.image_height(1))])
         self.assertEqual(S.image_title(2, 2), 'All tenders (2/2)')
-        self.assertEqual(len(S.render_snapshot_images(_payload(sections=11), None)), 3)
+        self.assertEqual([len(p) for p in S.section_pages(_payload(sections=7))], [3, 3, 1])
+        self.assertEqual(len(S.render_snapshot_images(_payload(sections=11), None)), 4)
+
+    def test_section_and_image_heights(self):
+        # Q3: Design on one line, Procurement on two fixed lines -> 628 px a section.
+        self.assertEqual(S.MAX_SECTIONS_PER_IMAGE, 3)
+        self.assertEqual(S.SECTION_H, 628)
+        self.assertEqual((S.image_height(1), S.image_height(3)), (868, 2124))
 
     def test_no_tender_no_image(self):
         self.assertEqual(S.render_snapshot_images(_payload(sections=0), None), [])
@@ -547,7 +574,7 @@ class RenderTests(SimpleTestCase):
                                                    dc_number=1234, active=0,
                                                    active_today=4)}
         deltas = S.section_deltas(now, before)
-        self.assertEqual(set(deltas), set(S.SECTION_KEYS + S.STRIP_KEYS))
+        self.assertEqual(set(deltas), set(S.SECTION_KEYS + S.BREAKDOWN_KEYS))
         self.assertEqual(deltas['overdue'], -4)
         self.assertEqual(deltas['dc_kwp'], 66)       # 1300 - 1234, the sums not the text
         self.assertEqual(deltas['active'], 2)
@@ -586,6 +613,218 @@ class RenderTests(SimpleTestCase):
 # ---------------------------------------------------------------------------
 
 @override_settings(ZEPTOMAIL_API_KEY='test-key', ZEPTOMAIL_FROM_EMAIL='from@example.com')
+# ---------------------------------------------------------------------------
+# 6. SNAP-1c: Design, Procurement and Attendance today
+# ---------------------------------------------------------------------------
+
+def _page_rows(breakdown):
+    """The tender page's TB-3 pieces as text, rendered from the include itself:
+    (attendance label, attendance definition, Design row, Procurement row), tags removed,
+    each row without its bold "Design" / "Procurement" key."""
+    html = render_to_string('projects/_site_breakdown_strip.html',
+                            {'breakdown': breakdown, 'show_extra': True})
+    attendance = re.search(r'data-tb3-attendance>\s*<div class="fig"><div class="v">\d+</div>'
+                           r'<div class="l">([^<]*)</div><div class="d">([^<]*)</div>', html)
+
+    def row(name):
+        inner = re.search(rf'data-tb3-{name.lower()}><span class="k">{name}</span> (.*?)</div>',
+                          html).group(1)
+        return re.sub(r'<[^>]+>', '', inner)
+    return attendance.group(1), attendance.group(2), row('Design'), row('Procurement')
+
+
+def _from(breakdown):
+    """A section holding `breakdown`'s figures, as collect_snapshot() stores them."""
+    return {'breakdown': {key: getattr(breakdown, key) for key in S.BREAKDOWN_KEYS}}
+
+
+class ExtraFiguresTests(ExtraFixture):
+    """The new payload figures against site_breakdown and the rendered tender page, on
+    real sites with something in every figure."""
+
+    def setUp(self):
+        super().setUp()
+        # Mobilized with material on site, one challan overdue and one not yet due,
+        # attendance today; mobilized with nothing received; released with no challan;
+        # survey returned (not started).
+        got = self._mobilized(self._resco())
+        self._line(self._challan(got, expected=DAY - timedelta(days=1)), Decimal('1'))
+        self._challan(got, expected=DAY + timedelta(days=3))
+        self._attendance(got, day=DAY)
+        self._mobilized(self._resco())
+        self._design(self._resco(), DESIGN_RELEASED)
+        self._design(self._resco(), DESIGN_SURVEY_RETURNED)
+
+    def test_new_payload_figures_equal_site_breakdown_as_the_tender_page_calls_it(self):
+        section = S.collect_snapshot(NOW)['tender_sections'][str(self.program.pk)]
+        page = site_breakdown(self.program.sites.all(), NOW)
+        self.assertEqual(section['breakdown'],
+                         {key: getattr(page, key) for key in S.BREAKDOWN_KEYS})
+        # Something in every figure, so equality is not 0 == 0.
+        self.assertEqual({key: section['breakdown'][key] for key in S.BREAKDOWN_KEYS[4:]},
+                         {'attendance_today': 1, 'design_not_started': 1,
+                          'design_in_progress': 2, 'design_released': 1, 'received': 1,
+                          # _mobilized() gives each site an open challan of its own.
+                          'pending': 1, 'dcs_to_confirm': 4, 'dcs_overdue': 1})
+
+    def test_rows_read_exactly_as_the_rendered_tender_page(self):
+        page = site_breakdown(self.program.sites.all(), NOW)
+        label, definition, design, procurement = _page_rows(page)
+        self.assertEqual(S.STRIP[-1], ('attendance_today', label, definition))
+        lines = S.breakdown_lines(_from(page))
+        self.assertEqual([name for name, _ in lines], ['Design', 'Procurement', ''])
+        self.assertEqual(S.line_text(lines[0][1]), design)
+        self.assertEqual(S.line_text(lines[1][1]) + S.PROCUREMENT_BREAK
+                         + S.line_text(lines[2][1]), procurement)
+        self.assertEqual(procurement, '1 received of 2 mobilized · 1 pending · '
+                                      '4 DCs to confirm, 1 overdue')
+
+
+class _Recorder:
+    """Stands in for ImageDraw.Draw: records each text drawn with its colour and measures
+    with a real one, so a test can read what _lines() drew."""
+
+    def __init__(self):
+        from PIL import Image, ImageDraw
+        self.real = ImageDraw.Draw(Image.new('RGB', (10, 10)))
+        self.texts = []
+
+    def text(self, xy, text, font=None, fill=None):
+        self.texts.append((text, fill, xy[0]))
+
+    def textlength(self, text, font=None):
+        return self.real.textlength(text, font=font)
+
+    def line(self, *args, **kwargs):
+        pass
+
+    def rounded_rectangle(self, *args, **kwargs):
+        pass
+
+
+class ExtraRenderTests(SimpleTestCase):
+
+    def _sb(self, **counts):
+        """A SiteBreakdown with these counts (ids made up to the length)."""
+        ids = lambda n, base: tuple(range(base, base + n))   # noqa: E731
+        fields = {f'{key}_ids': ids(counts.get(key, 0), 100 * n)
+                  for n, key in enumerate(('in_execution', 'mobilized', 'active',
+                                           'active_today', 'design_not_started',
+                                           'design_in_progress', 'design_released',
+                                           'received', 'pending', 'attendance_today'))}
+        return SiteBreakdown(dcs_to_confirm=counts.get('dcs_to_confirm', 0),
+                             dcs_overdue=counts.get('dcs_overdue', 0), **fields)
+
+    def test_wording_equals_the_include_for_none_one_and_many_challans(self):
+        # "DC" / "DCs" follows the page's pluralize at 0, 1 and 2.
+        for dcs in (0, 1, 2):
+            with self.subTest(dcs=dcs):
+                b = self._sb(in_execution=5, mobilized=3, received=2, pending=1,
+                             design_in_progress=4, design_released=1,
+                             dcs_to_confirm=dcs, dcs_overdue=min(dcs, 1))
+                _, _, design, procurement = _page_rows(b)
+                lines = S.breakdown_lines(_from(b))
+                self.assertEqual(S.line_text(lines[0][1]), design)
+                self.assertEqual(S.line_text(lines[1][1]) + S.PROCUREMENT_BREAK
+                                 + S.line_text(lines[2][1]), procurement)
+
+    def test_colours_green_and_amber_only_when_not_zero(self):
+        warn, good = S.TONE_COLOURS['warn'], S.BRAND
+        self.assertEqual(S.LINE_TONES, {'design_released': 'good', 'received': 'good',
+                                        'pending': 'warn', 'dcs_to_confirm': 'warn',
+                                        'dcs_overdue': 'warn'})
+        for key, colour in (('design_released', good), ('received', good),
+                            ('pending', warn), ('dcs_to_confirm', warn),
+                            ('dcs_overdue', warn)):
+            with self.subTest(key=key):
+                self.assertEqual(S.line_colour(key, 2), colour)
+                self.assertEqual(S.line_colour(key, 0), S.INK)
+        for key in ('design_not_started', 'design_in_progress'):
+            self.assertEqual(S.line_colour(key, 7), S.INK)
+
+    def test_drawn_rows_use_those_colours_and_mobilized_is_plain(self):
+        section = _section(1, 'T1', received=3, pending=0, dcs_to_confirm=2, dcs_overdue=0,
+                           design_released=1, mobilized=7, design_not_started=4,
+                           design_in_progress=6)
+        draw = _Recorder()
+        S._lines(draw, S._fonts(), section, {}, 0)
+        drawn = {text: fill for text, fill, _ in draw.texts}
+        self.assertEqual(drawn['3'], S.BRAND)                    # received, not 0
+        self.assertEqual(drawn['0'], S.INK)                      # pending / overdue at 0
+        self.assertEqual(drawn['2'], S.TONE_COLOURS['warn'])     # DCs to confirm
+        self.assertEqual(drawn['1'], S.BRAND)                    # released
+        self.assertEqual(drawn[' received of 7 mobilized'], S.MUTED)
+        self.assertEqual([t for t, _, _ in draw.texts if t in ('Design', 'Procurement')],
+                         ['Design', 'Procurement'])
+
+    def test_new_figure_arrows_by_program_id_none_for_of_mobilized(self):
+        now = _section(7, 'ALPHA', received=5, mobilized=9, attendance_today=4,
+                       dcs_overdue=0, design_released=3)
+        before = _payload(sections=0)
+        before['tender_sections'] = {'7': _section(7, 'ALPHA', received=2, mobilized=6,
+                                                   attendance_today=1, dcs_overdue=3,
+                                                   design_released=3)}
+        deltas = S.section_deltas(now, before)
+        self.assertEqual((deltas['received'], deltas['attendance_today'],
+                          deltas['dcs_overdue'], deltas['mobilized']), (3, 3, -3, 3))
+        self.assertIsNone(deltas['design_released'])
+        lines = S.breakdown_lines(now, deltas)
+        self.assertEqual(S.line_text(lines[1][1]),
+                         '5 ▲ 3 received of 9 mobilized · 1 pending')
+        self.assertEqual(S.line_text(lines[2][1]), '2 DCs to confirm, 0 ▼ 3 overdue')
+        # Another tender's figures never give arrows.
+        other = _payload(sections=0)
+        other['tender_sections'] = {'8': before['tender_sections']['7']}
+        self.assertTrue(all(v is None for v in S.section_deltas(now, other).values()))
+
+    def test_a_payload_from_before_snap1c_gives_the_new_figures_no_arrow(self):
+        now = _section(7, 'ALPHA', received=5, active=4)
+        old = _section(7, 'ALPHA', active=1)
+        old['breakdown'] = {key: old['breakdown'][key]
+                            for key in ('in_execution', 'mobilized', 'active', 'active_today')}
+        before = _payload(sections=0)
+        before['tender_sections'] = {'7': old}
+        deltas = S.section_deltas(now, before)
+        self.assertEqual(deltas['active'], 3)                    # the old strip still has
+        for key in ('attendance_today',) + S.LINE_KEYS:
+            self.assertIsNone(deltas[key], key)
+        S.render_snapshot_images({**_payload(sections=0), 'tender_sections': {'7': now}},
+                                 before)
+
+    def test_three_digit_figures_and_arrows_fit_uncut(self):
+        from PIL import Image, ImageDraw
+        draw = ImageDraw.Draw(Image.new('RGB', (10, 10)))
+        fonts = S._fonts()
+        big = {key: 888 for key in S.BREAKDOWN_KEYS}
+        section = _section(1, 'T1', **big)
+        deltas = {key: 888 for key in S.BREAKDOWN_KEYS}
+        # The rows: every line inside the box, right of the label column.
+        room = (S.IMAGE_WIDTH - S.MARGIN - 20) - (S.MARGIN + 20 + S.LINE_LABEL_W)
+        fonts_of = {'num': fonts.line_num, 'arrow': fonts.delta, 'text': fonts.line_text}
+        for label, runs in S.breakdown_lines(section, deltas):
+            width = sum(draw.textlength(t, font=fonts_of[kind]) for t, kind, _ in runs)
+            self.assertLessEqual(width, room, label)
+            self.assertLessEqual(draw.textlength(label, font=fonts.line_label),
+                                 S.LINE_LABEL_W - 8)
+        # The strip: each column holds its label, definition, figure and arrow, and the
+        # five columns end inside the strip's box.
+        for key, label, definition in S.STRIP:
+            width = S.STRIP_COL_W[key]
+            figure = (draw.textlength('888', font=fonts.strip_value) + 8
+                      + draw.textlength(S.delta_text(888), font=fonts.delta))
+            self.assertLessEqual(figure, width - 8, key)
+            self.assertLessEqual(draw.textlength(label, font=fonts.strip_label), width - 8, key)
+            if definition:
+                self.assertEqual(S.fit_text(draw, definition, fonts.strip_def, width - 8),
+                                 definition)
+        end = (S.MARGIN + 20 + sum(S.STRIP_COL_W.values())
+               + S.STRIP_ARROW_W * (len(S.STRIP_CHAIN) - 1)
+               + S.STRIP_DIVIDER_W * (len(S.STRIP) - len(S.STRIP_CHAIN)))
+        self.assertLessEqual(end, S.IMAGE_WIDTH - S.MARGIN)
+        S.render_snapshot_images({**_payload(sections=0), 'tender_sections': {'1': section}},
+                                 None)
+
+
 class CommandTests(SnapshotFixture):
 
     def setUp(self):
@@ -621,7 +860,12 @@ class CommandTests(SnapshotFixture):
         self.assertIn('Dry run: no row written, nothing sent.', out)
         # Per tender: heading, strip, tiles with sub-lines.
         self.assertIn('ALPHA · Tender Alpha', out)
-        self.assertIn('Sites in execution 2 › Mobilized 0 › Active 0 | Active today 0', out)
+        self.assertIn('Sites in execution 2 › Mobilized 0 › Active 0 | Active today 0'
+                      ' | Attendance today 0', out)
+        # SNAP-1c: the Design and Procurement rows, as the image draws them.
+        self.assertIn('  Design       0 not started · 0 in progress · 0 released + BOQ\n', out)
+        self.assertIn('  Procurement  0 received of 0 mobilized · 0 pending\n', out)
+        self.assertIn('               0 DCs to confirm, 0 overdue\n', out)
         self.assertIn('Blocked tasks', out)
         self.assertIn('1 site affected', out)
         self.assertFalse(DashboardSnapshot.objects.exists())
@@ -667,11 +911,13 @@ class CommandTests(SnapshotFixture):
         alpha = before['tender_sections'][str(self.tender_a.pk)]
         next(t for t in alpha['tiles'] if t['key'] == 'blocked')['value'] = 4
         alpha['breakdown']['in_execution'] = 5
+        alpha['breakdown']['dcs_overdue'] = 2
         DashboardSnapshot.objects.create(snapshot_date=FROZEN_TODAY - timedelta(days=1),
                                          taken_at=NOW - timedelta(days=1),
                                          payload=before, created_by_command='test')
         out = self._call('--dry-run', '--out-dir', self.dir)
         self.assertIn('Sites in execution 2 (▼ 3) › Mobilized 0', out)
+        self.assertIn('0 DCs to confirm, 0 ▼ 2 overdue', out)       # SNAP-1c row arrow
         self.assertRegex(out, r'Blocked tasks\s+1\s+▼ 3')
         self.assertRegex(out, r'Overdue tasks\s+0\s{3,}across')   # unchanged: no arrow
 

@@ -23,8 +23,8 @@ event's Admin-named list; the code names nobody.
                          against the last day that ran.
 
 --dry-run   collect and render only: no row written, nothing sent. Needs --out-dir;
-            prints each file's path and, per tender, the strip, the tiles and their
-            sub-lines.
+            prints each file's path and, per tender, the strip, the Design and
+            Procurement rows (SNAP-1c), the tiles and their sub-lines.
 --to USER   send only to that active user, skipping the named list. The email master
             switch and the event's pause still apply: they are checked inside the
             chokepoint (send_notification / notify), which this does not go around.
@@ -60,8 +60,9 @@ from projects.models import DashboardSnapshot, NotificationLog, SystemSettings, 
 from projects.notifications import NO_VALID_WHATSAPP_NUMBER, valid_whatsapp_number
 from projects.notify import channel_is_active, merge_named_recipients, notify_now
 from projects.notify_registry import WHATSAPP, get_event
-from projects.snapshot import (NO_TENDER_SKIP, STRIP, SnapshotError, collect_snapshot,
-                               delta_text, headline, ordered_sections, pm_line,
+from projects.snapshot import (NO_TENDER_SKIP, STRIP, STRIP_CHAIN, SnapshotError,
+                               breakdown_lines, collect_snapshot, delta_text, headline,
+                               line_text, ordered_sections, pm_line,
                                render_snapshot_images, section_deltas, section_title)
 from projects.whatsapp_params import sanitise_params
 
@@ -308,7 +309,8 @@ class Command(BaseCommand):
 
     def _print_figures(self, payload, previous):
         """What the images draw, as text: per tender in drawing order, the heading, the
-        strip and the 7 tiles with their sub-lines and arrows."""
+        strip, the Design and Procurement rows (SNAP-1c, the very runs the image draws)
+        and the 7 tiles with their sub-lines and arrows."""
         self.stdout.write('')
         self.stdout.write(payload['dates_as_of']['text'])
         for section in ordered_sections(payload):
@@ -322,7 +324,11 @@ class Command(BaseCommand):
                 arrow = delta_text(deltas[key])
                 strip.append(f'{label} {section["breakdown"][key]}'
                              f'{" (" + arrow + ")" if arrow else ""}')
-            self.stdout.write('  ' + ' › '.join(strip[:3]) + ' | ' + strip[3])
+            chain = len(STRIP_CHAIN)
+            self.stdout.write('  ' + ' › '.join(strip[:chain]) + ''.join(
+                ' | ' + figure for figure in strip[chain:]))
+            for label, runs in breakdown_lines(section, deltas):
+                self.stdout.write(f'  {label:12} {line_text(runs)}')
             for tile in section['tiles']:
                 arrow = delta_text(deltas[tile['key']])
                 self.stdout.write(f'  {tile["label"]:22} {str(tile["value"]):>8} '
