@@ -4761,3 +4761,23 @@ def user_can_set_site_bd(user):
     """
     profile = _user_and_profile_active(user)
     return profile is not None and profile.role in SITE_BD_SET_ROLES
+
+
+# FIN-M-AB (ruling FR23): who the milestone amount import may name as --actor. Finance
+# fills the sheet (Santosh or Payal); CEO, Admin and System Admin are the administrators
+# who may set site data by hand (SITE_BD_SET_ROLES). BD is left out on purpose: BD checks
+# the imported figures afterwards and must not be the one who loaded them.
+MILESTONE_AMOUNT_IMPORT_ROLES = frozenset({'Finance'}) | SITE_BD_SET_ROLES
+
+
+def user_can_import_milestone_amounts(user):
+    """True when `user` may be named as --actor of import_milestone_amounts (FIN-M-AB).
+
+    Allowed: Finance, CEO, Admin and System Admin (MILESTONE_AMOUNT_IMPORT_ROLES), with an
+    active profile AND login, so the log never names someone who has left. Blocked: every
+    other role — BD (who checks the figures after the import), PM, SCM and the rest — and
+    anyone deactivated. Not project-scoped: the command's scope rules decide which sites
+    it may write.
+    """
+    profile = _user_and_profile_active(user)
+    return profile is not None and profile.role in MILESTONE_AMOUNT_IMPORT_ROLES

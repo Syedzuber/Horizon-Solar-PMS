@@ -27,6 +27,7 @@ MONEY_ACTIVITY_CODES = frozenset({
     'milestone_amounts_set',      # views: BD's set_milestone_amounts and the PM edit's amount
     'milestone_amount_received',  # views: amount received / variance reason (FIN-M-L)
     'milestone_invoice_amount',   # views: the invoice amount Finance records (FIN-M-B3)
+    'milestone_amounts_imported', # milestone_amount_import: Finance's one-time sheet (FIN-M-AB)
 })
 # FIN-M-L's plain milestone code, 'milestone_updated' (description, dates, status,
 # creation), is deliberately NOT here: those lines carry no amount and every viewer of
@@ -59,6 +60,12 @@ NON_ACTIVITY_CODES = frozenset({
     'notify_template_seeded',           # seed_notification_templates (project=None)
     'cad_pdf_extraction_failed',        # design_artifact_upload: a failure note after the upload's own row
     'bd_backfilled',                    # backfill_site_bd: a one-off data fill, not work on the site
+    # FIN-M-AB: the one-time amount backfill from Finance's sheet. A data fill on ~37
+    # sites at once; counted, it would show every one of them "Active today".
+    'milestone_amounts_imported',       # import_milestone_amounts
 })
+# 'milestone_amounts_imported' is deliberately NOT 'milestone_amounts_set': the Finance
+# Head check "Amount changed after Received" reads only the latter, so Finance's first
+# fill of an amount that was blank does not list ~49 Received milestones as changed.
 # A BD set from the overview's form writes 'bd_assigned' and is NOT here: like
 # 'pm_assigned', it is a person's decision about the site and counts as its latest activity.
