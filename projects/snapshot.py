@@ -72,6 +72,18 @@ Test data is dropped by the CEO strip's rule (Q4, payments.exclude_test_site_pay
 One line, no arrows (Q6); the counts are stored per tender so SNAP-3c can trend them (F5).
 The image only: no page shows this line (F4).
 
+NEEDS ACTION (SNAP-3c, rules R1-R13 and answers Q1-Q8, 20 Nov 2026). Each section opens,
+under its heading, with a box of up to four lines: each role's worst flag, reds first,
+with the figure, its trend over the last three days and the role that acts; the last line
+ends "+N more" when more roles have a flag; no flag at all gives one green line. Every
+flagged figure elsewhere in the section carries a red or amber dot. The rules, their
+thresholds and the sentences live in snapshot_flags.py (pure: today's section and the
+stored rows before today in, flags out). Three figures the rules need are drawn nowhere,
+so each section stores them under `checks` (snapshot_flags.CHECK_KEYS): the Behind plan
+tile's scheduled-site count as a number, the sites with attendance today that are not
+Active (Z1), and the Active sites with no material received (Z2 reading (b)). All three
+come from the cards and the SiteBreakdown already in hand: no query is added.
+
 WHAT IS STORED BUT NOT DRAWN. The SNAP-1 organisation row and the By PM / By tender rows
 stay in the payload (and their tests), so the stored history keeps its shape; only
 `tender_sections` is drawn.
@@ -111,7 +123,9 @@ from .models import (
 )
 from .payments import exclude_test_site_payments
 from .site_breakdown import site_breakdown
-from .site_dashboard import build_site_cards, capacity_totals
+from .site_dashboard import REASON_SCHEDULED, build_site_cards, capacity_totals
+from .snapshot_flags import (CHECK_KEYS, CLEAN_LINE, MAX_ACTION_LINES, more_text,
+                             needs_action)
 from .views_site_dashboard import dates_as_of, kpi_tiles
 
 #: The image's fixed width (WhatsApp-friendly; SNAP-1 rendering rules).
@@ -447,11 +461,12 @@ def _tender_sections(live, owners, now):
     match on the same key; Zuber, 14 Nov).
 
     {'<program id>': {'id', 'code', 'name', 'pms', 'tiles', 'dc_kwp_number', 'breakdown',
-                      'finance'}}
+                      'finance', 'checks'}}
 
     `breakdown` holds BREAKDOWN_KEYS: the strip's five figures and the Design /
     Procurement rows' seven (SNAP-1c), all read off the one SiteBreakdown. `finance`
-    holds FINANCE_KEYS (SNAP-3b), the tender's five finance counts.
+    holds FINANCE_KEYS (SNAP-3b), the tender's five finance counts. `checks` holds
+    snapshot_flags.CHECK_KEYS (SNAP-3c), the three figures only the flags read.
     """
     sections = {}
     groups = section_cards(live)
@@ -481,8 +496,32 @@ def _tender_sections(live, owners, now):
             'dc_kwp_number': _dc_number(cards),
             'breakdown': {key: getattr(breakdown, key) for key in BREAKDOWN_KEYS},
             'finance': finance[program_id],
+            'checks': _checks(cards, breakdown),
         }
     return sections
+
+
+def _checks(cards, breakdown):
+    """SNAP-3c: the three figures the flags read that no tile or row draws, in
+    snapshot_flags.CHECK_KEYS order. No query: the cards and the SiteBreakdown are in hand.
+
+    scheduled              the Behind plan tile's "of N scheduled" (Q8: stored as a number;
+                           tests_snapshot_flags pins it to the tile's text). The tile's own
+                           expression, views_site_dashboard._kpis' `scheduled`, over the
+                           same cards.
+    attendance_not_active  Z1: sites with attendance today that are not Active (Civil not
+                           In Progress/Done). Site sets, not counts: attendance and Active
+                           can overlap any way.
+    active_no_material     Z2 reading (b) (Q2): Active sites with no material received.
+                           received_ids is drawn from Mobilized sites only, so an Active site
+                           with no challan at all counts here, as it should.
+    """
+    active = set(breakdown.active_ids)
+    return dict(zip(CHECK_KEYS, (
+        sum(1 for c in cards if c.schedule.reason == REASON_SCHEDULED),
+        len(set(breakdown.attendance_today_ids) - active),
+        len(active - set(breakdown.received_ids)),
+    )))
 
 
 def taken_at_label(moment):
@@ -734,6 +773,12 @@ TONE_COLOURS = {'crit': '#c23b2a', 'warn': '#a86400'}
 #: SNAP-1c row colours (LINE_TONES): the brand green for done, the tiles' amber for waiting.
 LINE_COLOURS = {'good': BRAND, 'warn': TONE_COLOURS['warn']}
 
+#: SNAP-3c dots: the tiles' red, and an amber brighter than the tiles' amber text, so a
+#: small dot still reads as amber and not as red on a phone. Green is the "no flag" line.
+DOT_COLOURS = {'red': TONE_COLOURS['crit'], 'amber': '#e39a14', 'green': BRAND}
+DOT_R = 7               # a dot's radius
+DOT_W = 2 * DOT_R + 8   # the room a dot takes beside a figure, gaps included
+
 MARGIN = 32
 
 # Vertical layout, in pixels. The image's height is PAGE_HEAD_H + sections x SECTION_H +
@@ -743,7 +788,14 @@ GOLD_H = 4
 STAMP_H = 40            # pale-green "Dates as of" strip
 PAGE_HEAD_H = BAND_H + GOLD_H + STAMP_H + 16
 HEADING_H = 64
-STRIP_TOP = HEADING_H + 12
+# SNAP-3c: the "Needs action" box between the heading and the strip. Always the height of
+# MAX_ACTION_LINES lines, even with one green line, so a section's height never depends
+# on its flags and image_height() stays arithmetic (the same rule as Q3 of SNAP-1c).
+ACTION_TOP = HEADING_H + 12
+ACTION_PAD = 12         # inside the box, above the first line and below the last
+ACTION_LINE_H = 34
+ACTION_H = 2 * ACTION_PAD + MAX_ACTION_LINES * ACTION_LINE_H
+STRIP_TOP = ACTION_TOP + ACTION_H + 12
 STRIP_H = 96
 # SNAP-1c: the Design and Procurement box, three fixed lines (Q3: Procurement wraps onto a
 # second line always, not only when long, so a section's height never depends on its
@@ -758,7 +810,7 @@ LINE_LABEL_W = 160      # the bold "Design" / "Procurement" / "Finance" column
 TILES_TOP = LINES_TOP + LINES_H + 16
 TILE_H = 120
 TILE_GAP = 12
-SECTION_H = TILES_TOP + 2 * TILE_H + TILE_GAP + 36      # 668 (SNAP-3b Q6; 628 before)
+SECTION_H = TILES_TOP + 2 * TILE_H + TILE_GAP + 36      # 840 (SNAP-3c box; 668 before)
 FOOTER_H = 56
 
 # The strip's columns: three chained figures with '›' between them, then Active today and
@@ -862,9 +914,29 @@ def _heading(draw, fonts, section, top):
               font=fonts.pm, fill=MUTED)
 
 
-def _strip(draw, fonts, section, deltas, top):
+def _dot(draw, x, centre_y, colour):
+    """A SNAP-3c flag dot whose left edge is at `x`. Returns the x after it."""
+    draw.ellipse([x, centre_y - DOT_R, x + 2 * DOT_R, centre_y + DOT_R],
+                 fill=DOT_COLOURS[colour])
+    return x + 2 * DOT_R
+
+
+def _value_with_dot(draw, font, value, x, y, centre_dy, dots, key):
+    """After a drawn figure at (x, y): its flag dot, when it has one. Returns the x where
+    the figure's arrow starts, so the arrow moves right of the dot."""
+    end = x + draw.textlength(value, font=font)
+    if key in dots:
+        # +3 after the dot: the words that follow a row figure start with a space only,
+        # which on its own leaves the dot touching the next word.
+        end = _dot(draw, end + 6, y + centre_dy, dots[key]) + 3
+    return end
+
+
+def _strip(draw, fonts, section, deltas, top, dots=None):
     """TB-1's breakdown strip: in execution › Mobilized › Active, then Active today and
-    Attendance today (SNAP-1c), each set apart behind a divider."""
+    Attendance today (SNAP-1c), each set apart behind a divider. SNAP-3c: a flagged
+    figure gets its dot between the figure and its arrow."""
+    dots = dots or {}
     draw.rounded_rectangle([MARGIN, top, IMAGE_WIDTH - MARGIN, top + STRIP_H], radius=12,
                            fill=PALE_GREEN, outline=PALE_GREEN_LINE, width=2)
     x = MARGIN + 20
@@ -878,10 +950,10 @@ def _strip(draw, fonts, section, deltas, top):
         draw.text((x, top + 12), label, font=fonts.strip_label, fill=MUTED)
         value = _number(section['breakdown'][key])
         draw.text((x, top + 32), value, font=fonts.strip_value, fill=INK)
+        end = _value_with_dot(draw, fonts.strip_value, value, x, top + 32, 19, dots, key)
         arrow = delta_text(deltas.get(key))
         if arrow:
-            ax = x + draw.textlength(value, font=fonts.strip_value) + 8
-            draw.text((ax, top + 44), arrow, font=fonts.delta, fill=FAINT)
+            draw.text((end + 8, top + 44), arrow, font=fonts.delta, fill=FAINT)
         if definition:
             draw.text((x, top + 72), fit_text(draw, definition, fonts.strip_def, width - 8),
                       font=fonts.strip_def, fill=FAINT)
@@ -898,9 +970,13 @@ def line_colour(key, value):
     return LINE_COLOURS[tone] if tone and value else INK
 
 
-def _lines(draw, fonts, section, deltas, top):
+def _lines(draw, fonts, section, deltas, top, dots=None):
     """SNAP-1c: the Design row, a rule, then Procurement on two lines (breakdown_lines),
-    in a white box like the tender page's. SNAP-3b: a second rule, then Finance."""
+    in a white box like the tender page's. SNAP-3b: a second rule, then Finance. SNAP-3c:
+    a flagged figure gets its dot right after it. The dot is drawn here, not added to the
+    runs, so section_lines() (pinned to the tender page's words) and the dry run's text
+    stay as they were."""
+    dots = dots or {}
     draw.rounded_rectangle([MARGIN, top, IMAGE_WIDTH - MARGIN, top + LINES_H], radius=12,
                            fill='white', outline=LINE, width=2)
     # Every figure's value by key, for line_colour(). FINANCE_KEYS and BREAKDOWN_KEYS
@@ -927,11 +1003,15 @@ def _lines(draw, fonts, section, deltas, top):
             else:
                 font, fill, dy = fonts.line_text, MUTED, 0
             draw.text((x, y + dy), text, font=font, fill=fill)
-            x += draw.textlength(text, font=font)
+            if kind == 'num':
+                x = _value_with_dot(draw, font, text, x, y, 13, dots, key)
+            else:
+                x += draw.textlength(text, font=font)
 
 
-def _tile(draw, fonts, tile, delta, x, y, width):
-    """One dashboard tile: label, value (toned when not zero), arrow, sub-line."""
+def _tile(draw, fonts, tile, delta, x, y, width, dot=None):
+    """One dashboard tile: label, value (toned when not zero), SNAP-3c's flag dot, arrow,
+    sub-line."""
     draw.rounded_rectangle([x, y, x + width, y + TILE_H], radius=10, fill='white',
                            outline=LINE, width=2)
     inner = width - 32
@@ -941,28 +1021,81 @@ def _tile(draw, fonts, tile, delta, x, y, width):
     colour = TONE_COLOURS[tone] if tone and tile['value'] else INK
     value = _number(tile['value'])
     draw.text((x + 16, y + 36), value, font=fonts.tile_value, fill=colour)
+    end = _value_with_dot(draw, fonts.tile_value, value, x + 16, y + 36, 21,
+                          {tile['key']: dot} if dot else {}, tile['key'])
     arrow = delta_text(delta)
     if arrow:
-        ax = x + 16 + draw.textlength(value, font=fonts.tile_value) + 10
-        draw.text((ax, y + 52), arrow, font=fonts.delta, fill=FAINT)
+        draw.text((end + 10, y + 52), arrow, font=fonts.delta, fill=FAINT)
     if tile['detail']:
         draw.text((x + 16, y + 90), fit_text(draw, tile['detail'], fonts.tile_detail, inner),
                   font=fonts.tile_detail, fill=FAINT)
 
 
-def _section(draw, fonts, section, deltas, top):
-    """One tender: heading, strip, Design / Procurement / Finance rows, 4 + 3 tiles.
-    Returns the y after (top + SECTION_H)."""
+#: Where a box line's dot and text start, and the right edge its text must end before.
+ACTION_DOT_X = MARGIN + 20
+ACTION_TEXT_X = ACTION_DOT_X + 2 * DOT_R + 12
+ACTION_TEXT_END = IMAGE_WIDTH - MARGIN - 20
+
+
+def action_rows(box):
+    """The box's drawn lines as [(dot colour, what, who, more)]: `what` and `who` make the
+    flag's sentence ('6 DCs overdue for confirmation' + ' — Site Engineers to confirm
+    receipts.'), `more` is '+N more' on the last line or ''. No flag: the green line."""
+    if not box.lines:
+        return [('green', CLEAN_LINE, '', '')]
+    rows = [(flag.colour, flag.text, f' — {flag.action}.', '') for flag in box.lines]
+    if box.more:
+        colour, what, who, _ = rows[-1]
+        rows[-1] = (colour, what, who, f'  {more_text(box.more)}')
+    return rows
+
+
+def fit_words(draw, text, font, max_width):
+    """`text` cut at a word boundary with '…' to fit `max_width`: the last resort for a
+    long box sentence (Zuber, 20 Nov), so a number is dropped whole, never cut in two."""
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    words = text.split(' ')
+    while len(words) > 1 and draw.textlength(' '.join(words) + '…', font=font) > max_width:
+        words.pop()
+    return ' '.join(words) + '…'
+
+
+def _action_box(draw, fonts, box, top):
+    """SNAP-3c's "Needs action" box: a dot and one sentence a line, who acts in bold, the
+    "+N more" in grey. Only the `what` part is ever shortened; who acts never is."""
+    draw.rounded_rectangle([MARGIN, top, IMAGE_WIDTH - MARGIN, top + ACTION_H], radius=12,
+                           fill='white', outline=LINE, width=2)
+    for n, (colour, what, who, more) in enumerate(action_rows(box)):
+        y = top + ACTION_PAD + n * ACTION_LINE_H
+        _dot(draw, ACTION_DOT_X, y + ACTION_LINE_H // 2, colour)
+        tail = (draw.textlength(who, font=fonts.line_num)
+                + draw.textlength(more, font=fonts.line_text))
+        what = fit_words(draw, what, fonts.line_text, ACTION_TEXT_END - ACTION_TEXT_X - tail)
+        x = ACTION_TEXT_X
+        for text, font, fill in ((what, fonts.line_text, INK), (who, fonts.line_num, INK),
+                                 (more, fonts.line_text, MUTED)):
+            if text:
+                draw.text((x, y + 5), text, font=font, fill=fill)
+                x += draw.textlength(text, font=font)
+
+
+def _section(draw, fonts, section, deltas, top, box):
+    """One tender: heading, SNAP-3c's "Needs action" box, strip, Design / Procurement /
+    Finance rows, 4 + 3 tiles, every flagged figure with its dot. Returns the y after
+    (top + SECTION_H)."""
     _heading(draw, fonts, section, top)
-    _strip(draw, fonts, section, deltas, top + STRIP_TOP)
-    _lines(draw, fonts, section, deltas, top + LINES_TOP)
+    _action_box(draw, fonts, box, top + ACTION_TOP)
+    _strip(draw, fonts, section, deltas, top + STRIP_TOP, box.dots)
+    _lines(draw, fonts, section, deltas, top + LINES_TOP, box.dots)
     tiles = {tile['key']: tile for tile in section['tiles']}
     for row_no, keys in enumerate(SECTION_TILE_ROWS):
         y = top + TILES_TOP + row_no * (TILE_H + TILE_GAP)
         width = (IMAGE_WIDTH - 2 * MARGIN - TILE_GAP * (len(keys) - 1)) / len(keys)
         for n, key in enumerate(keys):
             x = MARGIN + n * (width + TILE_GAP)
-            _tile(draw, fonts, tiles[key], deltas.get(key), round(x), y, round(width))
+            _tile(draw, fonts, tiles[key], deltas.get(key), round(x), y, round(width),
+                  box.dots.get(key))
     return top + SECTION_H
 
 
@@ -975,7 +1108,12 @@ def _png(height, draw_fn):
     return out.getvalue()
 
 
-FOOTER_TEXT = "Horizon Solar PMS · ▲▼ = change since yesterday's snapshot"
+#: The footer as (text, colour key) runs: SNAP-3c Q3 adds the dot key, each ● drawn in
+#: its own colour (DOT_COLOURS) so the key looks like the dots it explains; None = FAINT.
+FOOTER_RUNS = (("Horizon Solar PMS · ▲▼ = change since yesterday's snapshot · ", None),
+               ('●', 'red'), (' red = act now · ', None), ('●', 'amber'),
+               (' amber = watch', None))
+FOOTER_TEXT = ''.join(text for text, _ in FOOTER_RUNS)
 
 
 def image_title(n, total):
@@ -993,10 +1131,18 @@ def section_pages(payload):
             for i in range(0, len(sections), MAX_SECTIONS_PER_IMAGE)]
 
 
-def render_snapshot_images(payload, previous_payload=None):
+def section_box(section, payload, history=None):
+    """SNAP-3c: the section's "Needs action" box for `payload`'s day, read against
+    `history` ({ISO date: stored payload}, the days before; None or {} = no trend, hard
+    limits only). The renderer and the dry run both ask here, so both say the same."""
+    return needs_action(section, payload['snapshot_date'], history)
+
+
+def render_snapshot_images(payload, previous_payload=None, history=None):
     """The PNG images for `payload`, as a list of bytes, in sending order: up to
     MAX_SECTIONS_PER_IMAGE tender sections each, never splitting one, with ▲/▼ against
-    the same tender in `previous_payload`. No qualifying tender: [] (nothing to send).
+    the same tender in `previous_payload` and SNAP-3c's flags read against `history`
+    (see section_box). No qualifying tender: [] (nothing to send).
 
     Pure: reads nothing but its arguments and the bundled font.
     """
@@ -1012,9 +1158,13 @@ def render_snapshot_images(payload, previous_payload=None):
             y = _page_header(draw, fonts, payload, image_title(n, len(pages)))
             for section in chunk:
                 y = _section(draw, fonts, section, section_deltas(section, previous_payload),
-                             y)
+                             y, section_box(section, payload, history))
             draw.line([MARGIN, height - FOOTER_H + 8, IMAGE_WIDTH - MARGIN,
                        height - FOOTER_H + 8], fill=LINE)
-            draw.text((MARGIN, height - 34), FOOTER_TEXT, font=fonts.tile_detail, fill=FAINT)
+            x = MARGIN
+            for text, colour in FOOTER_RUNS:
+                draw.text((x, height - 34), text, font=fonts.tile_detail,
+                          fill=DOT_COLOURS[colour] if colour else FAINT)
+                x += draw.textlength(text, font=fonts.tile_detail)
         images.append(_png(height, draw_fn))
     return images

@@ -13,8 +13,9 @@ WHAT THIS PINS (SNAP-1b: what is drawn)
     Arrows         per tender by Program id for tiles and strip; a tender missing from
                    the previous payload (or a SNAP-1 payload) gets none
     Images         at most 3 sections an image (SNAP-1c S5), never split; 4 tenders ->
-                   2 images, 7 -> 3; sections 668 px (628 before SNAP-3b's Finance
-                   line); width 1080; no qualifying tender ->
+                   2 images, 7 -> 3; sections 840 px (668 before SNAP-3c's "Needs
+                   action" box, 628 before SNAP-3b's Finance line); width 1080; no
+                   qualifying tender ->
                    no image, nothing sent, exit 0, the row still saved
 
 WHAT THIS PINS (SNAP-1c: Design, Procurement and Attendance today)
@@ -318,7 +319,11 @@ class MoneyAndViewerTests(SnapshotFixture):
         self.assertTrue(payload['tender_sections'])
         for section in payload['tender_sections'].values():
             self.assertEqual(set(section), {'id', 'code', 'name', 'pms', 'tiles',
-                                            'dc_kwp_number', 'breakdown', 'finance'})
+                                            'dc_kwp_number', 'breakdown', 'finance',
+                                            'checks'})
+            # SNAP-3c: three whole-number site counts the flags read, nothing else.
+            self.assertEqual(tuple(section['checks']), S.CHECK_KEYS)
+            self.assertTrue(all(type(v) is int for v in section['checks'].values()))
             self.assertEqual(tuple(t['key'] for t in section['tiles']), S.SECTION_KEYS)
             for tile in section['tiles']:
                 self.assertEqual(set(tile), {'key', 'label', 'value', 'detail'})
@@ -534,11 +539,12 @@ class RenderTests(SimpleTestCase):
 
     def test_section_and_image_heights(self):
         # Q3: Design on one line, Procurement on two fixed lines -> 628 px a section;
-        # SNAP-3b Q6 adds Finance as one line behind a rule -> 668.
+        # SNAP-3b Q6 adds Finance as one line behind a rule -> 668; SNAP-3c adds the
+        # four-line "Needs action" box under the heading -> 840 (Q7: still 3 an image).
         self.assertEqual(S.MAX_SECTIONS_PER_IMAGE, 3)
-        self.assertEqual(S.SECTION_H, 668)
+        self.assertEqual(S.SECTION_H, 840)
         self.assertEqual((S.image_height(1), S.image_height(2), S.image_height(3)),
-                         (908, 1576, 2244))
+                         (1080, 1920, 2760))
 
     def test_no_tender_no_image(self):
         self.assertEqual(S.render_snapshot_images(_payload(sections=0), None), [])

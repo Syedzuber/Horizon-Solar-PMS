@@ -205,9 +205,10 @@ class SnapshotSwitchTests(SwitchFixture):
         drawn = []
         real = S._section
 
-        def record(draw, fonts, section, deltas, top):
+        # *rest: SNAP-3c added the section's "Needs action" box as a further argument.
+        def record(draw, fonts, section, *rest):
             drawn.append(section['id'])
-            return real(draw, fonts, section, deltas, top)
+            return real(draw, fonts, section, *rest)
 
         with mock.patch.object(S, '_section', side_effect=record):
             images = S.render_snapshot_images(self._collect(), None)

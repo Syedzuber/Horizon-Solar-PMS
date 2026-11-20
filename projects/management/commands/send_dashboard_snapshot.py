@@ -21,10 +21,14 @@ event's Admin-named list; the code names nobody.
                          figures sent.
     "Yesterday"          the newest row dated before today, so a missed day compares
                          against the last day that ran.
+    Trend flags          SNAP-3c's "Needs action" box reads the rows of the last three
+                         days and the newest one before them (trend_history); the rules
+                         are in snapshot_flags.py.
 
 --dry-run   collect and render only: no row written, nothing sent. Needs --out-dir;
-            prints each file's path and, per tender, the strip, the Design and
-            Procurement rows (SNAP-1c), the tiles and their sub-lines.
+            prints each file's path and, per tender, the "Needs action" lines and every
+            flag's reason (SNAP-3c), the strip, the Design and Procurement rows
+            (SNAP-1c), the tiles and their sub-lines.
 --to USER   send only to that active user, skipping the named list. The email master
             switch and the event's pause still apply: they are checked inside the
             chokepoint (send_notification / notify), which this does not go around.
@@ -47,6 +51,7 @@ the person's preference off, nobody on the named list). Non-zero, with one line 
 failure saying why, for a real error or any failed send on either channel (SNAP-2 W7).
 """
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
@@ -61,9 +66,10 @@ from projects.notifications import NO_VALID_WHATSAPP_NUMBER, valid_whatsapp_numb
 from projects.notify import channel_is_active, merge_named_recipients, notify_now
 from projects.notify_registry import WHATSAPP, get_event
 from projects.snapshot import (NO_TENDER_SKIP, STRIP, STRIP_CHAIN, SnapshotError,
-                               collect_snapshot, delta_text, headline, line_text,
-                               ordered_sections, pm_line, render_snapshot_images,
-                               section_deltas, section_lines, section_title)
+                               action_rows, collect_snapshot, delta_text, headline,
+                               line_text, ordered_sections, pm_line, render_snapshot_images,
+                               section_box, section_deltas, section_lines, section_title)
+from projects.snapshot_flags import SUNDAY, TREND_DAYS
 from projects.whatsapp_params import sanitise_params
 
 EVENT = 'daily_dashboard_snapshot'
@@ -73,6 +79,35 @@ COMMAND_NAME = 'send_dashboard_snapshot'
 # and a recipient may open the message days later; a week covers both, and the link
 # then dies, so a forwarded copy of it does not open the bucket for good.
 SNAPSHOT_LINK_SECONDS = 7 * 24 * 60 * 60
+
+
+def trend_history(today):
+    """SNAP-3c: the stored payloads the flags read, as {ISO date: payload}: every row from
+    TREND_DAYS days before `today` (an ISO date) up to yesterday, plus the newest row
+    older than that. The older row is there only for the history rule ("a stored row 3 or
+    more days old carries the figure") when the day exactly 3 days back did not run, and,
+    when that row is a Sunday, the newest non-Sunday row before it (R7, Q2).
+    Two queries (three when the older row is a Sunday), a handful of rows, however long
+    the table grows. Today's own row (a
+    same-day re-run) is never read: the flags compare today's fresh figures."""
+    day = date.fromisoformat(today)
+    start = day - timedelta(days=TREND_DAYS)
+    rows = dict(DashboardSnapshot.objects
+                .filter(snapshot_date__gte=start, snapshot_date__lt=day)
+                .values_list('snapshot_date', 'payload'))
+    before_window = (DashboardSnapshot.objects.filter(snapshot_date__lt=start)
+                     .order_by('-snapshot_date').values_list('snapshot_date', 'payload'))
+    older = before_window.first()
+    if older:
+        rows[older[0]] = older[1]
+        if older[0].weekday() == SUNDAY:
+            # R7 compares against the newest non-Sunday row at or before d-3 (SNAP-3c
+            # Q2); when the newest older row is a Sunday, fetch the one R7 needs too.
+            # A third query on those days only. Django's week_day counts Sunday as 1.
+            weekday_row = before_window.exclude(snapshot_date__week_day=1).first()
+            if weekday_row:
+                rows[weekday_row[0]] = weekday_row[1]
+    return {d.isoformat(): payload for d, payload in rows.items()}
 
 
 def snapshot_object_path(moment, number, name='site-dashboard'):
@@ -146,7 +181,8 @@ class Command(BaseCommand):
         previous_row = (DashboardSnapshot.objects.filter(snapshot_date__lt=today)
                         .order_by('-snapshot_date').first())
         previous = previous_row.payload if previous_row else None
-        images = render_snapshot_images(payload, previous)
+        history = trend_history(today)
+        images = render_snapshot_images(payload, previous, history=history)
         self.stdout.write(f'Collected {payload["taken_at_label"]} as {payload["viewer"]}; '
                           f'{len(payload["tender_sections"])} tender(s), '
                           f'{len(images)} image(s); previous snapshot: '
@@ -155,7 +191,7 @@ class Command(BaseCommand):
         if out_dir:
             self._write_files(out_dir, payload, images)
         if dry_run:
-            self._print_figures(payload, previous)
+            self._print_figures(payload, previous, history)
             if not images:
                 self.stdout.write(NO_TENDER_SKIP)
             else:
@@ -307,11 +343,11 @@ class Command(BaseCommand):
             path.write_bytes(content)
             self.stdout.write(f'Wrote {path} ({len(content):,} bytes)')
 
-    def _print_figures(self, payload, previous):
-        """What the images draw, as text: per tender in drawing order, the heading, the
+    def _print_figures(self, payload, previous, history=None):
+        """What the images draw, as text: per tender in drawing order, the heading,
+        SNAP-3c's "Needs action" lines and every flag with the reason it fired, the
         strip, the Design and Procurement rows (SNAP-1c) and the Finance line (SNAP-3b),
-        the very runs the image draws,
-        and the 7 tiles with their sub-lines and arrows."""
+        the very runs the image draws, and the 7 tiles with their sub-lines and arrows."""
         self.stdout.write('')
         self.stdout.write(payload['dates_as_of']['text'])
         for section in ordered_sections(payload):
@@ -320,6 +356,12 @@ class Command(BaseCommand):
             self.stdout.write('')
             self.stdout.write(f'{code}{" · " + name if name else ""} (Program '
                               f'{section["id"]}) | {pm_line(section)}')
+            box = section_box(section, payload, history)
+            self.stdout.write('  Needs action:')
+            for colour, what, who, more in action_rows(box):
+                self.stdout.write(f'    [{colour}] {what}{who}{more}')
+            for flag in box.flags:
+                self.stdout.write(f'    - {flag.colour:5} {flag.role}: {flag.reason}')
             strip = []
             for key, label, _ in STRIP:
                 arrow = delta_text(deltas[key])

@@ -420,7 +420,9 @@ class DrawnTests(SimpleTestCase):
 
     def test_the_box_grew_by_one_line_and_one_rule(self):
         self.assertEqual(S.LINES_H, 2 * S.LINES_PAD + 4 * S.LINE_H + 2 * S.LINE_RULE)
-        self.assertEqual(S.SECTION_H, 668)
+        # 668 with the Finance line; SNAP-3c's "Needs action" box above the strip makes
+        # it 840 (tests_snapshot_flags pins the box's share).
+        self.assertEqual(S.SECTION_H, 840)
 
 
 class DryRunTests(FinanceFixture):
