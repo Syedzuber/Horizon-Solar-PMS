@@ -116,6 +116,20 @@ class Project(models.Model):
         blank=True,
         limit_choices_to={'role': 'Project Coordinator'},
     )
+    # FIN-M-B5-1 (ruling FR7): the site's BD, who owns the M1 reminder (FR12). A
+    # UserProfile like assigned_pm, because role and the soft-deactivation flag live
+    # there. PROTECT because people are deactivated, never deleted, and a BD's name on
+    # a site is history worth keeping. No limit_choices_to: SiteBdForm builds the
+    # choices (active BDs plus the current holder), and a holder whose role later
+    # changes must still load. Written only by site_bd.set_site_bd(), which logs
+    # old -> new; read through permissions.user_is_site_bd().
+    bd                        = models.ForeignKey(
+        'UserProfile',
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name='bd_projects',
+    )
     survey_date               = models.DateField(blank=True, null=True)
     target_commissioning_date = models.DateField(blank=True, null=True)
     status                    = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Draft')

@@ -58,4 +58,7 @@ NON_ACTIVITY_CODES = frozenset({
     'auto_schedule_exclusion_changed',  # admin.ProjectAdmin: scheduling bookkeeping
     'notify_template_seeded',           # seed_notification_templates (project=None)
     'cad_pdf_extraction_failed',        # design_artifact_upload: a failure note after the upload's own row
+    'bd_backfilled',                    # backfill_site_bd: a one-off data fill, not work on the site
 })
+# A BD set from the overview's form writes 'bd_assigned' and is NOT here: like
+# 'pm_assigned', it is a person's decision about the site and counts as its latest activity.

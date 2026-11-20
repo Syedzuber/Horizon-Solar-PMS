@@ -2,6 +2,7 @@ import re
 from datetime import date
 
 from django import forms
+from django.db.models import Q
 from django.contrib.auth.models import User
 from django.utils import timezone
 from django.utils.dateparse import parse_date
@@ -10,7 +11,8 @@ from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCate
 from .utils import roles_for_phase
 from .permissions import (
     FINANCE_HEAD_HOLDER_ROLES,
-    PAYMENT_APPROVER_ROLES, qaqc_engineer_assignment_refusal, reserved_task_names,
+    PAYMENT_APPROVER_ROLES, active_bd_profiles, profile_is_active_bd,
+    qaqc_engineer_assignment_refusal, reserved_task_names,
 )
 
 
@@ -507,6 +509,64 @@ class ProjectEditForm(forms.ModelForm):
         if value is not None and value <= 0:
             raise forms.ValidationError('Contract value must be greater than zero.')
         return value
+
+
+class SiteBdForm(forms.Form):
+    """The overview's "Set BD" modal (FIN-M-B5-1). Not a ModelForm: the write goes
+    through site_bd.set_site_bd(), which locks the row, refuses a stale form and logs
+    old -> new — a ModelForm.save() would do none of that.
+
+    CHOICES: every active BD (permissions.active_bd_profiles()), plus the site's current
+    BD even if they are now inactive or no longer BD, so opening and saving the form
+    never silently blanks the seat. Never a PM or any other role. Blank = "Not set" and
+    is allowed (clears the seat).
+
+    `expected_bd` carries the BD the form showed; the writer refuses if the seat changed
+    since (two administrators editing at once).
+    """
+
+    bd = forms.ModelChoiceField(
+        queryset=UserProfile.objects.none(),
+        required=False,
+        empty_label='Not set',
+        label='BD',
+        widget=forms.Select(attrs={'class': 'form-select'}),
+    )
+    expected_bd = forms.CharField(required=False, widget=forms.HiddenInput)
+
+    def __init__(self, *args, project, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.project = project
+        current_id = project.bd_id
+        # Active BDs, or the current holder by pk — one query when the select renders or
+        # validates. The pk__in subquery keeps it a single SQL statement.
+        allowed = Q(pk__in=active_bd_profiles().values('pk'))
+        if current_id is not None:
+            allowed |= Q(pk=current_id)
+        field = self.fields['bd']
+        field.queryset = (UserProfile.objects.filter(allowed).select_related('user')
+                          .order_by('user__first_name', 'user__last_name', 'user__username'))
+        field.label_from_instance = _bd_choice_label
+        if not self.is_bound:
+            self.initial.setdefault('bd', current_id)
+            self.initial.setdefault('expected_bd', '' if current_id is None else str(current_id))
+
+    def clean_expected_bd(self):
+        """The BD pk the form was opened with, or None for an empty seat. A tampered
+        value is refused rather than guessed at."""
+        value = (self.cleaned_data.get('expected_bd') or '').strip()
+        if not value:
+            return None
+        if not value.isdigit():
+            raise forms.ValidationError('Reload the page and try again.')
+        return int(value)
+
+
+def _bd_choice_label(profile):
+    """A BD option: the person's name, marked when they are the current holder but no
+    longer an active BD (the only way such a person is in the list)."""
+    name = profile.user.get_full_name() or profile.user.username
+    return name if profile_is_active_bd(profile) else f'{name} (inactive)'
 
 
 class PostActivationFieldEditForm(forms.ModelForm):

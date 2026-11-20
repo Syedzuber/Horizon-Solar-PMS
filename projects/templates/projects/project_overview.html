@@ -169,6 +169,26 @@
         <i class="bi bi-person-badge-fill"></i>PM:
         {% if project.assigned_pm %}{{ project.assigned_pm.user.get_full_name|default:project.assigned_pm.user.username }}{% else %}<em>—</em>{% endif %}
       </span>
+      {% comment %}FIN-M-B5-1: the site's BD beside the PM, Residential only (show_site_bd),
+         to everyone who sees the PM line. "(inactive)" when the BD has left or changed role
+         — such a site is on the "No BD set" list. The pencil (can_set_site_bd: CEO / Admin /
+         System Admin, and only on a site in BD scope, so never on a Cancelled or test site)
+         loads the modal body; project_set_bd re-checks on the server.{% endcomment %}
+      {% if show_site_bd %}
+      <span class="info-pill" id="site-bd-pill">
+        <i class="bi bi-person-check-fill"></i>BD:
+        {% if project.bd %}{{ project.bd.user.get_full_name|default:project.bd.user.username }}{% if site_bd_inactive %} <em>(inactive)</em>{% endif %}{% else %}<em>Not set</em>{% endif %}
+        {% if can_set_site_bd %}
+          <button type="button" class="btn btn-link btn-sm p-0 ms-1 align-baseline text-decoration-none"
+                  title="Set the site's BD" aria-label="Set the site's BD"
+                  hx-get="{% url 'project_set_bd' project.project_id %}"
+                  hx-target="#bdEditModalContent" hx-swap="innerHTML"
+                  hx-on::after-request="if (event.detail.successful) bootstrap.Modal.getOrCreateInstance(document.getElementById('bdEditModal')).show();">
+            <i class="bi bi-pencil"></i>
+          </button>
+        {% endif %}
+      </span>
+      {% endif %}
       <span class="info-pill">
         <i class="bi bi-people-fill"></i>Coordinators:
         {% for c in project.coordinators.all %}{{ c.user.get_full_name|default:c.user.username }}{% if not forloop.last %}, {% endif %}{% empty %}<em>—</em>{% endfor %}
@@ -1594,6 +1614,19 @@ via hx-post and, on success, the server sends a fieldEditDone HX-Trigger that cl
 this modal while OOB-swapping the #project-editable-fields header pills. The trigger
 button lives in the header stats strip, gated on is_assigned_pm + non-Draft.
 {% endcomment %}
+{% comment %}FIN-M-B5-1: the BD modal. The pencil beside the header's BD line hx-gets
+project_set_bd into #bdEditModalContent and shows it; the form inside is a plain POST that
+redirects back here, so nothing has to close the modal. Rendered only for viewers who may
+set a BD on a Residential site.{% endcomment %}
+{% if show_site_bd and can_set_site_bd %}
+<div class="modal fade" id="bdEditModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content" id="bdEditModalContent">
+      {# hx-get fills this in #}
+    </div>
+  </div>
+</div>
+{% endif %}
 <div class="modal fade" id="fieldEditModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog">
     <div class="modal-content" id="fieldEditModalContent">

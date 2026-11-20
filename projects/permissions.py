@@ -4689,3 +4689,75 @@ def user_sees_money_activity_on_dashboard(user):
     # left to the managed-site leg in _money_rows_q(); Design Head, Site Engineer, Design
     # and BD are blocked because they work on sites, not on their purchasing (AF-1).
     return profile.role in MONEY_PORTFOLIO_ROLES
+
+
+# ---------------------------------------------------------------------------
+# FIN-M-B5-1 — a site's BD (Project.bd, ruling FR7). The BD owns the M1 reminder (FR1,
+# FR12); later FIN-M-B5 sessions ask user_is_site_bd() and nothing else. The role string
+# lives here and nowhere else (site_bd.py and the backfill command import SITE_BD_ROLE).
+# "Active" is the pair every recipient query uses: UserProfile.is_active (this app's
+# soft deactivation) AND User.is_active (Django's login gate) — either one off means the
+# person no longer works here.
+# ---------------------------------------------------------------------------
+
+#: UserProfile.role of a BD user. The Task side spells it 'BD / Sales' (Task.BD); this is
+#: the profile side, which is what Project.bd points at.
+SITE_BD_ROLE = 'BD'
+
+#: UserProfile.role of a PM. Read only by the BD backfill, to say WHY an OCR task's
+#: holder was not made the site's BD ("held by a PM" vs another role).
+SITE_PM_ROLE = 'PM'
+
+#: Who may set, change or clear a site's BD (FIN-M-B5-1 ruling 5): the portfolio
+#: administrators. Not the PM (the BD is the client-money owner on the sales side, not
+#: an execution seat) and not BD (a BD would be choosing who owns their own reminders).
+SITE_BD_SET_ROLES = frozenset({'CEO', 'Admin', 'System Admin'})
+
+
+def active_bd_profiles():
+    """BD profiles whose profile AND login are active — the people who may be made a
+    site's BD. A queryset, so callers compose it (form choices, the "No BD set" query)
+    without a second round trip."""
+    return _active_profiles().filter(role=SITE_BD_ROLE)
+
+
+def profile_is_active_bd(profile):
+    """True when `profile` is a BD whose profile and login are both active. The per-row
+    form of active_bd_profiles(), for the backfill command, which already holds the
+    assignee with its user (select_related) and must not query per site."""
+    if profile is None:
+        return False
+    return (profile.role == SITE_BD_ROLE and profile.is_active
+            and profile.user.is_active)
+
+
+def user_is_site_bd(user, project):
+    """True only when `user` is `project`'s BD (Project.bd) and is still an active BD.
+
+    Who passes: the one person set as the site's BD, while their role is BD and their
+    profile and login are both active. Who is blocked, and why:
+      * another BD — BD ownership is per site (FR12), not portfolio-wide;
+      * the site's BD once deactivated or moved to another role — a stale holder must
+        not keep owning the site's client money; the site then shows on "No BD set";
+      * a PM, anyone else, anonymous — not the site's BD.
+    Costs no query: compares ids on the already-loaded profile.
+    """
+    if project is None or project.bd_id is None:
+        return False
+    profile = _user_and_profile_active(user)
+    if profile is None or profile.role != SITE_BD_ROLE:
+        return False
+    return project.bd_id == profile.pk
+
+
+def user_can_set_site_bd(user):
+    """True when `user` may set, change or clear a site's BD (FIN-M-B5-1 ruling 5).
+
+    Allowed: CEO, Admin and System Admin, with an active profile and login — the
+    administrators who already see every site. Blocked: everyone else, PM and BD
+    included (see SITE_BD_SET_ROLES), and anyone deactivated, whose login might still
+    work. Not project-scoped: the Residential-only rule belongs to the view, which
+    refuses a tender site whatever the role.
+    """
+    profile = _user_and_profile_active(user)
+    return profile is not None and profile.role in SITE_BD_SET_ROLES

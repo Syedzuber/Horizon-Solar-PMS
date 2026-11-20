@@ -1,0 +1,29 @@
+{% comment %}
+FIN-M-B5-1 — the "Set BD" modal body, loaded by hx-get into #bdEditModalContent on the
+project overview. The form is a PLAIN POST (no hx-post): project_set_bd answers every
+POST with a redirect back to the overview and a message, so the header's BD line and the
+messages render from the server either way, and the form works without htmx.
+
+Choices (SiteBdForm): active BD users, plus the current BD even if no longer active —
+saving never silently blanks the seat. "Not set" clears it. expected_bd carries the BD
+this form was opened with; the server refuses the save if the seat changed since.
+
+Expects: project, form.
+{% endcomment %}
+<div class="modal-header">
+  <h5 class="modal-title">BD — {{ project.project_id }}</h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+</div>
+<form method="post" action="{% url 'project_set_bd' project.project_id %}">
+  {% csrf_token %}
+  {{ form.expected_bd }}
+  <div class="modal-body">
+    <label class="form-label small mb-1" for="{{ form.bd.id_for_label }}">BD for this site</label>
+    {{ form.bd }}
+    <div class="form-text small">The BD records M1 and gets its reminders. Only active BD users are listed.</div>
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+    <button type="submit" class="btn btn-brand btn-sm">Save</button>
+  </div>
+</form>

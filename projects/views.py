@@ -120,7 +120,9 @@ from .site_pm import (
     handover_error_line, material_steps_held_by, refuse_site_view_403, refuse_site_view_404,
     returning_bills_for, with_outgoing_pm_bill_step_count, with_outgoing_pm_task_count,
 )
-from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date, TYPED_DATE_FLOOR
+# FIN-M-B5-1: the one writer of Project.bd, behind the overview's BD modal.
+from .site_bd import SiteBdChangeRefused, bd_scope_projects, set_site_bd, site_in_bd_scope
+from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, SiteBdForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date, TYPED_DATE_FLOOR
 from .notify_registry import NOTIFICATION_EVENTS  # T2: the send-records Event filter's choices
 from .decorators import (
     login_required, role_required, get_user_dashboard,
@@ -129,6 +131,8 @@ from .decorators import (
 )
 from .permissions import (
     user_can_manage_project, user_can_view_project, manageable_projects_q,
+    # FIN-M-B5-1: who may set a site's BD (CEO / Admin / System Admin, active).
+    user_can_set_site_bd, profile_is_active_bd,
     # FIN-M-B3: who records an invoice on an M2/M3 milestone (Finance only, ruling (a)).
     user_can_invoice_milestone,
     user_can_open_dc_document, user_can_manage_dc_documents,
@@ -4138,6 +4142,62 @@ def project_field_edit(request, project_id):
     # GET → modal body prefilled from the current instance values.
     form = PostActivationFieldEditForm(instance=project)
     return _render_field_edit_modal_hx(request, project, form)
+
+
+@login_required
+def project_set_bd(request, project_id):
+    """Set, change or clear a Residential site's BD (Project.bd, FIN-M-B5-1).
+
+    GET returns the BD modal's body, loaded by htmx into the overview's #bdEditModal.
+    POST writes through site_bd.set_site_bd() — row lock, stale-form refusal, one
+    `bd_assigned` log line old -> new — and redirects back to the overview with a
+    message, so it works the same with or without htmx.
+
+    Access: CEO, Admin and System Admin with an active profile and login
+    (user_can_set_site_bd). Only sites in site_bd.bd_scope_projects() — live, non-test,
+    non-Cancelled Residential sites, Draft included (M1 is recorded on the Draft, R5);
+    any other site is a 404 whatever the role (rulings 5 and follow-up 1).
+    """
+    project = _active_project(project_id, select_related=('bd__user',))
+
+    # CEO / Admin / System Admin only — the administrators who see every site and choose
+    # who owns its client money. PM, BD and every other role are refused (ruling 5): the
+    # overview hides the pencil from them, but a hand-made POST lands here, so the check
+    # is on the server.
+    if not user_can_set_site_bd(request.user):
+        raise PermissionDenied
+    # BD scope (one definition, site_bd.bd_scope_projects()): a tender, Cancelled or test
+    # site has no BD to set. Asked through the queryset itself, not a copy of its terms;
+    # set_site_bd() asks again under the row lock.
+    if not bd_scope_projects().filter(pk=project.pk).exists():
+        raise Http404
+
+    if request.method == 'POST':
+        form = SiteBdForm(request.POST, project=project)
+        if form.is_valid():
+            new_bd = form.cleaned_data['bd']
+            try:
+                changed = set_site_bd(project, new_bd, request.user.profile,
+                                      expected_old_id=form.cleaned_data['expected_bd'])
+            except SiteBdChangeRefused as exc:
+                messages.error(request, str(exc))
+            else:
+                if changed:
+                    name = (new_bd.user.get_full_name() or new_bd.user.username
+                            if new_bd is not None else 'Not set')
+                    messages.success(request, f'BD for {project.project_id}: {name}.')
+                else:
+                    messages.info(request, 'No change to the BD.')
+        else:
+            # Only a tampered or stale POST gets here: the select offers valid people only.
+            messages.error(request, 'That person cannot be chosen as BD. '
+                                    'Reload the page and try again.')
+        return redirect('project_overview', project_id=project.project_id)
+
+    return render(request, 'projects/partials/_project_bd_form.html', {
+        'project': project,
+        'form':    SiteBdForm(project=project),
+    })
 
 
 @login_required
@@ -12213,7 +12273,9 @@ def project_overview(request, project_id):
     """
     project = _active_project(
         project_id,
-        select_related=('assigned_pm__user', 'assigned_design__user', 'created_by'),
+        # bd__user (FIN-M-B5-1): the header's BD line, in the same query as the PM.
+        select_related=('assigned_pm__user', 'assigned_design__user', 'created_by',
+                        'bd__user'),
     )
     profile = request.user.profile
     role    = profile.role
@@ -13049,6 +13111,17 @@ def project_overview(request, project_id):
         'dc_category_choices':         DCLineItem.CATEGORY_CHOICES,
         'dc_condition_choices':        DCLineItem.CONDITION_CHOICES,
         'is_assigned_pm':              is_assigned_pm,
+        # FIN-M-B5-1: the BD line shows on Residential sites only (ruling 5); the pencil
+        # only for CEO / Admin / System Admin. No query: the profile is already loaded.
+        'show_site_bd':                project.project_type == 'Residential',
+        # Pencil: a setter, on a site in BD scope (not Cancelled or test). site_in_bd_scope()
+        # reads the loaded row, so the pinned query count is unchanged.
+        'can_set_site_bd':             (user_can_set_site_bd(request.user)
+                                        and site_in_bd_scope(project)),
+        # True when the site HAS a BD who is no longer an active BD; reads the profile and
+        # user already loaded by select_related, so no query.
+        'site_bd_inactive':            (project.bd_id is not None
+                                        and not profile_is_active_bd(project.bd)),
         'can_assign_design':           can_assign_design,
         'show_design_selector':        show_design_selector,
         'design_candidates':           design_candidates,
