@@ -48,6 +48,30 @@ the By PM rows still count its sites: they are company-wide and not drawn. Switc
 on, it gets a section again, with no arrows that day, because yesterday's row has no
 section for it (section_deltas). No other page reads the switch.
 
+FINANCE COUNTS (SNAP-3b, rulings F1-F5 and answers Q2-Q6, 20 Nov 2026). Each section
+gets a Finance line under Procurement, in the same box:
+    N invoices · N payment requests · N approved · N pending · N paid
+COUNTS ONLY, NEVER MONEY (F1): tender_finance_counts() selects ids and statuses, never an
+amount column, and the payload carries five whole numbers per tender. A zero is drawn as
+0 in plain ink on purpose: it tells the team that finance data is not being entered (SNAP-3c
+will flag it). Vendor side only (F2): tenders have no client billing in PMS.
+    invoices          invoice files on the tender's orders (VendorOrderDocument,
+                      doc_type 'invoice') + contractor bills on its sites that were not
+                      withdrawn (Q3: a bill is the contractor's invoice)
+    payment requests  every request, any status (PaymentRequest has no withdrawn or
+                      cancelled status to leave out)
+    approved          approved or paid (Q2): the row reads as a funnel, requests >=
+                      approved >= paid
+    pending           awaiting approval, on hold, or approved and not yet paid; never
+                      rejected
+    paid              marked paid (CONFIRMED)
+A request belongs to a tender through its order's picked tenders (VendorOrderProgram)
+UNION the tenders of the order's sites (Q5), or through its contractor bill's site. An
+order naming two tenders counts in both; a request linked to no tender counts nowhere.
+Test data is dropped by the CEO strip's rule (Q4, payments.exclude_test_site_payments).
+One line, no arrows (Q6); the counts are stored per tender so SNAP-3c can trend them (F5).
+The image only: no page shows this line (F4).
+
 WHAT IS STORED BUT NOT DRAWN. The SNAP-1 organisation row and the By PM / By tender rows
 stay in the payload (and their tests), so the stored history keeps its shape; only
 `tender_sections` is drawn.
@@ -59,7 +83,8 @@ site look quiet that the CEO sees updated.
 
 NO MONEY (locked rule). kpi_tiles() is called with sees_payments=False, so the payment
 tile is never built, and no card's payment_open is read. The payload's keys are pinned
-by tests_dashboard_snapshot.
+by tests_dashboard_snapshot. SNAP-3b's finance figures are counts of records, not money,
+and read no amount (tests_snapshot_finance pins the SQL).
 
 ROWS (stored only).
     By PM      one row per ACTIVE PM (role PM, both active flags) who is the assigned PM
@@ -72,13 +97,19 @@ ROWS (stored only).
                exactly one row.
 """
 import io
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
-from .models import Program, Project, UserProfile
+from .models import (
+    APPROVAL_WITHDRAWN, VENDOR_ORDER_DOC_INVOICE, ContractorBillDetail, PaymentRequest,
+    Program, Project, UserProfile, VendorOrder, VendorOrderDocument, VendorOrderProgram,
+    VendorOrderSite,
+)
+from .payments import exclude_test_site_payments
 from .site_breakdown import site_breakdown
 from .site_dashboard import build_site_cards, capacity_totals
 from .views_site_dashboard import dates_as_of, kpi_tiles
@@ -149,6 +180,16 @@ BREAKDOWN_KEYS = STRIP_KEYS + LINE_KEYS
 #: on someone amber, the same idea as the tiles; every other figure, and any 0, is plain.
 LINE_TONES = {'design_released': 'good', 'received': 'good',
               'pending': 'warn', 'dcs_to_confirm': 'warn', 'dcs_overdue': 'warn'}
+
+#: SNAP-3b: the Finance line's five counts, in drawing order. 'payment_pending', not
+#: 'pending': Procurement already has a 'pending' key, and _lines() looks a figure's value
+#: up by key across both rows. None is in LINE_TONES, so all are drawn in plain ink (Q6).
+FINANCE_KEYS = ('invoices', 'requests', 'approved', 'payment_pending', 'paid')
+
+#: Which request statuses each request count takes (F2, Q2). `requests` takes all five.
+FINANCE_APPROVED = frozenset({PaymentRequest.APPROVED, PaymentRequest.CONFIRMED})
+FINANCE_PENDING = frozenset({PaymentRequest.PENDING_APPROVAL, PaymentRequest.ON_HOLD,
+                             PaymentRequest.APPROVED})
 
 NO_ACTIVE_PM = 'No active PM'
 RESIDENTIAL_ROW = 'Residential'
@@ -308,18 +349,117 @@ def section_cards(live):
     return groups
 
 
+def tender_finance_counts(program_ids):
+    """SNAP-3b: {program id: {FINANCE_KEYS: count}} for each of `program_ids`, zero-filled.
+    FIVE queries however many orders, requests or bills there are. See the module
+    docstring's FINANCE COUNTS for what each count means.
+
+    NO AMOUNT IS READ (F1): every query ends in values_list() over ids and statuses, so no
+    amount, approved_amount or invoice_amount column is selected, and none is filtered on.
+    tests_snapshot_finance pins the SQL.
+    """
+    ids = set(program_ids)
+    counts = {pid: dict.fromkeys(FINANCE_KEYS, 0) for pid in ids}
+    if not ids:
+        return counts
+
+    # The two record-keeping links from an order to a tender (Q5), each kept to the
+    # tenders being drawn. The picked tenders: the raiser may edit these after raising
+    # (VendorOrderProgram), so they can differ from the sites' tenders, and both count.
+    program_links = VendorOrderProgram.objects.filter(program_id__in=ids)
+    # The order's sites' tenders. A test or soft-deleted site links no tender: a test
+    # site is in no section, and a deleted site is in no reader (the soft-delete rule).
+    # Residential is left out as section_cards() leaves it out (Q1 of SNAP-1b), though
+    # Project.save() already refuses a Residential site on a Program.
+    site_links = (VendorOrderSite.objects
+                  .filter(project__program_id__in=ids, project__is_deleted=False,
+                          project__is_test=False)
+                  .exclude(project__project_type='Residential'))
+    # Queries 1 and 2: {order id: its tenders among `ids`}. A set per order, so an order
+    # whose picked tender is also its sites' tender counts there once.
+    order_tenders = defaultdict(set)
+    for order_id, pid in program_links.values_list('order_id', 'program_id'):
+        order_tenders[order_id].add(pid)
+    for order_id, pid in site_links.values_list('order_id', 'project__program_id'):
+        order_tenders[order_id].add(pid)
+    # The same orders as ONE subquery for queries 3 and 4, so no list of order ids is sent
+    # as parameters, however many orders there are. One subquery over VendorOrder, not
+    # "order IN (picked) OR order IN (sites)": SQLite 3.50 (the test suite's database)
+    # fails that OR on VendorOrderDocument with "internal query planner error". The join
+    # can repeat an order, which IN ignores.
+    linked_orders = (VendorOrder.objects
+                     .filter(Q(programs__in=program_links) | Q(sites__in=site_links))
+                     .values('pk'))
+
+    # Query 3: every request on a linked order, or on a contractor bill whose site is on
+    # one of the tenders (bill -> its one site's tender, Q5), minus test data by the CEO
+    # strip's rule (Q4). A bill on a deleted site is left out by the soft-delete rule. No
+    # status is filtered out: `requests` counts all five, and the loop sorts the rest.
+    # order_by() drops Meta.ordering's -requested_date, which nothing here needs.
+    requests = exclude_test_site_payments(PaymentRequest.objects.filter(
+        Q(vendor_order__in=linked_orders) | Q(contractor_bill__project__program_id__in=ids,
+                   contractor_bill__project__is_deleted=False)))
+    for order_id, bill_pid, bill_type, status in (
+            requests.order_by().values_list('vendor_order_id',
+                                            'contractor_bill__project__program_id',
+                                            'contractor_bill__project__project_type',
+                                            'status')):
+        if order_id is not None:
+            tenders = order_tenders[order_id]
+        else:
+            tenders = () if bill_type == 'Residential' else (bill_pid,)
+        # A request on an order naming two tenders counts in both (F3).
+        for pid in tenders:
+            tally = counts[pid]
+            tally['requests'] += 1
+            tally['approved'] += status in FINANCE_APPROVED
+            tally['payment_pending'] += status in FINANCE_PENDING
+            tally['paid'] += status == PaymentRequest.CONFIRMED
+
+    # Query 4: invoice files on linked orders. Test data by the same rule as the requests
+    # (exclude_test_site_payments' order term, restated for a document's order): an
+    # order is dropped when EVERY site it names is a test site; one with no site at all
+    # is kept, because "no site" is not evidence of test data.
+    order_sites = VendorOrderSite.objects.filter(order=OuterRef('order'))
+    invoices = (VendorOrderDocument.objects
+                .filter(order__in=linked_orders, doc_type=VENDOR_ORDER_DOC_INVOICE)
+                .exclude(Exists(order_sites)
+                         & ~Exists(order_sites.filter(project__is_test=False))))
+    for order_id in invoices.order_by().values_list('order_id', flat=True):
+        for pid in order_tenders[order_id]:
+            counts[pid]['invoices'] += 1
+
+    # Query 5: contractor bills on the tenders' sites that were not withdrawn (Q3). A
+    # rejected bill still counts: the contractor did send that invoice.
+    bills = (ContractorBillDetail.objects
+             .filter(project__program_id__in=ids, project__is_deleted=False,
+                     project__is_test=False)
+             .exclude(project__project_type='Residential')
+             .exclude(request__status=APPROVAL_WITHDRAWN))
+    for pid in bills.values_list('project__program_id', flat=True):
+        counts[pid]['invoices'] += 1
+    return counts
+
+
 def _tender_sections(live, owners, now):
     """SNAP-1b: one section per qualifying tender, keyed by the Program id as TEXT (a
     JSONField turns int keys into strings anyway, so the stored and the fresh payload
     match on the same key; Zuber, 14 Nov).
 
-    {'<program id>': {'id', 'code', 'name', 'pms', 'tiles', 'dc_kwp_number', 'breakdown'}}
+    {'<program id>': {'id', 'code', 'name', 'pms', 'tiles', 'dc_kwp_number', 'breakdown',
+                      'finance'}}
 
     `breakdown` holds BREAKDOWN_KEYS: the strip's five figures and the Design /
-    Procurement rows' seven (SNAP-1c), all read off the one SiteBreakdown.
+    Procurement rows' seven (SNAP-1c), all read off the one SiteBreakdown. `finance`
+    holds FINANCE_KEYS (SNAP-3b), the tender's five finance counts.
     """
     sections = {}
-    for program_id, cards in section_cards(live).items():
+    groups = section_cards(live)
+    # One call for every tender, so the finance counts cost five queries in all, not
+    # five per tender. Only the tenders drawn are asked for: a switched-off tender
+    # (SNAP-3a) has no section and so no finance row.
+    finance = tender_finance_counts(groups)
+    for program_id, cards in groups.items():
         figures = {f['key']: f for f in _figures(cards)}
         # TB-1's helper over exactly these sites: the same call the tender page makes
         # over program.sites.all() (Q2), one query per tender. Its TB-3 fields come from
@@ -340,6 +480,7 @@ def _tender_sections(live, owners, now):
                       for key in SECTION_KEYS],
             'dc_kwp_number': _dc_number(cards),
             'breakdown': {key: getattr(breakdown, key) for key in BREAKDOWN_KEYS},
+            'finance': finance[program_id],
         }
     return sections
 
@@ -531,6 +672,39 @@ def breakdown_lines(section, deltas=None):
 PROCUREMENT_BREAK = ' · '
 
 
+def finance_line(section):
+    """SNAP-3b: the Finance line as (label, runs), in breakdown_lines()' run shape, so
+    the renderer and the dry run draw it as they draw the rows above it.
+
+    'N invoices · N payment requests · N approved · N pending · N paid'. Counts only, no
+    arrows (Q6), plain ink at every value, zeros included. "invoice" and "payment
+    request" take Django's pluralize rule, as "DC" does in the Procurement row.
+    """
+    f = section['finance']
+
+    def count(key, singular=None):
+        n = f[key]
+        runs = [(_number(n), 'num', key)]
+        if singular:
+            return runs + [(f' {singular}{"" if n == 1 else "s"}', 'text', None)]
+        return runs
+
+    def words(text):
+        return [(text, 'text', None)]
+
+    return ('Finance', count('invoices', 'invoice') + words(' · ')
+            + count('requests', 'payment request') + words(' · ')
+            + count('approved') + words(' approved · ')
+            + count('payment_pending') + words(' pending · ')
+            + count('paid') + words(' paid'))
+
+
+def section_lines(section, deltas=None):
+    """Every line in a section's white box, in drawing order: breakdown_lines()' Design
+    and Procurement rows, then SNAP-3b's Finance line."""
+    return breakdown_lines(section, deltas) + [finance_line(section)]
+
+
 def line_text(runs):
     """One drawn line as plain text, arrows included (the dry run's form)."""
     return ''.join(text for text, _, _ in runs)
@@ -573,17 +747,18 @@ STRIP_TOP = HEADING_H + 12
 STRIP_H = 96
 # SNAP-1c: the Design and Procurement box, three fixed lines (Q3: Procurement wraps onto a
 # second line always, not only when long, so a section's height never depends on its
-# figures and image_height() stays arithmetic).
+# figures and image_height() stays arithmetic). SNAP-3b adds the Finance line as a fourth,
+# behind a second rule (layout A: one line, +40 px a section).
 LINES_TOP = STRIP_TOP + STRIP_H + 12
 LINES_PAD = 14          # inside the box, above the first line and below the last
 LINE_H = 36             # one text line
-LINE_RULE = 4           # the rule between Design and Procurement
-LINES_H = 2 * LINES_PAD + 3 * LINE_H + LINE_RULE
-LINE_LABEL_W = 160      # the bold "Design" / "Procurement" column
+LINE_RULE = 4           # a rule between two labelled rows (Design | Procurement | Finance)
+LINES_H = 2 * LINES_PAD + 4 * LINE_H + 2 * LINE_RULE
+LINE_LABEL_W = 160      # the bold "Design" / "Procurement" / "Finance" column
 TILES_TOP = LINES_TOP + LINES_H + 16
 TILE_H = 120
 TILE_GAP = 12
-SECTION_H = TILES_TOP + 2 * TILE_H + TILE_GAP + 36      # 628 (Q3)
+SECTION_H = TILES_TOP + 2 * TILE_H + TILE_GAP + 36      # 668 (SNAP-3b Q6; 628 before)
 FOOTER_H = 56
 
 # The strip's columns: three chained figures with '›' between them, then Active today and
@@ -725,14 +900,22 @@ def line_colour(key, value):
 
 def _lines(draw, fonts, section, deltas, top):
     """SNAP-1c: the Design row, a rule, then Procurement on two lines (breakdown_lines),
-    in a white box like the tender page's."""
+    in a white box like the tender page's. SNAP-3b: a second rule, then Finance."""
     draw.rounded_rectangle([MARGIN, top, IMAGE_WIDTH - MARGIN, top + LINES_H], radius=12,
                            fill='white', outline=LINE, width=2)
-    rule = top + LINES_PAD + LINE_H + LINE_RULE // 2
-    draw.line([MARGIN + 16, rule, IMAGE_WIDTH - MARGIN - 16, rule], fill=LINE, width=1)
-    values = section['breakdown']
-    for n, (label, runs) in enumerate(breakdown_lines(section, deltas)):
-        y = top + LINES_PAD + n * LINE_H + (LINE_RULE if n else 0) + 6
+    # Every figure's value by key, for line_colour(). FINANCE_KEYS and BREAKDOWN_KEYS
+    # share no key (tests_snapshot_finance pins it), so neither row hides the other's.
+    values = {**section['breakdown'], **section['finance']}
+    rules = 0
+    for n, (label, runs) in enumerate(section_lines(section, deltas)):
+        # A labelled row after the first starts behind a rule; Procurement's unlabelled
+        # second line does not.
+        if label and n:
+            rule = top + LINES_PAD + n * LINE_H + rules * LINE_RULE + LINE_RULE // 2
+            draw.line([MARGIN + 16, rule, IMAGE_WIDTH - MARGIN - 16, rule], fill=LINE,
+                      width=1)
+            rules += 1
+        y = top + LINES_PAD + n * LINE_H + rules * LINE_RULE + 6
         if label:
             draw.text((MARGIN + 20, y), label, font=fonts.line_label, fill=INK)
         x = MARGIN + 20 + LINE_LABEL_W
@@ -768,8 +951,8 @@ def _tile(draw, fonts, tile, delta, x, y, width):
 
 
 def _section(draw, fonts, section, deltas, top):
-    """One tender: heading, strip, Design / Procurement rows, 4 + 3 tiles. Returns the y
-    after (top + SECTION_H)."""
+    """One tender: heading, strip, Design / Procurement / Finance rows, 4 + 3 tiles.
+    Returns the y after (top + SECTION_H)."""
     _heading(draw, fonts, section, top)
     _strip(draw, fonts, section, deltas, top + STRIP_TOP)
     _lines(draw, fonts, section, deltas, top + LINES_TOP)

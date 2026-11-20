@@ -13,7 +13,8 @@ WHAT THIS PINS (SNAP-1b: what is drawn)
     Arrows         per tender by Program id for tiles and strip; a tender missing from
                    the previous payload (or a SNAP-1 payload) gets none
     Images         at most 3 sections an image (SNAP-1c S5), never split; 4 tenders ->
-                   2 images, 7 -> 3; sections 628 px; width 1080; no qualifying tender ->
+                   2 images, 7 -> 3; sections 668 px (628 before SNAP-3b's Finance
+                   line); width 1080; no qualifying tender ->
                    no image, nothing sent, exit 0, the row still saved
 
 WHAT THIS PINS (SNAP-1c: Design, Procurement and Attendance today)
@@ -317,11 +318,17 @@ class MoneyAndViewerTests(SnapshotFixture):
         self.assertTrue(payload['tender_sections'])
         for section in payload['tender_sections'].values():
             self.assertEqual(set(section), {'id', 'code', 'name', 'pms', 'tiles',
-                                            'dc_kwp_number', 'breakdown'})
+                                            'dc_kwp_number', 'breakdown', 'finance'})
             self.assertEqual(tuple(t['key'] for t in section['tiles']), S.SECTION_KEYS)
             for tile in section['tiles']:
                 self.assertEqual(set(tile), {'key', 'label', 'value', 'detail'})
             self.assertEqual(tuple(section['breakdown']), S.BREAKDOWN_KEYS)
+            # SNAP-3b: the finance block is five whole-number counts and nothing else.
+            # Its keys name records ('invoices', 'requests'), which the money pattern
+            # would flag, so it is checked here and then left out of the walk below.
+            finance = section.pop('finance')
+            self.assertEqual(tuple(finance), S.FINANCE_KEYS)
+            self.assertTrue(all(type(v) is int for v in finance.values()), finance)
         for text in _walk(payload):
             self.assertIsNone(self.MONEY.search(text), text)
 
@@ -465,13 +472,17 @@ def _section(pid, code, overdue=3, quiet=5, dc_number=1234, **values):
     strip = dict(in_execution=10, mobilized=4, active=2, active_today=1, attendance_today=3,
                  design_not_started=1, design_in_progress=6, design_released=3, received=3,
                  pending=1, dcs_to_confirm=2, dcs_overdue=1)
+    finance = dict(invoices=12, requests=34, approved=21, payment_pending=13, paid=8)
     for key, value in values.items():
-        (strip if key in S.BREAKDOWN_KEYS else tile_values)[key] = value
+        if key in S.FINANCE_KEYS:
+            finance[key] = value
+        else:
+            (strip if key in S.BREAKDOWN_KEYS else tile_values)[key] = value
     return {'id': pid, 'code': code, 'name': f'{code} {LONG}', 'pms': [f'A PM {LONG}'],
             'tiles': [{'key': key, 'label': label, 'value': tile_values[key],
                        'detail': f'detail {LONG}'}
                       for key, label, _ in S.FIGURES if key != 'sites'],
-            'dc_kwp_number': dc_number, 'breakdown': strip}
+            'dc_kwp_number': dc_number, 'breakdown': strip, 'finance': finance}
 
 
 def _payload(pm_rows=3, tender_rows=2, sections=3, **org):
@@ -522,10 +533,12 @@ class RenderTests(SimpleTestCase):
         self.assertEqual(len(S.render_snapshot_images(_payload(sections=11), None)), 4)
 
     def test_section_and_image_heights(self):
-        # Q3: Design on one line, Procurement on two fixed lines -> 628 px a section.
+        # Q3: Design on one line, Procurement on two fixed lines -> 628 px a section;
+        # SNAP-3b Q6 adds Finance as one line behind a rule -> 668.
         self.assertEqual(S.MAX_SECTIONS_PER_IMAGE, 3)
-        self.assertEqual(S.SECTION_H, 628)
-        self.assertEqual((S.image_height(1), S.image_height(3)), (868, 2124))
+        self.assertEqual(S.SECTION_H, 668)
+        self.assertEqual((S.image_height(1), S.image_height(2), S.image_height(3)),
+                         (908, 1576, 2244))
 
     def test_no_tender_no_image(self):
         self.assertEqual(S.render_snapshot_images(_payload(sections=0), None), [])

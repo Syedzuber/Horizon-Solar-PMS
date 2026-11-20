@@ -61,9 +61,9 @@ from projects.notifications import NO_VALID_WHATSAPP_NUMBER, valid_whatsapp_numb
 from projects.notify import channel_is_active, merge_named_recipients, notify_now
 from projects.notify_registry import WHATSAPP, get_event
 from projects.snapshot import (NO_TENDER_SKIP, STRIP, STRIP_CHAIN, SnapshotError,
-                               breakdown_lines, collect_snapshot, delta_text, headline,
-                               line_text, ordered_sections, pm_line,
-                               render_snapshot_images, section_deltas, section_title)
+                               collect_snapshot, delta_text, headline, line_text,
+                               ordered_sections, pm_line, render_snapshot_images,
+                               section_deltas, section_lines, section_title)
 from projects.whatsapp_params import sanitise_params
 
 EVENT = 'daily_dashboard_snapshot'
@@ -309,7 +309,8 @@ class Command(BaseCommand):
 
     def _print_figures(self, payload, previous):
         """What the images draw, as text: per tender in drawing order, the heading, the
-        strip, the Design and Procurement rows (SNAP-1c, the very runs the image draws)
+        strip, the Design and Procurement rows (SNAP-1c) and the Finance line (SNAP-3b),
+        the very runs the image draws,
         and the 7 tiles with their sub-lines and arrows."""
         self.stdout.write('')
         self.stdout.write(payload['dates_as_of']['text'])
@@ -327,7 +328,9 @@ class Command(BaseCommand):
             chain = len(STRIP_CHAIN)
             self.stdout.write('  ' + ' › '.join(strip[:chain]) + ''.join(
                 ' | ' + figure for figure in strip[chain:]))
-            for label, runs in breakdown_lines(section, deltas):
+            # section_lines(): the Design and Procurement rows, then SNAP-3b's Finance
+            # line, the very runs the image draws.
+            for label, runs in section_lines(section, deltas):
                 self.stdout.write(f'  {label:12} {line_text(runs)}')
             for tile in section['tiles']:
                 arrow = delta_text(deltas[tile['key']])
