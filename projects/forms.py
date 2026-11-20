@@ -1062,6 +1062,13 @@ def normalize_tender_code(value):
     return code
 
 
+#: SNAP-3a ruling Q1 (20 Nov 2026): the only role that may switch a tender in or out of the
+#: daily snapshot. Admin alone, as on the 51 role_required(['Admin']) screens and
+#: TENDER_DOC_ADMIN_ROLES. System Admin cannot open program_edit at all, and a PM or the
+#: tender's creator, who can, must not decide what management sees.
+SNAPSHOT_SWITCH_ROLES = frozenset({'Admin'})
+
+
 class ProgramForm(forms.ModelForm):
     """Create / edit a Program (OPEX tender or multi-site CAPEX contract).
 
@@ -1105,9 +1112,13 @@ class ProgramForm(forms.ModelForm):
         # template alone would leave them ON the form, and a ModelForm field absent
         # from the POST body cleans to None/'' and construct_instance writes THAT back.
         # Template-only hiding would silently wipe these columns on every save.
+        #
+        # SNAP-3a: in_daily_snapshot is listed here but REMOVED in __init__ unless the
+        # view passes snapshot_switch=True (Admin, edit form only). See __init__.
         fields = [
             'program_type', 'name', 'client_name', 'status',
             'short_tender_code', 'total_capacity', 'planned_site_count',
+            'in_daily_snapshot',
         ]
         widgets = {
             'program_type':              forms.Select(attrs={'class': 'form-select'}),
@@ -1117,11 +1128,13 @@ class ProgramForm(forms.ModelForm):
             'short_tender_code':         forms.TextInput(attrs={**_bs, 'placeholder': 'e.g. IPGCL26 or HRP-2026'}),
             'total_capacity':            forms.NumberInput(attrs={**_bs, 'step': '0.01'}),
             'planned_site_count':        forms.NumberInput(attrs={**_bs, 'min': '0'}),
+            'in_daily_snapshot':         forms.CheckboxInput(attrs={'class': 'form-check-input'}),
         }
         labels = {
             'total_capacity':      'Total planned capacity (MW)',
             'short_tender_code':   'Short tender code (RESCO)',
             'planned_site_count':  'Planned site count',
+            'in_daily_snapshot':   'Include in daily snapshot',
         }
 
     #: Shown for any program_type outside the offered choices — in practice a hand-
@@ -1130,8 +1143,18 @@ class ProgramForm(forms.ModelForm):
     PROGRAM_TYPE_REFUSED = ('A Program can only be RESCO. CAPEX projects stand alone: '
                             'create them from New Project, outside any Program.')
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, snapshot_switch=False, **kwargs):
         super().__init__(*args, **kwargs)
+        # SNAP-3a: the "Include in daily snapshot" switch is on the form ONLY when the
+        # view asks for it, which program_edit does for SNAPSHOT_SWITCH_ROLES (Admin)
+        # alone. Everyone else, the create form and the seed commands get a form without
+        # it, so the column is never written: construct_instance skips a field missing
+        # from cleaned_data. This is also why it is opt-in rather than opt-out. A
+        # checkbox absent from the POST body cleans to False, so a form that carried it
+        # without rendering it (or a seed command's dict) would switch the tender OFF
+        # on every save.
+        if not snapshot_switch:
+            del self.fields['in_daily_snapshot']
         # CAPEX STANDS ALONE (CAPEX-3). No CAPEX site can join a Program — every add-site
         # path 404s on a non-OPEX Program — so a CAPEX Program is an empty shell. The
         # limit lives HERE, on the form, and not on Program.PROGRAM_TYPE_CHOICES: the

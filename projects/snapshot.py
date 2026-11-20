@@ -41,6 +41,13 @@ all-RESCO today, and a non-RESCO site on a tender would still be counted here as
 A Residential site is never counted in a tender section, even on a Program (Q1;
 Project.save() refuses one, so the rule is defensive, as _tender_key()'s).
 
+TENDERS SWITCHED OFF (SNAP-3a, rulings K3 and Q2, 20 Nov 2026). A tender whose
+Program.in_daily_snapshot an Admin has switched off gets no section, so it is not drawn
+and not in the headline, and it has no stored By tender row. The organisation tiles and
+the By PM rows still count its sites: they are company-wide and not drawn. Switched back
+on, it gets a section again, with no arrows that day, because yesterday's row has no
+section for it (section_deltas). No other page reads the switch.
+
 WHAT IS STORED BUT NOT DRAWN. The SNAP-1 organisation row and the By PM / By tender rows
 stay in the payload (and their tests), so the stored history keeps its shape; only
 `tender_sections` is drawn.
@@ -71,7 +78,7 @@ from pathlib import Path
 
 from django.utils import timezone
 
-from .models import Project, UserProfile
+from .models import Program, Project, UserProfile
 from .site_breakdown import site_breakdown
 from .site_dashboard import build_site_cards, capacity_totals
 from .views_site_dashboard import dates_as_of, kpi_tiles
@@ -274,6 +281,21 @@ def _tender_rows(live):
     return tenders + [others[k] for k in ('residential', 'capex', 'resco') if k in others]
 
 
+def switched_off_tender_ids():
+    """The ids of the tenders an Admin has left out of the snapshot (SNAP-3a K3). One
+    query. Soft-deleted Programs are not filtered: their sites are on no card anyway."""
+    return frozenset(Program.objects.filter(in_daily_snapshot=False)
+                     .values_list('pk', flat=True))
+
+
+def _in_switched_off_tender(card, switched_off):
+    """True when `card` would count in a switched-off tender's section or By tender row.
+    Asked through _tender_key, so a Residential site on such a Program stays in the
+    Residential row, as it always has (Q1)."""
+    return (_tender_key(card)[0].startswith('program:')
+            and card.program_id in switched_off)
+
+
 def section_cards(live):
     """{program id: that tender's cards} for every tender with a site in execution (R4).
     A Residential site is never in a section, even on a Program (Q1); a CAPEX site on a
@@ -350,6 +372,10 @@ def collect_snapshot(now=None):
     # execution, so they count in no tile (views_site_dashboard.site_dashboard's `live`).
     live = [c for c in build_site_cards(viewer, today=today) if not c.is_draft]
     owners = _active_pm_owners(live)
+    # SNAP-3a (Q2): switched-off tenders are cut from the sections and the By tender rows
+    # only; `org` and `pms` below still read every live site.
+    switched_off = switched_off_tender_ids()
+    tender_live = [c for c in live if not _in_switched_off_tender(c, switched_off)]
     return {
         'snapshot_date': today.isoformat(),
         'snapshot_date_label': date_label(today),
@@ -359,8 +385,8 @@ def collect_snapshot(now=None):
         'viewer': viewer.username,
         'org': {'tiles': _figures(live), 'dc_kwp_number': _dc_number(live)},
         'pms': _pm_rows(live, owners),
-        'tenders': _tender_rows(live),
-        'tender_sections': _tender_sections(live, owners, now),
+        'tenders': _tender_rows(tender_live),
+        'tender_sections': _tender_sections(tender_live, owners, now),
     }
 
 

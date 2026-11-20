@@ -59,6 +59,21 @@
           <div class="form-text">Optional. Target only — never enforced as a limit.</div>
           {% for e in form.planned_site_count.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
         </div>
+        {% comment %}
+        SNAP-3a: rendered exactly when the field is on the form, i.e. for an Admin on the
+        edit page (ProgramForm.__init__, SNAPSHOT_SWITCH_ROLES). A checkbox on the form
+        but not on the page would post as unticked and switch the tender off.
+        {% endcomment %}
+        {% if form.in_daily_snapshot %}
+        <div class="col-12">
+          <div class="form-check">
+            {{ form.in_daily_snapshot }}
+            <label class="form-check-label" for="{{ form.in_daily_snapshot.id_for_label }}">{{ form.in_daily_snapshot.label }}</label>
+          </div>
+          <div class="form-text">Untick to leave this tender out of the 8 PM snapshot image. Nothing else changes.</div>
+          {% for e in form.in_daily_snapshot.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        {% endif %}
       </div>
 
       {% comment %}

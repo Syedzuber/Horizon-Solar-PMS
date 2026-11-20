@@ -122,7 +122,7 @@ from .site_pm import (
 )
 # FIN-M-B5-1: the one writer of Project.bd, behind the overview's BD modal.
 from .site_bd import SiteBdChangeRefused, bd_scope_projects, set_site_bd, site_in_bd_scope
-from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, SiteBdForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date, TYPED_DATE_FLOOR
+from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, SiteBdForm, TaskAddForm, VendorForm, ProgramForm, SNAPSHOT_SWITCH_ROLES, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date, TYPED_DATE_FLOOR
 from .notify_registry import NOTIFICATION_EVENTS  # T2: the send-records Event filter's choices
 from .decorators import (
     login_required, role_required, get_user_dashboard,
@@ -5501,10 +5501,18 @@ def program_edit(request, pk):
     """Edit a Program. Access mirrors program_detail. Each CHANGED field is audit-logged
     (one ActivityLog row per field) following the post-activation contract-edit pattern —
     editing a Program must never silently orphan/rewrite data. project_id values on
-    existing child sites are immutable and are NOT touched by any rename here."""
+    existing child sites are immutable and are NOT touched by any rename here.
+
+    SNAP-3a: an Admin also gets the "Include in daily snapshot" switch, and its line in
+    the log reads old -> new. Every other role that opens the page gets the form without
+    it, so a hand-made POST carrying the field cannot change it."""
     program = get_object_or_404(Program, pk=pk, is_deleted=False)
     if not _can_access_program(request, program):
         raise Http404
+    # Admin only (SNAPSHOT_SWITCH_ROLES, ruling Q1): what management sees each evening
+    # is an administrative choice, not the site PM's or the tender creator's, who also
+    # reach this view. For them the field is left off the form (ProgramForm.__init__).
+    snapshot_switch = _get_user_role(request) in SNAPSHOT_SWITCH_ROLES
 
     # A CAPEX PROGRAM IS REFUSED ON GET AND POST ALIKE, and nothing is written (CAPEX-3).
     # ProgramForm no longer offers CAPEX, so its edit form would show RESCO and saving
@@ -5517,22 +5525,32 @@ def program_edit(request, pk):
         return redirect('program_detail', pk=program.pk)
 
     if request.method == 'POST':
-        form = ProgramForm(request.POST, instance=program)
+        form = ProgramForm(request.POST, instance=program, snapshot_switch=snapshot_switch)
         if form.is_valid():
             changed = form.changed_data
             actor = getattr(request.user, 'profile', None)
+            # Read BEFORE form.save(): is_valid() has already written the posted value
+            # onto `program` (construct_instance), so the stored value is form.initial's.
+            snapshot_before = form.initial.get('in_daily_snapshot')
             with transaction.atomic():
                 program = form.save()
                 for field in changed:
+                    if field == 'in_daily_snapshot':
+                        # Ruling Q3: same code, but this line says old -> new.
+                        on_off = {True: 'On', False: 'Off'}
+                        description = (f"Edited Program '{program.name}' Include in daily "
+                                       f"snapshot: {on_off[bool(snapshot_before)]} → "
+                                       f"{on_off[program.in_daily_snapshot]}")
+                    else:
+                        description = f"Edited Program '{program.name}' field: {field}"
                     log_activity(
-                        None, actor,
-                        f"Edited Program '{program.name}' field: {field}",
+                        None, actor, description,
                         entity_type='Program', entity_id=program.pk, action_code='program_edited',
                     )
             messages.success(request, f"Program '{program.name}' updated successfully.")
             return redirect('program_detail', pk=program.pk)
     else:
-        form = ProgramForm(instance=program)
+        form = ProgramForm(instance=program, snapshot_switch=snapshot_switch)
     return render(request, 'projects/program_form.html', {
         'form': form, 'action': 'Edit', 'program': program,
     })

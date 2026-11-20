@@ -299,6 +299,11 @@ class Program(models.Model):
     financing_partner_name    = models.CharField(max_length=200, blank=True, default='')
     financing_assistance_type = models.CharField(max_length=100, blank=True, default='')
 
+    # SNAP-3a: whether the 8 PM snapshot (projects/snapshot.py) draws this tender. On by
+    # default, so every tender is in unless an Admin switches it off on the edit form
+    # (K1, K2); no other page reads it (K4).
+    in_daily_snapshot        = models.BooleanField(default=True)
+
     created_at               = models.DateTimeField(auto_now_add=True)
     updated_at               = models.DateTimeField(auto_now=True)
     created_by               = models.ForeignKey(
