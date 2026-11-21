@@ -31,6 +31,7 @@ from django.http import Http404, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.http import url_has_allowed_host_and_scheme
 
 from .decorators import login_required
 from .design_analytics import (
@@ -1519,8 +1520,8 @@ def _head_sites_redirect(request, program_id, site=None):
     parameter and no Referer: the path is reverse()d, the query is the two validated
     values above, and the anchor is the project_id of the site the CALLING VIEW loaded —
     so a crafted form can change which filter the Head sees, and nothing else. That is
-    the open-redirect hole _triage_redirect() leaves open with its startswith('/') test;
-    this does not inherit it.
+    the open-redirect hole _triage_redirect() had with its startswith('/') test, closed
+    in SEC-1.
 
     Both keys are always present (`?q=&status=`) so the URL has one shape whatever the
     filter, which is what the tests pin. Views that fail before any site is loaded (the
@@ -6341,9 +6342,22 @@ def _not_pending_refusal(project, change):
 def _triage_redirect(request, project):
     """Where a triage action lands. `next` is honoured so the Head working the dashboard
     queue stays on it, but ONLY if it is a local path — a POSTed absolute URL is an open
-    redirect, and this endpoint is reachable by anyone with head authority."""
+    redirect, and this endpoint is reachable by anyone with head authority.
+
+    SEC-1: DJANGO'S CHECK, NOT A HAND-ROLLED PREFIX TEST. The old test was
+    `startswith('/') and not startswith('//')`, which `/\\evil.com` passes — browsers
+    read `/\\` as `//` and leave the site — and so does `/<tab>/evil.com`, because the URL
+    parser drops the tab and sees `//evil.com`. url_has_allowed_host_and_scheme() handles
+    backslashes, control characters, schemes and protocol-relative forms, so this function
+    no longer has to know every trick. allowed_hosts is this request's own host only: the
+    form posts back a path on this site, never another domain. require_https follows the
+    request, so a scheme-qualified http:// link cannot downgrade an https session.
+    Deliberately NOT limited to the tender dashboard path (SEC-1 ruling): any safe local
+    path is followed, as before; the fallback is unchanged."""
     target = (request.POST.get('next') or '').strip()
-    if target.startswith('/') and not target.startswith('//'):
+    if target and url_has_allowed_host_and_scheme(
+            target, allowed_hosts={request.get_host()},
+            require_https=request.is_secure()):
         return target
     return reverse('design_qc_review', kwargs={'project_id': project.project_id})
 
