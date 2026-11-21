@@ -4,7 +4,6 @@ import re
 import uuid as _uuid
 from datetime import date, timedelta, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from urllib.parse import urlparse as _urlparse
 from urllib.parse import urlencode
 
 from django.conf import settings
@@ -233,6 +232,8 @@ from .utils import (
     # Prompt 0.4 — the versioned task template (R-7). Read-only here; the two duration
     # screens render the active version and nothing in views writes a template.
     resolve_active_task_template,
+    # SEC-2: the one safe check for a user-supplied `next` redirect.
+    safe_next_url,
     # The metric chokepoint (R-20) — 1.3b, SPLIT IN TWO BY PROMPT 1.6. Every task
     # COUNT below goes through exactly one of these; task LISTS deliberately do not.
     #
@@ -7748,12 +7749,14 @@ def task_status_update(request, project_id, task_id):
         task.refresh_from_db()
         return _render_task_row_hx(request, project, task)
 
-    # Honour the ?next= redirect if it's a local URL (netloc empty = same domain). Applied
+    # Honour the ?next= redirect if it's a safe local URL (safe_next_url). Applied
     # on success and on a missing block reason, and NOT on the other refusals — which is
     # what the two pre-B8 copies of this tail did.
     if outcome in (_TASK_STATUS_APPLIED, _TASK_STATUS_NEEDS_BLOCK_REASON):
-        next_url = request.POST.get('next', '')
-        if next_url and not _urlparse(next_url).netloc:
+        # SEC-2: safe_next_url() is the one open-redirect check (utils.py); the old
+        # urlparse().netloc test let http:evil.com (and /\evil.com) through. None = fallback.
+        next_url = safe_next_url(request, request.POST.get('next', ''))
+        if next_url:
             return redirect(next_url)
     return redirect('project_overview', project_id=project.project_id)
 
@@ -13621,8 +13624,10 @@ def upload_project_document(request, project_id):
     else:
         messages.error(request, msg)
 
-    next_url = request.POST.get('next', '')
-    if next_url and not _urlparse(next_url).netloc:
+    # SEC-2: safe_next_url() is the one open-redirect check (utils.py); the old
+    # urlparse().netloc test let http:evil.com (and /\evil.com) through. None = fallback.
+    next_url = safe_next_url(request, request.POST.get('next', ''))
+    if next_url:
         return redirect(next_url)
     return redirect('project_overview', project_id=project_id)
 
@@ -13662,8 +13667,10 @@ def delete_project_document(request, project_id, doc_pk):
     # Log the project document deletion
     log_activity(project, profile, f"Deleted file: {doc.file_name}", entity_type='File', entity_id=doc.pk)
     messages.success(request, f'"{doc.file_name}" deleted.')
-    next_url = request.POST.get('next', '')
-    if next_url and not _urlparse(next_url).netloc:
+    # SEC-2: safe_next_url() is the one open-redirect check (utils.py); the old
+    # urlparse().netloc test let http:evil.com (and /\evil.com) through. None = fallback.
+    next_url = safe_next_url(request, request.POST.get('next', ''))
+    if next_url:
         return redirect(next_url)
     return redirect('project_overview', project_id=project_id)
 
@@ -13765,8 +13772,10 @@ def upload_task_attachment(request, project_id, task_id):
     if _is_hx(request):
         return _render_attachments_hx(request, project, task)
 
-    next_url = request.POST.get('next', '')
-    if next_url and not _urlparse(next_url).netloc:
+    # SEC-2: safe_next_url() is the one open-redirect check (utils.py); the old
+    # urlparse().netloc test let http:evil.com (and /\evil.com) through. None = fallback.
+    next_url = safe_next_url(request, request.POST.get('next', ''))
+    if next_url:
         return redirect(next_url)
     return redirect('task_detail', project_id=project_id, task_id=task_id)
 
@@ -13810,8 +13819,10 @@ def delete_task_attachment(request, project_id, task_id, attach_pk):
     if _is_hx(request):
         return _render_attachments_hx(request, project, task)
 
-    next_url = request.POST.get('next', '')
-    if next_url and not _urlparse(next_url).netloc:
+    # SEC-2: safe_next_url() is the one open-redirect check (utils.py); the old
+    # urlparse().netloc test let http:evil.com (and /\evil.com) through. None = fallback.
+    next_url = safe_next_url(request, request.POST.get('next', ''))
+    if next_url:
         return redirect(next_url)
     return redirect('task_detail', project_id=project_id, task_id=task_id)
 

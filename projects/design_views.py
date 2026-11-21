@@ -31,7 +31,6 @@ from django.http import Http404, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
-from django.utils.http import url_has_allowed_host_and_scheme
 
 from .decorators import login_required
 from .design_analytics import (
@@ -42,7 +41,7 @@ from .design_metrics import (
     STAGE_LABELS, change_request_noun, effective_commitment, head_change_request_list,
     pending_extension, reviewer_correction_drill, reviewer_correction_panel, tender_metrics,
 )
-from .utils import design_due_date, record_transition
+from .utils import design_due_date, record_transition, safe_next_url
 # Prompt 3.1b-3 — the PM gate's four in-app notifications. See the block above
 # design_gate_next_actors() before adding a fifth.
 from .notifications import send_notification
@@ -6353,13 +6352,11 @@ def _triage_redirect(request, project):
     form posts back a path on this site, never another domain. require_https follows the
     request, so a scheme-qualified http:// link cannot downgrade an https session.
     Deliberately NOT limited to the tender dashboard path (SEC-1 ruling): any safe local
-    path is followed, as before; the fallback is unchanged."""
-    target = (request.POST.get('next') or '').strip()
-    if target and url_has_allowed_host_and_scheme(
-            target, allowed_hosts={request.get_host()},
-            require_https=request.is_secure()):
-        return target
-    return reverse('design_qc_review', kwargs={'project_id': project.project_id})
+    path is followed, as before; the fallback is unchanged.
+    SEC-2: the check now lives in the shared utils.safe_next_url(); behaviour unchanged."""
+    return safe_next_url(
+        request, request.POST.get('next'),
+        fallback=reverse('design_qc_review', kwargs={'project_id': project.project_id}))
 
 
 @login_required

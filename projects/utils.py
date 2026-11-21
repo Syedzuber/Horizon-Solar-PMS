@@ -6,8 +6,47 @@ from datetime import timedelta
 from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
+from django.utils.http import url_has_allowed_host_and_scheme
 
 logger = logging.getLogger(__name__)
+
+
+def safe_next_url(request, target, fallback=None):
+    """`target` stripped, if it is safe to redirect to — else `fallback`.
+
+    The one check for every screen that honours a user-supplied `next` (SEC-2). Safe
+    means a path on this site: url_has_allowed_host_and_scheme() with this request's own
+    host as the only allowed host. It refuses the tricks a hand-rolled prefix or netloc
+    test misses:
+
+      * backslash    `/\\evil.com`   — browsers read `/\\` as `//` and leave the site;
+      * control char `/<tab>/evil.com` — the URL parser drops the tab, leaving `//evil.com`;
+      * protocol-relative `//evil.com`;
+      * scheme       `https://evil.com/`, `http:evil.com`, `javascript:alert(1)`.
+
+    WHY DJANGO'S CHECK, NOT OURS: the two tests this replaces — `startswith('/') and not
+    startswith('//')` (SEC-1) and `not urlparse(next).netloc` (the five views.py screens)
+    — each let `/\\evil.com` through, because neither knew every way a browser normalises
+    a URL. Django's check is maintained against that list; a local copy would drift.
+    What actually left the site was the netloc test's `http:evil.com`: redirect() sends it
+    unencoded and an https page resolves it to http://evil.com/. The backslash and tab
+    forms were latent — redirect() percent-encodes them into local paths (`/%5Cevil.com`)
+    on Django 6.0 — and are refused here so the safety does not rest on that encoding.
+
+    require_https follows the request (SECURE_PROXY_SSL_HEADER makes it true behind
+    Railway's proxy), so an absolute http:// link to this host cannot downgrade an https
+    session. Relative paths — every `next` the templates send — never consult host or
+    scheme, so the proxy cannot change their answer.
+
+    `fallback=None` lets a caller keep its own `return redirect(...)` line: `if url:
+    return redirect(url)`. Pass a URL string to get it back instead.
+    """
+    target = (target or '').strip()
+    if target and url_has_allowed_host_and_scheme(
+            target, allowed_hosts={request.get_host()},
+            require_https=request.is_secure()):
+        return target
+    return fallback
 
 
 # ---------------------------------------------------------------------------
