@@ -179,7 +179,7 @@ between this panel and his.
                 Linking everything at design_qc_review would hand a reviewer who owes an
                 Arka verdict a page that says there is nothing to review yet.
                 {% endcomment %}
-                {% if row.stage_key == 'arka_submitted' or row.stage_key == 'awaiting_head_arka' %}
+                {% if row.stage_key == 'arka_submitted' %}
                   <a href="{% url 'design_head_review' project_id=row.project.project_id %}">{{ row.project.project_id }}</a>
                 {% else %}
                   <a href="{% url 'design_qc_review' project_id=row.project.project_id %}">{{ row.project.project_id }}</a>
@@ -229,14 +229,15 @@ table by another route, and that table is Head-only.
             {% if s.designer %}{{ s.designer.user.get_full_name|default:s.designer.user.username }}
             {% else %}<span class="text-muted">—</span>{% endif %}
           </td>
-          <td class="small">{{ s.assignment.get_status_display }}</td>
+          {# W-3: a legacy awaiting_head_arka site is pending at Design QC; its stored label names the Head. #}
+          <td class="small">{% if s.assignment.status == 'awaiting_head_arka' %}Arka awaiting Design QC{% else %}{{ s.assignment.get_status_display }}{% endif %}</td>
           <td class="text-end small">
             {% if s.capacity_kw %}{{ s.capacity_kw|floatformat:2 }}
             {% else %}<span class="text-muted" title="No fully approved Arka yet">—</span>{% endif %}
           </td>
           <td class="small">{{ s.attempts|length }}</td>
           <td class="text-end">
-            {% if s.stage == 'arka_submitted' or s.stage == 'awaiting_head_arka' %}
+            {% if s.stage == 'arka_submitted' %}
               <a href="{% url 'design_head_review' project_id=s.project.project_id %}"
                  class="btn btn-sm btn-outline-secondary">Open Arka</a>
             {% else %}

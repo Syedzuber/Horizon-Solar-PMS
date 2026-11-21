@@ -5144,7 +5144,7 @@ DESIGN_PENDING_AT = {
     # is the UNAPPROVED reading — Design QC still owes a verdict — and is what the
     # function falls back to when no Arka row was supplied.
     DESIGN_ARKA_SUBMITTED:       PENDING_AT_QC,
-    DESIGN_AWAITING_HEAD_ARKA:   PENDING_AT_DESIGN_HEAD,
+    DESIGN_AWAITING_HEAD_ARKA:   PENDING_AT_QC,     # W-3: legacy; Design QC moves it on (W-1)
     DESIGN_ARKA_REJECTED:        PENDING_AT_DESIGNER,
     DESIGN_ARTIFACTS_UPLOADED:   PENDING_AT_QC,
     DESIGN_IN_QC:                PENDING_AT_QC,

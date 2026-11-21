@@ -28,18 +28,26 @@ Head viewing somebody else's site gets `is_designer` False and sees state withou
     has nothing to do — so they take the same navy chip. The label itself names which
     reviewer, which is the part that actually differs.
     {% endcomment %}
-    {% elif p.design.status == 'in_qc' or p.design.status == 'artifacts_uploaded' or p.design.status == 'awaiting_head_qc' or p.design.status == 'awaiting_head_arka' or p.design.status == 'pm_rejected' %}
+    {% elif p.design.status == 'in_qc' or p.design.status == 'artifacts_uploaded' or p.design.status == 'awaiting_head_qc' or p.design.status == 'pm_rejected' %}
       <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
         Design: {{ p.design.status_label }}</span>
     {% comment %}
-    `arka_submitted` covers BOTH "waiting on Design QC" and "approved at both gates, CAD and
-    BOQ outstanding" — see the long note in _design_status_chips.html. The stored label says
+    `arka_submitted` covers BOTH "waiting on Design QC" and "approved, CAD and BOQ
+    outstanding" — see the long note in _design_status_chips.html. The stored label says
     "Arka submitted" for both, which reads as still-waiting on a site nobody is waiting for.
+
+    W-3: the green branch reads `p.design.arka_approved` (design_metrics.arka_is_approved(),
+    QC's verdict), NOT the Arka's head_verdict. W-1 removed the Head's Arka step, so
+    head_verdict stays 'pending' on every new Arka and the old test showed each one as
+    "awaiting Design QC" while it sat with the designer.
+
+    A legacy `awaiting_head_arka` site takes the navy "awaiting Design QC" chip: Design QC
+    moves it on (rule 2), and its stored label would name the Head.
     {% endcomment %}
-    {% elif p.design.status == 'arka_submitted' and p.design.arka.head_verdict == 'approved' %}
+    {% elif p.design.status == 'arka_submitted' and p.design.arka_approved %}
       <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
         Design: Arka approved — CAD and BOQ outstanding</span>
-    {% elif p.design.status == 'arka_submitted' %}
+    {% elif p.design.status == 'arka_submitted' or p.design.status == 'awaiting_head_arka' %}
       <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
         Design: Arka awaiting Design QC</span>
     {% elif p.design.status == 'arka_rejected' or p.design.status == 'awaiting_pm_approval' %}

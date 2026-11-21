@@ -65,6 +65,25 @@ def _mw_to_kw(value_mw):
     return Decimal(value_mw) * KW_PER_MW
 
 
+def arka_is_approved(arka):
+    """True when this Arka counts as approved: Design QC approved it, and the Design Head
+    did not reject it under the earlier two-step review. Pure; no query.
+
+    THE ONE DEFINITION (W-3). Since W-1 Design QC's verdict is the Arka's only gate, so
+    `head_verdict` stays 'pending' on every Arka submitted since. Before W-1 the Head could
+    overturn a QC approval; such a row carries verdict='approved' AND
+    head_verdict='rejected', and that layout was never approved, so it must not count.
+
+    Every reading that asks "is this Arka approved?" (the stage split, both capacity
+    figures, the dashboard chip, design_views._approved_arka) calls this rather than
+    restating the two terms, so they cannot drift apart again the way the dashboard chip
+    did when W-1 changed the rule.
+    """
+    return (arka is not None
+            and arka.verdict == ARKA_APPROVED
+            and arka.head_verdict != ARKA_REJECTED)
+
+
 # ---------------------------------------------------------------------------
 # 0. Which commitment counts — the effective / pending split (Part 8)
 # ---------------------------------------------------------------------------
@@ -192,7 +211,12 @@ def days_overdue(current_commitment, today=None):
 # Two of these are NOT plain status lookups and are resolved in _classify() instead:
 #   'in_design'      splits by whether the site has ever had an Arka submitted
 #   'arka_approved'  is status=arka_submitted whose current Arka is already approved,
-#                    i.e. the designer is mid-artifacts rather than waiting on the Head
+#                    i.e. the designer is mid-artifacts rather than waiting on Design QC
+#
+# W-3: there is NO 'awaiting_head_arka' stage. The Head's separate Arka approval was
+# removed in W-1, so nobody waits on him for an Arka and a tile saying so would point at
+# a step that no longer exists. A legacy site still stored at that status is filed under
+# 'arka_submitted' by _classify() — Design QC is who moves it on.
 STAGE_ORDER = [
     ('awaiting_survey',     'Awaiting survey'),
     ('awaiting_allocation', 'Awaiting allocation'),
@@ -200,7 +224,6 @@ STAGE_ORDER = [
     ('due_date_proposed',   'Date proposed, awaiting approval'),
     ('in_design',           'In design, awaiting Arka'),
     ('arka_submitted',      'Arka awaiting Design QC'),
-    ('awaiting_head_arka',  'Arka awaiting Design Head'),
     ('arka_approved',       'Arka approved, artifacts incomplete'),
     ('artifacts_uploaded',  'Awaiting Design QC'),
     ('in_qc',               'In Design QC'),
@@ -222,9 +245,9 @@ STAGE_LABELS = dict(STAGE_ORDER)
 # backlog on the Head's attention list as though it were his to clear, which is the exact
 # misattribution the second gate exists to make visible.
 #
-# Stages where the ball is in the DESIGN HEAD's court.
-HEAD_ACTION_STAGES = ('awaiting_allocation', 'due_date_proposed',
-                      'awaiting_head_arka', 'awaiting_head_qc')
+# Stages where the ball is in the DESIGN HEAD's court. W-3: no Arka stage — the Head
+# rules on the Arka only as part of the package, at 'awaiting_head_qc'.
+HEAD_ACTION_STAGES = ('awaiting_allocation', 'due_date_proposed', 'awaiting_head_qc')
 
 # Stages where the ball is in DESIGN QC's court. Allocation and due dates are absent —
 # those are the Head's alone and Part 9 does not move them.
@@ -256,9 +279,16 @@ def _classify(assignment, current_arka):
         # Arka means the Arka's gate is done and the designer owes artifacts; anything else
         # at this status means Design QC still owes a verdict. Pre-W-1 rows carry QC's
         # approval as well as the Head's, so they read the same. Same status, opposite
-        # bottleneck.
-        if current_arka is not None and current_arka.verdict == ARKA_APPROVED:
+        # bottleneck. W-3: read through arka_is_approved(), the shared definition.
+        if arka_is_approved(current_arka):
             return 'arka_approved'
+        return 'arka_submitted'
+    if status == DESIGN_AWAITING_HEAD_ARKA:
+        # W-3 — EXPLICIT, NEVER THE `status in STAGE_LABELS` LOOKUP BELOW, which no longer
+        # knows this status and would fall through to 'in_design'. A legacy site parked
+        # here before W-1 is pending at Design QC: W-1's "Move on" button is on the QC
+        # side, and the Head has no Arka step left to take. Its Arka is QC-approved, so it
+        # deliberately does NOT go through the arka_approved split above.
         return 'arka_submitted'
     if status in (DESIGN_ARKA_REJECTED, DESIGN_QC_FAILED):
         # Both hand the site back to the designer to produce a new Arka, which is what
@@ -364,10 +394,9 @@ def tender_metrics(program, today=None):
         # W-1: "approved" for capacity purposes means Design QC approved it — the Arka's
         # only gate since the Head's separate approval was removed (it used to require the
         # Head's too, which no new Arka will ever carry). A pre-W-1 Arka the Head rejected
-        # is still not approved.
-        approved_arka = arka if (arka is not None
-                                 and arka.verdict == ARKA_APPROVED
-                                 and arka.head_verdict != ARKA_REJECTED) else None
+        # is still not approved. W-3: the shared arka_is_approved(), which
+        # design_analytics' capacity reads too, so the two figures cannot disagree.
+        approved_arka = arka if arka_is_approved(arka) else None
         overdue = is_overdue(a, commitment, today)
         sites.append({
             'assignment':    a,
@@ -771,10 +800,15 @@ def _queue_age(sites, arka_stage, package_stage, today=None):
     own `submitted_at`; for a package it is `updated_at` on the assignment, which is when
     it last changed status — deliberately not `qc_started_at`, because an item waiting for
     a review has not started it yet.
+
+    `arka_stage=None` (W-3) means this queue has no Arka half: the Arka counts come back
+    0 / None. The Design Head's queue passes it, because he no longer rules on an Arka on
+    its own.
     """
     today = today or timezone.localdate()
 
-    pending_arka = [s for s in sites if s['stage'] == arka_stage and s['arka']]
+    pending_arka = ([s for s in sites if s['stage'] == arka_stage and s['arka']]
+                    if arka_stage is not None else [])
     awaiting_pkg = [s for s in sites if s['stage'] == package_stage]
 
     def _age_days(dt):
@@ -800,8 +834,12 @@ def review_queue_age(sites, today=None):
     `arka_submitted` / `artifacts_uploaded`. Those are now Design QC's queue; the Head's
     is what QC has passed. Keeping the old stages here would have shown him a backlog he
     cannot clear and hidden the one he can.
+
+    W-3: PACKAGES ONLY. The Head's separate Arka approval was removed in W-1, so there is
+    no Arka waiting on him; the old 'awaiting_head_arka' half would have counted legacy
+    sites he has no button for. Those are Design QC's now (qc_review_queue_age).
     """
-    return _queue_age(sites, 'awaiting_head_arka', 'awaiting_head_qc', today)
+    return _queue_age(sites, None, 'awaiting_head_qc', today)
 
 
 def qc_review_queue_age(sites, today=None):
@@ -1028,11 +1066,10 @@ def attention_list(sites, today=None, limit=ATTENTION_LIMIT,
     head_waiting = [s for s in sites if s['stage'] in own_stages]
 
     def _waiting_since(site):
-        # Both Arka stages date from the submission itself. `awaiting_head_arka` is the
-        # same physical Arka that `arka_submitted` was, handed on rather than resubmitted,
-        # so its clock does not restart when Design QC passes it — the designer has been
-        # waiting since they submitted, whoever currently holds it.
-        if site['stage'] in ('arka_submitted', 'awaiting_head_arka') and site['arka'] is not None:
+        # An Arka waiting for a verdict dates from the submission itself. W-3: a legacy
+        # `awaiting_head_arka` site is classified 'arka_submitted' too, so its clock still
+        # runs from when the designer submitted, not from when it was parked.
+        if site['stage'] == 'arka_submitted' and site['arka'] is not None:
             return site['arka'].submitted_at
         return site['assignment'].updated_at
 

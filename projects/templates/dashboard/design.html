@@ -151,7 +151,8 @@ already exists as a screen, shown so the Head knows whether opening it is worth 
 PART 9 ADDED THE TWO HEAD-GATE COUNTS and kept them apart from the Design QC ones. The
 first row is what Design QC is holding; the second is what has been passed up and is the
 Head's own to clear. Merging them would tell him how much work exists without telling him
-how much of it is his.
+how much of it is his. W-3: only the package count is left on his side; the Arka is
+Design QC's alone since W-1.
 {% endcomment %}
 {% if head_counts %}
 <div class="card shadow-sm border-0 mb-4">
@@ -186,11 +187,7 @@ how much of it is his.
           {{ head_counts.awaiting_arka }}</div>
         <div class="small text-muted">Arka with Design QC</div>
       </div>
-      <div class="col-6 col-lg-2">
-        <div class="design-stat-num {% if head_counts.awaiting_head_arka %}text-warning{% else %}text-muted{% endif %}">
-          {{ head_counts.awaiting_head_arka }}</div>
-        <div class="small text-muted">Arka awaiting <strong>you</strong></div>
-      </div>
+      {# W-3: no "Arka awaiting you" tile. The Head has no Arka step since W-1; legacy sites count under "Arka with Design QC". #}
       <div class="col-6 col-lg-2">
         <div class="design-stat-num text-muted">
           {{ head_counts.awaiting_qc }}</div>

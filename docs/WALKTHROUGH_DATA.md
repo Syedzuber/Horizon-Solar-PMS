@@ -178,7 +178,7 @@ or the site's design workspace.
 | WALKD02 | awaiting_allocation | survey link recorded |
 | WALKD03 | in_design | allocated, due date committed; **named QC reviewer** (`walk.designqc`) instead of the open pool |
 | WALKD04 | arka_submitted | Arka waiting for gate 1 |
-| WALKD05 | awaiting_head_arka | gate 1 passed, waiting for the Head |
+| WALKD05 | arka_submitted | QC-approved Arka, CAD/BOQ outstanding |
 | WALKD06 | arka_rejected | rejected at gate 1 with an electrical-design category |
 | WALKD07 | survey_returned | Design Hold taken from in_design |
 | WALKD08 | arka_submitted | held at arka_submitted, then lifted by a new survey link — **restored** (D18) |

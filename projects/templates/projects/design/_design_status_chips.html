@@ -21,8 +21,13 @@ designer's screen and the Head's screen can never disagree about the state.
   that is in fact sitting with the designer.
 
   So the label follows what design_metrics._classify() computes for the same site rather
-  than the raw status: `arka_approved` when head_verdict is approved, `arka_submitted`
-  otherwise. Both surfaces now say the same thing about the same row.
+  than the raw status: `arka_approved` when design_metrics.arka_is_approved() holds (QC's
+  verdict since W-1), `arka_submitted` otherwise. Both surfaces now say the same thing
+  about the same row.
+
+  W-3: a legacy `awaiting_head_arka` site reads "Arka awaiting Design QC" like any
+  QC-pending Arka. W-1 removed the Head's Arka step and Design QC moves these sites on, so
+  the stored label ("awaiting Design Head") would send the reader to the wrong person.
   {% endcomment %}
   {% if status == 'artifacts_uploaded' %}
     <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
@@ -33,10 +38,10 @@ designer's screen and the Head's screen can never disagree about the state.
   {% elif status == 'arka_submitted' and arka_approved %}
     <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
       Design: Arka approved — CAD and BOQ outstanding</span>
-  {% elif status == 'arka_submitted' %}
+  {% elif status == 'arka_submitted' or status == 'awaiting_head_arka' %}
     <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
       Design: Arka awaiting Design QC</span>
-  {% elif status == 'awaiting_head_arka' or status == 'awaiting_head_qc' or status == 'pm_rejected' %}
+  {% elif status == 'awaiting_head_qc' or status == 'pm_rejected' %}
     <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
       Design: {{ assignment.get_status_display }}</span>
   {% elif status == 'awaiting_pm_approval' %}
@@ -54,11 +59,11 @@ designer's screen and the Head's screen can never disagree about the state.
   gated on the Arka at all. What `arka_approved` still decides is whether the ATTEMPT can
   reach `artifacts_uploaded` — _maybe_advance_to_artifacts_uploaded() is its one consumer.
 
-  `arka_approved` is _approved_arka() and tests head_verdict (Part 9's second gate), so
-  the green pill means both reviewers have signed off. An Arka Design QC has passed but
-  the Head has not gets its own amber pill naming who is holding it — not because
-  anything of the designer's is blocked on it, but because a reader chasing a stalled
-  tender needs to know whose desk it is on.
+  `arka_approved` is _approved_arka(), which reads design_metrics.arka_is_approved(): Design
+  QC approved it and the Head did not reject it under the earlier two-step review. W-3
+  removed the amber "Passed QC, awaiting Design Head" pill: since W-1 the Head has no Arka
+  step, so a QC-approved Arka is simply approved and nothing waits on him for it. The red
+  Head-rejected pill stays for an Arka he rejected before that change.
   {% endcomment %}
   {% if arka_approved %}
     <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
@@ -69,9 +74,6 @@ designer's screen and the Head's screen can never disagree about the state.
   {% elif arka and arka.verdict == 'rejected' %}
     <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>
       Arka v{{ arka.version }}: Rejected at Design QC</span>
-  {% elif arka and arka.verdict == 'approved' %}
-    <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
-      Arka v{{ arka.version }}: Passed QC, awaiting Design Head</span>
   {% elif arka %}
     <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
       Arka v{{ arka.version }}: Awaiting Design QC</span>

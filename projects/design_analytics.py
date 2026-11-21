@@ -81,7 +81,7 @@ from statistics import median
 from .models import (
     ActivityLog, ArkaSubmission, DesignAssignment, DesignAttempt,
     DesignChangeRequest, DueDateCommitment,
-    ARKA_APPROVED, ARKA_PENDING,
+    ARKA_PENDING,
     CHANGE_REQUEST_ACCEPTED, CHANGE_REQUEST_PENDING, CHANGE_REQUEST_REJECTED,
     CHANGE_REQUEST_CORRECTED, CHANGE_REQUEST_ORIGIN_SCM,
     DESIGN_RELEASED, DESIGN_SURVEY_RETURNED, DESIGN_WORK_FINISHED_STATUSES,
@@ -91,7 +91,7 @@ from .models import (
     QC_FAILED, QC_PASSED, QC_PENDING,
 )
 from .design_metrics import (
-    CAUSE_PM_CHANGE, CAUSE_UNCATEGORISED, classify_attempt_causes,
+    CAUSE_PM_CHANGE, CAUSE_UNCATEGORISED, arka_is_approved, classify_attempt_causes,
     effective_commitment, rework_contribution,
 )
 from .utils import is_working_day
@@ -297,7 +297,13 @@ METRIC_CATALOGUE = [
            core=True,
            why='Locked: it is the only metric that measures the reviewers. If it stays '
                'near zero across two tenders the Head\'s gate is a formality and the '
-               'second gate is not earning its cost.'),
+               'second gate is not earning its cost.',
+           # W-3 (rule 3): the Arka half stopped growing at W-1 and the panel must say so,
+           # or a flat Arka figure reads as "no overturns".
+           caveat='The Design Head stopped ruling on Arkas when the Arka review became '
+                  'single-step (Nov 2026). The Arka column counts verdicts given before '
+                  'then and will not grow, so a flat Arka figure does not mean no '
+                  'overturns. Packages are still counted.'),
     Metric('on_time_delivery', GROUP_D, 'On-time delivery',
            'Sites released on or before the APPROVED due date, per designer. A pending '
            'extension request never moves the date this is measured against.'),
@@ -442,10 +448,15 @@ def analytics_dataset(programs, need_hold_events=False):
         # W-1: Design QC's approval, as design_metrics.capacity_panel now requires — the
         # Arka's only gate since the Head's separate Arka approval was removed. Testing the
         # Head's verdict here would report zero capacity on every new site.
+        #
+        # W-3 (rule 4): through design_metrics.arka_is_approved(), the predicate the
+        # tender dashboard's capacity reads, so the two figures agree. Before W-3 this
+        # tested QC's verdict alone and would have counted an Arka the Head rejected
+        # under the earlier two-step review, which the dashboard leaves out.
         approved_arka = None
         if final is not None:
             for k in sorted(arkas_by_attempt.get(final.pk, []), key=lambda x: x.version):
-                if k.is_current and k.verdict == ARKA_APPROVED:
+                if k.is_current and arka_is_approved(k):
                     approved_arka = k
         sites.append({
             'assignment':  a,
@@ -1308,7 +1319,11 @@ def m_queue_latency(data):
     return {
         'rows': [
             {'label': 'Arka — waiting for a Design QC verdict', 'spread': _spread(arka_qc)},
-            {'label': 'Arka — waiting for a Head verdict',      'spread': _spread(arka_head)},
+            # W-3: history only. No Arka has waited on the Head since W-1, so this row
+            # holds the earlier two-step review's figures and stops changing.
+            {'label': 'Arka — waiting for a Head verdict (earlier two-step review; '
+                      'step removed)',
+             'spread': _spread(arka_head)},
             {'label': 'Package — waiting for a Design QC verdict', 'spread': _spread(pkg_qc)},
             {'label': 'Package — waiting for a Head verdict',      'spread': _spread(pkg_head)},
         ],

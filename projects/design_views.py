@@ -38,7 +38,8 @@ from .design_analytics import (
     compute as compute_analytics, selected_metric_keys,
 )
 from .design_metrics import (
-    STAGE_LABELS, change_request_noun, effective_commitment, head_change_request_list,
+    STAGE_LABELS, arka_is_approved, change_request_noun, effective_commitment,
+    head_change_request_list,
     pending_extension, reviewer_correction_drill, reviewer_correction_panel, tender_metrics,
 )
 from .utils import design_due_date, record_transition, safe_next_url
@@ -3324,12 +3325,12 @@ def _approved_arka(attempt):
     (QC passed it) and head_verdict='rejected' (the Head overturned it); the site went to
     `arka_rejected` and the layout was never approved, so it must not read as approved
     on the screens that call this.
+
+    W-3: the test itself is design_metrics.arka_is_approved(), the one definition every
+    dashboard and metric reads too. Same two terms as before; no change in behaviour.
     """
     arka = _current_arka(attempt)
-    if (arka is not None and arka.verdict == ARKA_APPROVED
-            and arka.head_verdict != ARKA_REJECTED):
-        return arka
-    return None
+    return arka if arka_is_approved(arka) else None
 
 
 def _require_current_arka(attempt):
@@ -7439,8 +7440,11 @@ _DESIGNER_ACTIONS = {
     DESIGN_SURVEY_RETURNED:     ('none', '', 'Design Hold — waiting for a replacement survey.'),
     # PART 9 — the two waiting rooms. Both name WHICH reviewer is holding the ball, which
     # is the entire reason they are separate statuses rather than a flag.
-    DESIGN_AWAITING_HEAD_ARKA:  ('none', '', 'Arka passed Design QC — waiting for the '
-                                             'Design Head to approve it.'),
+    #
+    # W-3: `awaiting_head_arka` is a legacy status (W-1 removed the Head's Arka step).
+    # A site still parked there is moved on by Design QC, so the card names Design QC.
+    DESIGN_AWAITING_HEAD_ARKA:  ('none', '', 'Arka passed Design QC — waiting for '
+                                             'Design QC to move it on.'),
     DESIGN_AWAITING_HEAD_QC:    ('none', '', 'Package passed Design QC — waiting for the '
                                              'Design Head\'s review.'),
     # PROMPT 3.1a — no action, and says who holds the ball. Without this entry the
@@ -7484,6 +7488,10 @@ def designer_dashboard_context(profile, projects):
         # extension — and would show the requested date as though it had been granted.
         current_due = effective_commitment(commitments)
         pending_due = pending_extension(commitments)
+        # W-3: the shared definition, read once and used by both the next-action branch
+        # below and the card's status chip (_dashboard_design_chips.html), so the chip
+        # cannot go on reading the Head's verdict after the rule moved to QC's.
+        arka_approved = arka_is_approved(arka)
 
         # `arka_submitted` is the one status whose next step depends on the Arka verdict
         # rather than on the status alone, so it is resolved here instead of in the table.
@@ -7509,7 +7517,7 @@ def designer_dashboard_context(profile, projects):
                 kind__in=CAD_KINDS, is_current=True).exists())
             boq_done = bool(attempt and attempt.boq_submitted_at)
             # W-1: QC's approval is the Arka's only one now (this used to test the Head's).
-            approved = arka is not None and arka.verdict == ARKA_APPROVED
+            approved = arka_approved
 
             if not has_cad:
                 kind, label, waiting = 'link', 'Upload CAD', ''
@@ -7559,6 +7567,7 @@ def designer_dashboard_context(profile, projects):
                                if attempt and attempt.opened_reason != ATTEMPT_REASON_INITIAL
                                else ''),
             'arka':           arka,
+            'arka_approved':  arka_approved,
             'due_date':       current_due.proposed_date if current_due else None,
             'due_approved':   bool(current_due and current_due.approved_at),
             # The requested date, shown as a pending chip beside the agreed one. It is
@@ -7587,6 +7596,25 @@ def designer_dashboard_context(profile, projects):
     return out
 
 
+def _arka_owed_by_qc_q():
+    """The Arkas Design QC owes an action on, as a Q over DesignAssignment. Used with
+    .distinct(), since it joins through attempts and Arka submissions.
+
+    Two arms, and they match design_qc_queue()'s Arka rows:
+      * `arka_submitted` whose current Arka still awaits QC's verdict;
+      * a legacy site still parked at `awaiting_head_arka` (W-3, rule 2). W-1 removed
+        the Head's Arka step and gave Design QC the "Move on" button for these, so they
+        are pending at QC and are counted there, never as waiting on the Head.
+
+    ONE definition for the Head's strip and the QC strip, so the two counts and the
+    queue they head cannot disagree.
+    """
+    return (Q(status=DESIGN_ARKA_SUBMITTED,
+              attempts__arka_submissions__is_current=True,
+              attempts__arka_submissions__verdict=ARKA_PENDING)
+            | Q(status=DESIGN_AWAITING_HEAD_ARKA))
+
+
 def design_head_dashboard_counts(user):
     """The three queue sizes a Design Head can see for free — one COUNT each.
 
@@ -7608,16 +7636,12 @@ def design_head_dashboard_counts(user):
     base = DesignAssignment.objects.filter(project__is_deleted=False)
     return {
         'awaiting_allocation': base.filter(status=DESIGN_AWAITING_ALLOCATION).count(),
-        # Gate 1's Arka queue — still keyed on the QC verdict, which is what `verdict`
-        # now means. The status term alone would be enough; the verdict term is kept as
-        # the same belt-and-braces re-check it has always been.
-        'awaiting_arka':       base.filter(status=DESIGN_ARKA_SUBMITTED,
-                                           attempts__arka_submissions__is_current=True,
-                                           attempts__arka_submissions__verdict=ARKA_PENDING
-                                           ).distinct().count(),
-        # PART 9 — gate 2's two queues, counted separately from gate 1's. Merging them
-        # would tell the Head how much work exists without telling him how much is his.
-        'awaiting_head_arka':  base.filter(status=DESIGN_AWAITING_HEAD_ARKA).count(),
+        # The Arka queue, which is Design QC's alone since W-1: Arkas awaiting QC's
+        # verdict plus legacy `awaiting_head_arka` sites QC must move on (W-3, rule 2).
+        'awaiting_arka':       base.filter(_arka_owed_by_qc_q()).distinct().count(),
+        # PART 9 — gate 2's queue, counted separately from gate 1's. Merging them would
+        # tell the Head how much work exists without telling him how much is his. W-3: no
+        # 'awaiting_head_arka' count — the Head has no Arka step left to take.
         'awaiting_head_qc':    base.filter(status=DESIGN_AWAITING_HEAD_QC).count(),
         'awaiting_qc':         base.filter(status=DESIGN_ARTIFACTS_UPLOADED).count(),
         'in_qc':               base.filter(status=DESIGN_IN_QC).count(),
@@ -7684,17 +7708,16 @@ def design_qc_dashboard_counts(user):
     #
     # The gate-2 statuses are deliberately absent. These count gate-1 work owed, and
     # `qc_assigned_to` says nothing about who clears gate 2.
+    #
+    # W-3: the Arka arm is _arka_owed_by_qc_q(), which adds legacy `awaiting_head_arka`
+    # sites. design_qc_queue() already lists them for QC to move on, so leaving them out
+    # here put rows in the queue that no number above it counted.
     gate1_owed = base.filter(
-        Q(status=DESIGN_ARKA_SUBMITTED,
-          attempts__arka_submissions__is_current=True,
-          attempts__arka_submissions__verdict=ARKA_PENDING)
+        _arka_owed_by_qc_q()
         | Q(status__in=(DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC))
     ).distinct()
     counts = {
-        'awaiting_arka': base.filter(status=DESIGN_ARKA_SUBMITTED,
-                                     attempts__arka_submissions__is_current=True,
-                                     attempts__arka_submissions__verdict=ARKA_PENDING
-                                     ).distinct().count(),
+        'awaiting_arka': base.filter(_arka_owed_by_qc_q()).distinct().count(),
         'awaiting_qc':   base.filter(status=DESIGN_ARTIFACTS_UPLOADED).count(),
         'in_qc':         base.filter(status=DESIGN_IN_QC).count(),
         'assigned_to_me': (gate1_owed.filter(qc_assigned_to=profile).count()

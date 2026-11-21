@@ -64,8 +64,9 @@ NO AUTO-REFRESH (settled decision 7). The only way this page updates is the Refr
     <a href="{% url 'design_qc_queue' %}"
        class="btn btn-sm text-white" style="background-color:#1a7a4a;">
       Review queue
-      {% if m.queue.arka_count or m.queue.qc_count %}
-        <span class="badge bg-white text-dark ms-1">{{ m.queue.arka_count|add:m.queue.qc_count }}</span>
+      {# W-3: packages only; the Head's queue has no Arka half since W-1. #}
+      {% if m.queue.qc_count %}
+        <span class="badge bg-white text-dark ms-1">{{ m.queue.qc_count }}</span>
       {% endif %}
     </a>
   </div>
@@ -199,19 +200,8 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
       <div class="card-header bg-white py-2 fw-semibold small">Your review queue</div>
       <div class="card-body py-3">
         <div class="row g-2 text-center">
-          <div class="col-6">
-            <div class="design-stat-num {% if m.queue.arka_count %}text-warning{% else %}text-muted{% endif %}">
-              {{ m.queue.arka_count }}
-            </div>
-            <div class="small text-muted">Arka awaiting your approval</div>
-            {% if m.queue.arka_oldest_days is not None %}
-              <div class="small mt-1">
-                oldest <strong>{{ m.queue.arka_oldest_days }} day{{ m.queue.arka_oldest_days|pluralize }}</strong>
-                <div class="text-muted" style="font-size:.7rem;">{{ m.queue.arka_oldest_site.project_id }}</div>
-              </div>
-            {% endif %}
-          </div>
-          <div class="col-6">
+          {# W-3: packages only. No "Arka awaiting your approval" half: the Head has no Arka step since W-1. #}
+          <div class="col-12">
             <div class="design-stat-num {% if m.queue.qc_count %}text-warning{% else %}text-muted{% endif %}">
               {{ m.queue.qc_count }}
             </div>
@@ -226,9 +216,9 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
         </div>
         {% comment %}
         PART 9 REPOINTED THIS PANEL. It counts what Design QC has passed UP to you —
-        `awaiting_head_arka` and `awaiting_head_qc` — not the whole review backlog. Sites
-        still with Design QC are counted under their own stage tiles above, and are not
-        yours to clear.
+        `awaiting_head_qc` — not the whole review backlog. Sites still with Design QC are
+        counted under their own stage tiles above, and are not yours to clear. W-3 removed
+        the `awaiting_head_arka` half with the Head's Arka step (W-1).
         {% endcomment %}
         <div class="small text-muted mt-3">
           Your queue is what Design QC has already passed. Items still with Design QC are
@@ -648,7 +638,7 @@ rather than to the site's QC screen, because he is working a queue, not one site
           </td>
           <td class="small fw-semibold">
             {# Part 9 — Arka stages live on a different screen from packages. #}
-            {% if row.stage_key == 'arka_submitted' or row.stage_key == 'awaiting_head_arka' %}
+            {% if row.stage_key == 'arka_submitted' %}
               <a href="{% url 'design_head_review' project_id=row.project.project_id %}">{{ row.project.project_id }}</a>
             {% else %}
               <a href="{% url 'design_qc_review' project_id=row.project.project_id %}">{{ row.project.project_id }}</a>
@@ -695,7 +685,8 @@ rather than to the site's QC screen, because he is working a queue, not one site
             {% if s.designer %}{{ s.designer.user.get_full_name|default:s.designer.user.username }}
             {% else %}<span class="text-muted">—</span>{% endif %}
           </td>
-          <td class="small">{{ s.assignment.get_status_display }}</td>
+          {# W-3: a legacy awaiting_head_arka site is pending at Design QC; its stored label names the Head. #}
+          <td class="small">{% if s.assignment.status == 'awaiting_head_arka' %}Arka awaiting Design QC{% else %}{{ s.assignment.get_status_display }}{% endif %}</td>
           <td class="small">
             {% if s.commitment %}
               {{ s.commitment.proposed_date|date:"d M Y" }}
@@ -710,7 +701,7 @@ rather than to the site's QC screen, because he is working a queue, not one site
           </td>
           <td class="small">{{ s.attempts|length }}</td>
           <td class="text-end">
-            {% if s.stage == 'arka_submitted' or s.stage == 'awaiting_head_arka' %}
+            {% if s.stage == 'arka_submitted' %}
               <a href="{% url 'design_head_review' project_id=s.project.project_id %}"
                  class="btn btn-sm btn-outline-secondary">Open Arka</a>
             {% else %}

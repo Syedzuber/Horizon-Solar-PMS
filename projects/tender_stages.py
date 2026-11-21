@@ -121,6 +121,9 @@ STATUS_TO_STAGE = {
     DESIGN_IN_DESIGN:            STAGE_IN_DESIGN,
     # The Arka half of review stays in S2 (decision 3); S3 is the package review.
     DESIGN_ARKA_SUBMITTED:       STAGE_IN_DESIGN,
+    # W-3: a legacy status (W-1 removed the Head's Arka step). It sits in the same stage
+    # as a QC-pending `arka_submitted`, and _waiting_on() names Design QC for it too,
+    # because design_metrics._classify() files it as 'arka_submitted' (a QC stage).
     DESIGN_AWAITING_HEAD_ARKA:   STAGE_IN_DESIGN,
     DESIGN_ARKA_REJECTED:        STAGE_IN_DESIGN,
     # Handed in but QC has not started it. design_metrics files this as Design QC's queue;
@@ -1002,6 +1005,11 @@ def stuck_sites(sites_qs, today, aged_block_cutoff):
 # ---------------------------------------------------------------------------
 
 DESIGN_STATUS_LABELS = dict(DESIGN_ASSIGNMENT_STATUS_CHOICES)
+# W-3 (rule 2): the stored label for the legacy `awaiting_head_arka` says "awaiting Design
+# Head", a step W-1 removed. A site still parked there is pending at Design QC, which
+# moves it on, so the CEO's site list says that instead. The stored choices stay as they
+# are (no migration); only this list's reading changes.
+DESIGN_STATUS_LABELS[DESIGN_AWAITING_HEAD_ARKA] = 'Arka awaiting Design QC'
 
 
 def tender_site_list(sites_qs, today, aged_block_cutoff):

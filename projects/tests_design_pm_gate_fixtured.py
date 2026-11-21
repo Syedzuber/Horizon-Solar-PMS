@@ -399,10 +399,15 @@ class PmRejectedDeclarationTests(TestCase):
 
     def test_04_no_stage_of_its_own_and_the_stage_list_is_unchanged(self):
         """Folded into 'awaiting_head_qc' (decision 1): review_queue_age() takes ONE package
-        stage, and a new tile would change every tender dashboard."""
+        stage, and a new tile would change every tender dashboard.
+
+        W-3: 'awaiting_head_arka' is out of the list. W-1 removed the Head's separate Arka
+        approval, so its tile pointed at a step that no longer exists; a legacy site at
+        that status is filed under 'arka_submitted' (tests_design_arka_single_gate_display).
+        """
         self.assertEqual([k for k, _ in STAGE_ORDER], [
             'awaiting_survey', 'awaiting_allocation', 'allocated', 'due_date_proposed',
-            'in_design', 'arka_submitted', 'awaiting_head_arka', 'arka_approved',
+            'in_design', 'arka_submitted', 'arka_approved',
             'artifacts_uploaded', 'in_qc', 'awaiting_head_qc', 'blocked',
             'awaiting_pm_approval', 'released'])
         # HEAD_ACTION_STAGES follows from the fold; QC_ACTION_STAGES is not the Head's.
