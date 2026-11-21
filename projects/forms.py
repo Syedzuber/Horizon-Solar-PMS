@@ -8,6 +8,8 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.utils.functional import cached_property
 from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory, Program, BOQItemMaster, StockLocation, VENDOR_KIND_SUPPLIER
+from .models import ActivityLog, BOQItem, log_activity
+from .units import UNIT_CHOICES, canonical_unit
 from .utils import roles_for_phase
 from .permissions import (
     FINANCE_HEAD_HOLDER_ROLES,
@@ -888,11 +890,41 @@ class VendorForm(forms.ModelForm):
 
 _ITEM_CODE_RE = re.compile(r'^[A-Z0-9][A-Z0-9\-_]*$')
 
+# THE LONGEST CATEGORY AND UNIT A SITE BOQ LINE CAN HOLD (B-0). Every line-creation path
+# (opex_boq_entry, _boq_upload_apply, boq_correct, Residential seeding) copies both
+# straight from the catalogue row, and the catalogue columns are wider (64 / 20) than the
+# line columns (20 / 10). A longer value would save here and then crash the first BOQ save
+# that used it. Read from BOQItem, not typed, so the two can never drift apart.
+_LINE_CATEGORY_MAX = BOQItem._meta.get_field('category').max_length
+_LINE_UOM_MAX = BOQItem._meta.get_field('uom').max_length
+
+#: Ruling 12: once an item is on a site BOQ its unit is fixed. Shared with the tests.
+UNIT_LOCKED_MESSAGE = ("This item is already used on site BOQs, so its unit can't change. "
+                       "Retire it and create a new item with the right unit.")
+
 
 class BOQItemMasterForm(forms.ModelForm):
     """Create / edit one catalogue entry. `code` is create-only — it is the stable
     identifier BOQ rows and grouped procurement refer to, so the edit view drops the
-    field rather than letting it be reassigned (see admin_boq_item_edit)."""
+    field rather than letting it be reassigned (see admin_boq_item_edit).
+
+    B-0 RULES, for both the Admin and the Design Head screen:
+    - the unit is a dropdown of projects/units.py UNITS, the one shared list;
+    - category and unit fit a BOQ line's columns (20 / 10);
+    - a stored old spelling ('No.', 'Mtr', 'LOT') opens as its list code and saves as it,
+      which is not a unit change;
+    - an item already on a BOQ line cannot change its unit (ruling 12).
+    """
+
+    # A FORM FIELD, NOT MODEL `choices`. The column stays free text so no migration is
+    # needed and the stored values that predate the list stay readable; the list is
+    # enforced where values enter. The blank first option is deliberate: a new item must
+    # choose, and an item whose stored unit has no mapping opens with nothing selected.
+    unit = forms.ChoiceField(
+        choices=[('', 'Choose a unit')] + list(UNIT_CHOICES),
+        error_messages={'required': 'Choose a unit from the list.',
+                        'invalid_choice': 'Choose a unit from the list.'},
+    )
 
     class Meta:
         model  = BOQItemMaster
@@ -916,9 +948,22 @@ class BOQItemMasterForm(forms.ModelForm):
         )
         self.fields['category'].help_text = (
             'Residential: display grouping only. RESCO: groups the picker and the saved '
-            'sheet, so it should match an existing RESCO category exactly.'
+            'sheet, so it should match an existing RESCO category exactly. '
+            f'At most {_LINE_CATEGORY_MAX} characters — the most a site BOQ line holds.'
         )
-        self.fields['unit'].help_text     = 'e.g. Nos, Mtr, Kg, Set, Lot. Required — quantities cannot be summed across sites without it.'
+        self.fields['category'].widget.attrs['maxlength'] = _LINE_CATEGORY_MAX
+        self.fields['unit'].help_text = (
+            'Required — quantities cannot be summed across sites without it. Once the item '
+            'is on a site BOQ its unit is fixed: to change it, retire the item and add a '
+            'new one.'
+        )
+        # AN OLD SPELLING OPENS AS ITS LIST CODE. ModelForm's initial is the stored text,
+        # which matches no option for 'No.' / 'Mtr' / 'LOT' and would render as "Choose a
+        # unit". Showing the mapped code means saving the form stores it (a spelling fix
+        # the log records). A value with no mapping maps to '' and opens unselected, so the
+        # form cannot save until someone picks a unit (B-0 T1).
+        if self.instance.pk:
+            self.initial['unit'] = canonical_unit(self.instance.unit) or ''
         self.fields['sort_order'].help_text = 'Position in the standard BOQ template; also becomes the line item serial number.'
         self.fields['is_mandatory'].help_text = (
             'RESCO only. A mandatory item is added to every new RESCO BOQ and cannot be '
@@ -987,11 +1032,131 @@ class BOQItemMasterForm(forms.ModelForm):
     def clean_description(self):
         return (self.cleaned_data.get('description') or '').strip()
 
-    def clean_unit(self):
-        value = (self.cleaned_data.get('unit') or '').strip()
-        if not value:
-            raise forms.ValidationError('Unit is required.')
+    def clean_category(self):
+        value = self.cleaned_data.get('category') or ''
+        if len(value) > _LINE_CATEGORY_MAX:
+            raise forms.ValidationError(
+                f'Category can be at most {_LINE_CATEGORY_MAX} characters. A site BOQ line '
+                f'holds no more, so a longer one would stop the BOQ from saving.')
         return value
+
+    def clean_unit(self):
+        """A list code that fits a BOQ line, and, on an item already in use, the unit it
+        already had (ruling 12).
+
+        The dropdown has already refused a blank or an off-list value by the time this
+        runs. The length check below cannot fail with today's list (the longest code is 5
+        characters); it is here so a longer code added to units.py later is refused at the
+        catalogue, not at the first BOQ save that copies it.
+
+        "IN USE" MEANS ANY BOQ LINE AT ALL, deleted sites included (B-0 P5, Zuber's
+        ruling). A site that is restored brings its lines back, and they would then show a
+        unit the catalogue no longer agrees with. That is why this does NOT apply the
+        is_deleted filter every other site queryset carries.
+
+        THE COMPARISON IS AGAINST THE STORED UNIT'S LIST CODE, not its raw text. 'No.'
+        saved as 'Nos' is the same unit spelled the list's way, so it passes; 'No.' saved
+        as 'Set' does not. A stored value with no mapping has no list code, so on an item
+        in use every choice is a change and is refused. That item can only be retired.
+
+        RACE: a designer can add the first line between this check and the save. The
+        window is one request wide and the outcome is an unused-at-check item changing
+        unit once, which is what the rule allowed a moment earlier. A row lock would not
+        close it either, because line creation does not lock the catalogue row.
+        """
+        value = self.cleaned_data.get('unit') or ''
+        if len(value) > _LINE_UOM_MAX:
+            raise forms.ValidationError(
+                f'Unit can be at most {_LINE_UOM_MAX} characters, the most a site BOQ line '
+                f'holds.')
+        if (self.instance.pk
+                and value != canonical_unit(self.instance.unit)
+                and self.instance.boq_items.exists()):
+            raise forms.ValidationError(UNIT_LOCKED_MESSAGE)
+        return value
+
+
+# ---------------------------------------------------------------------------
+# Catalogue edit log — before and after values (B-0 T3)
+#
+# Every catalogue add, edit, retire and reactivate, on both screens and in the
+# normalise_catalogue_units command, writes its ActivityLog text through these helpers so
+# the format is one format. ActivityLog.action is free text of 255 characters; there is no
+# structured column, and adding one would be a migration. So:
+#   "<prefix>: unit: No. → Nos; category: 'MMS' → 'BOS'"
+# lists only the fields that changed. Text values are quoted and shortened to about 95
+# characters with "…" (approved). If the line would still run past 255, the description
+# change is written as an entry of its own, so it is not cut off by log_activity.
+# ---------------------------------------------------------------------------
+
+#: (field, the name a reader sees), in the order an entry lists them. `code` is absent: it
+#: is create-only and every entry's prefix already names it.
+_CATALOGUE_LOG_FIELDS = (
+    ('description',  'description'),
+    ('unit',         'unit'),
+    ('category',     'category'),
+    ('project_type', 'type'),
+    ('is_active',    'active'),
+    ('is_mandatory', 'mandatory'),
+    ('sort_order',   'sort order'),
+)
+_CATALOGUE_LOG_QUOTED = {'description', 'category'}
+_CATALOGUE_LOG_VALUE_MAX = 95
+_ACTION_MAX = ActivityLog._meta.get_field('action').max_length
+
+
+def catalogue_snapshot(item):
+    """The logged fields of `item` as they are now. Taken BEFORE a form is validated: a
+    ModelForm writes its cleaned values onto the instance during is_valid(), so a snapshot
+    taken afterwards would already hold the new values."""
+    return {name: getattr(item, name) for name, _label in _CATALOGUE_LOG_FIELDS}
+
+
+def _catalogue_log_value(name, value, limit):
+    if isinstance(value, bool):
+        return 'yes' if value else 'no'
+    if name == 'project_type':
+        return dict(Project.PROJECT_TYPE_CHOICES).get(value, value)
+    text = str(value)
+    if name in _CATALOGUE_LOG_QUOTED:
+        if len(text) > limit:
+            text = text[:limit - 1] + '…'
+        return f"'{text}'"
+    return text
+
+
+def catalogue_change_entries(prefix, before, after):
+    """The log text for one catalogue save: a list of one entry, or two when the
+    description change needs a line of its own. `before` is None for a create, which
+    lists every field as "→ value". A save that changed nothing still yields one entry
+    saying so, because every save was logged before B-0 and still is."""
+    # Two description values must fit one entry beside the prefix. With a short code
+    # ('OPX-038') this gives the approved 95; a long code shortens the values rather than
+    # letting log_activity cut the entry's tail.
+    overhead = len(f"{prefix}: description: '' → ''")
+    limit = max(20, min(_CATALOGUE_LOG_VALUE_MAX, (_ACTION_MAX - overhead) // 2))
+    parts = {}
+    for name, label in _CATALOGUE_LOG_FIELDS:
+        new = _catalogue_log_value(name, after[name], limit)
+        if before is None:
+            parts[name] = f'{label}: → {new}'
+        elif before[name] != after[name]:
+            parts[name] = f'{label}: {_catalogue_log_value(name, before[name], limit)} → {new}'
+    if not parts:
+        return [f'{prefix}: no fields changed']
+    whole = f"{prefix}: {'; '.join(parts.values())}"
+    if len(whole) <= _ACTION_MAX or 'description' not in parts or len(parts) == 1:
+        return [whole]
+    description = parts.pop('description')
+    return [f'{prefix}: {description}', f"{prefix}: {'; '.join(parts.values())}"]
+
+
+def log_catalogue_change(actor, item, prefix, before, action_code=''):
+    """Write the before/after entries for one catalogue save. `actor` None is a system
+    write (the normalise command), which names itself in `prefix`."""
+    for text in catalogue_change_entries(prefix, before, catalogue_snapshot(item)):
+        log_activity(None, actor, text, entity_type='BOQItemMaster', entity_id=item.pk,
+                     action_code=action_code)
 
 
 # ---------------------------------------------------------------------------

@@ -54,7 +54,9 @@ from .design_storage import (
 )
 # Part 12 — the catalogue screen reuses the Admin screen's form class unchanged rather
 # than declaring a second one. forms.py imports only from .models, so this adds no cycle.
-from .forms import BOQItemMasterForm, check_typed_date
+from .forms import (
+    BOQItemMasterForm, catalogue_snapshot, check_typed_date, log_catalogue_change,
+)
 from .models import (
     # Session E — the Design mirror derivation. `Task` is read and written ONLY by
     # apply_mirror_status() below, never by a view in this module: the design workspace
@@ -9006,11 +9008,10 @@ def design_boq_catalogue_create(request):
             item = form.save(commit=False)
             item.project_type = 'OPEX'
             item.save()
-            log_activity(None, request.user.profile,
-                         f"Created RESCO BOQ catalogue item "
-                         f"'{item.code} — {item.description}'",
-                         entity_type='BOQItemMaster', entity_id=item.pk,
-                         action_code='design_boq_item_created')
+            # B-0 T3: a create has no "before", so every field is listed as "→ value".
+            log_catalogue_change(request.user.profile, item,
+                                 f"Created RESCO BOQ catalogue item '{item.code}'", None,
+                                 action_code='design_boq_item_created')
             messages.success(request, f'Catalogue item "{item.code}" added.')
             return redirect('design_boq_catalogue')
     else:
@@ -9047,6 +9048,9 @@ def design_boq_catalogue_edit(request, item_id):
 
     Existing BOQItem rows are never modified: BOQItem.description is a point-in-time
     snapshot taken at BOQ creation, and nothing here writes to BOQItem.
+
+    B-0: the form refuses a unit change on an item already on a BOQ line (ruling 12), and
+    the log entry lists each changed field as old → new.
     """
     if not user_is_design_head(request.user):
         return HttpResponseForbidden(_CATALOGUE_FORBIDDEN)
@@ -9054,16 +9058,16 @@ def design_boq_catalogue_edit(request, item_id):
     item = _opex_catalogue_item(item_id)
 
     if request.method == 'POST':
+        # Before binding: is_valid() writes the posted values onto `item`.
+        before = catalogue_snapshot(item)
         form = BOQItemMasterForm(request.POST, instance=item)
         del form.fields['code']
         del form.fields['project_type']
         if form.is_valid():
             form.save()
-            log_activity(None, request.user.profile,
-                         f"Updated RESCO BOQ catalogue item '{item.code}' "
-                         f"(active={item.is_active})",
-                         entity_type='BOQItemMaster', entity_id=item.pk,
-                         action_code='design_boq_item_updated')
+            log_catalogue_change(request.user.profile, item,
+                                 f"Updated RESCO BOQ catalogue item '{item.code}'", before,
+                                 action_code='design_boq_item_updated')
             messages.success(request, f'Catalogue item "{item.code}" saved.')
             return redirect('design_boq_catalogue')
     else:
@@ -9111,13 +9115,14 @@ def design_boq_catalogue_toggle(request, item_id):
                                 f'the mandatory flag before deactivating it.')
         return redirect('design_boq_catalogue')
 
+    before = catalogue_snapshot(item)
     item.is_active = not item.is_active
     item.save(update_fields=['is_active', 'updated_at'])
 
     state = 'activated' if item.is_active else 'deactivated'
-    log_activity(None, request.user.profile,
-                 f"{state.capitalize()} RESCO BOQ catalogue item '{item.code}'",
-                 entity_type='BOQItemMaster', entity_id=item.pk,
-                 action_code=f'design_boq_item_{state}')
+    # B-0 T3: retire and reactivate log "active: yes → no" like any other edit.
+    log_catalogue_change(request.user.profile, item,
+                         f"{state.capitalize()} RESCO BOQ catalogue item '{item.code}'",
+                         before, action_code=f'design_boq_item_{state}')
     messages.success(request, f'Catalogue item "{item.code}" {state}.')
     return redirect('design_boq_catalogue')

@@ -122,6 +122,7 @@ from .site_pm import (
 # FIN-M-B5-1: the one writer of Project.bd, behind the overview's BD modal.
 from .site_bd import SiteBdChangeRefused, bd_scope_projects, set_site_bd, site_in_bd_scope
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, SiteBdForm, TaskAddForm, VendorForm, ProgramForm, SNAPSHOT_SWITCH_ROLES, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date, TYPED_DATE_FLOOR
+from .forms import catalogue_snapshot, log_catalogue_change  # B-0: catalogue before/after log
 from .notify_registry import NOTIFICATION_EVENTS  # T2: the send-records Event filter's choices
 from .decorators import (
     login_required, role_required, get_user_dashboard,
@@ -18192,9 +18193,10 @@ def admin_boq_item_create(request):
         form = BOQItemMasterForm(request.POST)
         if form.is_valid():
             item = form.save()
-            log_activity(None, request.user.profile,
-                         f"Created BOQ catalogue item '{item.code} — {item.description}'",
-                         entity_type='BOQItemMaster', entity_id=item.pk)
+            # B-0 T3: a create has no "before", so every field is listed as "→ value".
+            # action_code stays blank on the Admin screen (Zuber, B-0).
+            log_catalogue_change(request.user.profile, item,
+                                 f"Created BOQ catalogue item '{item.code}'", None)
             messages.success(request, f'Catalogue item "{item.code}" added.')
             return redirect('admin_boq_items')
     else:
@@ -18214,18 +18216,20 @@ def admin_boq_item_create(request):
 def admin_boq_item_edit(request, item_id):
     """Edit one catalogue entry. `code` is create-only and is removed from the form here
     — reassigning it would break the identifier existing BOQ rows were grouped under.
-    Existing BOQItem rows are never modified. Access: Admin only."""
+    Existing BOQItem rows are never modified. B-0: the form refuses a unit change on an
+    item already on a BOQ line (ruling 12), and the log lists each changed field as
+    old → new. Access: Admin only."""
     item = get_object_or_404(BOQItemMaster, pk=item_id)
 
     if request.method == 'POST':
+        # Before binding: is_valid() writes the posted values onto `item`.
+        before = catalogue_snapshot(item)
         form = BOQItemMasterForm(request.POST, instance=item)
         del form.fields['code']
         if form.is_valid():
             form.save()
-            log_activity(None, request.user.profile,
-                         f"Updated BOQ catalogue item '{item.code}' "
-                         f"(active={item.is_active})",
-                         entity_type='BOQItemMaster', entity_id=item.pk)
+            log_catalogue_change(request.user.profile, item,
+                                 f"Updated BOQ catalogue item '{item.code}'", before)
             messages.success(request, f'Catalogue item "{item.code}" saved.')
             return redirect('admin_boq_items')
     else:
@@ -18264,13 +18268,14 @@ def admin_boq_item_toggle(request, item_id):
                                 f'the mandatory flag before deactivating it.')
         return redirect('admin_boq_items')
 
+    before = catalogue_snapshot(item)
     item.is_active = not item.is_active
     item.save(update_fields=['is_active', 'updated_at'])
 
     state = 'activated' if item.is_active else 'deactivated'
-    log_activity(None, request.user.profile,
-                 f"{state.capitalize()} BOQ catalogue item '{item.code}'",
-                 entity_type='BOQItemMaster', entity_id=item.pk)
+    # B-0 T3: retire and reactivate log "active: yes → no" like any other edit.
+    log_catalogue_change(request.user.profile, item,
+                         f"{state.capitalize()} BOQ catalogue item '{item.code}'", before)
     messages.success(request, f'Catalogue item "{item.code}" {state}.')
     return redirect('admin_boq_items')
 

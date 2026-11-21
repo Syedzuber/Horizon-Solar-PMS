@@ -14,11 +14,12 @@ from decimal import Decimal
 UNIT_COUNT = 'count'
 UNIT_MEASURED = 'measured'
 
-# THE INTENDED SHARED VOCABULARY. Other unit fields in PMS (BOQItem.uom,
-# BOQItemMaster.unit, VendorOrderLine and DCLineItem units) are free text today and
-# migrate onto this list later, one at a time. Until they do, this list is enforced ONLY
-# on approval material lines (MaterialApprovalLine: choices here, a CHECK in the
-# database, and approvals.py's chokepoint) — nowhere else yet.
+# THE ONE SHARED VOCABULARY. It is enforced in two places: approval material lines
+# (MaterialApprovalLine: choices here, a CHECK in the database, and approvals.py's
+# chokepoint), and the BOQ catalogue (BOQItemMaster.unit: BOQItemMasterForm offers only
+# these codes, B-0 ruling 13). BOQItem.uom, VendorOrderLine and DCLineItem units stay free
+# text: a BOQ line keeps the unit text it was created with, so a catalogue fix never
+# rewrites a site's sheet.
 #
 # (code, label, kind). The code is what is stored; the label is what a person reads.
 UNITS = (
@@ -38,6 +39,29 @@ UNIT_CODES = tuple(code for code, _, _ in UNITS)
 COUNT_UNITS = tuple(code for code, _, kind in UNITS if kind == UNIT_COUNT)
 MEASURED_UNITS = tuple(code for code, _, kind in UNITS if kind == UNIT_MEASURED)
 UNIT_LABELS = dict(UNIT_CHOICES)
+
+# OLD SPELLINGS OF A LISTED UNIT (B-0, ruling 13), and only those. Each maps a stored
+# catalogue value to the code it already meant, so rewriting it is a spelling fix, not a
+# change of unit: 'No.' and 'Nos' count the same thing. A value that is neither a code nor
+# a key here (anything a person would have to decide about) has no mapping, and nothing
+# guesses one.
+UNIT_SPELLINGS = {
+    'No.': 'Nos',
+    'No':  'Nos',
+    'Mtr': 'Meter',
+    'LOT': 'Lot',
+}
+
+
+def canonical_unit(value):
+    """The list code `value` stands for: itself if it is a code, its mapped code if it is
+    a known old spelling, else None. Surrounding spaces are ignored; case is not folded,
+    because deciding that two spellings are one unit is a ruling, and the rulings made so
+    far are exactly the keys of UNIT_SPELLINGS."""
+    value = (value or '').strip()
+    if value in UNIT_CODES:
+        return value
+    return UNIT_SPELLINGS.get(value)
 
 
 def unit_places(unit):
