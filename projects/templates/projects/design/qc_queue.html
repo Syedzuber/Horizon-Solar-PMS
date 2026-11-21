@@ -149,9 +149,10 @@ their verdict with nowhere to click.
         </div>
       </div>
       <div class="text-end">
-        {% if row.awaiting_head %}
+        {% if row.legacy %}
+          {# W-1 fallback: QC approved it before the Head's Arka step was removed. #}
           <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
-            Awaiting Design Head</span>
+            QC approved — move on</span>
         {% else %}
           <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
             Awaiting Design QC</span>
@@ -166,18 +167,17 @@ their verdict with nowhere to click.
     <div class="d-flex flex-wrap gap-2 mt-2">
       <a href="{% url 'design_head_review' project_id=row.site.project_id %}"
          class="btn btn-sm text-white" style="background-color:#1a7a4a;">
-        {% if row.can_qc or row.can_head %}Review Arka{% else %}Open Arka{% endif %}
+        {% if row.can_qc %}Review Arka{% else %}Open Arka{% endif %}
       </a>
-      {% if row.blocked_own %}
+      {% comment %}
+      W-1: the Head's Arka rows ("With the Design Head", "you passed this Arka yourself")
+      are gone with the Head's separate Arka approval. A legacy row is QC's to move on.
+      {% endcomment %}
+      {% if row.legacy and row.can_qc %}
         <span class="align-self-center text-muted small">
-          You passed this Arka through Design QC yourself — the Design Head verdict has to
-          come from somebody else.
+          Approved by Design QC before the Head's Arka step was removed — open it to move it on.
         </span>
-      {% elif row.awaiting_head and not row.can_head %}
-        <span class="align-self-center text-muted small">
-          With the Design Head. Nothing for you to do on this one.
-        </span>
-      {% elif not row.awaiting_head and not row.can_qc %}
+      {% elif not row.can_qc %}
         <span class="align-self-center text-muted small">
           You cannot review this site — either you are its allocated designer, or you do
           not hold the Design QC flag.

@@ -439,12 +439,13 @@ def analytics_dataset(programs, need_hold_events=False):
                               key=lambda t: t.attempt_number)
         final = next((t for t in own_attempts
                       if t.attempt_number == a.current_attempt_number), None)
-        # BOTH GATES, exactly as design_metrics.capacity_panel requires: a capacity only
-        # Design QC has signed off is not a released capacity.
+        # W-1: Design QC's approval, as design_metrics.capacity_panel now requires — the
+        # Arka's only gate since the Head's separate Arka approval was removed. Testing the
+        # Head's verdict here would report zero capacity on every new site.
         approved_arka = None
         if final is not None:
             for k in sorted(arkas_by_attempt.get(final.pk, []), key=lambda x: x.version):
-                if k.is_current and k.head_verdict == ARKA_APPROVED:
+                if k.is_current and k.verdict == ARKA_APPROVED:
                     approved_arka = k
         sites.append({
             'assignment':  a,

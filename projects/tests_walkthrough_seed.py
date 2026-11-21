@@ -267,9 +267,11 @@ class SeededWalkthroughTests(_TempManifestMixin, TestCase):
                          (m.QC_PASSED, 'walk.designhead'))
         self.assertIsNotNone(attempt.boq_submitted_at)
         arka = attempt.arka_submissions.get(is_current=True)
+        # W-1: QC's approval only; the Head rules on the Arka at the package gate (above).
         self.assertEqual((arka.verdict, arka.head_verdict),
-                         (m.ARKA_APPROVED, m.ARKA_APPROVED))
-        self.assertNotEqual(arka.reviewed_by, arka.head_reviewed_by)
+                         (m.ARKA_APPROVED, m.ARKA_PENDING))
+        self.assertIsNone(arka.head_reviewed_by)
+        self.assertNotEqual(arka.reviewed_by, attempt.head_reviewed_by)
         cad = m.DesignFile.objects.get(attempt=attempt, kind=m.DESIGN_FILE_CAD_ZIP,
                                        is_current=True)
         self.assertEqual(cad.bucket, support.STUB_BUCKET)
@@ -290,7 +292,9 @@ class SeededWalkthroughTests(_TempManifestMixin, TestCase):
         self.assertNotIn('WALKD01', statuses)   # no assignment: where a walk starts
         for code, status in {
             'WALKD02': m.DESIGN_AWAITING_ALLOCATION, 'WALKD03': m.DESIGN_IN_DESIGN,
-            'WALKD04': m.DESIGN_ARKA_SUBMITTED, 'WALKD05': m.DESIGN_AWAITING_HEAD_ARKA,
+            # W-1: WALKD05 stops after QC's Arka approval — `arka_submitted`, CAD and BOQ
+            # outstanding (was `awaiting_head_arka`, the removed Head step).
+            'WALKD04': m.DESIGN_ARKA_SUBMITTED, 'WALKD05': m.DESIGN_ARKA_SUBMITTED,
             'WALKD06': m.DESIGN_ARKA_REJECTED, 'WALKD07': m.DESIGN_SURVEY_RETURNED,
             'WALKD08': m.DESIGN_ARKA_SUBMITTED, 'WALKD09': m.DESIGN_ARTIFACTS_UPLOADED,
             'WALKD10': m.DESIGN_IN_QC, 'WALKD11': m.DESIGN_AWAITING_HEAD_QC,
@@ -405,7 +409,10 @@ FRESH_STATUS = {
 #: released 10. An extension request writes no ledger row.
 FRESH_LEDGER = {
     'WALKFRESHSURVEY': (1, 0), 'WALKFRESHALLOC': (1, 1), 'WALKFRESHDESIGN': (1, 2),
-    'WALKFRESHEXT': (1, 2), 'WALKFRESHARKA': (1, 3), 'WALKFRESHREL': (1, 10),
+    # W-1: WALKFRESHREL writes 8 design rows, not 10. The Head's Arka step (two rows:
+    # -> awaiting_head_arka -> arka_submitted) is gone, and QC's approval at arka_submitted
+    # re-states the status, which writes no StatusTransition (R-3: no x -> x rows).
+    'WALKFRESHEXT': (1, 2), 'WALKFRESHARKA': (1, 3), 'WALKFRESHREL': (1, 8),
     'WALKFRESHACT': (1, 0),
 }
 

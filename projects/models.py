@@ -5004,6 +5004,11 @@ DESIGN_RELEASED            = 'released'
 # flag on the existing ones because the BOTTLENECK IS DIFFERENT: `arka_submitted` means
 # the QC reviewer owes a verdict, `awaiting_head_arka` means the Head does, and a
 # dashboard that cannot tell them apart cannot say who is holding the tender up.
+#
+# W-1 (21 Nov 2026): `awaiting_head_arka` IS A LEGACY VALUE NOTHING WRITES. The Head's
+# separate Arka approval was removed (ruling 1); QC's approval moves the site on. It stays
+# in the choices, with no migration, so pre-W-1 ledger rows and any site still parked here
+# stay readable. Design QC moves such a site on (design_arka_approve's legacy branch).
 DESIGN_AWAITING_HEAD_ARKA  = 'awaiting_head_arka'
 DESIGN_AWAITING_HEAD_QC    = 'awaiting_head_qc'
 
@@ -5134,7 +5139,8 @@ DESIGN_PENDING_AT = {
     DESIGN_ALLOCATED:            PENDING_AT_DESIGNER,
     DESIGN_DUE_DATE_PROPOSED:    PENDING_AT_DESIGN_HEAD,
     DESIGN_IN_DESIGN:            PENDING_AT_DESIGNER,
-    # Resolved by design_pending_at() against the current Arka's head_verdict. This entry
+    # Resolved by design_pending_at() against the current Arka's QC verdict (W-1; it was
+    # the head_verdict until the Head's separate Arka approval was removed). This entry
     # is the UNAPPROVED reading — Design QC still owes a verdict — and is what the
     # function falls back to when no Arka row was supplied.
     DESIGN_ARKA_SUBMITTED:       PENDING_AT_QC,
@@ -5189,12 +5195,13 @@ def design_pending_at(assignment, current_arka=None, change_request_pending=Fals
        suspended and the Design Head owes a triage verdict. Any status-first answer here
        would name a reviewer who cannot act.
 
-    2. `arka_submitted` MEANS TWO OPPOSITE THINGS and is settled by the Arka's
-       head_verdict, not by the status. The classification already exists — this delegates
+    2. `arka_submitted` MEANS TWO OPPOSITE THINGS and is settled by the Arka's QC
+       verdict, not by the status (W-1; it was the head_verdict until the Head's separate
+       Arka approval was removed). The classification already exists — this delegates
        to design_metrics._classify() rather than restating it, so the site list and the
-       tender dashboard cannot drift apart on the same site. A head-approved Arka at this
-       status means both gates are done and the designer owes CAD and BOQ; anything else
-       means Design QC still owes the Arka verdict.
+       tender dashboard cannot drift apart on the same site. A QC-approved Arka at this
+       status means the Arka's gate is done and the designer owes CAD and BOQ; anything
+       else means Design QC still owes the Arka verdict.
 
        Imported inside the function because design_metrics imports this module; at module
        scope it would be a cycle. Same pattern as record_transition above.
@@ -5998,9 +6005,11 @@ class ArkaSubmission(models.Model):
     branches deleted, so what it now enforces is that an Arka EXISTS — not that anyone has
     approved it. The BOQ calls neither, having no derivation from a layout to go stale.
 
-    WHAT head_verdict='approved' STILL DECIDES is whether the attempt may reach
-    `artifacts_uploaded`. `design_views._approved_arka()` survives unchanged and is read
-    by `_maybe_advance_to_artifacts_uploaded()`, which is now its only gate-like consumer.
+    W-1 (21 Nov 2026): THE HEAD NO LONGER RULES ON THE ARKA SEPARATELY. QC's
+    verdict='approved' is now what lets the attempt reach `artifacts_uploaded`
+    (`design_views._approved_arka()`), and the Head rules on the Arka at the package gate,
+    on DesignAttempt. So head_verdict stays 'pending' on every Arka submitted since W-1;
+    the head_* columns keep the pre-W-1 history and are written by nothing.
 
     THE CONSEQUENCE, RECORDED HERE BECAUSE THIS IS THE MODEL IT FALLS ON: a DesignFile may
     now point at a version this row later supersedes. `derived_from_arka` is what makes

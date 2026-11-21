@@ -39,7 +39,7 @@ from .models import (
     DESIGN_AWAITING_ALLOCATION, DESIGN_IN_DESIGN, DESIGN_ARKA_SUBMITTED,
     DESIGN_ARKA_REJECTED, DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_RELEASED,
     DESIGN_AWAITING_PM_APPROVAL,
-    DESIGN_AWAITING_HEAD_ARKA, DESIGN_AWAITING_HEAD_QC,
+    DESIGN_AWAITING_HEAD_QC,
     ARKA_PENDING, ARKA_APPROVED, ARKA_REJECTED,
     QC_PENDING, QC_PASSED, QC_FAILED,
     ATTEMPT_REASON_INITIAL, ATTEMPT_REASON_QC_FAILED, ATTEMPT_REASON_PM_CHANGE_REQUEST,
@@ -132,11 +132,29 @@ class Part9Base(TestCase):
 # ===========================================================================
 
 class ArkaGateTests(Part9Base):
+    """W-1 (21 Nov 2026): the Arka has ONE gate, Design QC's. The tests that pinned the
+    Head's separate Arka gate are rewritten to the flow that replaced it: QC's approval
+    moves the site on, and the Head rules on the Arka at the final package gate, where the
+    person who gave the Arka's QC verdict is refused (settled decision 2, carried over)."""
 
     def setUp(self):
         super().setUp()
         self.site, self.a = self._site('P9-ARKA')
         self.attempt, self.arka = self._submit_arka(self.a)
+
+    def _to_awaiting_head_qc(self, a, attempt, qc_by=None):
+        """Row writes, exactly as PackageGateTests.setUp makes them: the package complete,
+        passed through package QC by `qc_by` (default self.qc), waiting for the Head."""
+        attempt.boq_submitted_at = timezone.now()
+        attempt.boq_submitted_by = self.designer
+        attempt.qc_started_at = timezone.now()
+        attempt.qc_verdict = QC_PASSED
+        attempt.qc_reviewed_by = qc_by or self.qc
+        attempt.qc_reviewed_at = timezone.now()
+        attempt.head_started_at = timezone.now()
+        attempt.save()
+        a.status = DESIGN_AWAITING_HEAD_QC
+        a.save()
 
     def test_01_submission_leaves_both_verdicts_pending(self):
         """VERIFICATION 1."""
@@ -146,14 +164,18 @@ class ArkaGateTests(Part9Base):
         self.assertFalse(self.arka.head_overturned_qc)
         self.assertEqual(self.a.status, DESIGN_ARKA_SUBMITTED)
 
-    def test_02_head_cannot_approve_before_design_qc(self):
-        """VERIFICATION 2 — the serial gate, by direct POST."""
+    def test_02_the_head_has_no_separate_arka_verdict(self):
+        """VERIFICATION 2, rewritten for W-1. Was: the Head could not countersign before
+        Design QC. The Head's Arka step is gone: a Head without the QC flag is refused the
+        Arka endpoint outright, and nothing is recorded on the Arka."""
         self._login(self.head)
-        self._post('design_arka_head_approve', self.site)
+        response = self._post('design_arka_approve', self.site)
 
+        self.assertEqual(response.status_code, 403)
         self.arka.refresh_from_db()
         self.a.refresh_from_db()
-        self.assertEqual(self.arka.head_verdict, ARKA_PENDING, 'Head verdict was recorded')
+        self.assertEqual((self.arka.verdict, self.arka.head_verdict),
+                         (ARKA_PENDING, ARKA_PENDING))
         self.assertIsNone(self.arka.head_reviewed_by_id)
         self.assertEqual(self.a.status, DESIGN_ARKA_SUBMITTED)
 
@@ -191,8 +213,10 @@ class ArkaGateTests(Part9Base):
         self.assertEqual(self.arka.head_verdict, ARKA_PENDING)
         self.assertFalse(self.arka.head_overturned_qc)
 
-    def test_04_qc_approval_moves_to_awaiting_head(self):
-        """VERIFICATION 4."""
+    def test_04_qc_approval_moves_the_site_on(self):
+        """VERIFICATION 4, rewritten for W-1: QC's approval no longer parks the site at
+        `awaiting_head_arka`. No CAD or BOQ yet, so it stays `arka_submitted`, owed by the
+        designer, and the Head's Arka verdict is never asked for."""
         self._login(self.qc)
         self._post('design_arka_approve', self.site)
 
@@ -201,7 +225,7 @@ class ArkaGateTests(Part9Base):
         self.assertEqual(self.arka.verdict, ARKA_APPROVED)
         self.assertEqual(self.arka.reviewed_by_id, self.qc.pk)
         self.assertEqual(self.arka.head_verdict, ARKA_PENDING)
-        self.assertEqual(self.a.status, DESIGN_AWAITING_HEAD_ARKA)
+        self.assertEqual(self.a.status, DESIGN_ARKA_SUBMITTED)
 
     def test_05_cad_upload_is_no_longer_refused_while_head_verdict_pending(self):
         """WAS "refused while head_verdict pending" — INVERTED BY THE COMBINED-SUBMISSION
@@ -235,64 +259,66 @@ class ArkaGateTests(Part9Base):
             self.assertNotIn(gone, text,
                              'the verdict must no longer be a reason to refuse an upload')
 
-    def test_06_head_approval_unlocks_and_returns_to_arka_submitted(self):
-        """VERIFICATION 6."""
+    def test_06_qc_approval_alone_approves_the_arka(self):
+        """VERIFICATION 6, rewritten for W-1. Was: the Head's approval cleared the Arka.
+        QC's approval now does, and it is what lets the PACKAGE complete."""
         self._login(self.qc)
         self._post('design_arka_approve', self.site)
-        self._login(self.head)
-        self._post('design_arka_head_approve', self.site)
 
         self.arka.refresh_from_db()
         self.a.refresh_from_db()
-        self.assertEqual(self.arka.head_verdict, ARKA_APPROVED)
-        self.assertEqual(self.arka.head_reviewed_by_id, self.head.pk)
-        self.assertFalse(self.arka.head_overturned_qc, 'gates agreed — not an overturn')
+        self.assertEqual(self.arka.head_verdict, ARKA_PENDING)
+        self.assertIsNone(self.arka.head_reviewed_by_id)
         # No new status is invented for "approved, artifacts outstanding" — see the Part 9
         # note in design_views.
         self.assertEqual(self.a.status, DESIGN_ARKA_SUBMITTED)
-
-        # And both gates have now cleared. This used to assert through
-        # _require_approved_arka(), the upload gate; that helper is gone and upload no
-        # longer consults the verdict at all, so the assertion moves to _approved_arka(),
-        # which is what still decides whether the PACKAGE may complete.
         from .design_views import _approved_arka, _current_attempt
         self.assertIsNotNone(_approved_arka(_current_attempt(self.a)))
 
     def test_07a_dual_flag_holder_cannot_record_both_verdicts(self):
-        """VERIFICATION 7, first half — settled decision 2, by direct POST."""
+        """VERIFICATION 7, first half — settled decision 2, by direct POST. W-1: the Head's
+        ruling on the Arka is now the final package verdict, so that is what is refused to
+        the person who gave the Arka its QC verdict (somebody else QC'd the package)."""
         self._login(self.both)
-        self._post('design_arka_approve', self.site)          # gate 1, allowed
+        self._post('design_arka_approve', self.site)          # the Arka's QC gate, allowed
         self.arka.refresh_from_db()
         self.assertEqual(self.arka.verdict, ARKA_APPROVED)
         self.assertEqual(self.arka.reviewed_by_id, self.both.pk)
 
-        self._post('design_arka_head_approve', self.site)     # gate 2, REFUSED
-        self.arka.refresh_from_db()
-        self.assertEqual(self.arka.head_verdict, ARKA_PENDING,
-                         'one person recorded both verdicts on the same Arka')
-        self.assertIsNone(self.arka.head_reviewed_by_id)
+        self._to_awaiting_head_qc(self.a, self.attempt)
+        self._post('design_head_qc_pass', self.site)          # the final verdict, REFUSED
+        self.attempt.refresh_from_db()
+        self.a.refresh_from_db()
+        self.assertEqual(self.attempt.head_verdict, QC_PENDING,
+                         'one person gave the Arka QC verdict and the final Head verdict')
+        self.assertEqual(self.a.status, DESIGN_AWAITING_HEAD_QC)
 
     def test_07b_the_same_person_may_record_the_head_verdict_on_another_site(self):
         """VERIFICATION 7, second half — the refusal is per ARTIFACT, not per user."""
         other_site, other_a = self._site('P9-ARKA2')
         _attempt, other_arka = self._submit_arka(other_a)
 
-        # Somebody ELSE passes the second site through Design QC.
+        # Somebody ELSE passes the second site's Arka through Design QC.
         self._login(self.qc)
         self._post('design_arka_approve', other_site)
+        self._to_awaiting_head_qc(other_a, _attempt)
 
         # `both` blocked itself on the first site...
         self._login(self.both)
         self._post('design_arka_approve', self.site)
-        self._post('design_arka_head_approve', self.site)
-        self.arka.refresh_from_db()
-        self.assertEqual(self.arka.head_verdict, ARKA_PENDING)
+        self._to_awaiting_head_qc(self.a, self.attempt)
+        self._post('design_head_qc_pass', self.site)
+        self.attempt.refresh_from_db()
+        self.assertEqual(self.attempt.head_verdict, QC_PENDING)
 
-        # ...and is still free to act as Head on the second.
-        self._post('design_arka_head_approve', other_site)
-        other_arka.refresh_from_db()
-        self.assertEqual(other_arka.head_verdict, ARKA_APPROVED)
-        self.assertEqual(other_arka.head_reviewed_by_id, self.both.pk)
+        # ...and is still free to give the final Head verdict on the second (W-1: the Arka
+        # verdict the Head used to record separately is part of this one now).
+        self._post('design_head_qc_pass', other_site)
+        _attempt.refresh_from_db()
+        other_a.refresh_from_db()
+        self.assertEqual(_attempt.head_verdict, QC_PASSED)
+        self.assertEqual(_attempt.head_reviewed_by_id, self.both.pk)
+        self.assertEqual(other_a.status, DESIGN_AWAITING_PM_APPROVAL)
 
     def test_08_assigned_designer_holding_both_flags_is_refused_both_gates(self):
         """VERIFICATION 8 — settled decision 3 beats any flag."""
@@ -306,30 +332,39 @@ class ArkaGateTests(Part9Base):
         self.arka.refresh_from_db()
         self.assertEqual(self.arka.verdict, ARKA_PENDING)
 
-        # And at gate 2, having been passed through gate 1 by somebody else.
+        # And at the Head's final verdict (W-1: where the Head now rules on the Arka),
+        # having been passed through the Arka gate and package QC by somebody else.
         self._login(self.qc)
         self._post('design_arka_approve', self.site)
+        self._to_awaiting_head_qc(self.a, self.attempt)
         self._login(self.designer)
-        r2 = self._post('design_arka_head_approve', self.site)
+        r2 = self._post('design_head_qc_pass', self.site)
         self.assertEqual(r2.status_code, 403)
-        self.arka.refresh_from_db()
-        self.assertEqual(self.arka.head_verdict, ARKA_PENDING)
+        self.attempt.refresh_from_db()
+        self.assertEqual(self.attempt.head_verdict, QC_PENDING)
 
-    def test_head_rejection_sets_the_overturn_signal_on_the_arka(self):
+    def test_head_final_fail_with_the_arka_ticked_overturns_and_reopens_the_arka(self):
+        """Was: the Head's separate Arka rejection set the overturn signal on the Arka. W-1:
+        the Head fails the Arka at the package gate instead; the overturn is recorded on the
+        attempt and the designer gets a new attempt with the Arka to redo."""
         self._login(self.qc)
         self._post('design_arka_approve', self.site)
+        self._to_awaiting_head_qc(self.a, self.attempt)
         self._login(self.head)
-        self._post('design_arka_head_reject', self.site,
-                   rejection_reason='capacity does not fit the roof',
-                   error_category=ERR_BOQ_QUANTITY)
+        self._post('design_head_qc_fail', self.site,
+                   head_remarks='capacity does not fit the roof',
+                   error_category=ERR_LAYOUT, redo_scope_submitted='1',
+                   redo=['arka', 'cad'])
 
-        self.arka.refresh_from_db()
+        self.attempt.refresh_from_db()
         self.a.refresh_from_db()
-        self.assertEqual(self.arka.head_verdict, ARKA_REJECTED)
-        self.assertEqual(self.arka.head_failure_category, ERR_BOQ_QUANTITY)
-        self.assertTrue(self.arka.head_overturned_qc)
-        # Decision 5: the designer's experience is identical at either gate.
-        self.assertEqual(self.a.status, DESIGN_ARKA_REJECTED)
+        self.assertEqual(self.attempt.head_verdict, QC_FAILED)
+        self.assertTrue(self.attempt.head_overturned_qc)
+        self.assertEqual(sorted(self.attempt.redo_required), ['arka', 'cad'])
+        # Decision 5: the designer's experience is identical at either gate — the Arka is
+        # not carried, so the new attempt opens at `in_design` for a new one.
+        self.assertEqual(self.a.status, DESIGN_IN_DESIGN)
+        self.assertEqual(self.a.current_attempt_number, 2)
 
 
 # ===========================================================================
@@ -740,54 +775,48 @@ class ReviewQueueReachabilityTests(Part9Base):
         # And it is actionable by this reviewer, with a link to the Arka screen.
         row = [x for x in r.context['arka_rows'] if x['site'].project_id == 'P9-REACH'][0]
         self.assertTrue(row['can_qc'])
-        self.assertFalse(row['can_head'])
+        # W-1: no `can_head` key — the Head has no Arka action in the queue any more.
+        self.assertNotIn('can_head', row)
         self.assertContains(
             r, reverse('design_head_review', kwargs={'project_id': 'P9-REACH'}))
 
-    def test_an_arka_awaiting_the_head_appears_and_is_his_to_act_on(self):
+    def test_a_qc_approved_arka_is_in_nobodys_arka_queue(self):
+        """Was: an Arka awaiting the Head appeared and was his to act on. W-1 removed that
+        step, so once QC approves, the Arka leaves the queue for the Head and QC alike."""
         self._login(self.qc)
         self._post('design_arka_approve', self.site)
 
-        self._login(self.head)
-        r = self.client.get(self.url)
-        row = [x for x in r.context['arka_rows'] if x['site'].project_id == 'P9-REACH'][0]
-        self.assertTrue(row['awaiting_head'])
-        self.assertTrue(row['can_head'])
-        self.assertFalse(row['can_qc'])
-
-        # Design QC still SEES it — knowing what is stacked at the other gate is the point
-        # — but can no longer act on it.
-        self._login(self.qc)
-        r = self.client.get(self.url)
-        row = [x for x in r.context['arka_rows'] if x['site'].project_id == 'P9-REACH'][0]
-        self.assertFalse(row['can_qc'])
-        self.assertFalse(row['can_head'])
+        for profile in (self.head, self.qc):
+            self._login(profile)
+            r = self.client.get(self.url)
+            codes = [row['site'].project_id for row in r.context['arka_rows']]
+            self.assertNotIn('P9-REACH', codes, profile.user.username)
 
     def test_a_fully_approved_arka_leaves_the_queue(self):
-        """It is with the DESIGNER, owing CAD and BOQ — not in anybody's review queue."""
+        """It is with the DESIGNER, owing CAD and BOQ — not in anybody's review queue.
+        W-1: QC's approval alone makes it fully approved (was: QC then the Head)."""
         self._login(self.qc)
         self._post('design_arka_approve', self.site)
         self._login(self.head)
-        self._post('design_arka_head_approve', self.site)
 
         self.a.refresh_from_db()
         self.assertEqual(self.a.status, DESIGN_ARKA_SUBMITTED)   # the "artifacts outstanding" state
         r = self.client.get(self.url)
         codes = [row['site'].project_id for row in r.context['arka_rows']]
         self.assertNotIn('P9-REACH', codes,
-                         'a both-gates-approved Arka is still sitting in a review queue')
+                         'a QC-approved Arka is still sitting in a review queue')
 
     def test_a_both_gates_approved_site_does_not_claim_to_be_awaiting_anybody(self):
         """`arka_submitted` means two different things and must not render as one.
 
         The stored status is the same before Design QC has looked at the Arka and after the
         Head has approved it. A chip reading "Arka submitted" in the second case sent a
-        Design Head hunting a site he had already cleared.
+        Design Head hunting a site he had already cleared. W-1: QC's approval is the
+        approval now (was: QC then the Head).
         """
         self._login(self.qc)
         self._post('design_arka_approve', self.site)
         self._login(self.head)
-        self._post('design_arka_head_approve', self.site)
 
         r = self.client.get(reverse('design_head_review',
                                     kwargs={'project_id': 'P9-REACH'}))
@@ -805,16 +834,26 @@ class ReviewQueueReachabilityTests(Part9Base):
         self.assertContains(r, 'Arka awaiting Design QC')
         self.assertNotContains(r, 'CAD and BOQ outstanding')
 
-    def test_a_dual_flag_holder_sees_its_own_qc_verdict_blocking_the_head_row(self):
+    def test_a_dual_flag_holder_sees_its_own_arka_qc_verdict_blocking_the_final_verdict(self):
+        """Was: the Head row in the Arka queue showed "you passed this through Design QC
+        yourself". W-1 moved that refusal to the final package verdict, so the explanation
+        is on the package review screen, before anyone clicks."""
         self._login(self.both)
         self._post('design_arka_approve', self.site)
-        r = self.client.get(self.url)
-        row = [x for x in r.context['arka_rows'] if x['site'].project_id == 'P9-REACH'][0]
-        self.assertFalse(row['can_head'])
-        self.assertTrue(row['blocked_own'])
-        # Phrase chosen to sit on ONE source line in the template — the surrounding
-        # sentence is wrapped, and a substring spanning the wrap would never match.
-        self.assertContains(r, 'through Design QC yourself')
+        # Package QC by somebody else, so the ONLY conflict is the Arka verdict.
+        self.attempt.boq_submitted_at = timezone.now()
+        self.attempt.boq_submitted_by = self.designer
+        self.attempt.qc_verdict = QC_PASSED
+        self.attempt.qc_reviewed_by = self.qc
+        self.attempt.save()
+        self.a.status = DESIGN_AWAITING_HEAD_QC
+        self.a.save()
+
+        r = self.client.get(reverse('design_qc_review', kwargs={'project_id': 'P9-REACH'}))
+        self.assertFalse(r.context['can_head_verdict'])
+        self.assertTrue(r.context['blocked_by_own_qc_verdict'])
+        self.assertTrue(r.context['own_arka_qc_verdict'])
+        self.assertContains(r, 'Design QC verdict on this attempt')
 
     def test_the_attention_list_links_arka_stages_to_the_arka_screen(self):
         """A package link on an Arka-stage row leads to 'nothing to review yet'."""
@@ -1150,8 +1189,6 @@ class RoleExclusionTests(Part9Base):
         endpoints = [
             ('design_arka_approve',      {}),
             ('design_arka_reject',       {'rejection_reason': 'x', 'error_category': ERR_LAYOUT}),
-            ('design_arka_head_approve', {}),
-            ('design_arka_head_reject',  {'rejection_reason': 'x', 'error_category': ERR_LAYOUT}),
             ('design_qc_start',          {}),
             ('design_qc_pass',           {}),
             ('design_qc_fail',           {'qc_remarks': 'x', 'error_category': ERR_LAYOUT}),
@@ -1224,9 +1261,8 @@ class BlastRadiusTests(Part9Base):
         site, a = self._site('P9-BLAST')
         attempt, arka = self._submit_arka(a)
         self._login(self.qc)
+        # W-1: QC's approval is the Arka's only gate; the Head's Arka step is gone.
         self._post('design_arka_approve', site)
-        self._login(self.head)
-        self._post('design_arka_head_approve', site)
 
         self.assertEqual(Project.objects.filter(project_type='Residential').count(),
                          residential_before)

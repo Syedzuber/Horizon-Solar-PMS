@@ -42,10 +42,13 @@ VALIDATE = 'projects.design_views.validate_cad_zip'
 STORE = 'projects.design_views.upload_design_file'
 EXTRACT = 'projects.design_views.extract_cad_pdfs'
 
+# W-1 (21 Nov 2026) took `awaiting_head_arka` out of the window: nothing writes it any more,
+# and a legacy site parked there is moved on by Design QC first. It is pinned as REFUSED.
 OPEN = (DESIGN_IN_DESIGN, DESIGN_ARKA_SUBMITTED, DESIGN_ARKA_REJECTED,
-        DESIGN_AWAITING_HEAD_ARKA, DESIGN_SURVEY_RETURNED, DESIGN_ARTIFACTS_UPLOADED)
+        DESIGN_SURVEY_RETURNED, DESIGN_ARTIFACTS_UPLOADED)
 REFUSED = (DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC, DESIGN_AWAITING_PM_APPROVAL,
-           DESIGN_RELEASED, DESIGN_PM_REJECTED, DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED)
+           DESIGN_RELEASED, DESIGN_PM_REJECTED, DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED,
+           DESIGN_AWAITING_HEAD_ARKA)
 
 CLOSED_NOTE = 'Uploads are closed while the design is in review.'
 
@@ -136,7 +139,7 @@ class UploadWindowBase(TestCase):
 
 class WindowConstantTests(TestCase):
 
-    def test_the_window_is_exactly_the_ruled_six(self):
+    def test_the_window_is_exactly_the_ruled_five(self):
         """A status added to or dropped from the window is a ruling, not a refactor."""
         self.assertEqual(set(DESIGN_UPLOAD_OPEN_STATUSES), set(OPEN))
         self.assertEqual(len(DESIGN_UPLOAD_OPEN_STATUSES), len(OPEN))

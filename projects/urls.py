@@ -113,14 +113,12 @@ urlpatterns = [
     path('design/<str:project_id>/work/',           design_views.design_site_workspace,  name='design_site_workspace'),
     path('design/<str:project_id>/review/',         design_views.design_head_review,     name='design_head_review'),
     path('design/<str:project_id>/arka/submit/',    design_views.design_arka_submit,     name='design_arka_submit'),
-    # PART 9 — the Arka now passes two gates. The two ORIGINAL routes are unchanged in
-    # name and path and are now GATE 1 (Design QC), because the fields they write are the
-    # Design QC verdict; the two head/ routes are GATE 2. Keeping the old names means
-    # every existing link and reverse() still resolves, and what changed is who may POST.
+    # The Arka's Design QC verdict — a Design QC reviewer only, never the allocated designer.
+    # W-1 (21 Nov 2026): this is the Arka's ONLY gate. Part 9's two head/ routes (the Design
+    # Head's separate Arka approve / reject) are removed; the Head rules on the Arka at the
+    # package gate (design_head_qc_pass / _fail).
     path('design/<str:project_id>/arka/approve/',   design_views.design_arka_approve,    name='design_arka_approve'),
     path('design/<str:project_id>/arka/reject/',    design_views.design_arka_reject,     name='design_arka_reject'),
-    path('design/<str:project_id>/arka/head/approve/', design_views.design_arka_head_approve, name='design_arka_head_approve'),
-    path('design/<str:project_id>/arka/head/reject/',  design_views.design_arka_head_reject,  name='design_arka_head_reject'),
     path('design/<str:project_id>/artifact/upload/', design_views.design_artifact_upload, name='design_artifact_upload'),
     path('design/<str:project_id>/artifact/<int:pk>/', design_views.design_file_download, name='design_file_download'),
     path('design/<str:project_id>/boq/complete/',   design_views.design_boq_complete,    name='design_boq_complete'),

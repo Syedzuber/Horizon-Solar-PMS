@@ -48,7 +48,7 @@ from .models import (
     DESIGN_RELEASED, DESIGN_SURVEY_RETURNED,
     DESIGN_AWAITING_HEAD_ARKA, DESIGN_AWAITING_HEAD_QC,
     DESIGN_AWAITING_PM_APPROVAL, DESIGN_WORK_FINISHED_STATUSES, DESIGN_PM_REJECTED,
-    ARKA_APPROVED, ARKA_PENDING,
+    ARKA_APPROVED, ARKA_PENDING, ARKA_REJECTED,
     ATTEMPT_REASON_QC_FAILED, ATTEMPT_REASON_PM_CHANGE_REQUEST, ATTEMPT_REASON_PM_REJECTED,
     ERROR_GROUP_A, error_category_group,
 )
@@ -251,12 +251,13 @@ def _classify(assignment, current_arka):
         # is told apart from a fresh one (prompt 3.1b-2b).
         return 'awaiting_head_qc'
     if status == DESIGN_ARKA_SUBMITTED:
-        # PART 9: the test is head_verdict, not verdict. `arka_submitted` carrying a
-        # head-approved Arka means BOTH gates are done and the designer owes artifacts;
-        # anything else at this status means Design QC still owes a verdict. (An Arka that
-        # QC has passed but the Head has not sits at `awaiting_head_arka` and never
-        # reaches this branch.) Same status, opposite bottleneck.
-        if current_arka is not None and current_arka.head_verdict == ARKA_APPROVED:
+        # W-1: the test is QC's `verdict` again (Part 9 had made it head_verdict). The
+        # Head's separate Arka approval is gone, so `arka_submitted` carrying a QC-approved
+        # Arka means the Arka's gate is done and the designer owes artifacts; anything else
+        # at this status means Design QC still owes a verdict. Pre-W-1 rows carry QC's
+        # approval as well as the Head's, so they read the same. Same status, opposite
+        # bottleneck.
+        if current_arka is not None and current_arka.verdict == ARKA_APPROVED:
             return 'arka_approved'
         return 'arka_submitted'
     if status in (DESIGN_ARKA_REJECTED, DESIGN_QC_FAILED):
@@ -360,10 +361,13 @@ def tender_metrics(program, today=None):
         arka = current_arka.get(a.pk)
         commitment = effective_by_assignment.get(a.pk)
         pending    = pending_by_assignment.get(a.pk)
-        # PART 9: "approved" for capacity purposes means BOTH gates passed. A capacity
-        # only Design QC has signed off is not a number the tender may be reported on.
+        # W-1: "approved" for capacity purposes means Design QC approved it — the Arka's
+        # only gate since the Head's separate approval was removed (it used to require the
+        # Head's too, which no new Arka will ever carry). A pre-W-1 Arka the Head rejected
+        # is still not approved.
         approved_arka = arka if (arka is not None
-                                 and arka.head_verdict == ARKA_APPROVED) else None
+                                 and arka.verdict == ARKA_APPROVED
+                                 and arka.head_verdict != ARKA_REJECTED) else None
         overdue = is_overdue(a, commitment, today)
         sites.append({
             'assignment':    a,

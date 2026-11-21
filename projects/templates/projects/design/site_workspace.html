@@ -140,20 +140,14 @@ The Head branch is tested FIRST: if he ruled, his is the verdict that stands.
     {% elif arka and arka.verdict == 'pending' %}
       <div class="small text-muted">
         Arka v{{ arka.version }} ({{ arka.capacity_kw }} kW) is with Design QC.
-        It then goes to the Design Head. You can upload CAD and mark the BOQ complete
-        while you wait — neither is held up by the verdict any more.
+        You can upload CAD and mark the BOQ complete while you wait — neither is held up
+        by the verdict.
       </div>
-    {% elif arka and arka.verdict == 'approved' and arka.head_verdict == 'pending' %}
-      {% comment %}
-      Half-way through the gates. Naming who holds it still matters — otherwise the
-      designer chases the wrong person. What it NO LONGER means is that anything of
-      theirs is blocked: CAD and BOQ stopped waiting on this verdict.
-      {% endcomment %}
-      <div class="small text-muted">
-        Arka v{{ arka.version }} ({{ arka.capacity_kw }} kW) passed Design QC and is now
-        with the Design Head. The package cannot complete until they approve it, but your
-        CAD and BOQ do not have to wait for that.
-      </div>
+    {% comment %}
+    W-1: the "passed Design QC and is now with the Design Head" branch that stood here is
+    gone. Design QC's approval is the Arka's only one, so a QC-approved Arka is simply
+    approved (`arka_approved`, below), and the Head rules on it at the final package review.
+    {% endcomment %}
     {% elif arka_approved %}
       <div class="small">
         <span class="ver-tag">Arka v{{ arka.version }}</span> approved

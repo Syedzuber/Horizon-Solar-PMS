@@ -145,9 +145,13 @@ has hit twice already.
           {% if arka.head_reviewed_at %}{{ arka.head_reviewed_at|date:"d M Y H:i" }}{% endif %}
           {% if arka.head_reviewed_by %}by {{ arka.head_reviewed_by.user.get_full_name|default:arka.head_reviewed_by.user.username }}{% endif %}
         {% elif arka.verdict == 'approved' %}
-          · passed Design QC {{ arka.reviewed_at|date:"d M Y H:i" }}
-          by {{ arka.reviewed_by.user.get_full_name|default:arka.reviewed_by.user.username }},
-          awaiting the Design Head
+          {% comment %}
+          W-1: QC's approval is the Arka's only one. This used to end "awaiting the Design
+          Head"; the Head now rules on the Arka here, with the CAD and BOQ, at the package
+          gate. The branch above is pre-W-1 history (Arkas the Head approved separately).
+          {% endcomment %}
+          · approved by Design QC {{ arka.reviewed_at|date:"d M Y H:i" }}
+          by {{ arka.reviewed_by.user.get_full_name|default:arka.reviewed_by.user.username }}
         {% endif %}
       </div>
       <div class="small mt-1">
@@ -480,8 +484,16 @@ this screen must not allow.
       </div>
 
     {% elif blocked_by_own_qc_verdict %}
+      {% comment %}
+      W-1 (T3): two reasons share this branch. The Head's final verdict is also the ruling on
+      the Arka, so the person who gave the Arka its Design QC verdict is refused it too.
+      {% endcomment %}
       <div class="alert alert-warning small mb-0 py-2">
+        {% if own_arka_qc_verdict %}
+        <strong>You gave the Design QC verdict on this attempt's Arka yourself.</strong>
+        {% else %}
         <strong>You passed attempt {{ attempt.attempt_number }} through Design QC yourself.</strong>
+        {% endif %}
         The Design Head verdict on the same package has to come from somebody else — two
         verdicts by one person is not a second review.
       </div>

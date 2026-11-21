@@ -38,7 +38,7 @@ from .models import (
     Program, Project, UserProfile, BOQ, BOQItem, BOQItemMaster,
     DesignAssignment, DesignAttempt, ArkaSubmission, DesignFile,
     DESIGN_IN_DESIGN, DESIGN_ARKA_SUBMITTED, DESIGN_ARKA_REJECTED,
-    DESIGN_ARTIFACTS_UPLOADED, DESIGN_AWAITING_HEAD_ARKA,
+    DESIGN_ARTIFACTS_UPLOADED,
     ARKA_PENDING, ARKA_APPROVED, ARKA_REJECTED,
     ATTEMPT_REASON_INITIAL, ERR_LAYOUT,
     DESIGN_FILE_CAD_ZIP,
@@ -159,9 +159,6 @@ class CombinedSubmissionBase(TestCase):
         return self.client.post(self._url('design_arka_reject'), {
             'rejection_reason': reason, 'error_category': ERR_LAYOUT})
 
-    def _head_approve(self):
-        self._login(self.head)
-        return self.client.post(self._url('design_arka_head_approve'))
 
 
 # ===========================================================================
@@ -231,8 +228,11 @@ class CombinedArkaAndCadTests(CombinedSubmissionBase):
         """Order-insensitivity, end to end: CAD first, approvals second.
 
         _maybe_advance_to_artifacts_uploaded() is evaluated after every Part 3 write, and
-        the Head's approval is a Part 3 write. The package must complete on THAT event
+        the Arka approval is a Part 3 write. The package must complete on THAT event
         rather than needing the designer to touch the CAD again.
+
+        W-1: the completing approval is Design QC's (was the Head's separate Arka approval,
+        reached via `awaiting_head_arka`); it completes the package in the same request.
         """
         self._login(self.designer)
         self._submit_arka()
@@ -247,12 +247,8 @@ class CombinedArkaAndCadTests(CombinedSubmissionBase):
 
         self._qc_approve()
         self.assignment.refresh_from_db()
-        self.assertEqual(self.assignment.status, DESIGN_AWAITING_HEAD_ARKA)
-
-        self._head_approve()
-        self.assignment.refresh_from_db()
         self.assertEqual(self.assignment.status, DESIGN_ARTIFACTS_UPLOADED,
-                         'the Head\'s approval is what completed it, with no re-upload')
+                         'QC\'s approval is what completed it, with no re-upload')
 
 
 # ===========================================================================
@@ -446,8 +442,8 @@ class RejectionAfterCombinedSubmissionTests(CombinedSubmissionBase):
         self._qc_reject()
         self._login(self.designer)
         self._submit_arka(capacity='140.00')
+        # W-1: QC's approval completes it (was: QC, then the Head's Arka approval).
         self._qc_approve()
-        self._head_approve()
 
         self.assignment.refresh_from_db()
         attempt = _current_attempt(self.assignment)
@@ -455,7 +451,7 @@ class RejectionAfterCombinedSubmissionTests(CombinedSubmissionBase):
         v2  = _current_arka(attempt)
 
         self.assertEqual(self.assignment.status, DESIGN_ARTIFACTS_UPLOADED)
-        self.assertEqual(v2.head_verdict, ARKA_APPROVED)
+        self.assertEqual(v2.verdict, ARKA_APPROVED)
         self.assertNotEqual(cad.derived_from_arka_id, v2.pk,
                             'THE GAP: the package is complete on a mismatched drawing')
 

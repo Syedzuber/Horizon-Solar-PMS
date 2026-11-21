@@ -231,7 +231,10 @@ class HeadReviewTextTests(CombinedSubmissionBase):
         for gone in ('CAD and BOQ stay locked until he approves',
                      'Unlocks CAD and BOQ upload for the designer'):
             self.assertNotIn(gone, body)
-        self.assertIn('CAD and\n              BOQ can be submitted independently', body)
+        # W-1: the hint no longer says "Sends it to the Design Head" — QC's approval moves
+        # the site on, and the Head rules on the Arka at the final package review.
+        self.assertIn('Moves the site on.', body)
+        self.assertNotIn('Sends it to the Design Head', body)
 
 
 class DesignerDashboardOffersRealActionsTests(CombinedSubmissionBase):
@@ -288,11 +291,11 @@ class DesignerDashboardOffersRealActionsTests(CombinedSubmissionBase):
         """The approved path is unchanged — the branch was reordered, not rewritten."""
         self._login(self.designer)
         self._submit_arka()
+        # W-1: QC's approval is the Arka's only one (was: QC, then the Head).
         self._qc_approve()
-        self._head_approve()
 
         self.assignment.refresh_from_db()
-        self.assertEqual(_current_arka(_current_attempt(self.assignment)).head_verdict,
+        self.assertEqual(_current_arka(_current_attempt(self.assignment)).verdict,
                          ARKA_APPROVED)
         self.assertEqual(self._card()['action_label'], 'Upload CAD')
 

@@ -12,7 +12,9 @@ stood the old version down with its verdict pending forever (EXECUTION_MODULE_DE
 
 THE RULES UNDER TEST (D18 Part B sign-off, 17 Sep 2026)
   R1  a lift restores the from-status of the hold's own StatusTransition row, but only when that
-      status is `arka_submitted` or `awaiting_head_arka`; every other from-status is derived
+      status is `arka_submitted`; every other from-status is derived. W-1 (21 Nov 2026): the
+      Head's separate Arka approval is gone, so a legacy hold from `awaiting_head_arka`
+      restores `arka_submitted` (the Arka is QC-approved, the designer owes the rest)
   R2  ...and only when the current Arka is in the state that status implies; otherwise
       derived, with a warning
   R3  a hold with no ledger row of its own is derived, with a warning, and never refused
@@ -137,15 +139,11 @@ class HoldRestoreBase(TestCase):
         self._submit_arka(site)
         return site
 
-    def _awaiting_head_arka(self, code):
-        site = self._arka_submitted(code)
-        self._step(self.qc, 'design_arka_approve', site, DESIGN_AWAITING_HEAD_ARKA)
-        return site
-
     def _arka_approved(self, code):
-        """`arka_submitted` with v1 approved at both gates: the artifacts are outstanding."""
-        site = self._awaiting_head_arka(code)
-        self._step(self.head, 'design_arka_head_approve', site, DESIGN_ARKA_SUBMITTED)
+        """`arka_submitted` with v1 approved by Design QC: the artifacts are outstanding.
+        W-1: QC's approval is the Arka's only gate (this used to need the Head's as well)."""
+        site = self._arka_submitted(code)
+        self._step(self.qc, 'design_arka_approve', site, DESIGN_ARKA_SUBMITTED)
         return site
 
     def _upload_cad(self, site):
@@ -230,7 +228,9 @@ class RestoreFromArkaSubmittedTests(HoldRestoreBase):
                           (DESIGN_SURVEY_RETURNED, DESIGN_ARKA_SUBMITTED)])
         # Back in the reviewer's queue, and the verdict can actually be recorded.
         self.assertIn(self._review_link(site), self._queue_html(self.qc))
-        self._step(self.qc, 'design_arka_approve', site, DESIGN_AWAITING_HEAD_ARKA)
+        # W-1: the approval moves the site on; with no CAD or BOQ it stays arka_submitted.
+        self._step(self.qc, 'design_arka_approve', site, DESIGN_ARKA_SUBMITTED)
+        self.assertEqual(self._arka(site).verdict, ARKA_APPROVED)
 
     def test_02_lift_by_upload_restores(self):
         site = self._arka_submitted('HRS-R1-FILE')
@@ -240,7 +240,7 @@ class RestoreFromArkaSubmittedTests(HoldRestoreBase):
         self.assertEqual(ActivityLog.objects.filter(project=site).latest('id').action_code,
                          'design_survey_unblocked')
 
-    def test_03_approved_at_both_gates_restores_and_resubmission_stays_closed(self):
+    def test_03_qc_approved_restores_and_resubmission_stays_closed(self):
         """The "artifacts outstanding" state. Derived, it came back at `in_design`, where
         ARKA_SUBMITTABLE_STATUSES lets the designer stand an approved Arka down."""
         site = self._arka_approved('HRS-R1-APPR')
@@ -253,26 +253,34 @@ class RestoreFromArkaSubmittedTests(HoldRestoreBase):
                     'remarks': ''})
         self.assertEqual(ArkaSubmission.objects.filter(attempt__assignment__project=site).count(), 1)
         arka = self._arka(site)
+        # W-1: QC's approval only; the Head no longer rules on the Arka separately.
         self.assertEqual((arka.version, arka.verdict, arka.head_verdict),
-                         (1, ARKA_APPROVED, ARKA_APPROVED))
+                         (1, ARKA_APPROVED, ARKA_PENDING))
 
 
 # ===========================================================================
-# R1 — a hold from `awaiting_head_arka` restores it
+# W-1 — a legacy hold from `awaiting_head_arka` restores `arka_submitted`
 # ===========================================================================
 
 class RestoreFromAwaitingHeadArkaTests(HoldRestoreBase):
 
-    def test_01_lift_restores_and_the_head_can_rule(self):
-        site = self._awaiting_head_arka('HRS-R1-HEAD')
+    def test_01_a_legacy_hold_restores_arka_submitted_with_the_designer(self):
+        """Was: the lift restored `awaiting_head_arka` and the Head could rule. W-1 removed
+        the Head's Arka step, so restoring that status would strand the site. Nothing writes
+        `awaiting_head_arka` any more, so apply_design_status() places this legacy site there,
+        as a pre-W-1 QC approval did."""
+        site = self._arka_approved('HRS-R1-HEAD')
+        apply_design_status(self._a(site), DESIGN_AWAITING_HEAD_ARKA, self.qc,
+                            'legacy: QC approved, awaiting the Head (pre-W-1)',
+                            'design_arka_qc_approved')
         self._held(site)
         self._lift_by_link(site)
 
-        self.assertEqual(self._a(site).status, DESIGN_AWAITING_HEAD_ARKA)
+        self.assertEqual(self._a(site).status, DESIGN_ARKA_SUBMITTED)
         arka = self._arka(site)
         self.assertEqual((arka.verdict, arka.head_verdict), (ARKA_APPROVED, ARKA_PENDING))
-        self.assertIn(self._review_link(site), self._queue_html(self.head))
-        self._step(self.head, 'design_arka_head_approve', site, DESIGN_ARKA_SUBMITTED)
+        # With the designer, owing CAD and BOQ — not in anybody's Arka review queue.
+        self.assertNotIn(self._review_link(site), self._queue_html(self.qc))
 
 
 # ===========================================================================
@@ -316,23 +324,27 @@ class ArkaMismatchFallbackTests(HoldRestoreBase):
 
     def test_01_a_verdict_edited_out_of_band_during_the_hold_derives(self):
         """No product path records a verdict during a hold (VerdictDuringHoldTests). The Arka
-        admin can: `verdict` is editable there, and this save() is that edit."""
+        admin can: `head_verdict` is editable there, and this save() is that edit.
+
+        W-1: the edit used to be QC's `verdict`; "QC approved, Head pending" is now a
+        legitimate `arka_submitted` state, so it no longer mismatches. A Head approval with
+        QC still pending breaks the serial rule and still does."""
         site = self._arka_submitted('HRS-R2-EDIT')
         self._held(site)
         arka = self._arka(site)
-        arka.verdict = ARKA_APPROVED
-        arka.save(update_fields=['verdict'])
+        arka.head_verdict = ARKA_APPROVED
+        arka.save(update_fields=['head_verdict'])
 
         with self.assertLogs(LOGGER, 'WARNING') as logs:
             self._lift_by_link(site)
 
         self.assertEqual(self._a(site).status, DESIGN_IN_DESIGN)
         self.assertTrue(any('HRS-R2-EDIT' in line and 'arka_submitted' in line
-                            and 'qc=approved head=pending' in line and '§D18 R2' in line
+                            and 'qc=pending head=approved' in line and '§D18 R2' in line
                             for line in logs.output), logs.output)
 
     def test_02_no_current_arka_derives(self):
-        site = self._awaiting_head_arka('HRS-R2-GONE')
+        site = self._arka_approved('HRS-R2-GONE')
         self._held(site)
         ArkaSubmission.objects.filter(attempt__assignment__project=site).update(is_current=False)
 
@@ -501,17 +513,21 @@ class VerdictDuringHoldTests(HoldRestoreBase):
         self.assertEqual(self._arka(site).verdict, ARKA_PENDING)
 
         self._lift_by_link(site)
-        self._step(self.qc, 'design_arka_approve', site, DESIGN_AWAITING_HEAD_ARKA)
+        # W-1: QC's approval moves the site on (was: to the Head's Arka step).
+        self._step(self.qc, 'design_arka_approve', site, DESIGN_ARKA_SUBMITTED)
 
-    def test_02_the_head_is_refused_during_the_hold(self):
-        site = self._awaiting_head_arka('HRS-V-HEAD')
+    def test_02_a_qc_approved_arka_on_hold_is_not_moved_by_a_qc_post(self):
+        """Was: the Head's Arka verdict was refused during the hold. That verdict no longer
+        exists (W-1); the remaining Arka endpoint must still refuse to move a held site."""
+        site = self._arka_approved('HRS-V-HEAD')
         self._held(site)
-        self._post(self.head, 'design_arka_head_approve', site)
+        ledger_before = len(self._ledger(site))
+        self._post(self.qc, 'design_arka_approve', site)
         self.assertEqual(self._a(site).status, DESIGN_SURVEY_RETURNED)
-        self.assertEqual(self._arka(site).head_verdict, ARKA_PENDING)
+        self.assertEqual(len(self._ledger(site)), ledger_before)
 
         self._lift_by_link(site)
-        self._step(self.head, 'design_arka_head_approve', site, DESIGN_ARKA_SUBMITTED)
+        self.assertEqual(self._a(site).status, DESIGN_ARKA_SUBMITTED)
 
 
 # ===========================================================================

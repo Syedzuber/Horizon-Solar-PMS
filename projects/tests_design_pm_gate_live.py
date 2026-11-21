@@ -56,7 +56,7 @@ from .models import (
     BOQ, BOQItem, BOQItemMaster, DesignAssignment, Program, Project, SiteGroupMembership,
     StatusTransition, Task,
     ATTEMPT_REASON_PM_REJECTED, DESIGN_ARKA_SUBMITTED, DESIGN_ARTIFACTS_UPLOADED,
-    DESIGN_AWAITING_ALLOCATION, DESIGN_AWAITING_HEAD_ARKA, DESIGN_AWAITING_HEAD_QC,
+    DESIGN_AWAITING_ALLOCATION, DESIGN_AWAITING_HEAD_QC,
     DESIGN_AWAITING_PM_APPROVAL, DESIGN_FILE_CAD_ZIP, DESIGN_IN_DESIGN, DESIGN_IN_QC,
     DESIGN_PM_REJECTED, DESIGN_RELEASED, ERR_LAYOUT, ERR_SURVEY_INADEQUATE, ERROR_GROUP_A,
     ERROR_GROUP_B, QC_PASSED, REASON_DESIGN_HEAD_PASSED, REASON_DESIGN_HEAD_RETURNED_TO_PM,
@@ -349,8 +349,9 @@ class LiveGateBase(TestCase):
         self._step(self.designer, 'design_arka_submit', site, DESIGN_ARKA_SUBMITTED,
                    {'capacity_kw': '120.00', 'arka_link': 'https://example.com/arka',
                     'remarks': ''})
-        self._step(self.qc, 'design_arka_approve', site, DESIGN_AWAITING_HEAD_ARKA)
-        self._step(self.head, 'design_arka_head_approve', site, DESIGN_ARKA_SUBMITTED)
+        # W-1: QC's Arka approval is the only Arka gate; with no CAD or BOQ yet the site
+        # stays at `arka_submitted`, owed by the designer. (Was QC approve -> Head approve.)
+        self._step(self.qc, 'design_arka_approve', site, DESIGN_ARKA_SUBMITTED)
         self._upload_cad(site)
         if not BOQ.objects.filter(project=site).exists():
             boq = BOQ.objects.create(project=site, status='Draft')

@@ -1,19 +1,20 @@
 {% extends "base.html" %}
 {% comment %}
-Arka review for ONE OPEX site — BOTH GATES (Part 3, rebuilt by Part 9).
+Arka review for ONE OPEX site (Part 3, rebuilt by Part 9, narrowed by W-1).
 
 Bootstrap extending base.html with the Design dashboard's `.chip` pills, same as
 site_workspace.html and head_sites.html. Not Tailwind — see finding E3.
 
-TWO REVIEWERS, ONE SCREEN. Design QC rules first, the Design Head second, and they look at
-exactly the same Arka — so this renders one card and swaps which action block is inside it.
-`can_qc_verdict` and `can_head_verdict` are mutually exclusive by construction (they
-require different assignment statuses), so at most one form is ever on the page.
+ONE GATE SINCE W-1 (21 Nov 2026). Design QC rules on the Arka; its approval moves the site
+on. The Design Head's separate Arka approve / reject forms are gone — the Head rules on the
+Arka, the CAD and the BOQ together at the package gate (qc_review.html) — so the Head sees
+this screen read-only. `can_move_on_legacy` is the W-1 fallback for a site still parked at
+`awaiting_head_arka`: QC already approved it, so the only action is to move it on. It and
+`can_qc_verdict` need different statuses, so at most one form is ever on the page.
 
-EVERY BUTTON HERE IS A CONVENIENCE, NOT A GATE. design_arka_approve / _reject and
-design_arka_head_approve / _reject each re-check the flag, the self-review exclusion, the
-one-person-two-verdicts rule and the preceding gate on POST, so a direct POST to a bare
-URL is refused exactly as a hidden button would have prevented.
+EVERY BUTTON HERE IS A CONVENIENCE, NOT A GATE. design_arka_approve / _reject re-check the
+flag, the self-review exclusion, the one-person-two-verdicts rule and the status on POST,
+so a direct POST to a bare URL is refused exactly as a hidden button would have prevented.
 {% endcomment %}
 
 {% block title %}Arka review — {{ project.project_id }} — SolarPMS{% endblock %}
@@ -42,18 +43,17 @@ URL is refused exactly as a hidden button would have prevented.
 
 {% include "projects/design/_design_status_chips.html" %}
 
-{# ── Verdict — gate 1 (Design QC) or gate 2 (Design Head) ────────────────── #}
+{# ── Verdict — Design QC, the Arka's only gate (W-1) ─────────────────────── #}
 <div class="card shadow-sm mb-3">
   <div class="card-header bg-white py-2 fw-semibold small d-flex justify-content-between">
     <span>Pending Arka</span>
-    {% if can_qc_verdict %}<span class="badge bg-primary-subtle text-primary-emphasis">Gate 1 · Design QC</span>
-    {% elif can_head_verdict %}<span class="badge bg-info-subtle text-info-emphasis">Gate 2 · Design Head</span>
+    {% if can_qc_verdict or can_move_on_legacy %}<span class="badge bg-primary-subtle text-primary-emphasis">Design QC</span>
     {% endif %}
   </div>
   <div class="card-body py-3">
 
-    {% if can_qc_verdict or can_head_verdict %}
-      {# The Arka itself, identical for both reviewers. #}
+    {% if can_qc_verdict or can_move_on_legacy %}
+      {# The Arka itself. #}
       <div class="mb-3">
         <div>
           <span class="ver-tag">Arka v{{ arka.version }}</span>
@@ -66,7 +66,7 @@ URL is refused exactly as a hidden button would have prevented.
           Submitted {{ arka.submitted_at|date:"d M Y H:i" }} by
           {{ arka.submitted_by.user.get_full_name|default:arka.submitted_by.user.username }}
         </div>
-        {% if can_head_verdict %}
+        {% if can_move_on_legacy %}
           <div class="small mt-2">
             Passed Design QC
             {% if arka.reviewed_by %}by {{ arka.reviewed_by.user.get_full_name|default:arka.reviewed_by.user.username }}{% endif %}
@@ -78,14 +78,11 @@ URL is refused exactly as a hidden button would have prevented.
 
     {% if can_qc_verdict %}
       {% comment %}
-      GATE 1 — Design QC. Approval hands the Arka to the Head, and that is ALL it does.
-
-      It used to say "it does NOT unlock CAD or BOQ, which now need
-      head_verdict='approved'" — true when both artifacts were gated on the Arka, false
-      since. Neither gate unlocks anything now: the CAD travels with the Arka submission
-      (it records which version it was drawn against, but that version needs no verdict)
-      and the BOQ is not gated on the Arka at all. What the two verdicts still decide is
-      whether the PACKAGE may complete.
+      Design QC — the Arka's only gate since W-1. Approval moves the site on: if the CAD and
+      BOQ are already in, the package is complete and comes back to Design QC; otherwise the
+      designer owes them. It unlocks nothing — the CAD travels with the Arka submission and
+      the BOQ is not gated on the Arka at all. The Head rules on this Arka later, at the
+      package gate.
       {% endcomment %}
       <div class="row g-3">
         <div class="col-md-4">
@@ -93,8 +90,8 @@ URL is refused exactly as a hidden button would have prevented.
             {% csrf_token %}
             <button class="btn btn-sm btn-success">Pass QC — Arka v{{ arka.version }}</button>
             <div class="text-muted mt-1" style="font-size:.7rem;">
-              Sends it to the Design Head. The designer is not waiting on this — CAD and
-              BOQ can be submitted independently; only the package needs both verdicts.
+              Moves the site on. If the CAD and BOQ are already in, the package is ready for
+              Design QC; the Design Head rules on the Arka at the final package review.
             </div>
           </form>
         </div>
@@ -128,74 +125,45 @@ URL is refused exactly as a hidden button would have prevented.
         </div>
       </div>
 
-    {% elif can_head_verdict %}
+    {% elif can_move_on_legacy %}
       {% comment %}
-      GATE 2 — the Design Head. This used to be labelled "THIS approval unlocks CAD and
-      BOQ"; it unlocks neither, and nothing else is waiting on it either. It is the
-      verdict the PACKAGE waits on: with the CAD and the BOQ already in, this approval is
-      the event that completes the attempt.
+      W-1 fallback. This site reached `awaiting_head_arka` before the Head's separate Arka
+      approval was removed. Design QC has already approved the Arka, so nothing is recorded
+      here: the button only moves the site on, exactly as a QC approval now does
+      (design_arka_approve's legacy branch).
       {% endcomment %}
-      <div class="row g-3">
-        <div class="col-md-4">
-          <form method="post" action="{% url 'design_arka_head_approve' project_id=project.project_id %}">
-            {% csrf_token %}
-            <button class="btn btn-sm btn-success">Approve Arka v{{ arka.version }}</button>
-            <div class="text-muted mt-1" style="font-size:.7rem;">
-              Completes the design package, if the CAD and BOQ are already in.
-            </div>
-          </form>
+      <form method="post" action="{% url 'design_arka_approve' project_id=project.project_id %}">
+        {% csrf_token %}
+        <button class="btn btn-sm btn-success">Move on — Arka v{{ arka.version }}</button>
+        <div class="text-muted mt-1" style="font-size:.7rem;">
+          This Arka already passed Design QC and was waiting for the Design Head's separate
+          approval, which no longer exists. Moving it on sends it to the designer, or straight
+          to Design QC if the CAD and BOQ are already in.
         </div>
+      </form>
 
-        <div class="col-md-8">
-          <form method="post" action="{% url 'design_arka_head_reject' project_id=project.project_id %}">
-            {% csrf_token %}
-            <div class="row g-2 align-items-end">
-              <div class="col-md-6">
-                {% include "projects/design/_error_category_select.html" with cat_id="head_arka_cat" %}
-              </div>
-              <div class="col-md-6">
-                <label for="head_arka_reason" class="form-label small mb-1">
-                  Reason <span class="text-danger">*</span>
-                </label>
-                <input type="text" name="rejection_reason" id="head_arka_reason"
-                       class="form-control form-control-sm"
-                       placeholder="Why is it rejected?" required>
-                <div class="text-muted mt-1" style="font-size:.7rem;">
-                  Recorded as overturning the Design QC approval.
-                </div>
-              </div>
-            </div>
-            <button class="btn btn-sm btn-outline-danger mt-2">Reject as Design Head</button>
-          </form>
-        </div>
-      </div>
-
-    {% elif blocked_by_own_qc_verdict %}
-      {# Settled decision 2, explained rather than rendered as an empty card. #}
-      <div class="alert alert-warning small mb-0 py-2">
-        <strong>You passed Arka v{{ arka.version }} through Design QC yourself.</strong>
-        The Design Head verdict on the same Arka has to come from somebody else — two
-        verdicts by one person is not a second review.
-      </div>
-
-    {% elif arka and arka.head_verdict == 'approved' %}
-      <div class="small">
-        <span class="ver-tag">Arka v{{ arka.version }}</span> approved at both gates
-        {% if arka.head_reviewed_by %}— Design Head {{ arka.head_reviewed_by.user.get_full_name|default:arka.head_reviewed_by.user.username }}{% endif %}
-        {% if arka.head_reviewed_at %}on {{ arka.head_reviewed_at|date:"d M Y H:i" }}{% endif %}.
-        Nothing to review — waiting on the designer's CAD and BOQ.
-      </div>
-    {% elif arka and arka.verdict == 'approved' %}
-      <div class="small">
-        <span class="ver-tag">Arka v{{ arka.version }}</span> passed Design QC
-        {% if arka.reviewed_by %}by {{ arka.reviewed_by.user.get_full_name|default:arka.reviewed_by.user.username }}{% endif %}
-        {% if arka.reviewed_at %}on {{ arka.reviewed_at|date:"d M Y H:i" }}{% endif %}.
-        Awaiting the Design Head's approval.
-      </div>
     {% elif arka and arka.head_verdict == 'rejected' %}
+      {# Pre-W-1 history: checked before the QC approval, which such a row also carries. #}
       <div class="small">
         <span class="ver-tag">Arka v{{ arka.version }}</span> rejected by the Design Head,
         overturning Design QC. Waiting for the designer to submit v{{ arka.version|add:1 }}.
+      </div>
+    {% elif arka and arka.verdict == 'approved' %}
+      {% comment %}
+      W-1: QC's approval is the Arka's only one. This used to say "Awaiting the Design Head's
+      approval"; the Head now rules on the Arka at the final package review instead.
+      {% endcomment %}
+      <div class="small">
+        <span class="ver-tag">Arka v{{ arka.version }}</span> approved by Design QC
+        {% if arka.reviewed_by %}({{ arka.reviewed_by.user.get_full_name|default:arka.reviewed_by.user.username }}){% endif %}
+        {% if arka.reviewed_at %}on {{ arka.reviewed_at|date:"d M Y H:i" }}{% endif %}.
+        {% if assignment.status == 'arka_submitted' %}
+          Nothing to review — waiting on the designer's CAD and BOQ.
+        {% elif assignment.status == 'awaiting_head_arka' %}
+          Waiting for Design QC to move it on.
+        {% else %}
+          The Design Head rules on it with the CAD and BOQ at the final package review.
+        {% endif %}
       </div>
     {% elif arka and arka.verdict == 'rejected' %}
       <div class="small">

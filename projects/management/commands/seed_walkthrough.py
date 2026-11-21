@@ -489,7 +489,10 @@ def independent_aging_figures(now):
 
 
 #: The design route, in order. `upto` names the last step taken.
-DESIGN_ROUTE = ['survey', 'allocate', 'arka', 'arka_qc', 'arka_head', 'cad', 'boq',
+#: W-1 (21 Nov 2026): no 'arka_head' step — the Design Head's separate Arka approval was
+#: removed. Design QC's Arka approval moves the site on, and the Head rules on the Arka at
+#: 'head_pass' together with the CAD and BOQ.
+DESIGN_ROUTE = ['survey', 'allocate', 'arka', 'arka_qc', 'cad', 'boq',
                 'qc_start', 'qc_pass', 'head_pass', 'pm_approve']
 
 
@@ -873,13 +876,11 @@ class Command(BaseCommand):
                        check=self._expect(site, m.DESIGN_ARKA_SUBMITTED),
                        what=f'{site.project_id} Arka submit')
         elif step == 'arka_qc':
+            # W-1: QC's approval is the Arka's only gate. No CAD or BOQ yet on this route,
+            # so the site stays at `arka_submitted` with the designer owing them.
             self._post('walk.designqc', 'design_arka_approve', pid,
-                       check=self._expect(site, m.DESIGN_AWAITING_HEAD_ARKA),
-                       what=f'{site.project_id} Arka gate 1')
-        elif step == 'arka_head':
-            self._post('walk.designhead', 'design_arka_head_approve', pid,
                        check=self._expect(site, m.DESIGN_ARKA_SUBMITTED),
-                       what=f'{site.project_id} Arka gate 2')
+                       what=f'{site.project_id} Arka QC approval')
         elif step == 'cad':
             self._post('walk.design', 'design_artifact_upload', pid,
                        {'kind': m.DESIGN_FILE_CAD_ZIP, 'artifact_file': self._cad_upload(),

@@ -104,8 +104,9 @@ class PendingAtBase(TestCase):
         assignment.save(update_fields=['current_attempt_number'])
         return attempt
 
-    def _arka(self, attempt, head_verdict=ARKA_PENDING):
-        """The current Arka on `attempt`, at the Head verdict asked for.
+    def _arka(self, attempt, head_verdict=ARKA_PENDING, verdict=ARKA_PENDING):
+        """The current Arka on `attempt`, at the verdicts asked for. W-1: `verdict` (QC's)
+        is what splits `arka_submitted` now, so the approved fixtures set it.
 
         `head_rejection_reason` is filled on the rejected branch because the Part 1 CHECK
         constraint head_rejection_reason_required_when_head_rejected demands it — a Head
@@ -115,7 +116,7 @@ class PendingAtBase(TestCase):
         return ArkaSubmission.objects.create(
             attempt=attempt, version=1, capacity_kw=Decimal('100.00'),
             arka_link='https://example.com/arka', submitted_by=self.designer,
-            verdict=ARKA_PENDING, head_verdict=head_verdict,
+            verdict=verdict, head_verdict=head_verdict,
             head_rejection_reason=('Setback not met.'
                                    if head_verdict == ARKA_REJECTED else ''),
             is_current=True)
@@ -278,13 +279,15 @@ class PendingAtArkaSubmittedTests(PendingAtBase):
     `awaiting_head_arka` and never reaches this branch.)
     """
 
-    def _arka_site(self, code, head_verdict, qc=None):
+    def _arka_site(self, code, head_verdict, qc=None, verdict=ARKA_PENDING):
         _, assignment = self._site(code, status=DESIGN_ARKA_SUBMITTED, qc=qc)
         attempt = self._attempt(assignment)
-        return assignment, self._arka(attempt, head_verdict=head_verdict)
+        return assignment, self._arka(attempt, head_verdict=head_verdict, verdict=verdict)
 
-    def test_01_head_approved_arka_is_back_with_the_designer(self):
-        assignment, arka = self._arka_site('PA-ARK-A', ARKA_APPROVED)
+    def test_01_qc_approved_arka_is_back_with_the_designer(self):
+        """W-1: QC's approval is the Arka's only one (was: the Head's approval, set here on
+        a fixture whose QC verdict was still pending)."""
+        assignment, arka = self._arka_site('PA-ARK-A', ARKA_PENDING, verdict=ARKA_APPROVED)
         self.assertEqual(design_pending_at(assignment, arka), PENDING_AT_DESIGNER)
 
     def test_02_an_unapproved_arka_is_a_qc_stage(self):
@@ -347,11 +350,11 @@ class PendingAtChangeRequestTests(PendingAtBase):
             PENDING_AT_CHANGE_REQUEST)
 
     def test_03_it_outranks_the_arka_split_as_well(self):
-        """The override is tested BEFORE the Arka branch, so a head-approved Arka does not
-        get to answer "Designer" over a suspended gate."""
+        """The override is tested BEFORE the Arka branch, so a QC-approved Arka does not
+        get to answer "Designer" over a suspended gate. (W-1: was head-approved.)"""
         _, assignment = self._site('PA-CR-ARK', status=DESIGN_ARKA_SUBMITTED)
         attempt = self._attempt(assignment)
-        arka = self._arka(attempt, head_verdict=ARKA_APPROVED)
+        arka = self._arka(attempt, verdict=ARKA_APPROVED)
         self.assertEqual(design_pending_at(assignment, arka), PENDING_AT_DESIGNER)
         self.assertEqual(
             design_pending_at(assignment, arka, change_request_pending=True),

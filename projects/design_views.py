@@ -228,10 +228,12 @@ ARKA_SUBMITTABLE_STATUSES = (DESIGN_IN_DESIGN, DESIGN_ARKA_REJECTED)
 # review and after), and tests_design_hold_restore pins work continuing through the hold.
 # A hold taken before any Arka is still refused by _require_current_arka().
 #
-# `awaiting_head_arka` goes away in W-1; drop it here then.
+# `awaiting_head_arka` IS OUT (W-1, 21 Nov 2026): the Head's separate Arka approval is gone
+# and nothing writes that status any more. A legacy site still parked there is moved on by
+# Design QC (design_arka_approve's legacy branch), which returns it to `arka_submitted` and
+# so reopens uploads.
 DESIGN_UPLOAD_OPEN_STATUSES = (DESIGN_IN_DESIGN, DESIGN_ARKA_SUBMITTED, DESIGN_ARKA_REJECTED,
-                               DESIGN_AWAITING_HEAD_ARKA, DESIGN_SURVEY_RETURNED,
-                               DESIGN_ARTIFACTS_UPLOADED)
+                               DESIGN_SURVEY_RETURNED, DESIGN_ARTIFACTS_UPLOADED)
 
 
 def _design_uploads_open(assignment, attempt):
@@ -290,12 +292,11 @@ KIND_LABELS = dict(DESIGN_FILE_KIND_CHOICES)
 # PART 9 added the two waiting-room statuses. `awaiting_head_qc` genuinely needs to be
 # here: the package has passed Design QC and is sitting with the Head, `qc_started_at` is
 # set and the site is not released, so the window is open by every term of the rule above.
-# `awaiting_head_arka` is included for completeness and is unreachable in practice —
-# `qc_started_at` is still null at the Arka stage, so the check below refuses it first.
+# `awaiting_head_arka` WAS here "for completeness" and is now OUT (W-1): nothing writes it,
+# and `qc_started_at` is null at the Arka stage, so it could never pass the check below.
 CHANGE_REQUEST_STATUSES = (DESIGN_IN_QC, DESIGN_QC_FAILED, DESIGN_IN_DESIGN,
                            DESIGN_ARKA_SUBMITTED, DESIGN_ARKA_REJECTED,
-                           DESIGN_ARTIFACTS_UPLOADED,
-                           DESIGN_AWAITING_HEAD_ARKA, DESIGN_AWAITING_HEAD_QC)
+                           DESIGN_ARTIFACTS_UPLOADED, DESIGN_AWAITING_HEAD_QC)
 
 
 # ── Part 9 ─────────────────────────────────────────────────────────────────────
@@ -320,13 +321,19 @@ CHANGE_REQUEST_STATUSES = (DESIGN_IN_QC, DESIGN_QC_FAILED, DESIGN_IN_DESIGN,
 # whose QC verdict somebody else recorded, which is the normal way a Head with the QC flag
 # actually works.
 #
-# STATUS AFTER A HEAD ARKA APPROVAL IS `arka_submitted`, NOT a new value. Part 3 settled
+# W-1 (ruling 1, Praveen, 21 Nov 2026) — THE ARKA NOW HAS ONE GATE, NOT TWO. Design QC's
+# approval is enough to move the site on; the Head rules on the Arka, the CAD and the BOQ
+# together at the package gate (design_head_qc_pass / _fail), and may fail any of them
+# there. So everything above about the Arka's second gate is history: the Head's Arka
+# views, routes and flags are gone, and `awaiting_head_arka` is a legacy value nothing
+# writes. The two-people protection that gate gave is kept at the package gate — the Head
+# may not give the final verdict on an attempt whose Arka they QC'd themselves.
+#
+# STATUS AFTER THE ARKA QC APPROVAL IS `arka_submitted`, NOT a new value. Part 3 settled
 # that there is no status for "Arka approved, artifacts outstanding" — the verdict on the
-# current Arka disambiguates, and design_metrics._classify() already splits the two. Part 9
-# keeps that exactly: QC approval moves the site to `awaiting_head_arka`, and the Head's
-# approval returns it to `arka_submitted`, now carrying head_verdict='approved'. The site
-# is not going backwards; `awaiting_head_arka` means strictly "the Head has not ruled", so
-# the site must leave it the moment he does.
+# current Arka disambiguates, and design_metrics._classify() splits the two on QC's
+# `verdict`. If the CAD and BOQ are already in, the same request goes on to
+# `artifacts_uploaded`.
 
 
 # ---------------------------------------------------------------------------
@@ -354,23 +361,28 @@ def _get_or_create_assignment(project):
 def _arka_matches_status(arka, status):
     """Whether the current Arka `arka` is in the state `status` says it is in. STRICT.
 
-        arka_submitted      QC and Head both pending (Design QC owes the verdict), OR both
-                            approved (the "artifacts outstanding" state of the Part 9 note)
-        awaiting_head_arka  QC approved, Head pending
+        arka_submitted      QC and Head both pending (Design QC owes the verdict), OR QC
+                            approved and the Head not against it (the "artifacts
+                            outstanding" state of the Part 9 / W-1 note)
+
+    W-1: the second reading used to demand head_verdict='approved'. The Head no longer rules
+    on the Arka, so a QC-approved Arka now carries head_verdict='pending' for good, and
+    pre-W-1 rows still carry 'approved' — both are the same state. 'rejected' is not: a Head
+    rejection moved the site to `arka_rejected`, so finding one at `arka_submitted` is an
+    out-of-band edit. `awaiting_head_arka` is no longer a restorable status (a legacy hold
+    taken from it is mapped to `arka_submitted` by _arka_status_before_hold()).
 
     Every other combination, a missing Arka included, is False. Through the product a
-    verdict cannot land while the site is `survey_returned`: _verdict_target() and
-    _head_verdict_target() both test the status first. A mismatch here therefore means an
-    out-of-band edit, and ArkaSubmissionAdmin can make one — `verdict`, `head_verdict` and
-    `is_current` are all editable there. The lift does not guess what that edit meant.
+    verdict cannot land while the site is `survey_returned`: _verdict_target() tests the
+    status first. A mismatch here therefore means an out-of-band edit, and
+    ArkaSubmissionAdmin can make one — `verdict`, `head_verdict` and `is_current` are all
+    editable there. The lift does not guess what that edit meant.
     """
     if arka is None:
         return False
     if status == DESIGN_ARKA_SUBMITTED:
         return ((arka.verdict == ARKA_PENDING and arka.head_verdict == ARKA_PENDING)
-                or (arka.verdict == ARKA_APPROVED and arka.head_verdict == ARKA_APPROVED))
-    if status == DESIGN_AWAITING_HEAD_ARKA:
-        return arka.verdict == ARKA_APPROVED and arka.head_verdict == ARKA_PENDING
+                or (arka.verdict == ARKA_APPROVED and arka.head_verdict != ARKA_REJECTED))
     return False
 
 
@@ -397,11 +409,16 @@ def _arka_status_before_hold(assignment):
          refused by the commits that added them (c212043, 9104ee7). Deriving returns such a
          site to `in_design` on the same
          attempt, which is the §D13 defect; it is logged for repair, not repeated silently.
-      3. THE HOLD WAS TAKEN FROM ANYTHING BUT THE TWO ARKA STATUSES -> None, silently. The
+      3. THE HOLD WAS TAKEN FROM ANYTHING BUT `arka_submitted` -> None, silently. The
          derivation reads the current rows and is right for them (a date approved during
          the hold, say), where the stored from-status could be stale.
       4. THE CURRENT ARKA DOES NOT MATCH THAT STATUS -> None, with a warning (see
-         _arka_matches_status). Otherwise, the from-status.
+         _arka_matches_status). Otherwise, `arka_submitted`.
+
+    W-1 — A LEGACY HOLD FROM `awaiting_head_arka` restores `arka_submitted`. That status
+    meant "QC approved, the Head has not ruled"; with the Head's Arka approval gone, the
+    same Arka is simply QC-approved, which is the `arka_submitted` "artifacts outstanding"
+    state. Restoring the old status would park the site where no screen moves it on.
     """
     hold = (DesignAssignment.objects.filter(pk=assignment.pk)
             .annotate(hold_from=latest_design_transition(
@@ -424,7 +441,10 @@ def _arka_status_before_hold(assignment):
                        'derived status.', site, from_status)
         return None
 
-    if from_status not in (DESIGN_ARKA_SUBMITTED, DESIGN_AWAITING_HEAD_ARKA):
+    # W-1: a hold row written before the Head's Arka approval was removed. See the docstring.
+    if from_status == DESIGN_AWAITING_HEAD_ARKA:
+        from_status = DESIGN_ARKA_SUBMITTED
+    if from_status != DESIGN_ARKA_SUBMITTED:
         return None
 
     arka = _current_arka(_current_attempt(assignment))
@@ -451,7 +471,10 @@ def _status_after_unblock(assignment):
     and the current Arka both say the site was in review, it goes back into review — see
     _arka_status_before_hold() for the conditions and its three logged fallbacks.
 
-    The two restorable statuses are returned by NAME below, not as the value read from the
+    W-1: `arka_submitted` is now the ONLY restorable status. `awaiting_head_arka` is a
+    legacy value nothing writes, and a legacy hold taken from it restores `arka_submitted`.
+
+    The restorable status is returned by NAME below, not as the value read from the
     ledger, so tests_design_pm_gate_live's parse can still resolve every status a lift can
     write.
 
@@ -468,8 +491,6 @@ def _status_after_unblock(assignment):
     before_hold = _arka_status_before_hold(assignment)
     if before_hold == DESIGN_ARKA_SUBMITTED:
         return DESIGN_ARKA_SUBMITTED
-    if before_hold == DESIGN_AWAITING_HEAD_ARKA:
-        return DESIGN_AWAITING_HEAD_ARKA
 
     if assignment.assigned_to_id is None:
         return DESIGN_AWAITING_ALLOCATION
@@ -1335,14 +1356,15 @@ def apply_design_status(assignment, new_status, actor, detail, action_code,
 
     WHAT IT IS NOT. It is not a state machine and deliberately carries no transition
     table. Whether a move is legal from the current state remains each caller's own job,
-    exactly as before — `_qc_guard()`, `_verdict_target()`, `_head_verdict_target()`,
+    exactly as before — `_qc_guard()`, `_verdict_target()`,
     `REALLOCATABLE_STATUSES`, `ARKA_SUBMITTABLE_STATUSES` and the per-view status tests
     are the guards, and they are per-gate for good reason. Two shapes in this module
-    cannot be expressed as edges between status names at all: `design_arka_head_approve`
-    moves `awaiting_head_arka -> arka_submitted`, which reads backwards and is forwards
-    (the Arka now carries head_verdict='approved'), and `_status_after_unblock()` returns
-    one of three computed values rather than a literal. It is also not a permission
-    check: those need `request`, which this never takes.
+    cannot be expressed as edges between status names at all: design_arka_approve()'s
+    W-1 legacy branch moves `awaiting_head_arka -> arka_submitted`, which reads backwards
+    and is forwards (the Arka is QC-approved and the Head's Arka step no longer exists),
+    and `_status_after_unblock()` returns one of three computed values rather than a
+    literal. It is also not a permission check: those need `request`, which this never
+    takes.
 
     filter().update(), NOT save(). The reason is written out at design_qc_assign() and
     applies identically here: two people acting on one site would otherwise each write a
@@ -3288,19 +3310,24 @@ def _current_arka(attempt):
 
 
 def _approved_arka(attempt):
-    """The current Arka ONLY IF it has cleared BOTH gates. This is the object CAD and BOQ
+    """The current Arka ONLY IF Design QC has approved it. This is the object CAD and BOQ
     artifacts pair to — deliberately not "the most recently approved version", so a
     superseded approval can never become the parent of a new artifact.
 
-    PART 9 MOVED THE TEST FROM `verdict` TO `head_verdict`, and that is the whole change
-    to the Part 3 gate. `verdict='approved'` now means only that Design QC passed it; an
-    Arka the Head has not yet approved is not a layout anybody may build against, so CAD
-    and BOQ stay locked until the second gate clears. Because the serial rule guarantees
-    head_verdict can only be 'approved' after verdict is, testing the Head field alone is
-    sufficient and there is no need to test both.
+    W-1 MOVED THE TEST BACK FROM `head_verdict` TO `verdict`. Part 9 had made the Head's
+    separate Arka approval the one the package waited on; ruling 1 (Praveen, 21 Nov 2026)
+    removed it, so QC's approval is what lets the package complete and the Head rules on
+    the Arka at the package gate instead. Pre-W-1 rows carry both approvals, and a QC
+    approval is present on every one of them, so this test admits them unchanged.
+
+    A PRE-W-1 HEAD REJECTION STILL COUNTS AGAINST. Such a row carries verdict='approved'
+    (QC passed it) and head_verdict='rejected' (the Head overturned it); the site went to
+    `arka_rejected` and the layout was never approved, so it must not read as approved
+    on the screens that call this.
     """
     arka = _current_arka(attempt)
-    if arka is not None and arka.head_verdict == ARKA_APPROVED:
+    if (arka is not None and arka.verdict == ARKA_APPROVED
+            and arka.head_verdict != ARKA_REJECTED):
         return arka
     return None
 
@@ -3366,6 +3393,20 @@ def _other_gate_actor_conflict(profile, other_gate_reviewer_id):
     if profile is None or other_gate_reviewer_id is None:
         return False
     return other_gate_reviewer_id == profile.pk
+
+
+def _own_arka_qc_conflict(profile, attempt):
+    """Whether `profile` gave the Design QC verdict on `attempt`'s current Arka — W-1, T3.
+
+    THE PROTECTION THE REMOVED HEAD ARKA GATE GAVE, MOVED TO THE PACKAGE GATE. That gate
+    refused a Head who had QC'd the Arka himself (settled decision 2). With it gone, the
+    Head's final verdict at the package gate is the Head's ruling on the Arka too, so it is
+    refused — pass AND fail — for the person who gave the Arka's QC verdict on this
+    attempt. A carried-forward Arka copies `reviewed_by` from its original, so a rework
+    attempt keeps the same answer. Head-or-deputy authority is unchanged (F3 open).
+    """
+    arka = _current_arka(attempt)
+    return arka is not None and _other_gate_actor_conflict(profile, arka.reviewed_by_id)
 
 
 def _posted_error_category(request):
@@ -3685,18 +3726,17 @@ def design_site_workspace(request, project_id):
 
 @login_required
 def design_head_review(request, project_id):
-    """The Arka review screen for one site, serving BOTH gates (Part 9).
+    """The Arka review screen for one site. Access: Design QC, the Design Head or his named
+    deputy; the allocated designer is refused by the gate predicates.
 
-    One screen rather than two, because the reviewers are looking at exactly the same
-    thing — the Arka, its capacity, its link and its version history. What differs is
-    which action they may take, and that is decided per gate below and rendered as at most
-    one action block. A user with neither authority gets the read-only view if they can
-    see the site at all.
+    W-1: the Arka has ONE gate now, Design QC's. The Head's Arka verdict form and its
+    own-QC-verdict explanation are gone; the Head sees this screen read-only and rules on
+    the Arka at the package gate (design_qc_review).
 
-    `can_qc_verdict` and `can_head_verdict` are mutually exclusive by construction: they
-    require different statuses. Each additionally carries the settled-decision-2 check, so
-    a dual-flag holder who recorded gate 1 sees no gate-2 form — the refusal is visible
-    before the click, and re-checked server-side when it happens anyway.
+    `can_qc_verdict` is the QC verdict form. `can_move_on_legacy` is the W-1 fallback for a
+    site still parked at `awaiting_head_arka`: QC has already approved its Arka, so the only
+    action is to move it on (design_arka_approve's legacy branch). The two are mutually
+    exclusive by status.
     """
     project = _opex_site(project_id)
     assignment = getattr(project, 'design_assignment', None)
@@ -3721,24 +3761,16 @@ def design_head_review(request, project_id):
         and assignment.status == DESIGN_ARKA_SUBMITTED
         and not _other_gate_actor_conflict(profile, arka.head_reviewed_by_id)
     )
-    # Gate 2 — the Head owes a verdict on what QC passed.
-    ctx['can_head_verdict'] = bool(
-        can_head_gate
+    # W-1 fallback (P7) — a legacy site at `awaiting_head_arka`. Only a Design QC reviewer
+    # may move it on: the move is design_arka_approve(), which is gated on the QC flag and
+    # refuses the allocated designer. The Head's approval step it was waiting for no longer
+    # exists, so without this the site would have no screen that moves it.
+    ctx['can_move_on_legacy'] = bool(
+        can_qc_gate
         and arka is not None
         and arka.verdict == ARKA_APPROVED
         and arka.head_verdict == ARKA_PENDING
         and assignment.status == DESIGN_AWAITING_HEAD_ARKA
-        and not _other_gate_actor_conflict(profile, arka.reviewed_by_id)
-    )
-    # Rendered as an explanation when the Head is looking at an Arka he passed through
-    # Design QC himself. Without it the screen simply shows no buttons and he has no way
-    # to tell "already decided" from "you are refused, and here is why".
-    ctx['blocked_by_own_qc_verdict'] = bool(
-        can_head_gate
-        and arka is not None
-        and assignment.status == DESIGN_AWAITING_HEAD_ARKA
-        and arka.head_verdict == ARKA_PENDING
-        and _other_gate_actor_conflict(profile, arka.reviewed_by_id)
     )
     ctx['error_categories'] = DESIGN_ERROR_CATEGORY_CHOICES
     ctx['is_design_qc']     = can_qc_gate
@@ -3828,29 +3860,39 @@ def design_arka_submit(request, project_id):
             'design_arka_submitted',
             entity_type='ArkaSubmission', entity_id=arka.pk)
 
+    # W-1: the Arka waits on Design QC only; the Head no longer approves it separately.
     return _back(f'{project.project_id}: Arka v{next_version} submitted — awaiting '
-                 f'Design Head approval.', ok=True)
+                 f'Design QC\'s verdict.', ok=True)
 
 
 # ---------------------------------------------------------------------------
 # 8. Arka verdict
 # ---------------------------------------------------------------------------
 
-def _verdict_target(request, project):
-    """The Arka a DESIGN QC (gate 1) verdict may be recorded against, or an error message.
+def _verdict_target(request, project, legacy_ok=False):
+    """The Arka a DESIGN QC verdict may be recorded against, or an error message.
 
     Shared by the QC approve and reject views so the two cannot disagree about which
     submission is reviewable. The designer cannot reach either endpoint: both are gated on
     `user_can_qc_gate_design`, which refuses the assigned designer.
+
+    `legacy_ok` (W-1, approve only) ALSO admits a site parked at `awaiting_head_arka` whose
+    current Arka QC has already approved and the Head has not ruled on — the state the
+    removed Head Arka step left behind. The caller then moves it on without recording a
+    second verdict. Reject never passes it: QC has already approved that Arka, and turning
+    an approval into a rejection is not what the fallback is for.
     """
     assignment = getattr(project, 'design_assignment', None)
     if assignment is None:
         return None, None, f'{project.project_id}: no design assignment for this site.'
+    attempt = _current_attempt(assignment)
+    arka = _current_arka(attempt)
+    if (legacy_ok and assignment.status == DESIGN_AWAITING_HEAD_ARKA and arka is not None
+            and arka.verdict == ARKA_APPROVED and arka.head_verdict == ARKA_PENDING):
+        return assignment, arka, None
     if assignment.status != DESIGN_ARKA_SUBMITTED:
         return None, None, (f'{project.project_id}: there is no Arka awaiting a Design QC '
                             f'verdict (status "{assignment.get_status_display()}").')
-    attempt = _current_attempt(assignment)
-    arka = _current_arka(attempt)
     if arka is None:
         return None, None, f'{project.project_id}: no current Arka submission found.'
     if arka.verdict != ARKA_PENDING:
@@ -3859,50 +3901,29 @@ def _verdict_target(request, project):
     return assignment, arka, None
 
 
-def _head_verdict_target(request, project):
-    """The Arka a DESIGN HEAD (gate 2) verdict may be recorded against, or an error message.
-
-    THIS IS WHERE THE SERIAL RULE IS ENFORCED for the Arka. The status test does the work:
-    `awaiting_head_arka` is reachable only from a Design QC approval, so a Head arriving
-    before QC has ruled finds the site still at `arka_submitted` and is refused with a
-    message naming what he is waiting for. The explicit `verdict != ARKA_APPROVED` test
-    below is a belt-and-braces re-check against the row itself rather than the cached
-    status, in the same spirit as _package_is_complete().
-    """
-    assignment = getattr(project, 'design_assignment', None)
-    if assignment is None:
-        return None, None, f'{project.project_id}: no design assignment for this site.'
-    if assignment.status != DESIGN_AWAITING_HEAD_ARKA:
-        return None, None, (
-            f'{project.project_id}: there is no Arka awaiting your verdict — Design QC '
-            f'must approve it first (status "{assignment.get_status_display()}").')
-    attempt = _current_attempt(assignment)
-    arka = _current_arka(attempt)
-    if arka is None:
-        return None, None, f'{project.project_id}: no current Arka submission found.'
-    if arka.verdict != ARKA_APPROVED:
-        return None, None, (f'{project.project_id}: Arka v{arka.version} has not been '
-                            f'approved by Design QC, so there is nothing for you to '
-                            f'countersign.')
-    if arka.head_verdict != ARKA_PENDING:
-        return None, None, (f'{project.project_id}: Arka v{arka.version} has already '
-                            f'been {arka.get_head_verdict_display().lower()} by the '
-                            f'Design Head.')
-    return assignment, arka, None
-
-
 @login_required
 def design_arka_approve(request, project_id):
-    """GATE 1 — DESIGN QC approves the current Arka version.
+    """DESIGN QC approves the current Arka version — THE ARKA'S ONLY GATE since W-1.
+    Access: a Design QC reviewer, never the allocated designer. POST only.
 
-    Moves the site to `awaiting_head_arka`. It unlocks nothing, and neither does gate 2
-    any more — CAD travels with the Arka submission and the BOQ is not gated on the Arka
-    at all. What `head_verdict='approved'` still decides is whether the PACKAGE may
-    complete (see _approved_arka, still consulted by
-    _maybe_advance_to_artifacts_uploaded).
+    W-1 (ruling 1, Praveen, 21 Nov 2026): QC's approval is enough to move the site on. The
+    site returns to `arka_submitted` carrying verdict='approved' (the "artifacts
+    outstanding" state, owed by the designer), and the package advance runs in the same
+    request, so a site whose CAD and BOQ are already in goes straight to
+    `artifacts_uploaded`. Both writes go through apply_design_status(), so both land in the
+    activity log; the StatusTransition ledger records only the real move to
+    `artifacts_uploaded`, because the approval re-states `arka_submitted` and an x -> x row
+    is never written (R-3). The Head rules on this Arka later, together with the CAD and
+    BOQ, at the package gate.
+
+    THE LEGACY BRANCH (W-1 fallback). A site that reached `awaiting_head_arka` before W-1
+    shipped already carries QC's approval; it is moved on exactly as above, without a
+    second verdict being recorded.
     """
     project = _opex_site(project_id)
     assignment_pre = getattr(project, 'design_assignment', None)
+    # Only a Design QC reviewer may rule on the Arka; the allocated designer is refused by
+    # the predicate even if they hold the QC flag, because nobody reviews their own layout.
     if not user_can_qc_gate_design(request.user, assignment_pre):
         return HttpResponseForbidden(
             'The Arka Design QC review is for a Design QC reviewer, and never for the '
@@ -3910,12 +3931,30 @@ def design_arka_approve(request, project_id):
     if request.method != 'POST':
         return redirect('design_head_review', project_id=project.project_id)
 
-    assignment, arka, error = _verdict_target(request, project)
+    assignment, arka, error = _verdict_target(request, project, legacy_ok=True)
     if error:
         messages.error(request, error)
         return redirect('design_head_review', project_id=project.project_id)
 
     profile = request.user.profile
+
+    if assignment.status == DESIGN_AWAITING_HEAD_ARKA:
+        # The legacy branch: QC's verdict is already on the row, so only the status moves.
+        with transaction.atomic():
+            apply_design_status(
+                assignment, DESIGN_ARKA_SUBMITTED, profile,
+                f'Arka v{arka.version} moved on after Design QC approval — the Design '
+                f'Head\'s separate Arka approval no longer exists (W-1)',
+                'design_arka_qc_approved',
+                entity_type='ArkaSubmission', entity_id=arka.pk)
+            advanced = _maybe_advance_to_artifacts_uploaded(
+                assignment, _current_attempt(assignment), profile)
+        messages.success(request, f'{project.project_id}: Arka v{arka.version} moved on — '
+                                  + ('the package is complete and waiting for Design QC.'
+                                     if advanced else
+                                     'the designer now owes the rest of the package.'))
+        return redirect('design_head_review', project_id=project.project_id)
+
     # Decision 2, gate 1 side: refuse if this same person already recorded the HEAD
     # verdict on this Arka. Unreachable through the UI (the Head verdict cannot be first)
     # but checked anyway — every gate enforces the rule from its own side, so neither
@@ -3931,20 +3970,28 @@ def design_arka_approve(request, project_id):
         arka.reviewed_by = profile
         arka.reviewed_at = timezone.now()
         arka.save(update_fields=['verdict', 'reviewed_by', 'reviewed_at'])
+        # `arka_submitted` again, by name and forwards by meaning: the Arka now carries
+        # QC's approval, so design_metrics._classify() reads it as "artifacts outstanding".
         apply_design_status(
-            assignment, DESIGN_AWAITING_HEAD_ARKA, profile,
-            f'Arka v{arka.version} passed Design QC ({arka.capacity_kw} kW) — '
-            f'awaiting Design Head approval',
+            assignment, DESIGN_ARKA_SUBMITTED, profile,
+            f'Arka v{arka.version} approved by Design QC ({arka.capacity_kw} kW)',
             'design_arka_qc_approved',
             entity_type='ArkaSubmission', entity_id=arka.pk)
+        # The CAD and BOQ may already be in (they never waited on this verdict), in which
+        # case this approval is the event that completes the package. Same transaction, so
+        # the site is never observable at `arka_submitted` with a complete package.
+        advanced = _maybe_advance_to_artifacts_uploaded(
+            assignment, _current_attempt(assignment), profile)
 
-    # NAMES WHO HOLDS THE ARKA, AND NOTHING ELSE. It used to end "...before the designer
-    # can upload CAD or enter the BOQ", which is no longer true of either: CAD travels
-    # with the Arka submission and the BOQ is not gated on the Arka at all. What the
-    # Head's approval still decides is whether the PACKAGE can complete.
-    messages.success(request, f'{project.project_id}: Arka v{arka.version} passed Design '
-                              f'QC — it now needs the Design Head\'s approval before the '
-                              f'design package can be completed.')
+    # NAMES WHO HOLDS THE SITE NEXT, AND NOTHING ELSE.
+    if advanced:
+        messages.success(request, f'{project.project_id}: Arka v{arka.version} approved — '
+                                  f'the CAD and BOQ were already in, so the package is '
+                                  f'complete and waiting for Design QC.')
+    else:
+        messages.success(request, f'{project.project_id}: Arka v{arka.version} approved — '
+                                  f'the designer now owes the rest of the package (CAD and '
+                                  f'BOQ).')
     return redirect('design_head_review', project_id=project.project_id)
 
 
@@ -4011,142 +4058,6 @@ def design_arka_reject(request, project_id):
     messages.success(request, f'{project.project_id}: Arka v{arka.version} rejected at '
                               f'Design QC — the designer has been asked to submit a new '
                               f'version.')
-    return redirect('design_head_review', project_id=project.project_id)
-
-
-@login_required
-def design_arka_head_approve(request, project_id):
-    """GATE 2 — the DESIGN HEAD approves an Arka that Design QC has already passed.
-
-    THIS IS NO LONGER THE APPROVAL THAT UNLOCKS UPLOAD — nothing is locked behind it any
-    more. It is the approval the PACKAGE waits on: _maybe_advance_to_artifacts_uploaded()
-    is evaluated at the end of this view precisely because the CAD and the BOQ may already
-    have arrived, in which case this verdict is the event that completes the package.
-
-    Status returns to `arka_submitted`, which carries head_verdict='approved' and therefore
-    classifies as "Arka approved, artifacts incomplete" — see the Part 9 note at the top of
-    this module for why no new status is invented for that state.
-    """
-    project = _opex_site(project_id)
-    assignment_pre = getattr(project, 'design_assignment', None)
-    if not user_can_head_gate_design(request.user, assignment_pre):
-        return HttpResponseForbidden(
-            'The Design Head Arka review is for the Design Head or his named deputy, and '
-            'never for the designer allocated to this site.')
-    if request.method != 'POST':
-        return redirect('design_head_review', project_id=project.project_id)
-
-    assignment, arka, error = _head_verdict_target(request, project)
-    if error:
-        messages.error(request, error)
-        return redirect('design_head_review', project_id=project.project_id)
-
-    profile = request.user.profile
-    if _other_gate_actor_conflict(profile, arka.reviewed_by_id):
-        messages.error(request, f'{project.project_id}: you recorded the Design QC verdict '
-                                f'on Arka v{arka.version} yourself, so you cannot also '
-                                f'countersign it as Design Head. It needs a second pair '
-                                f'of eyes.')
-        return redirect('design_head_review', project_id=project.project_id)
-
-    with transaction.atomic():
-        arka.head_verdict     = ARKA_APPROVED
-        arka.head_reviewed_by = profile
-        arka.head_reviewed_at = timezone.now()
-        # QC approved and the Head approved — the gates agree, so no overturn.
-        arka.head_overturned_qc = False
-        arka.save(update_fields=['head_verdict', 'head_reviewed_by', 'head_reviewed_at',
-                                 'head_overturned_qc'])
-        # Backwards by status name, forwards by meaning — see the docstring. This is one
-        # of the two shapes that make a transition table the wrong abstraction here.
-        apply_design_status(
-            assignment, DESIGN_ARKA_SUBMITTED, profile,
-            f'Arka v{arka.version} approved by the Design Head '
-            f'({arka.capacity_kw} kW)',
-            'design_arka_head_approved',
-            entity_type='ArkaSubmission', entity_id=arka.pk)
-        # A re-approval on an attempt that already carries CAD and a submitted BOQ would
-        # otherwise leave the status behind; evaluating here costs one query.
-        _maybe_advance_to_artifacts_uploaded(
-            assignment, _current_attempt(assignment), profile)
-
-    # As on gate 1: this no longer "unlocks" anything the designer was waiting on. It
-    # completes the layout, and it is what lets the package advance once the artifacts
-    # are in — which they may already be.
-    messages.success(request, f'{project.project_id}: Arka v{arka.version} approved — '
-                              f'the design package can complete once the CAD and BOQ '
-                              f'are in.')
-    return redirect('design_head_review', project_id=project.project_id)
-
-
-@login_required
-def design_arka_head_reject(request, project_id):
-    """GATE 2 — the DESIGN HEAD rejects an Arka that Design QC passed.
-
-    Reason and category are both mandatory, exactly as at gate 1, and the site returns to
-    the designer identically (settled decision 5). The two rejections are RECORDED
-    distinctly — different columns, different action_code — so "how often does the Head
-    reject what QC passed" stays answerable.
-
-    THIS IS THE OVERTURN CASE for an Arka: QC approved it and the Head did not, so
-    head_overturned_qc is set. See the note on the field for why it is stored rather than
-    derived.
-    """
-    project = _opex_site(project_id)
-    assignment_pre = getattr(project, 'design_assignment', None)
-    if not user_can_head_gate_design(request.user, assignment_pre):
-        return HttpResponseForbidden(
-            'The Design Head Arka review is for the Design Head or his named deputy, and '
-            'never for the designer allocated to this site.')
-    if request.method != 'POST':
-        return redirect('design_head_review', project_id=project.project_id)
-
-    assignment, arka, error = _head_verdict_target(request, project)
-    if error:
-        messages.error(request, error)
-        return redirect('design_head_review', project_id=project.project_id)
-
-    profile = request.user.profile
-    if _other_gate_actor_conflict(profile, arka.reviewed_by_id):
-        messages.error(request, f'{project.project_id}: you recorded the Design QC verdict '
-                                f'on Arka v{arka.version} yourself, so you cannot also '
-                                f'rule on it as Design Head. It needs a second pair of eyes.')
-        return redirect('design_head_review', project_id=project.project_id)
-
-    reason = (request.POST.get('rejection_reason') or '').strip()
-    if not reason:
-        messages.error(request, f'{project.project_id}: a rejection reason is required '
-                                f'— the designer cannot act on "rejected" alone.')
-        return redirect('design_head_review', project_id=project.project_id)
-
-    category, cat_error = _posted_error_category(request)
-    if cat_error:
-        messages.error(request, f'{project.project_id}: {cat_error}.')
-        return redirect('design_head_review', project_id=project.project_id)
-
-    with transaction.atomic():
-        arka.head_verdict           = ARKA_REJECTED
-        arka.head_rejection_reason  = reason
-        arka.head_failure_category  = category
-        arka.head_reviewed_by       = profile
-        arka.head_reviewed_at       = timezone.now()
-        # QC approved, the Head rejected — the gates disagree. This is the signal
-        # settled decision 6 exists to capture.
-        arka.head_overturned_qc     = True
-        arka.save(update_fields=['head_verdict', 'head_rejection_reason',
-                                 'head_failure_category', 'head_reviewed_by',
-                                 'head_reviewed_at', 'head_overturned_qc'])
-        apply_design_status(
-            assignment, DESIGN_ARKA_REJECTED, profile,
-            f'Arka v{arka.version} rejected by the Design Head, overturning '
-            f'Design QC '
-            f'[{DESIGN_ERROR_CATEGORY_LABELS.get(category, category)}]: {reason}',
-            'design_arka_head_rejected',
-            entity_type='ArkaSubmission', entity_id=arka.pk)
-
-    messages.success(request, f'{project.project_id}: Arka v{arka.version} rejected — the '
-                              f'designer has been asked to submit a new version, and the '
-                              f'Design QC approval has been recorded as overturned.')
     return redirect('design_head_review', project_id=project.project_id)
 
 
@@ -4579,9 +4490,11 @@ def _open_next_attempt(assignment, reason, actor, detail, redo=None, extra_field
     preserve work against a requirement that no longer exists.
 
     THE OPENING STATUS FOLLOWS THE ARKA. With no carried Arka the site returns to
-    `in_design` and the designer submits one. With an Arka carried forward and approved at
-    both gates, the site opens at `arka_submitted` — Part 3's "artifacts outstanding"
-    state — so the designer can go straight to whatever actually failed.
+    `in_design` and the designer submits one. With an Arka carried forward and approved by
+    Design QC, the site opens at `arka_submitted` — Part 3's "artifacts outstanding"
+    state — so the designer can go straight to whatever actually failed. (W-1: this used to
+    require the Head's Arka approval too; that step is gone, and a carried pre-W-1 Arka
+    carries QC's approval as well, so both kinds open here.)
 
     `extra_fields` (3.1c-i) rides on the status write below, for companion columns a caller
     needs moved in the same write. Only design_change_request_accept() passes it, to clear
@@ -4607,7 +4520,7 @@ def _open_next_attempt(assignment, reason, actor, detail, redo=None, extra_field
     carried_arka = _current_arka(new_attempt)
     opening_status = (DESIGN_ARKA_SUBMITTED
                       if (carried_arka is not None
-                          and carried_arka.head_verdict == ARKA_APPROVED)
+                          and carried_arka.verdict == ARKA_APPROVED)
                       else DESIGN_IN_DESIGN)
 
     detail_suffix = f' — carried forward: {", ".join(carried)}' if carried else ''
@@ -5004,6 +4917,13 @@ def design_head_qc_pass(request, project_id):
                                 f'you cannot also release it as Design Head. It needs a '
                                 f'second pair of eyes.')
         return redirect('design_qc_review', project_id=project.project_id)
+    # W-1 (T3): this verdict is also the Head's ruling on the Arka, so the person who gave
+    # the Arka's Design QC verdict is refused it, as the removed Head Arka gate refused them.
+    if _own_arka_qc_conflict(profile, attempt):
+        messages.error(request, f'{project.project_id}: you gave the Design QC verdict on '
+                                f'this attempt\'s Arka yourself, so you cannot also give the '
+                                f'final Design Head approval. It needs a second pair of eyes.')
+        return redirect('design_qc_review', project_id=project.project_id)
 
     now = timezone.now()
     with transaction.atomic():
@@ -5094,6 +5014,12 @@ def design_head_qc_fail(request, project_id):
                                 f'{attempt.attempt_number} through Design QC yourself, so '
                                 f'you cannot also rule on it as Design Head. It needs a '
                                 f'second pair of eyes.')
+        return redirect('design_qc_review', project_id=project.project_id)
+    # W-1 (T3): failing the package is ruling on the Arka too — same refusal as the pass.
+    if _own_arka_qc_conflict(profile, attempt):
+        messages.error(request, f'{project.project_id}: you gave the Design QC verdict on '
+                                f'this attempt\'s Arka yourself, so you cannot also give the '
+                                f'final Design Head verdict. It needs a second pair of eyes.')
         return redirect('design_qc_review', project_id=project.project_id)
 
     remarks = (request.POST.get('head_remarks') or '').strip()
@@ -7255,7 +7181,10 @@ def design_qc_queue(request):
     # and scoping him would hide work he is accountable for. See _qc_scope().
     scope = _qc_scope(request.user)
 
-    # ── Arkas: awaiting gate 1, or passed gate 1 and awaiting gate 2 ──────────
+    # ── Arkas: awaiting Design QC's verdict (the Arka's only gate since W-1) ──
+    # Sites at `arka_submitted` in this reviewer's scope, plus any legacy site still parked
+    # at `awaiting_head_arka` (W-1 fallback) so it has a screen that moves it on. Soft-
+    # deleted sites are excluded, as on every design list.
     arka_assignments = (DesignAssignment.objects
                         .filter(scope,
                                 status__in=(DESIGN_ARKA_SUBMITTED,
@@ -7270,29 +7199,21 @@ def design_qc_queue(request):
         arka = _current_arka(attempt)
         if arka is None:
             continue
-        # A site at `arka_submitted` whose Arka the Head has ALREADY approved is not in
-        # anybody's review queue — it is with the designer, owing CAD and BOQ. See the
-        # Part 9 status note: that combination is the "artifacts outstanding" state.
-        if arka.head_verdict == ARKA_APPROVED:
+        legacy = assignment.status == DESIGN_AWAITING_HEAD_ARKA
+        # A site at `arka_submitted` whose Arka Design QC has ALREADY approved is not in
+        # anybody's review queue — it is with the designer, owing CAD and BOQ. W-1: this
+        # used to test the Head's verdict; QC's approval is now the Arka's only one.
+        if not legacy and arka.verdict == ARKA_APPROVED:
             continue
-        awaiting_head = assignment.status == DESIGN_AWAITING_HEAD_ARKA
-        can_qc_gate   = user_can_qc_gate_design(request.user, assignment)
-        can_head_gate = user_can_head_gate_design(request.user, assignment)
-        own_qc_verdict = _other_gate_actor_conflict(profile, arka.reviewed_by_id)
+        can_qc_gate = user_can_qc_gate_design(request.user, assignment)
         arka_rows.append({
             'assignment':    assignment,
             'site':          assignment.project,
             'attempt':       attempt,
             'arka':          arka,
-            'awaiting_head': awaiting_head,
-            'can_qc':        (can_qc_gate and not awaiting_head
-                              and arka.verdict == ARKA_PENDING),
-            'can_head':      (can_head_gate and awaiting_head
-                              and arka.head_verdict == ARKA_PENDING
-                              and not own_qc_verdict),
-            'blocked_own':   (can_head_gate and awaiting_head
-                              and arka.head_verdict == ARKA_PENDING
-                              and own_qc_verdict),
+            # W-1 fallback: QC approved it before W-1 shipped; the action is "move on".
+            'legacy':        legacy,
+            'can_qc':        can_qc_gate and (legacy or arka.verdict == ARKA_PENDING),
         })
 
     # ── Packages: awaiting gate 1, in gate 1, or awaiting gate 2 ──────────────
@@ -7416,6 +7337,12 @@ def design_qc_review(request, project_id):
     # gate's verdict on this exact attempt?
     own_qc_verdict = bool(attempt is not None and _other_gate_actor_conflict(
         profile, attempt.qc_reviewed_by_id))
+    # W-1 (T3): the same refusal for the person who gave this attempt's ARKA its QC verdict,
+    # evaluated here so the form is withheld and the reason shown before anyone clicks.
+    # design_head_qc_pass / _fail re-check it through the same helper.
+    own_arka_qc_verdict = bool(attempt is not None
+                               and _own_arka_qc_conflict(profile, attempt))
+    own_qc_verdict = own_qc_verdict or own_arka_qc_verdict
 
     ctx.update({
         'history':       _attempt_history(assignment),
@@ -7431,6 +7358,8 @@ def design_qc_review(request, project_id):
         # Why the gate-2 form is absent, when it is absent for this reason and not
         # because of the status. An empty screen explains nothing.
         'blocked_by_own_qc_verdict': can_head_gate and awaiting_head and own_qc_verdict,
+        # W-1 (T3) — which of the two reasons it is, so the message names the right one.
+        'own_arka_qc_verdict': own_arka_qc_verdict,
         # PROMPT 3.1b-2b — the Design Head's two answers to a PM rejection: return it to the
         # PM unchanged, or send it back to the designer. Gate-2 authority, so the assigned
         # designer is refused even when they hold Head authority; both endpoints re-check it
@@ -7462,7 +7391,8 @@ def design_qc_review(request, project_id):
         # What is actually available to carry, so the form can say "carried forward"
         # against a real artifact rather than offering an empty promise.
         'has_approved_arka_to_carry': bool(
-            ctx['arka'] is not None and ctx['arka'].head_verdict == ARKA_APPROVED),
+            # W-1: QC's approval, the Arka's only one now (was the Head's).
+            ctx['arka'] is not None and ctx['arka'].verdict == ARKA_APPROVED),
     })
     ctx.update(_boq_review_panel(ctx['boq']))
     # Session B - whether this reviewer may CORRECT the bill they are reading, rather than
@@ -7578,7 +7508,8 @@ def designer_dashboard_context(profile, projects):
             has_cad  = bool(attempt and attempt.design_files.filter(
                 kind__in=CAD_KINDS, is_current=True).exists())
             boq_done = bool(attempt and attempt.boq_submitted_at)
-            approved = arka is not None and arka.head_verdict == ARKA_APPROVED
+            # W-1: QC's approval is the Arka's only one now (this used to test the Head's).
+            approved = arka is not None and arka.verdict == ARKA_APPROVED
 
             if not has_cad:
                 kind, label, waiting = 'link', 'Upload CAD', ''
