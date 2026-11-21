@@ -206,6 +206,51 @@ SURVEY_LINK_ALLOWED_HOSTS = (
 # first. See design_arka_submit().
 ARKA_SUBMITTABLE_STATUSES = (DESIGN_IN_DESIGN, DESIGN_ARKA_REJECTED)
 
+# ── W-4 ────────────────────────────────────────────────────────────────────────
+# The statuses in which the allocated designer may upload or replace a design file
+# (design_artifact_upload). THE RULE: uploads are open while the package is still with the
+# designer, and close the moment Design QC takes it into review (`in_qc`). From then on —
+# QC, the Head, the PM, release, a PM rejection — a file the designer swaps in would become
+# `is_current` and reach QC, the Head and the SE drawings card without anyone reviewing it.
+# A rework (QC or Head fail, Head send-back, accepted change request) opens a new attempt
+# at `in_design` or `arka_submitted`, which reopens uploads; after release a drawing
+# changes only through a change request.
+#
+# AN ALLOW-LIST, NOT A DENY-LIST, so a status added later is closed until someone decides.
+#
+# `artifacts_uploaded` IS IN (Zuber, 21 Nov 2026): the package is complete but QC has not
+# picked it up, so the designer may still fix their own mistake. The upload supersedes the
+# file and leaves the status alone — _maybe_advance_to_artifacts_uploaded() fires only from
+# `arka_submitted`.
+#
+# `survey_returned` (Design Hold) IS IN (option A, 21 Nov 2026): a hold can only be placed
+# while the package is with the designer (DESIGN_NOT_WITH_DESIGNER_STATUSES refuses it in
+# review and after), and tests_design_hold_restore pins work continuing through the hold.
+# A hold taken before any Arka is still refused by _require_current_arka().
+#
+# `awaiting_head_arka` goes away in W-1; drop it here then.
+DESIGN_UPLOAD_OPEN_STATUSES = (DESIGN_IN_DESIGN, DESIGN_ARKA_SUBMITTED, DESIGN_ARKA_REJECTED,
+                               DESIGN_AWAITING_HEAD_ARKA, DESIGN_SURVEY_RETURNED,
+                               DESIGN_ARTIFACTS_UPLOADED)
+
+
+def _design_uploads_open(assignment, attempt):
+    """Whether the designer's upload window is open — THE ONE PLACE THE RULE IS EVALUATED.
+
+    Read by design_artifact_upload() (the enforcement) and the workspace (the form), so the
+    form can never offer an upload the view would refuse.
+
+    THE CLOSED-ATTEMPT TEST IS A BACKSTOP. No product path leaves a status in the window
+    with a closed current attempt (0 such rows in the 17 Nov restore): only the Head's pass
+    closes an attempt without opening the next, and that moves the site out of the window.
+    It is here because _current_attempt() ignores `closed_at`, so a future path that broke
+    that pairing would otherwise reopen uploads on a reviewed attempt. `attempt` is None
+    before the first Arka; the view then refuses for the missing Arka instead.
+    """
+    if assignment.status not in DESIGN_UPLOAD_OPEN_STATUSES:
+        return False
+    return attempt is None or attempt.closed_at is None
+
 # Every CAD kind, current and legacy. READ PATHS ONLY — listing, download, history.
 # The progression rule deliberately does NOT use this; see PROGRESSION_CAD_KINDS.
 CAD_KINDS = DESIGN_FILE_CAD_KINDS
@@ -3618,6 +3663,12 @@ def design_site_workspace(request, project_id):
         # what happened as the Head does on the QC screen.
         'history':      _attempt_history(assignment),
         'can_submit_arka': is_designer and assignment.status in ARKA_SUBMITTABLE_STATUSES,
+        # W-4 — the upload form shows only to the allocated designer while the window is
+        # open; everyone else is refused by the view anyway. Computed by the same helper
+        # the view enforces with, never re-tested in the template. ctx['attempt'] is the
+        # current attempt _workspace_context() already fetched — no extra query.
+        'can_upload_artifacts': is_designer and _design_uploads_open(assignment,
+                                                                     ctx['attempt']),
         # The BOQ link is only useful if the existing Part 0.6 gate lets this user in.
         # Surfaced rather than hidden: a designer allocated to a site whose
         # `assigned_design` names someone else is locked out of BOQ entry, and being
@@ -4105,12 +4156,13 @@ def design_arka_head_reject(request, project_id):
 
 @login_required
 def design_artifact_upload(request, project_id):
-    """The allocated DESIGNER uploads a CAD (pdf/dwg) or optional BOQ (xlsx/pdf) file.
+    """The allocated DESIGNER uploads a CAD zip or optional BOQ (xlsx/pdf) file.
+    Access: the designer allocated to this site only, POST only, and only while the upload
+    window is open (W-4, DESIGN_UPLOAD_OPEN_STATUSES).
 
-    REFUSED only when no Arka has been submitted yet — the approval requirement is gone,
-    the existence requirement is not. A direct POST to this URL against an attempt with
-    no Arka gets the same refusal a hidden button would have prevented; a POST against a
-    PENDING or even a REJECTED Arka is now accepted, which is the change.
+    REFUSED when the window is closed — from QC start onward, or on a closed attempt — and
+    when no Arka has been submitted yet. The approval requirement is gone, the existence
+    requirement is not: a POST against a PENDING or even a REJECTED Arka is accepted.
 
     PAIRING: derived_from_arka is set to the value _require_current_arka() returns, which
     is the CURRENT version whatever its verdict. It is never read off an older submission
@@ -4137,6 +4189,18 @@ def design_artifact_upload(request, project_id):
         (messages.success if ok else messages.error)(request, msg)
         return redirect('design_site_workspace', project_id=project.project_id)
 
+    # W-4 — THE UPLOAD WINDOW. Even the allocated designer may upload only while the package
+    # is still with them; from QC start onward a replaced file would become current and reach
+    # QC, the Head and the SE drawings card unreviewed, so it is refused. Checked BEFORE the
+    # file is read or stored: a refusal stores nothing, logs nothing and extracts nothing.
+    # Message + redirect, not 403 — the designer has the authority, the site is at the
+    # wrong stage (the same split as design_arka_submit and _qc_guard).
+    attempt = _current_attempt(assignment)
+    if not _design_uploads_open(assignment, attempt):
+        return _back(f'{project.project_id}: uploads are closed while the design is in '
+                     f'review (this site is "{assignment.get_status_display()}"). After '
+                     f'release, changes go through a change request.')
+
     kind = (request.POST.get('kind') or '').strip()
     if kind not in UPLOADABLE_KINDS:
         return _back('Choose which kind of file this is.')
@@ -4145,7 +4209,6 @@ def design_artifact_upload(request, project_id):
     if not upload:
         return _back('Please choose a file to upload.')
 
-    attempt = _current_attempt(assignment)
     try:
         arka = _require_current_arka(attempt)
     except ValueError as exc:

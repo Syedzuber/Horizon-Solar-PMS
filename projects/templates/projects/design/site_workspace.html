@@ -10,8 +10,9 @@ is out of scope. Same reasoning as head_sites.html — see finding E3.
 NO NAVIGATION ENTRY POINT. This screen is URL-reachable only (/design/<id>/work/);
 wiring it into the dashboards is Part 4.5.
 
-EVERY BUTTON HERE IS DECORATION OVER A SERVER-SIDE RULE. Hiding the CAD form until the
-Arka is approved is a convenience; design_artifact_upload() refuses the POST regardless.
+EVERY BUTTON HERE IS DECORATION OVER A SERVER-SIDE RULE. Hiding the upload form until an
+Arka exists, and while the upload window is closed (W-4, `can_upload_artifacts`), is a
+convenience; design_artifact_upload() refuses the POST regardless.
 {% endcomment %}
 
 {% block title %}Design — {{ project.project_id }} — SolarPMS{% endblock %}
@@ -184,7 +185,7 @@ The Head branch is tested FIRST: if he ruled, his is the verdict that stands.
         Submit the Arka first. Every uploaded file is recorded against the Arka version
         it was drawn from, so there has to be one — it does not have to be approved.
       </div>
-    {% elif is_designer %}
+    {% elif can_upload_artifacts %}
       <form method="post" enctype="multipart/form-data"
             action="{% url 'design_artifact_upload' project_id=project.project_id %}"
             class="row g-2 align-items-end">
@@ -238,6 +239,8 @@ The Head branch is tested FIRST: if he ruled, his is the verdict that stands.
           </div>
         </div>
       </form>
+    {% elif is_designer %}
+      <div class="small text-muted">Uploads are closed while the design is in review. After release, changes go through a change request.</div>
     {% else %}
       <div class="small text-muted">Only the allocated designer can upload artifacts.</div>
     {% endif %}
