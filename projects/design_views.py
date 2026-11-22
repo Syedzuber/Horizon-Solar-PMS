@@ -51,8 +51,8 @@ from .notifications import send_notification
 # Session T3b — the change-request notifications, worded by the notify_registry events.
 from .notify import notify
 from .design_storage import (
-    DesignStorageError, build_design_path, extract_cad_pdfs, get_design_file_url,
-    upload_design_file, validate_cad_zip,
+    DesignStorageError, build_design_path, delete_design_objects, extract_cad_pdfs,
+    get_design_file_url, upload_design_file, validate_cad_zip,
 )
 # Part 12 — the catalogue screen reuses the Admin screen's form class unchanged rather
 # than declaring a second one. forms.py imports only from .models, so this adds no cycle.
@@ -4177,19 +4177,21 @@ def design_arka_reject(request, project_id):
 REVISION_REASON_MAX = 1000
 
 #: Why a revision is refused, keyed by permissions.boq_correction_closed_reason(). Every
-#: other code (not submitted, not in review) gets _REVISION_NOT_IN_REVIEW.
+#: other code (not submitted, not in review) gets _REVISION_NOT_IN_REVIEW. Worded for "the
+#: design" because the Arka revision and the CAD revision (W-5b) share them (ruling Q3).
 _REVISION_CLOSED_MESSAGES = {
     BOQ_CORRECTION_CLOSED_PAST_REVIEW:
         'this design has moved past review. A drawing change now goes back to the '
         'designer through a change request.',
     BOQ_CORRECTION_CLOSED_CHANGE_REQUEST:
-        'a change request is open on this design. The Arka cannot be revised until it is '
-        'decided.',
+        'a change request is open on this design. The design cannot be revised until it '
+        'is decided.',
 }
-_REVISION_NOT_IN_REVIEW = ('the Arka can be revised only while the package is in review — '
-                           'handed in, with Design QC, or with the Design Head.')
+_REVISION_NOT_IN_REVIEW = ('the design can be revised only while the package is in review — '
+                           'with Design QC or with the Design Head.')
 _REVISION_GROUP_LOCKED = ('this site is in a locked procurement group, so its design is '
                           'final and cannot be revised.')
+_REVISION_BEFORE_QC = 'Revisions open once QC has started reviewing the package.'
 
 
 def _revision_window_refusal(user, project, attempt):
@@ -4201,7 +4203,9 @@ def _revision_window_refusal(user, project, attempt):
     BC-1's own function, called as it stands: boq_correction_closed_reason(). BOQ
     correction is not changed by W-5 and the two windows cannot drift apart.
 
-    THREE TERMS ARE ADDED ON TOP, ALL NARROWING, NONE WIDENING:
+    FOUR TERMS ARE ADDED ON TOP, ALL NARROWING, NONE WIDENING:
+      * not `artifacts_uploaded` (ruling 5, 22 Nov 2026): revisions open when review
+        starts, at `in_qc`. See the comment at the check.
       * no open change request on the attempt. BC-1 opens its window for the Head while a
         change request is pending, in any status (D-7, so he can record `corrected`). That
         exception is NOT extended here: after release a drawing changes through the
@@ -4219,6 +4223,13 @@ def _revision_window_refusal(user, project, attempt):
     reason = boq_correction_closed_reason(user, project)
     if reason is not None:
         return _REVISION_CLOSED_MESSAGES.get(reason, _REVISION_NOT_IN_REVIEW)
+    # NOT BEFORE QC STARTS (ruling 5). In `artifacts_uploaded` the package is handed in but
+    # review has not begun, and W-4 still lets the designer upload a CAD there, so a reviewer
+    # revision could be silently superseded by the designer's next upload. BOQ correction
+    # keeps `artifacts_uploaded` (BC-1 is unchanged): there is no overlap for the BOQ,
+    # because a submitted BOQ is locked to the designer.
+    if project.design_assignment.status == DESIGN_ARTIFACTS_UPLOADED:
+        return _REVISION_BEFORE_QC
     if _open_change_requests(attempt).exists():
         return _REVISION_CLOSED_MESSAGES[BOQ_CORRECTION_CLOSED_CHANGE_REQUEST]
     if attempt is None or attempt.closed_at is not None:
@@ -4231,8 +4242,9 @@ def _revision_window_refusal(user, project, attempt):
 def user_may_revise_design(user, project):
     """Whether `user` may make a reviewer revision on `project` right now: BOQ-correction
     authority (Design QC or Design Head verdict authority, never the site's designer) AND
-    the window above. Feeds the review screen's form flag, so the form shows exactly when
-    design_arka_revise() would accept it.
+    the window above. Feeds the review screen's one form flag (can_revise_design), so both
+    revision forms show exactly when design_arka_revise() and design_cad_revise() would
+    accept them.
     """
     if not user_has_boq_correction_authority(user, project):
         return False
@@ -4255,9 +4267,9 @@ def design_arka_revise(request, project_id):
 
     Access: Design QC or the Design Head (or his named deputy) with verdict authority on
     this site — BOQ correction's authority, user_has_boq_correction_authority(), which
-    refuses the site's own designer — and only inside the BOQ-correction window
-    (_revision_window_refusal: `artifacts_uploaded`, `in_qc`, `awaiting_head_qc`, the BOQ
-    stamped on the current attempt, no open change request).
+    refuses the site's own designer — and only inside the reviewer-revision window
+    (_revision_window_refusal: `in_qc` or `awaiting_head_qc` — not `artifacts_uploaded`,
+    ruling 5 — the BOQ stamped on the current attempt, no open change request).
 
     THE NEW VERSION:
       * link and/or capacity changed (at least one must differ from the current version),
@@ -4364,7 +4376,88 @@ def design_arka_revise(request, project_id):
 
 # ---------------------------------------------------------------------------
 # 9. CAD and BOQ artifact upload
+#
+# W-5b: the three helpers below are design_artifact_upload's own lines, moved so the
+# reviewer's CAD revision (design_cad_revise) stores, versions and extracts a zip exactly
+# as the designer does. Each is a straight move; who may call, the window and the
+# transaction stay with each caller.
 # ---------------------------------------------------------------------------
+
+def _put_design_object(project, kind, upload):
+    """Validate `upload` and put it in the private design bucket. Returns
+    (bucket, stored_path, listing); raises DesignStorageError with the message the user
+    sees. Called BEFORE any transaction opens, so a storage failure writes no row.
+    `kind` must already be whitelisted by the caller (it becomes a path segment).
+    """
+    # ARCHIVE VALIDATION BEFORE STORAGE (Part 8). A zip that is unreadable, oversized
+    # when expanded, or missing a PDF or a DWG is refused here — so a rejected archive
+    # never reaches the bucket and never leaves an orphaned object behind.
+    listing = []
+    if kind == DESIGN_FILE_CAD_ZIP:
+        listing = validate_cad_zip(upload)
+
+    # `kind` is whitelisted by the caller, so it is safe as a storage path segment.
+    path = build_design_path(project.project_id, kind, upload.name)
+    bucket, stored_path = upload_design_file(upload, path)
+    return bucket, stored_path, listing
+
+
+def _record_design_file_version(attempt, kind, bucket, stored_path, listing, upload, arka,
+                                profile, remarks='', reviewer_role='', revision_reason='',
+                                designer_at_revision_id=None):
+    """Write version N+1 of `kind` on `attempt` and supersede the current one. Returns
+    (design_file, next_version). The CALLER holds the transaction (and, on the reviewer
+    path, the assignment row lock), so the row, the supersede and the caller's activity
+    entry commit together.
+
+    The three revision fields are blank for the designer; design_cad_revise sets them.
+    """
+    previous = attempt.design_files.filter(kind=kind, is_current=True).first()
+    next_version = (attempt.design_files.filter(kind=kind)
+                    .aggregate(m=Max('version'))['m'] or 0) + 1
+
+    design_file = DesignFile.objects.create(
+        attempt=attempt, kind=kind, version=next_version,
+        bucket=bucket, path=stored_path,
+        original_filename=(upload.name or '')[:255],
+        size_bytes=getattr(upload, 'size', None),
+        content_type=(getattr(upload, 'content_type', '') or '')[:100],
+        archive_listing=listing,
+        derived_from_arka=arka,
+        uploaded_by=profile, remarks=remarks, is_current=True,
+        reviewer_role=reviewer_role, revision_reason=revision_reason,
+        designer_at_revision_id=designer_at_revision_id,
+    )
+    # The new row is created first and the old one updated second, so superseded_by can
+    # point at a row that exists.
+    if previous is not None:
+        previous.is_current    = False
+        previous.superseded_by = design_file
+        previous.save(update_fields=['is_current', 'superseded_by'])
+    return design_file, next_version
+
+
+def _extract_cad_pdfs_best_effort(project, profile, design_file, upload, version, caller):
+    """Extract a just-committed CAD zip's PDFs; never raises. `caller` names the view in
+    the log line."""
+    # DR-1 — the zip's PDFs become their own private objects, for a later screen to link
+    # one drawing. Called AFTER the atomic block, so the DesignFile row is committed
+    # whatever happens here, and BEST-EFFORT (DR-9): any failure is logged and recorded on
+    # the site's activity, the upload stands, and the uploader's message is unchanged. The
+    # extract_cad_pdfs command picks up whatever this leaves undone.
+    try:
+        extract_cad_pdfs(design_file, upload)
+    except Exception as exc:
+        logger.warning('%s: PDF extraction failed for %s '
+                       'DesignFile %s; the upload stands. %s',
+                       caller, project.project_id, design_file.pk, exc,
+                       exc_info=not isinstance(exc, DesignStorageError))
+        log_activity(project, profile,
+                     f'{KIND_LABELS[design_file.kind]} v{version}: PDFs could not be '
+                     f'extracted from the archive',
+                     entity_type='DesignFile', entity_id=design_file.pk,
+                     action_code='cad_pdf_extraction_failed')
+
 
 @login_required
 def design_artifact_upload(request, project_id):
@@ -4426,20 +4519,10 @@ def design_artifact_upload(request, project_id):
     except ValueError as exc:
         return _back(f'{project.project_id}: {exc}.')
 
-    # ARCHIVE VALIDATION BEFORE STORAGE (Part 8). A zip that is unreadable, oversized
-    # when expanded, or missing a PDF or a DWG is refused here — so a rejected archive
-    # never reaches the bucket and never leaves an orphaned object behind.
-    listing = []
-    if kind == DESIGN_FILE_CAD_ZIP:
-        try:
-            listing = validate_cad_zip(upload)
-        except DesignStorageError as exc:
-            return _back(f'{project.project_id}: {exc}')
-
-    # `kind` is whitelisted above, so it is safe as a storage path segment.
-    path = build_design_path(project.project_id, kind, upload.name)
+    # Validation and storage, shared with the reviewer's CAD revision (W-5b). Both
+    # failures used to be caught separately with this same message.
     try:
-        bucket, stored_path = upload_design_file(upload, path)
+        bucket, stored_path, listing = _put_design_object(project, kind, upload)
     except DesignStorageError as exc:
         return _back(f'{project.project_id}: {exc}')
 
@@ -4448,24 +4531,9 @@ def design_artifact_upload(request, project_id):
 
     profile = request.user.profile
     with transaction.atomic():
-        previous = attempt.design_files.filter(kind=kind, is_current=True).first()
-        next_version = (attempt.design_files.filter(kind=kind)
-                        .aggregate(m=Max('version'))['m'] or 0) + 1
-
-        design_file = DesignFile.objects.create(
-            attempt=attempt, kind=kind, version=next_version,
-            bucket=bucket, path=stored_path,
-            original_filename=(upload.name or '')[:255],
-            size_bytes=getattr(upload, 'size', None),
-            content_type=(getattr(upload, 'content_type', '') or '')[:100],
-            archive_listing=listing,
-            derived_from_arka=arka,
-            uploaded_by=profile, remarks=remarks, is_current=True,
-        )
-        if previous is not None:
-            previous.is_current    = False
-            previous.superseded_by = design_file
-            previous.save(update_fields=['is_current', 'superseded_by'])
+        design_file, next_version = _record_design_file_version(
+            attempt, kind, bucket, stored_path, listing, upload, arka, profile,
+            remarks=remarks)
 
         log_activity(project, profile,
                      f'{KIND_LABELS[kind]} v{next_version} uploaded, derived from '
@@ -4475,30 +4543,146 @@ def design_artifact_upload(request, project_id):
 
         advanced = _maybe_advance_to_artifacts_uploaded(assignment, attempt, profile)
 
-    # DR-1 — the zip's PDFs become their own private objects, for a later screen to link
-    # one drawing. AFTER the atomic block, so the DesignFile row is committed whatever
-    # happens here, and BEST-EFFORT (DR-9): any failure is logged and recorded on the
-    # site's activity, the upload stands, and the designer's message is unchanged. The
-    # extract_cad_pdfs command picks up whatever this leaves undone.
     if kind == DESIGN_FILE_CAD_ZIP:
-        try:
-            extract_cad_pdfs(design_file, upload)
-        except Exception as exc:
-            logger.warning('design_artifact_upload: PDF extraction failed for %s '
-                           'DesignFile %s; the upload stands. %s',
-                           project.project_id, design_file.pk, exc,
-                           exc_info=not isinstance(exc, DesignStorageError))
-            log_activity(project, profile,
-                         f'{KIND_LABELS[kind]} v{next_version}: PDFs could not be '
-                         f'extracted from the archive',
-                         entity_type='DesignFile', entity_id=design_file.pk,
-                         action_code='cad_pdf_extraction_failed')
+        _extract_cad_pdfs_best_effort(project, profile, design_file, upload, next_version,
+                                      'design_artifact_upload')
 
     msg = (f'{project.project_id}: {KIND_LABELS[kind]} v{next_version} uploaded '
            f'(derived from Arka v{arka.version}).')
     if advanced:
         msg += ' The design package is now complete.'
     return _back(msg, ok=True)
+
+
+# ---------------------------------------------------------------------------
+# 9b. Reviewer revision of the CAD (W-5b)
+#
+# The CAD half of W-5: Design QC or the Design Head may put in a new cad_zip during package
+# review, in the same window as the Arka revision (section 8b) and with the same record.
+# The BOQ is never replaced this way; it goes through BOQ correction (ruling Q4).
+# ---------------------------------------------------------------------------
+
+def _discard_stored_object(project, bucket, stored_path):
+    """Best-effort removal of an object design_cad_revise stored but did not record (ruling
+    Q1, 22 Nov 2026). delete_design_objects() never raises; a failed delete is only logged,
+    and the object is then an orphan, as a failed designer upload already leaves one."""
+    for b, p, ok, error in delete_design_objects([(bucket, stored_path)]):
+        if not ok:
+            logger.warning('design_cad_revise: could not remove %s/%s for %s after the '
+                           'revision was not recorded; the object is orphaned. %s',
+                           b, p, project.project_id, error)
+
+
+@login_required
+def design_cad_revise(request, project_id):
+    """A reviewer puts in a new CAD zip during package review (W-5b). POST only.
+
+    Access: Design QC or the Design Head (or his named deputy) with verdict authority on
+    this site — user_has_boq_correction_authority(), which refuses the site's own designer —
+    and only inside the reviewer-revision window (_revision_window_refusal), the same one
+    as design_arka_revise.
+
+    THE NEW VERSION goes through the designer's own helpers: validate_cad_zip and storage
+    (_put_design_object), version N+1 superseding the current zip
+    (_record_design_file_version), and PDF extraction after commit
+    (_extract_cad_pdfs_best_effort), so after release it reaches the SE drawings card like
+    any designer zip. It records the reviewer as `uploaded_by`, the reviewer's role, the
+    mandatory reason and the designer at revision; `derived_from_arka` is the CURRENT Arka,
+    which may itself be a reviewer's revision. `remarks` stays blank (ruling Q6).
+
+    ORDER (ruling Q1): window check without the lock -> validate and store -> lock and
+    re-check -> row + activity entry -> extraction after commit. Every ordinary refusal
+    lands at the first check and stores nothing. If the re-check refuses (the status moved
+    in between) or the transaction raises, the stored object is removed best-effort.
+
+    WHAT DOES NOT HAPPEN: no status change, no new attempt, no BOQCorrection, no
+    notification, and never _maybe_advance_to_artifacts_uploaded — the package is already
+    past that step, and the reviewer's file must not move it. A Head revision is final (F2).
+    """
+    project = _opex_site(project_id)
+    # Who: Design QC or Design Head verdict authority on this site, exactly as for the Arka
+    # revision and BOQ correction. The designer is refused by that predicate: their own
+    # upload path (design_artifact_upload) is closed in review by W-4 on purpose.
+    if not user_has_boq_correction_authority(request.user, project):
+        return HttpResponseForbidden('Revising the CAD is for Design QC or the Design Head '
+                                     'reviewing this site, never its designer.')
+    if request.method != 'POST':
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    def _back(msg, ok=False):
+        (messages.success if ok else messages.error)(request, f'{project.project_id}: {msg}')
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    upload = request.FILES.get('cad_file')
+    if not upload:
+        return _back('choose the revised CAD zip to upload.')
+    reason = (request.POST.get('revision_reason') or '').strip()
+    if not reason:
+        return _back('a reason is required — say why the CAD is being revised.')
+    if len(reason) > REVISION_REASON_MAX:
+        return _back(f'keep the reason under {REVISION_REASON_MAX} characters.')
+
+    # FIRST WINDOW CHECK, WITHOUT THE LOCK, BEFORE ANYTHING IS STORED. Holding the row lock
+    # across a 25 MB upload would make every verdict on this site wait for it (ruling Q1),
+    # so the lock is taken only for the re-check and the write below.
+    refusal = _revision_window_refusal(request.user, project,
+                                       _current_attempt(project.design_assignment))
+    if refusal:
+        return _back(refusal)
+
+    try:
+        bucket, stored_path, listing = _put_design_object(project, DESIGN_FILE_CAD_ZIP,
+                                                          upload)
+    except DesignStorageError as exc:
+        return _back(str(exc))
+
+    profile = request.user.profile
+    try:
+        with transaction.atomic():
+            # LOCK THE ASSIGNMENT ROW for the re-check and the write, as design_arka_revise
+            # does: a verdict landing between the first check and here could close the
+            # attempt, and this would then record a revision on a closed attempt.
+            assignment = (DesignAssignment.objects.select_for_update()
+                          .get(pk=project.design_assignment.pk))
+            # Seat the locked row where the BC-1 function reads the status.
+            project.design_assignment = assignment
+            attempt = _current_attempt(assignment)
+            refusal = _revision_window_refusal(request.user, project, attempt)
+            arka = None if refusal else _current_arka(attempt)
+            if not refusal and arka is None:
+                # Never in the window (nothing reaches review without an Arka), but
+                # derived_from_arka is NOT NULL, so it is refused rather than crashed on.
+                refusal = 'there is no Arka on this attempt for the CAD to be drawn from.'
+            if not refusal:
+                old = attempt.design_files.filter(kind=DESIGN_FILE_CAD_ZIP,
+                                                  is_current=True).first()
+                design_file, next_version = _record_design_file_version(
+                    attempt, DESIGN_FILE_CAD_ZIP, bucket, stored_path, listing, upload,
+                    arka, profile,
+                    reviewer_role=_reviewer_role(request.user, assignment),
+                    revision_reason=reason,
+                    # Frozen now, as on the Arka revision, so W-6 credits the designer who
+                    # held the site at revision even after a reallocation.
+                    designer_at_revision_id=assignment.assigned_to_id,
+                )
+                from_version = f'v{old.version} → ' if old is not None else ''
+                log_activity(project, profile,
+                             f'{design_file.reviser_label} revised the CAD: '
+                             f'{from_version}v{next_version}; reason: {reason}',
+                             entity_type='DesignFile', entity_id=design_file.pk,
+                             action_code='design_cad_reviewer_revised')
+    except Exception:
+        _discard_stored_object(project, bucket, stored_path)
+        raise
+    if refusal:
+        _discard_stored_object(project, bucket, stored_path)
+        return _back(refusal)
+
+    _extract_cad_pdfs_best_effort(project, profile, design_file, upload, next_version,
+                                  'design_cad_revise')
+    return _back(f'CAD v{next_version} is now current, drawn from Arka v{arka.version} — '
+                 f'your revision is recorded against your name. The site\'s status is '
+                 f'unchanged.', ok=True)
 
 
 @login_required
@@ -7734,10 +7918,11 @@ def design_qc_review(request, project_id):
     # as `can_qc_gate or can_head_gate` here: the rule has one home, and the screen must
     # not be able to offer a link the endpoint would refuse.
     ctx['can_correct_boq'] = user_can_correct_boq(request.user, project)
-    # W-5a — the reviewer's Arka revision form. The same authority and window as the
-    # endpoint (user_may_revise_design), computed here and never re-derived from the status
-    # in the template, so the form shows exactly when design_arka_revise() would accept it.
-    ctx['can_revise_arka'] = user_may_revise_design(request.user, project)
+    # W-5a/W-5b — the reviewer's Arka and CAD revision forms. One flag for both: the same
+    # authority and window as both endpoints (user_may_revise_design), computed here and
+    # never re-derived from the status in the template, so the forms show exactly when
+    # design_arka_revise() and design_cad_revise() would accept them.
+    ctx['can_revise_design'] = user_may_revise_design(request.user, project)
     ctx['revision_reason_max'] = REVISION_REASON_MAX
     # W-5a — which Arka the current CAD was drawn from, when it is not the current one.
     # Shown to everyone who opens this screen (QC, the Head, an assigned reviewer):

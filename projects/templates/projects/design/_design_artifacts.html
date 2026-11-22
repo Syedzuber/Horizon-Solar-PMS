@@ -127,6 +127,16 @@ stored anywhere (settled decision 8).
                 {{ f.uploaded_by.user.get_full_name|default:f.uploaded_by.user.username }}
               </div>
               {% comment %}
+              W-5b — a CAD Design QC or the Design Head uploaded in review. Named with the
+              reason so nobody reads the uploader as the designer. A carried copy keeps the
+              label (the fields travel with it), beside its "carried forward" badge.
+              {% endcomment %}
+              {% if f.reviewer_role %}
+                <div class="mt-1 ps-2 border-start border-2 border-warning" style="font-size:.7rem;">
+                  Revised by {{ f.reviser_label }}: {{ f.revision_reason }}
+                </div>
+              {% endif %}
+              {% comment %}
               The designer's own note, written at upload. Optional, so nothing renders
               when it is empty — no label, no divider. Labelled "Designer note" because
               this cell otherwise carries only reviewer-facing facts and an unlabelled

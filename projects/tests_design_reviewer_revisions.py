@@ -174,7 +174,8 @@ class RevisionBase(TestCase):
 class WindowTests(RevisionBase):
 
     def test_qc_and_the_head_may_revise_in_each_window_status(self):
-        for status in (DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC):
+        # artifacts_uploaded left out: ruling 5 (W-5b) opens revisions at in_qc.
+        for status in (DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC):
             for who in (self.qc, self.head):
                 with self.subTest(status=status, who=who.user.username):
                     self._set_status(status)

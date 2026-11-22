@@ -6310,6 +6310,15 @@ class DesignFile(models.Model):
     def __str__(self):
         return f"{self.kind} v{self.version} — attempt {self.attempt_id}"
 
+    @property
+    def reviser_label(self):
+        """'<name> (QC)' / '<name> (Head)' for a reviewer's CAD (W-5b), '' for a designer's
+        upload. Mirrors ArkaSubmission.reviser_label; on a file the reviser is
+        `uploaded_by`, which design_cad_revise sets to the reviewer."""
+        if not self.reviewer_role:
+            return ''
+        return f'{_revision_person(self.uploaded_by)} ({self.get_reviewer_role_display()})'
+
 
 # DR-1 — what happened to one `.pdf` entry of a CAD zip when its PDFs were extracted.
 # Only `extracted` has a storage object; every other value records why there is none, so

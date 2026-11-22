@@ -1,8 +1,9 @@
 {% comment %}
 W-5a — Design QC or the Design Head revises the Arka during package review.
 
-Rendered by qc_review.html only when the view's `can_revise_arka` is true, which is
-user_may_revise_design(): BOQ-correction authority AND the BOQ-correction window. The
+Rendered by qc_review.html only when the view's `can_revise_design` is true, which is
+user_may_revise_design(): BOQ-correction authority AND the reviewer-revision window
+(in_qc / awaiting_head_qc; not artifacts_uploaded, ruling 5). The
 template never tests the status itself, so the form cannot appear where
 design_arka_revise() would refuse it.
 

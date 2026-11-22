@@ -122,6 +122,8 @@ urlpatterns = [
     # W-5a — Design QC or the Design Head revises the Arka during package review (the BOQ
     # correction window), with a reason. Never the designer; no status change.
     path('design/<str:project_id>/arka/revise/',    design_views.design_arka_revise,     name='design_arka_revise'),
+    # W-5b — the same reviewers, the same window: a new CAD zip with a reason.
+    path('design/<str:project_id>/cad/revise/',     design_views.design_cad_revise,      name='design_cad_revise'),
     path('design/<str:project_id>/artifact/upload/', design_views.design_artifact_upload, name='design_artifact_upload'),
     path('design/<str:project_id>/artifact/<int:pk>/', design_views.design_file_download, name='design_file_download'),
     path('design/<str:project_id>/boq/complete/',   design_views.design_boq_complete,    name='design_boq_complete'),

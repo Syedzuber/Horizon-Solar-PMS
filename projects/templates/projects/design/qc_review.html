@@ -177,8 +177,9 @@ has hit twice already.
           (revised by {{ arka.submitted_by.user.get_full_name|default:arka.submitted_by.user.username }}, {{ arka.get_reviewer_role_display }}: {{ arka.revision_reason }}){% endif %}
         </div>
       {% endif %}
-      {% if can_revise_arka %}
+      {% if can_revise_design %}
         {% include "projects/design/_reviewer_arka_revision_form.html" %}
+        {% include "projects/design/_reviewer_cad_revision_form.html" %}
       {% endif %}
     {% else %}
       <div class="small text-muted">No Arka on this attempt.</div>
