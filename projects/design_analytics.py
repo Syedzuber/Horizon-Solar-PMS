@@ -727,8 +727,10 @@ def m_arka_iterations(data):
     for s in data['sites']:
         row = _bucket(per, s['designer'], {'versions': 0, 'attempts': 0})
         for t in s['attempts']:
+            # W-5a: a reviewer's revision is not a designer iteration either — the
+            # designer did not produce it. Same exclusion as the carried copies.
             own = [k for k in data['arkas_by_attempt'].get(t.pk, [])
-                   if k.carried_forward_from_id is None]
+                   if k.carried_forward_from_id is None and not k.reviewer_role]
             if not own:
                 continue
             row['attempts'] += 1
@@ -1267,7 +1269,11 @@ def m_stage_dwell(data):
         for t in s['attempts']:
             own_arkas = sorted(data['arkas_by_attempt'].get(t.pk, []),
                                key=lambda k: k.version)
-            fresh = [k for k in own_arkas if k.carried_forward_from_id is None]
+            # W-5a: reviewer revisions are left out like carried copies. They carry the
+            # QC approval (and its time) of the version they replaced, so their
+            # submitted -> verdict interval is not a wait anyone had.
+            fresh = [k for k in own_arkas
+                     if k.carried_forward_from_id is None and not k.reviewer_role]
             if fresh:
                 _add('Allocation → first Arka submitted',
                      s['assignment'].assigned_at, fresh[0].submitted_at)
@@ -1300,7 +1306,9 @@ def m_queue_latency(data):
     """
     arka_qc, arka_head, pkg_qc, pkg_head = [], [], [], []
     for k in data['arkas']:
-        if k.carried_forward_from_id is not None:
+        # W-5a: a reviewer revision was never in a reviewer's queue — its QC verdict and
+        # time are copied from the version it replaced — so it is no latency sample.
+        if k.carried_forward_from_id is not None or k.reviewer_role:
             continue
         d = _working_days(_localdate(k.submitted_at), _localdate(k.reviewed_at))
         if d is not None:

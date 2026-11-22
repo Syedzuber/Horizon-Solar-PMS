@@ -5336,6 +5336,25 @@ ARKA_VERDICT_CHOICES = [
     (ARKA_REJECTED, 'Rejected'),
 ]
 
+# W-5 — who made a REVIEWER REVISION of an Arka version or a design file. Blank on every
+# row the designer made, which is every row before W-5. The labels are what the screens
+# print in "Revised by <name> (QC)" — the role a reviewer acted in, not a job title.
+REVIEWER_ROLE_QC   = 'qc'
+REVIEWER_ROLE_HEAD = 'head'
+
+REVIEWER_ROLE_CHOICES = [
+    (REVIEWER_ROLE_QC,   'QC'),
+    (REVIEWER_ROLE_HEAD, 'Head'),
+]
+
+
+def _revision_person(profile):
+    """A UserProfile's display name for the W-5 revision labels, or a placeholder when the
+    link was cleared (SET_NULL on a departed user)."""
+    if profile is None:
+        return 'someone no longer on the system'
+    return profile.user.get_full_name() or profile.user.username
+
 # ===========================================================================
 # PART 9 — DESIGN ERROR CATEGORIES
 # ===========================================================================
@@ -6100,6 +6119,34 @@ class ArkaSubmission(models.Model):
 
     is_current = models.BooleanField(default=True)
 
+    # ── Reviewer revision (W-5) ─────────────────────────────────────────────
+    # Set when Design QC or the Design Head put this version in during package review
+    # instead of the designer (design_views.design_arka_revise). `submitted_by` is then the
+    # REVIEWER, and these three say in what capacity, why, and whose design it was.
+    #
+    # THE QC APPROVAL IS COPIED FROM THE VERSION THIS ONE REPLACED (ruling, 22 Nov 2026,
+    # option A) — `verdict`, `reviewed_by` and `reviewed_at` name the person who approved
+    # the layout the reviewer then changed, exactly as a carried-forward copy keeps its
+    # verdicts. `reviewer_role` is what keeps that honest: every screen that shows the
+    # approval of a revised version says "QC approval by Y kept; revised by X" instead
+    # (revision_approval_text below). Nobody is recorded as approving a layout they did not
+    # see, and the Head's final-approval check (_own_arka_qc_conflict) still sees the person
+    # who really gave the QC verdict.
+    #
+    # COUNTING (W-6): a revision is `reviewer_role != ''` AND `carried_forward_from IS NULL`.
+    # A carried-forward copy keeps all three fields so its label stays true, so it must be
+    # left out of any count or the same revision is counted once per attempt it rides.
+    reviewer_role = models.CharField(  # '' = the designer's own version
+        max_length=4, choices=REVIEWER_ROLE_CHOICES, blank=True, default='')
+    revision_reason = models.TextField(blank=True, default='')  # required when reviewer_role is set (CHECK)
+    # The designer the revision is charged against, frozen at revision time as
+    # BOQCorrection.designer_at_correction is (BC-4), so a later reallocation does not move
+    # it. SET_NULL: a departed designer must not block deleting anything.
+    designer_at_revision = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='arka_revisions_as_designer',
+    )
+
     class Meta:
         ordering        = ['attempt', 'version']
         unique_together = ('attempt', 'version')
@@ -6122,10 +6169,39 @@ class ArkaSubmission(models.Model):
                            | ~models.Q(head_rejection_reason='')),
                 name='head_rejection_reason_required_when_head_rejected',
             ),
+            # W-5 — a reviewer revision must say why. Same valid-case shape as the two
+            # rules above; every pre-W-5 row has reviewer_role='' and so passes.
+            models.CheckConstraint(
+                condition=models.Q(reviewer_role='') | ~models.Q(revision_reason=''),
+                name='arka_revision_reason_required',
+            ),
         ]
 
     def __str__(self):
         return f"Arka v{self.version} — attempt {self.attempt_id} ({self.verdict})"
+
+    @property
+    def reviser_label(self):
+        """'<name> (QC)' / '<name> (Head)' for a reviewer revision, '' for a designer's
+        version. The one spelling of the reviser every W-5 line uses."""
+        if not self.reviewer_role:
+            return ''
+        return f'{_revision_person(self.submitted_by)} ({self.get_reviewer_role_display()})'
+
+    @property
+    def revision_approval_text(self):
+        """How the QC approval of a REVISED version is shown everywhere (ruling Q1, 22 Nov):
+        'QC approval by <Y> kept; revised by <X> (<role>): <reason>'. '' for a designer's
+        version, which keeps its plain "approved by" wording.
+
+        One property so the chip, the review screens and the activity entry cannot word it
+        differently — and so no screen can show only "approved by Y" on a version Y never
+        saw.
+        """
+        if not self.reviewer_role:
+            return ''
+        return (f'QC approval by {_revision_person(self.reviewed_by)} kept; revised by '
+                f'{self.reviser_label}: {self.revision_reason}')
 
 
 class DesignFile(models.Model):
@@ -6206,9 +6282,30 @@ class DesignFile(models.Model):
         related_name='carried_forward_to',
     )
 
+    # ── Reviewer revision (W-5) ─────────────────────────────────────────────
+    # The same three fields as ArkaSubmission, with the same meaning: set when Design QC
+    # or the Design Head uploaded this version during package review, and then
+    # `uploaded_by` is the REVIEWER. Written by nothing until W-5b (the CAD revision);
+    # added now so one migration carries both models and carry-forward copies them from
+    # the start. W-6 counts `reviewer_role != ''` AND `carried_forward_from IS NULL`.
+    reviewer_role = models.CharField(  # '' = the designer's own upload
+        max_length=4, choices=REVIEWER_ROLE_CHOICES, blank=True, default='')
+    revision_reason = models.TextField(blank=True, default='')  # required when reviewer_role is set (CHECK)
+    designer_at_revision = models.ForeignKey(  # frozen at revision time, as BC-4
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='design_file_revisions_as_designer',
+    )
+
     class Meta:
         ordering        = ['attempt', 'kind', 'version']
         unique_together = ('attempt', 'kind', 'version')
+        constraints = [
+            # W-5 — a reviewer revision must say why; every pre-W-5 row passes.
+            models.CheckConstraint(
+                condition=models.Q(reviewer_role='') | ~models.Q(revision_reason=''),
+                name='design_file_revision_reason_required',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.kind} v{self.version} — attempt {self.attempt_id}"

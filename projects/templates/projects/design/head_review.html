@@ -154,9 +154,14 @@ so a direct POST to a bare URL is refused exactly as a hidden button would have 
       approval"; the Head now rules on the Arka at the final package review instead.
       {% endcomment %}
       <div class="small">
-        <span class="ver-tag">Arka v{{ arka.version }}</span> approved by Design QC
-        {% if arka.reviewed_by %}({{ arka.reviewed_by.user.get_full_name|default:arka.reviewed_by.user.username }}){% endif %}
-        {% if arka.reviewed_at %}on {{ arka.reviewed_at|date:"d M Y H:i" }}{% endif %}.
+        {% if arka.reviewer_role %}
+          {# W-5a (ruling Q1): a revised version is never shown as a plain "approved by". #}
+          <span class="ver-tag">Arka v{{ arka.version }}</span>: {{ arka.revision_approval_text }}.
+        {% else %}
+          <span class="ver-tag">Arka v{{ arka.version }}</span> approved by Design QC
+          {% if arka.reviewed_by %}({{ arka.reviewed_by.user.get_full_name|default:arka.reviewed_by.user.username }}){% endif %}
+          {% if arka.reviewed_at %}on {{ arka.reviewed_at|date:"d M Y H:i" }}{% endif %}.
+        {% endif %}
         {% if assignment.status == 'arka_submitted' %}
           Nothing to review — waiting on the designer's CAD and BOQ.
         {% elif assignment.status == 'awaiting_head_arka' %}

@@ -43,6 +43,8 @@ from .design_metrics import (
     pending_extension, reviewer_correction_drill, reviewer_correction_panel, tender_metrics,
 )
 from .utils import design_due_date, record_transition, safe_next_url
+# W-5a: the reviewer's Arka capacity is checked to the column's places and ceiling.
+from .number_input import decimal_field_max, parse_decimal_input
 # Prompt 3.1b-3 — the PM gate's four in-app notifications. See the block above
 # design_gate_next_actors() before adding a fifth.
 from .notifications import send_notification
@@ -111,6 +113,7 @@ from .models import (
     REASON_DESIGN_HEAD_PASSED,
     StatusTransition, SUBJECT_DESIGN_ASSIGNMENT,
     ARKA_PENDING, ARKA_APPROVED, ARKA_REJECTED,
+    REVIEWER_ROLE_QC, REVIEWER_ROLE_HEAD,
     QC_PENDING, QC_PASSED, QC_FAILED,
     ATTEMPT_REASON_INITIAL, ATTEMPT_REASON_QC_FAILED, ATTEMPT_REASON_PM_CHANGE_REQUEST,
     # Part 4.6 — the Design Head's triage verdict on a change request.
@@ -148,6 +151,9 @@ from .permissions import (
     # Session B - reviewer BOQ correction. Read here only to decide whether the QC review
     # screen renders the link; the authority itself is enforced in views.boq_correct().
     user_can_correct_boq,
+    # W-5: the BC-1 window, read as it stands for the reviewer Arka/CAD revisions too.
+    user_has_boq_correction_authority, boq_correction_closed_reason,
+    BOQ_CORRECTION_CLOSED_PAST_REVIEW, BOQ_CORRECTION_CLOSED_CHANGE_REQUEST,
     # Prompt 3.1b-1 — the PM's release approval: the per-site authority, and its
     # queryset form for the queue.
     can_approve_design_release, manageable_projects_q,
@@ -3568,17 +3574,58 @@ def _boq_provenance(attempt, arka, arka_history):
     """
     if attempt is None or attempt.boq_submitted_at is None or arka is None:
         return None, False
-    # TODO (W-7, fixed separately per Zuber 22 Nov): a BOQ stamp CARRIED from an earlier
-    # attempt predates every Arka on this one, so the footer says "completed before any
-    # Arka was submitted" — untrue, it was completed under the earlier attempt's Arka.
-    # Possible since Part 9.1 after an {Arka, CAD} fail; W-7 makes it routine ({Arka}
-    # fails). Deferred because the fix is a provenance change, not part of the fail scope.
+    # A BOQ stamp CARRIED from an earlier attempt predates every Arka on this one, so it
+    # comes back here as (None, True) — the same answer as a BOQ completed before any Arka.
+    # The footer tells the two apart through _carried_boq_attempt() (W-5a, fixing the W-7
+    # wording TODO); this function stays pure and query-free.
     # `arka_history` is already in hand for the version panel — reuse it rather than
     # issuing a second query per screen. It is newest-version-first.
     submitted_by_then = [a for a in arka_history
                          if a.submitted_at <= attempt.boq_submitted_at]
     provenance = max(submitted_by_then, key=lambda a: a.version, default=None)
     return provenance, (provenance is None or provenance.pk != arka.pk)
+
+
+def _carried_boq_attempt(assignment, attempt, boq_provenance_arka, boq_is_stale):
+    """The earlier attempt a CARRIED BOQ stamp was written on, or None (W-5a, ruling Q7).
+
+    Fixes the W-7 wording TODO: a stamp carried forward by a fail predates every Arka on
+    the new attempt, so _boq_provenance() finds no version for it and the footer used to
+    say "completed before any Arka was submitted" — untrue, it was completed on an earlier
+    attempt. Carry-forward copies the stamp VERBATIM (_carry_forward_artifacts), so the
+    earliest earlier attempt holding the identical timestamp is where it was written.
+
+    Queried only in that one state (stale, no provenance version, not attempt 1), so every
+    other render pays nothing.
+    """
+    if (attempt is None or not boq_is_stale or boq_provenance_arka is not None
+            or attempt.attempt_number <= 1):
+        return None
+    # Earlier attempts of this site with the very same completion stamp; the first is
+    # the one the designer marked complete on.
+    return (assignment.attempts
+            .filter(attempt_number__lt=attempt.attempt_number,
+                    boq_submitted_at=attempt.boq_submitted_at)
+            .order_by('attempt_number').first())
+
+
+def _cad_pairing(arka, files):
+    """The current CAD zip and the Arka it was drawn from, when that Arka is NOT the
+    current one; else None. Feeds the pairing line on the review screen (W-5a).
+
+    Three ways to get here, all shown the same way and none blocking anything: an older
+    Arka version on the same attempt, a reviewer's Arka revision after the CAD (ruling 8:
+    the CAD stays current), or a CAD carried by a fail from an earlier attempt (W-7).
+    `files` is _attempt_files(), which already joins `derived_from_arka__attempt`, so this
+    costs no query.
+    """
+    if arka is None:
+        return None
+    cad = next((f for f in files
+                if f.kind == DESIGN_FILE_CAD_ZIP and f.is_current), None)
+    if cad is None or cad.derived_from_arka_id == arka.pk:
+        return None
+    return {'cad': cad, 'cad_arka': cad.derived_from_arka}
 
 
 def _designer_boq(project):
@@ -3669,6 +3716,10 @@ def _workspace_context(project, assignment):
         # `boq_is_stale` is True: that is a BOQ stamped before any Arka existed.
         'boq_provenance_arka': boq_provenance_arka,
         'boq_is_stale':        boq_is_stale,
+        # W-5a: the attempt a carried stamp was written on, so the footer stops calling it
+        # "completed before any Arka was submitted". None in every other state.
+        'boq_carried_from':    _carried_boq_attempt(assignment, attempt,
+                                                    boq_provenance_arka, boq_is_stale),
         'cad_kinds':      [(k, KIND_LABELS[k]) for k in UPLOADABLE_KINDS],
         'status':         assignment.status,
     }
@@ -3794,6 +3845,65 @@ def design_head_review(request, project_id):
 # 7. Arka submission
 # ---------------------------------------------------------------------------
 
+def _read_arka_fields(post):
+    """Read and check the Arka capacity and link from a POST. Returns
+    (capacity, link, error); `error` is '' when both are usable.
+
+    Shared by the designer's submission and the reviewer's revision (W-5) so the two accept
+    exactly the same values with exactly the same messages.
+
+    CAPACITY IS RECORDED, NOT VALIDATED AGAINST ANYTHING (settled decision 5). Positive-
+    number validation only. There is deliberately no comparison against tendered capacity,
+    no mismatch gate and no rollup — that is Part 5 reporting and a separate commercial
+    decision.
+    """
+    raw_capacity = (post.get('capacity_kw') or '').strip()
+    try:
+        capacity = Decimal(raw_capacity)
+    except (InvalidOperation, ValueError):
+        return None, '', 'Please enter the designed capacity in kW as a number.'
+    if not capacity.is_finite():
+        # Decimal('NaN') and Decimal('Infinity') parse; neither is a capacity. Before W-5
+        # 'NaN' raised InvalidOperation at the `<= 0` test below (a 500) and 'Infinity'
+        # reached the database. Refused here because both callers now share this check.
+        return None, '', 'Please enter the designed capacity in kW as a number.'
+    if capacity <= 0:
+        return None, '', 'Designed capacity must be greater than zero.'
+
+    arka_link = (post.get('arka_link') or '').strip()
+    if not arka_link:
+        return None, '', 'An Arka link is required.'
+    try:
+        URLValidator()(arka_link)
+    except ValidationError:
+        return None, '', 'Please enter a valid Arka link (a full URL, including https://).'
+    return capacity, arka_link, ''
+
+
+def _add_arka_version(attempt, **fields):
+    """Add the next Arka version to `attempt` and make it the current one. Returns it.
+
+    THE ONE PLACE A NEW VERSION IS NUMBERED AND SWITCHED IN, shared by the designer's
+    submission and the reviewer's revision (W-5) so the two cannot number or supersede
+    differently. `fields` are the ArkaSubmission columns the caller sets; `attempt`,
+    `version` and `is_current` are this function's. The caller owns the transaction.
+
+    The previous version is stood down BEFORE the insert: the partial unique constraint
+    `uniq_current_arka_per_attempt` rejects the insert otherwise — the ordering is
+    load-bearing, not stylistic.
+    """
+    # Race: two writers on one attempt can both stand the old version down and both
+    # compute the same next number; the second insert then fails on
+    # unique_together(attempt, version) or uniq_current_arka_per_attempt, and its
+    # transaction rolls back whole, so two current versions can never exist. The reviewer
+    # path also holds the assignment row lock (design_arka_revise), which serialises it
+    # against the review verdicts as well.
+    attempt.arka_submissions.filter(is_current=True).update(is_current=False)
+    next_version = (attempt.arka_submissions.aggregate(m=Max('version'))['m'] or 0) + 1
+    return ArkaSubmission.objects.create(
+        attempt=attempt, version=next_version, is_current=True, **fields)
+
+
 @login_required
 def design_arka_submit(request, project_id):
     """The allocated DESIGNER submits an Arka version.
@@ -3801,9 +3911,9 @@ def design_arka_submit(request, project_id):
     Permission is `assignment.assigned_to == profile` and nobody else — explicitly
     including the Design Head, who reviews these and must not be able to author one.
 
-    VERSIONING: version is max(version for this attempt) + 1, starting at 1, and any
-    previous submission is flipped to is_current=False BEFORE the insert, in the same
-    transaction. The partial unique constraint `uniq_current_arka_per_attempt` rejects
+    VERSIONING (_add_arka_version, shared with the reviewer revision since W-5): version is
+    max(version for this attempt) + 1, starting at 1, and any previous submission is
+    flipped to is_current=False BEFORE the insert, in the same transaction. The partial unique constraint `uniq_current_arka_per_attempt` rejects
     the insert otherwise — the ordering is load-bearing, not stylistic.
 
     A rejected version stays is_current=True until this replacement lands, so the
@@ -3826,25 +3936,9 @@ def design_arka_submit(request, project_id):
                      f'site is in design or its previous Arka was rejected '
                      f'(this site is "{assignment.get_status_display()}").')
 
-    # ── capacity: recorded, NOT validated against anything (settled decision 5) ──
-    # Positive-number validation only. There is deliberately no comparison against
-    # tendered capacity, no mismatch gate and no rollup — that is Part 5 reporting and
-    # a separate commercial decision.
-    raw_capacity = (request.POST.get('capacity_kw') or '').strip()
-    try:
-        capacity = Decimal(raw_capacity)
-    except (InvalidOperation, ValueError):
-        return _back('Please enter the designed capacity in kW as a number.')
-    if capacity <= 0:
-        return _back('Designed capacity must be greater than zero.')
-
-    arka_link = (request.POST.get('arka_link') or '').strip()
-    if not arka_link:
-        return _back('An Arka link is required.')
-    try:
-        URLValidator()(arka_link)
-    except ValidationError:
-        return _back('Please enter a valid Arka link (a full URL, including https://).')
+    capacity, arka_link, field_error = _read_arka_fields(request.POST)
+    if field_error:
+        return _back(field_error)
 
     # Optional note for the reviewer. Never validated and never rejected — an empty
     # value stores '' and the submission proceeds exactly as before.
@@ -3856,17 +3950,10 @@ def design_arka_submit(request, project_id):
         if attempt is None:
             attempt = _open_first_attempt(assignment)
 
-        # Stand the previous version down BEFORE inserting — see the docstring.
-        attempt.arka_submissions.filter(is_current=True).update(is_current=False)
-        next_version = (attempt.arka_submissions.aggregate(
-            m=Max('version'))['m'] or 0) + 1
-
-        arka = ArkaSubmission.objects.create(
-            attempt=attempt, version=next_version,
-            capacity_kw=capacity, arka_link=arka_link,
-            submitted_by=profile, remarks=remarks,
-            verdict=ARKA_PENDING, is_current=True,
-        )
+        arka = _add_arka_version(
+            attempt, capacity_kw=capacity, arka_link=arka_link,
+            submitted_by=profile, remarks=remarks, verdict=ARKA_PENDING)
+        next_version = arka.version
         apply_design_status(
             assignment, DESIGN_ARKA_SUBMITTED, profile,
             f'Arka v{arka.version} submitted ({capacity} kW) for approval',
@@ -4072,6 +4159,207 @@ def design_arka_reject(request, project_id):
                               f'Design QC — the designer has been asked to submit a new '
                               f'version.')
     return redirect('design_head_review', project_id=project.project_id)
+
+
+# ---------------------------------------------------------------------------
+# 8b. Reviewer revision of the Arka (W-5)
+#
+# Design QC or the Design Head may put in a new Arka version during package review, as
+# they may already correct the BOQ (BC-1). This reverses the August rule that reviewers
+# never touch the designer's files, so it copies the BOQ correction pattern rather than
+# granting a bare permission: the same window, attribution to the reviewer, a mandatory
+# reason, and a record (ArkaSubmission.reviewer_role and friends) W-6 can count per
+# designer. No status is written: the package stays where it is in review.
+# ---------------------------------------------------------------------------
+
+#: Longest reason a reviewer may give for a revision — a paragraph, not an essay; the
+#: reason is shown inline on the artifacts panel and in the activity line.
+REVISION_REASON_MAX = 1000
+
+#: Why a revision is refused, keyed by permissions.boq_correction_closed_reason(). Every
+#: other code (not submitted, not in review) gets _REVISION_NOT_IN_REVIEW.
+_REVISION_CLOSED_MESSAGES = {
+    BOQ_CORRECTION_CLOSED_PAST_REVIEW:
+        'this design has moved past review. A drawing change now goes back to the '
+        'designer through a change request.',
+    BOQ_CORRECTION_CLOSED_CHANGE_REQUEST:
+        'a change request is open on this design. The Arka cannot be revised until it is '
+        'decided.',
+}
+_REVISION_NOT_IN_REVIEW = ('the Arka can be revised only while the package is in review — '
+                           'handed in, with Design QC, or with the Design Head.')
+_REVISION_GROUP_LOCKED = ('this site is in a locked procurement group, so its design is '
+                          'final and cannot be revised.')
+
+
+def _revision_window_refusal(user, project, attempt):
+    """'' when the reviewer-revision window is open on `project`, otherwise the sentence
+    saying why it is closed. The WHEN half; the WHO half is
+    permissions.user_has_boq_correction_authority(), read by the caller.
+
+    ONE WINDOW FOR BOQ CORRECTION AND THESE REVISIONS (ruling Q5, 22 Nov 2026), so it is
+    BC-1's own function, called as it stands: boq_correction_closed_reason(). BOQ
+    correction is not changed by W-5 and the two windows cannot drift apart.
+
+    THREE TERMS ARE ADDED ON TOP, ALL NARROWING, NONE WIDENING:
+      * no open change request on the attempt. BC-1 opens its window for the Head while a
+        change request is pending, in any status (D-7, so he can record `corrected`). That
+        exception is NOT extended here: after release a drawing changes through the
+        designer on a new attempt. The exception is the only way the BC-1 function returns
+        None while a request is open, so this term removes exactly it.
+      * the current attempt is not closed. A backstop, as in _design_uploads_open(): no
+        window status ever has a closed current attempt.
+      * the procurement group lock, which BOQ correction applies in its view rather than
+        in the BC-1 function. Locked groups hold released sites only, so this is a
+        backstop too.
+
+    `project.design_assignment` must already be the row the caller holds (the revision
+    view seats the LOCKED row there), because the BC-1 function reads the status off it.
+    """
+    reason = boq_correction_closed_reason(user, project)
+    if reason is not None:
+        return _REVISION_CLOSED_MESSAGES.get(reason, _REVISION_NOT_IN_REVIEW)
+    if _open_change_requests(attempt).exists():
+        return _REVISION_CLOSED_MESSAGES[BOQ_CORRECTION_CLOSED_CHANGE_REQUEST]
+    if attempt is None or attempt.closed_at is not None:
+        return _REVISION_NOT_IN_REVIEW
+    if project_boq_is_group_locked(project):
+        return _REVISION_GROUP_LOCKED
+    return ''
+
+
+def user_may_revise_design(user, project):
+    """Whether `user` may make a reviewer revision on `project` right now: BOQ-correction
+    authority (Design QC or Design Head verdict authority, never the site's designer) AND
+    the window above. Feeds the review screen's form flag, so the form shows exactly when
+    design_arka_revise() would accept it.
+    """
+    if not user_has_boq_correction_authority(user, project):
+        return False
+    attempt = _current_attempt(project.design_assignment)
+    return not _revision_window_refusal(user, project, attempt)
+
+
+def _reviewer_role(user, assignment):
+    """The capacity a reviewer revises in: 'head' with Design Head gate authority, else
+    'qc'. A person holding both is recorded as the Head (ruling Q6, 22 Nov 2026); Praveen
+    notes the Head is never a site's QC, so it should be rare."""
+    if user_can_head_gate_design(user, assignment):
+        return REVIEWER_ROLE_HEAD
+    return REVIEWER_ROLE_QC
+
+
+@login_required
+def design_arka_revise(request, project_id):
+    """A reviewer puts in a new Arka version during package review (W-5). POST only.
+
+    Access: Design QC or the Design Head (or his named deputy) with verdict authority on
+    this site — BOQ correction's authority, user_has_boq_correction_authority(), which
+    refuses the site's own designer — and only inside the BOQ-correction window
+    (_revision_window_refusal: `artifacts_uploaded`, `in_qc`, `awaiting_head_qc`, the BOQ
+    stamped on the current attempt, no open change request).
+
+    THE NEW VERSION:
+      * link and/or capacity changed (at least one must differ from the current version),
+        with a mandatory reason (ruling 7);
+      * becomes current on the current attempt; the designer's version stays in history;
+      * keeps the QC approval of the version it replaces (option A) — so it counts as
+        approved for package completeness with no fresh verdict, and the Head's
+        final-approval check still sees whoever really gave the QC verdict;
+      * records the reviewer's role, the reason and the designer at revision.
+
+    WHAT DOES NOT HAPPEN: no status change (the site stays where it is in review), no new
+    attempt, no BOQCorrection, and the current CAD stays current with its original
+    `derived_from_arka` (ruling 8). A Head revision is final (F2); the Head then gives the
+    final verdict as usual.
+    """
+    project = _opex_site(project_id)
+    # Who: Design QC or Design Head verdict authority on this site, exactly as for BOQ
+    # correction. The designer is refused by that predicate: a reviewer revision is a
+    # reviewer's act, and the designer has their own Arka path (design_arka_submit).
+    if not user_has_boq_correction_authority(request.user, project):
+        return HttpResponseForbidden('Revising the Arka is for Design QC or the Design Head '
+                                     'reviewing this site, never its designer.')
+    if request.method != 'POST':
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    def _back(msg, ok=False):
+        (messages.success if ok else messages.error)(request, f'{project.project_id}: {msg}')
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    capacity, arka_link, field_error = _read_arka_fields(request.POST)
+    if field_error:
+        return _back(field_error)
+    # The column holds two decimal places. A third would be rounded away on save and could
+    # turn a "change" into no change at all, so it is refused rather than guessed at — and
+    # a value above the column's ceiling would fail at the database. Prompt N's parser
+    # answers both (trailing zeros do not count); the designer's path is left as it was.
+    try:
+        parse_decimal_input(request.POST.get('capacity_kw'), places=2,
+                            max_value=decimal_field_max(ArkaSubmission, 'capacity_kw'),
+                            field_label='Designed capacity')
+    except ValidationError as exc:
+        return _back(exc.messages[0])
+    reason = (request.POST.get('revision_reason') or '').strip()
+    if not reason:
+        return _back('a reason is required — say why the Arka is being revised.')
+    if len(reason) > REVISION_REASON_MAX:
+        return _back(f'keep the reason under {REVISION_REASON_MAX} characters.')
+
+    profile = request.user.profile
+    with transaction.atomic():
+        # LOCK THE ASSIGNMENT ROW for the window check and the write (ruling Q8). Without it
+        # a QC or Head verdict landing in the same moment could close this attempt after
+        # the check passed, leaving a revision on a closed attempt. Every verdict reads
+        # the status this lock holds still.
+        assignment = (DesignAssignment.objects.select_for_update()
+                      .get(pk=project.design_assignment.pk))
+        # Seat the locked row where the BC-1 function reads it.
+        project.design_assignment = assignment
+        attempt = _current_attempt(assignment)
+        refusal = _revision_window_refusal(request.user, project, attempt)
+        if refusal:
+            return _back(refusal)
+
+        # Every package in the window has a QC-approved current Arka (nothing reaches
+        # `artifacts_uploaded` without one). Checked anyway: the revision COPIES that
+        # approval, and must never manufacture one from a pending or rejected version.
+        old = _approved_arka(attempt)
+        if old is None:
+            return _back('there is no approved Arka on this attempt to revise.')
+
+        changes = []
+        if arka_link != old.arka_link:
+            changes.append(f'link: {old.arka_link} → {arka_link}')
+        if capacity != old.capacity_kw:
+            changes.append(f'capacity: {old.capacity_kw} → {capacity} kW')
+        if not changes:
+            return _back('the link and the capacity are both unchanged, so there is '
+                         'nothing to revise.')
+
+        new = _add_arka_version(
+            attempt, capacity_kw=capacity, arka_link=arka_link, submitted_by=profile,
+            # The QC approval of the layout being revised, kept with its author and time
+            # (option A). Never this reviewer's name: a QC revision must not read as a QC
+            # verdict by the reviser, nor a Head revision as one by the Head. The head_*
+            # columns stay 'pending', as on every Arka since W-1.
+            verdict=old.verdict, reviewed_by_id=old.reviewed_by_id,
+            reviewed_at=old.reviewed_at,
+            reviewer_role=_reviewer_role(request.user, assignment),
+            revision_reason=reason,
+            # Frozen now, as BOQCorrection.designer_at_correction (BC-4), so W-6 credits
+            # the designer who held the site at revision even after a reallocation.
+            designer_at_revision_id=assignment.assigned_to_id,
+        )
+        log_activity(project, profile,
+                     f'{new.reviser_label} revised the Arka (v{old.version} → '
+                     f'v{new.version}): {"; ".join(changes)}. '
+                     f'{new.revision_approval_text}',
+                     entity_type='ArkaSubmission', entity_id=new.pk,
+                     action_code='design_arka_reviewer_revised')
+
+    return _back(f'Arka v{new.version} is now current — your revision is recorded against '
+                 f'your name. The CAD and the site\'s status are unchanged.', ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -4441,6 +4729,11 @@ def _carry_forward_artifacts(old_attempt, new_attempt, redo):
             head_reviewed_by=old_arka.head_reviewed_by,
             head_reviewed_at=old_arka.head_reviewed_at,
             head_overturned_qc=old_arka.head_overturned_qc,
+            # W-5: a reviewer revision stays labelled as one on the next attempt. W-6
+            # counts only rows with carried_forward_from NULL, so the copy is not counted.
+            reviewer_role=old_arka.reviewer_role,
+            revision_reason=old_arka.revision_reason,
+            designer_at_revision_id=old_arka.designer_at_revision_id,
             carried_forward_from=old_arka, is_current=True,
         )
         carried.append(f'Arka v{old_arka.version}')
@@ -4481,6 +4774,11 @@ def _carry_forward_artifacts(old_attempt, new_attempt, redo):
             uploaded_by=old_file.uploaded_by,
             # As above — the upload note travels with the copy.
             remarks=old_file.remarks,
+            # W-5: as on the Arka copy above — the revision label travels, the count
+            # (carried_forward_from NULL only) does not.
+            reviewer_role=old_file.reviewer_role,
+            revision_reason=old_file.revision_reason,
+            designer_at_revision_id=old_file.designer_at_revision_id,
             carried_forward_from=old_file, is_current=True,
         )
         carried.append(f'{KIND_LABELS.get(old_file.kind, old_file.kind)}'
@@ -7436,6 +7734,15 @@ def design_qc_review(request, project_id):
     # as `can_qc_gate or can_head_gate` here: the rule has one home, and the screen must
     # not be able to offer a link the endpoint would refuse.
     ctx['can_correct_boq'] = user_can_correct_boq(request.user, project)
+    # W-5a — the reviewer's Arka revision form. The same authority and window as the
+    # endpoint (user_may_revise_design), computed here and never re-derived from the status
+    # in the template, so the form shows exactly when design_arka_revise() would accept it.
+    ctx['can_revise_arka'] = user_may_revise_design(request.user, project)
+    ctx['revision_reason_max'] = REVISION_REASON_MAX
+    # W-5a — which Arka the current CAD was drawn from, when it is not the current one.
+    # Shown to everyone who opens this screen (QC, the Head, an assigned reviewer):
+    # information only, nothing is blocked by it.
+    ctx['cad_pairing'] = _cad_pairing(ctx['arka'], ctx['files'])
     return render(request, 'projects/design/qc_review.html', ctx)
 
 

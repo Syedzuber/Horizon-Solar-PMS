@@ -140,7 +140,14 @@ has hit twice already.
       <div class="small">
         <span class="ver-tag">Arka v{{ arka.version }}</span>
         · <strong>{{ arka.capacity_kw }} kW</strong> designed
-        {% if arka.head_verdict == 'approved' %}
+        {% if arka.reviewer_role %}
+          {% comment %}
+          W-5a (ruling Q1): a reviewer's revision keeps the QC approval of the version it
+          replaced, so it is never shown as a plain "approved by" — that would name someone
+          as approving a layout they never saw. Checked first, before the history branches.
+          {% endcomment %}
+          · {{ arka.revision_approval_text }}
+        {% elif arka.head_verdict == 'approved' %}
           · approved at both gates
           {% if arka.head_reviewed_at %}{{ arka.head_reviewed_at|date:"d M Y H:i" }}{% endif %}
           {% if arka.head_reviewed_by %}by {{ arka.head_reviewed_by.user.get_full_name|default:arka.head_reviewed_by.user.username }}{% endif %}
@@ -157,6 +164,22 @@ has hit twice already.
       <div class="small mt-1">
         <a href="{{ arka.arka_link }}" target="_blank" rel="noopener">{{ arka.arka_link }}</a>
       </div>
+      {% comment %}
+      W-5a — THE PAIRING LINE. The current CAD was drawn from an Arka other than the current
+      one: an older version on this attempt, a reviewer's revision made after it (ruling 8:
+      the CAD stays current), or a CAD a fail carried from an earlier attempt (W-7).
+      Information only — nothing is blocked. `cad_pairing` is computed by the view.
+      {% endcomment %}
+      {% if cad_pairing %}
+        <div class="small mt-1 text-body-secondary">
+          CAD drawn from Arka v{{ cad_pairing.cad_arka.version }} · attempt {{ cad_pairing.cad_arka.attempt.attempt_number }};
+          current Arka is v{{ arka.version }}{% if arka.reviewer_role %}
+          (revised by {{ arka.submitted_by.user.get_full_name|default:arka.submitted_by.user.username }}, {{ arka.get_reviewer_role_display }}: {{ arka.revision_reason }}){% endif %}
+        </div>
+      {% endif %}
+      {% if can_revise_arka %}
+        {% include "projects/design/_reviewer_arka_revision_form.html" %}
+      {% endif %}
     {% else %}
       <div class="small text-muted">No Arka on this attempt.</div>
     {% endif %}

@@ -72,8 +72,11 @@ stored anywhere (settled decision 8).
                 * EARLIER attempt — the reviewer failed the Arka and did NOT tick the CAD,
                   i.e. judged the drawing sound (Praveen F1). Grey note, not a warning.
               Accepted trade-off (Zuber, 22 Nov): a CAD already stale inside its attempt and
-              then carried by a {BOQ} fail shows the grey note. W-5 revisits the
-              same-attempt case when reviewers can upload a new Arka.
+              then carried by a {BOQ} fail shows the grey note.
+
+              W-5a: when the newer Arka on the same attempt is a REVIEWER'S revision, the
+              yellow mark names who revised it and why, in the pairing line's words. The
+              CAD staying current there is the rule (ruling 8), not an oversight.
               {% endcomment %}
               <span class="ver-tag">Arka v{{ f.derived_from_arka.version }}{% if attempt and f.derived_from_arka.attempt_id != attempt.id %} · attempt {{ f.derived_from_arka.attempt.attempt_number }}{% endif %}</span>
               {% if attempt and f.derived_from_arka.attempt_id != attempt.id %}
@@ -81,7 +84,14 @@ stored anywhere (settled decision 8).
                   kept from attempt {{ f.derived_from_arka.attempt.attempt_number }} — the fail did not ask for a new {% if 'cad' in f.kind %}CAD{% else %}BOQ{% endif %}
                 </span></div>
               {% elif arka and f.derived_from_arka_id != arka.id %}
-                <span class="badge bg-warning text-dark">not the current Arka</span>
+                {% if arka.reviewer_role %}
+                  <div><span class="badge bg-warning text-dark text-wrap text-start">
+                    drawn from Arka v{{ f.derived_from_arka.version }}; current Arka is v{{ arka.version }}
+                    (revised by {{ arka.submitted_by.user.get_full_name|default:arka.submitted_by.user.username }}, {{ arka.get_reviewer_role_display }}: {{ arka.revision_reason }})
+                  </span></div>
+                {% else %}
+                  <span class="badge bg-warning text-dark">not the current Arka</span>
+                {% endif %}
               {% endif %}
             </td>
             <td class="small">
@@ -157,14 +167,27 @@ stored anywhere (settled decision 8).
   Purely informational. Nothing here blocks a verdict, changes a status, or re-asks the
   designer for anything — it makes visible a staleness that has always been possible and
   has never been shown.
+
+  W-5a (ruling Q7): when the newer Arka is a REVIEWER'S revision the badge names who
+  revised it and why — a capacity change is exactly when the bill needs a second look. A
+  stamp carried from an earlier attempt (`boq_carried_from`) says so instead of claiming
+  it came before any Arka (the W-7 wording TODO).
   {% endcomment %}
   {% if boq_complete %}
     <div class="card-footer bg-white py-2 small">
       <span class="ver-tag">BOQ completion</span>
       {% if boq_is_stale %}
-        {% if boq_provenance_arka %}
+        {% if boq_provenance_arka and arka.reviewer_role %}
+          <span class="badge bg-warning text-dark text-wrap text-start">
+            BOQ completed under Arka v{{ boq_provenance_arka.version }}; Arka revised to v{{ arka.version }} by {{ arka.reviser_label }}: {{ arka.revision_reason }}
+          </span>
+        {% elif boq_provenance_arka %}
           <span class="badge bg-warning text-dark">
             completed under Arka v{{ boq_provenance_arka.version }}, not the current version
+          </span>
+        {% elif boq_carried_from %}
+          <span class="badge bg-warning text-dark">
+            completed on attempt {{ boq_carried_from.attempt_number }} and carried forward, before this attempt's Arka
           </span>
         {% else %}
           <span class="badge bg-warning text-dark">
@@ -182,9 +205,18 @@ stored anywhere (settled decision 8).
       </span>
       {% if boq_is_stale %}
         <div class="text-muted mt-1" style="font-size:.7rem;">
-          The bill was marked complete before the Arka now on this attempt. Nothing re-asks
-          for it — an Arka rejected and replaced within one attempt opens no rework loop —
-          so check it against the current layout before recording a verdict.
+          {% if boq_provenance_arka and arka.reviewer_role %}
+            A reviewer revised the Arka after the bill was marked complete. Check the bill
+            against the revised layout before recording a verdict.
+          {% elif boq_carried_from %}
+            The bill was carried forward from attempt {{ boq_carried_from.attempt_number }}
+            because the fail did not ask for a new BOQ. Check it against the current layout
+            before recording a verdict.
+          {% else %}
+            The bill was marked complete before the Arka now on this attempt. Nothing re-asks
+            for it — an Arka rejected and replaced within one attempt opens no rework loop —
+            so check it against the current layout before recording a verdict.
+          {% endif %}
         </div>
       {% endif %}
     </div>
@@ -213,8 +245,13 @@ stored anywhere (settled decision 8).
               <a href="{{ a.arka_link }}" target="_blank" rel="noopener">{{ a.arka_link|truncatechars:70 }}</a>
             </div>
             <div class="text-muted" style="font-size:.7rem;">
-              submitted {{ a.submitted_at|date:"d M Y H:i" }}
-              by {{ a.submitted_by.user.get_full_name|default:a.submitted_by.user.username }}
+              {% if a.reviewer_role %}
+                {# W-5a: a reviewer's version is "revised", never "submitted" — the designer did not hand it in. #}
+                revised {{ a.submitted_at|date:"d M Y H:i" }} by {{ a.reviser_label }}
+              {% else %}
+                submitted {{ a.submitted_at|date:"d M Y H:i" }}
+                by {{ a.submitted_by.user.get_full_name|default:a.submitted_by.user.username }}
+              {% endif %}
             </div>
           </div>
           {% comment %}
@@ -226,9 +263,16 @@ stored anywhere (settled decision 8).
           so head_verdict stays 'pending' on every Arka since, and a pending one gets no
           Head chip at all ("Awaiting Head" would point at a step that no longer exists).
           A verdict the Head did give is kept, labelled as the earlier two-step review.
+
+          W-5a (ruling Q1): a REVIEWER'S revision keeps the QC approval of the version it
+          replaced, so its chip says exactly that — "QC approval by Y kept; revised by X
+          (role): reason" — and the plain "QC <date> by Y" line below is not shown for it.
+          It must never read as Y approving a layout Y did not see.
           {% endcomment %}
           <div class="text-end">
-            {% if a.verdict == 'approved' %}
+            {% if a.reviewer_role %}
+              <span class="chip chip-green text-wrap text-start"><span class="chip-dot chip-dot-green"></span>{{ a.revision_approval_text }}</span>
+            {% elif a.verdict == 'approved' %}
               <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>QC approved</span>
             {% elif a.verdict == 'rejected' %}
               <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>QC rejected</span>
@@ -258,7 +302,7 @@ stored anywhere (settled decision 8).
                 Carried forward from attempt {{ a.carried_forward_from.attempt.attempt_number }}
               </span></div>
             {% endif %}
-            {% if a.reviewed_at %}
+            {% if a.reviewed_at and not a.reviewer_role %}
               <div class="text-muted" style="font-size:.7rem;">
                 QC {{ a.reviewed_at|date:"d M Y H:i" }}
                 by {{ a.reviewed_by.user.get_full_name|default:a.reviewed_by.user.username }}
