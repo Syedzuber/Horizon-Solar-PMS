@@ -38,7 +38,7 @@ from django.utils import timezone
 
 from .models import (
     ArkaSubmission, BOQCorrection, DesignAssignment, DesignAttempt, DesignChangeRequest,
-    DueDateCommitment, StatusTransition, UserProfile, SUBJECT_DESIGN_ASSIGNMENT,
+    DesignFile, DueDateCommitment, StatusTransition, UserProfile, SUBJECT_DESIGN_ASSIGNMENT,
     BOQ_CORRECTION_LINE_ADDED, BOQ_CORRECTION_QUANTITY_CHANGED,
     CHANGE_REQUEST_OPEN_VERDICTS, CHANGE_REQUEST_PM_REJECTED,
     CHANGE_REQUEST_PENDING, CHANGE_REQUEST_ORIGIN_SCM,
@@ -1110,6 +1110,26 @@ def attention_list(sites, today=None, limit=ATTENTION_LIMIT,
 # _allocate_one() reallocates only inside REALLOCATABLE_STATUSES and BC-3 made the admin
 # assigned_to read-only, so the case is narrow: a rework site back in `in_design`, which
 # can still be reallocated (DESIGN_MODULE_DEFERRED.md W1).
+#
+# REVIEWER ARKA/CAD REVISIONS (W-6, ruling 10) ARE A THIRD FIGURE ON THE SAME ROWS: new Arka
+# or CAD versions Design QC or the Head put in during review (W-5). Like the corrections,
+# they are shown beside rework and never added to it. A revision opens no attempt, so it
+# cannot reach rework_contribution() anyway. Rulings (Zuber, 22 Nov 2026):
+#   * counted   rows with reviewer_role set AND carried_forward_from NULL. A carried copy
+#               keeps the reviewer fields so its label stays true, so counting it would
+#               count one revision once per attempt it rides. Every row counts, so two
+#               revisions on one site are two, as Quantity edits counts every edit.
+#   * credited  to designer_at_revision ONLY — no fallback to the current designer (Q2).
+#               Every revision is stamped when it is written, so a NULL means the designer
+#               was deleted or the site had none then, and the current designer did not do
+#               that work (answer 36). Those sites are their own footnote, so the
+#               corrections' `unassigned_sites` is unchanged.
+#   * scope     the same sites and the same reached-review gate as the corrections, so
+#               the gate never drops one in practice: a revision opens only from in_qc.
+#   * counts only — no revisions rate, so REVIEWED_MIN_FOR_RATE has nothing to hide (Q1).
+#   * NO CHANGE-REQUEST EXCLUSION (Q5): design_views._revision_window_refusal() refuses
+#     while a change request is open on the attempt, and a change request cites BOQ
+#     corrections only, never a revision. No drill-down list either.
 # ---------------------------------------------------------------------------
 
 #: Fewest reached-review sites a designer needs before the panel shows a rate. Below this
@@ -1214,9 +1234,32 @@ def _reached_review(status, in_ledger, qc_started):
     return in_ledger or qc_started or status in PACKAGE_REVIEW_REACHED_STATUSES
 
 
+def _reviewer_revision_facts(model, assignment_ids):
+    """Reviewer revisions of one model (ArkaSubmission or DesignFile) on these
+    assignments, counted per (assignment, designer at revision). ONE query.
+
+    Only original revisions: reviewer_role set and carried_forward_from NULL (see the W-6
+    note above). The stamped designer's names come along in the same columns
+    _stamped_designer() reads, so a designer who holds no site here costs no extra query.
+    """
+    return list(
+        model.objects
+        .filter(attempt__assignment_id__in=assignment_ids,
+                carried_forward_from__isnull=True)
+        .exclude(reviewer_role='')
+        .values(assignment_pk=F('attempt__assignment_id'),
+                stamped_id=F('designer_at_revision_id'),
+                stamped_username=F('designer_at_revision__user__username'),
+                stamped_first_name=F('designer_at_revision__user__first_name'),
+                stamped_last_name=F('designer_at_revision__user__last_name'))
+        .annotate(revisions=Count('pk'))
+        .order_by())
+
+
 def reviewer_correction_panel(sites):
-    """One row per designer with a site that reached package review or a counted
-    correction credited to them, in ONE query.
+    """One row per designer with a site that reached package review, or a counted
+    correction or reviewer revision credited to them, in THREE queries (one for the
+    corrections, plus W-6's one per revision model).
 
     `sites` is tender_metrics()['sites'], already in memory; the current designer and
     status come from there. The query adds, per assignment, the two review signals the
@@ -1234,9 +1277,12 @@ def reviewer_correction_panel(sites):
                        the template shows a dash: kept as a number rather than None so
                        the threshold is a display rule only.
       quantity_edits   counted quantity_changed rows; lines_added likewise for line_added.
+      arka_revisions   W-6: reviewer Arka revisions credited to this designer (stamp only).
+      cad_revisions    the same for CAD. `revisions` = their sum. Counts only, no rate.
 
     `unassigned_sites` counts reached-review sites with a counted correction credited to
     nobody (no stamp and no current designer) — a footnote, never a row.
+    `unassigned_revision_sites` is its W-6 twin for revisions with no designer stamped.
 
     A correction on a site that never reached review is not counted: BC-1 makes such a row
     impossible, and counting one made before BC-1 could push the rate past 100%.
@@ -1244,6 +1290,7 @@ def reviewer_correction_panel(sites):
     assignment_ids = [s['assignment'].pk for s in sites]
     if not assignment_ids:
         return {'rows': [], 'total_edits': 0, 'unassigned_sites': 0,
+                'total_revisions': 0, 'unassigned_revision_sites': 0,
                 'rate_min': REVIEWED_MIN_FOR_RATE,
                 'reviewed_projects': {}, 'corrected_projects': {}}
 
@@ -1272,6 +1319,13 @@ def reviewer_correction_panel(sites):
             lines_added=_correction_count(counted, BOQ_CORRECTION_LINE_ADDED),
         )
         .order_by())
+    # W-6 — reviewer revisions, one query per model. Separate statements, not more
+    # aggregates on the one above: joining revisions there too would multiply its
+    # correction rows and change every correction count.
+    revision_facts = (('arka_revisions', _reviewer_revision_facts(ArkaSubmission,
+                                                                  assignment_ids)),
+                      ('cad_revisions', _reviewer_revision_facts(DesignFile,
+                                                                 assignment_ids)))
 
     site_by_assignment = {s['assignment'].pk: s for s in sites}
     reached = {fact['pk'] for fact in facts
@@ -1286,6 +1340,7 @@ def reviewer_correction_panel(sites):
     def _row(designer):
         return by_designer.setdefault(designer.pk, {
             'designer': designer, 'reviewed': 0, 'quantity_edits': 0, 'lines_added': 0,
+            'arka_revisions': 0, 'cad_revisions': 0,
             'projects': [], 'corrected': {},
         })
 
@@ -1316,6 +1371,20 @@ def reviewer_correction_panel(sites):
         row['quantity_edits'] += fact['quantity_edits']
         row['lines_added']    += fact['lines_added']
 
+    # W-6 — the revisions, by stamped designer ONLY (no fallback, ruling Q2). Same gate
+    # as the corrections; a designer credited with revisions alone still gets a row
+    # (Reached review 0, rate dash), as BC-4 does for corrections (Q3).
+    unassigned_revisions = set()
+    for key, revision_rows in revision_facts:
+        for fact in revision_rows:
+            if fact['assignment_pk'] not in reached:
+                continue
+            if fact['stamped_id'] is None:
+                unassigned_revisions.add(fact['assignment_pk'])
+                continue
+            designer = known.get(fact['stamped_id']) or _stamped_designer(fact)
+            _row(designer)[key] += fact['revisions']
+
     rows = sorted(by_designer.values(),
                   key=lambda r: (r['designer'].user.get_full_name()
                                  or r['designer'].user.username).lower())
@@ -1324,10 +1393,13 @@ def reviewer_correction_panel(sites):
         row['rate'] = (round(100 * row['sites_corrected'] / row['reviewed'])
                        if row['reviewed'] else None)
         row['rate_shown'] = row['reviewed'] >= REVIEWED_MIN_FOR_RATE
+        row['revisions'] = row['arka_revisions'] + row['cad_revisions']
     return {
         'rows': rows,
         'total_edits': sum(r['quantity_edits'] + r['lines_added'] for r in rows),
         'unassigned_sites': len(unassigned),
+        'total_revisions': sum(r['revisions'] for r in rows),
+        'unassigned_revision_sites': len(unassigned_revisions),
         'rate_min': REVIEWED_MIN_FOR_RATE,
         # designer pk -> that designer's reviewed sites. Every row's designer is a key,
         # with an empty list for one credited only with corrections: the dashboard view

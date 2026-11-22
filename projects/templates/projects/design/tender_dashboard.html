@@ -368,6 +368,12 @@ zero-display tests both key on the first `?designer=` link for a designer.
 BC-4: the rate is a dash below corrections.rate_min reached-review sites (r.rate_shown);
 the counts always show. Sites with counted corrections and no designer to credit are a
 footnote, not a row, and the zero state shows only when they are zero too.
+
+W-6 (ruling 10): "Arka/CAD revisions" — new Arka or CAD versions Design QC or the Head put
+in during review, credited to the designer at revision time, counted once (carried copies
+excluded). Counts only, no rate. Not rework. The table shows when there are corrections OR
+revisions; revisions with no designer stamped are their own footnote, so the corrections
+footnote's count is unchanged.
 {% endcomment %}
 <div class="card shadow-sm border-0 mt-3" id="reviewerCorrections">
   <div class="card-header bg-white py-2 d-flex justify-content-between align-items-baseline">
@@ -376,7 +382,7 @@ footnote, not a row, and the zero state shows only when they are zero too.
       All time, this tender. Shown beside Rework, never added to it.
     </span>
   </div>
-  {% if not corrections.total_edits and not corrections.unassigned_sites %}
+  {% if not corrections.total_edits and not corrections.unassigned_sites and not corrections.total_revisions and not corrections.unassigned_revision_sites %}
     <div class="card-body text-center text-muted small py-4">No reviewer corrections yet.</div>
   {% else %}
   {% if corrections.rows %}
@@ -390,6 +396,7 @@ footnote, not a row, and the zero state shows only when they are zero too.
           <th class="text-end">Rate</th>
           <th class="text-end">Quantity edits</th>
           <th class="text-end">Lines added</th>
+          <th class="text-end" title="New Arka or CAD versions put in by QC or the Head during review. Not counted as rework.">Arka/CAD revisions</th>
         </tr>
       </thead>
       <tbody>
@@ -407,6 +414,10 @@ footnote, not a row, and the zero state shows only when they are zero too.
           </td>
           <td class="text-end">{{ r.quantity_edits }}</td>
           <td class="text-end">{{ r.lines_added }}</td>
+          <td class="text-end">
+            {{ r.revisions }}
+            <div class="text-muted" style="font-size:.7rem;">Arka {{ r.arka_revisions }} · CAD {{ r.cad_revisions }}</div>
+          </td>
         </tr>
       {% endfor %}
       </tbody>
@@ -416,6 +427,11 @@ footnote, not a row, and the zero state shows only when they are zero too.
   {% if corrections.unassigned_sites %}
     <div class="px-3 py-2 small text-muted border-top">
       {{ corrections.unassigned_sites }} site(s) with reviewer corrections have no designer assigned.
+    </div>
+  {% endif %}
+  {% if corrections.unassigned_revision_sites %}
+    <div class="px-3 py-2 small text-muted border-top">
+      {{ corrections.unassigned_revision_sites }} site(s) with reviewer revisions have no designer to credit.
     </div>
   {% endif %}
   {% endif %}

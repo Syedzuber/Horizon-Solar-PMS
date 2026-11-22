@@ -340,13 +340,15 @@ class DrillAndQueryTests(ReviewerCorrectionBase):
             site, _ = self._pre_release(f'BC2-Q{n}')
             self._set_quantity(site, 12)
         sites = tender_metrics(self.program)['sites']
-        with self.assertNumQueries(1):
+        # +2: reviewer revision counts (W-6), one per model.
+        with self.assertNumQueries(3):
             three = reviewer_correction_panel(sites)
         for n in range(4, 8):
             site, _ = self._pre_release(f'BC2-Q{n}')
             self._set_quantity(site, 12)
         sites = tender_metrics(self.program)['sites']
-        with self.assertNumQueries(1):
+        # +2: reviewer revision counts (W-6), one per model.
+        with self.assertNumQueries(3):
             seven = reviewer_correction_panel(sites)
         self.assertEqual((three['total_edits'], seven['total_edits']), (3, 7))
         with self.assertNumQueries(1):
@@ -510,7 +512,8 @@ class SnapshotQueryTests(DesignerAtCorrectionTests):
             self._reassign(assignment, other)
 
         sites = tender_metrics(self.program)['sites']
-        with self.assertNumQueries(1):
+        # +2: reviewer revision counts (W-6), one per model.
+        with self.assertNumQueries(3):
             panel = reviewer_correction_panel(sites)
         mine = next(r for r in panel['rows'] if r['designer'].pk == self.designer.pk)
         theirs = next(r for r in panel['rows'] if r['designer'].pk == other.pk)
