@@ -11,6 +11,9 @@ from .units import MEASURED_UNITS, UNIT_CHOICES, UNIT_CODES
 # B-3: the configured-ACCB catalogue code and type list. accb.py imports no models, so
 # this direction is the only one and there is no cycle.
 from .accb import ACCB_CONFIGURED_CODE, ACCB_TYPES
+# B-2a: the formula rules' rounding modes and the save-time check. boq_formulas imports
+# models only inside its two loader functions, so this module-level import has no cycle.
+from .boq_formulas import ROUND_NONE, ROUND_UP, ROUNDING_CHOICES, validate_formula_rules
 # NTF-DCG 5b: NotificationEventRecipient.save() asks the registry whether an event takes
 # named recipients. The registry imports nothing from this module, so there is no cycle.
 from .notify_registry import NOTIFICATION_EVENTS
@@ -1564,6 +1567,181 @@ class BOQCorrection(models.Model):
         who = self.corrected_by or 'unknown'
         return (f"BOQ correction — {self.boq.project.project_id} "
                 f"{self.item_code or '(ad-hoc)'} {self.action} by {who}")
+
+
+# ---------------------------------------------------------------------------
+# B-2a — BOQ formula rules, stored as rows (the engine is projects/boq_formulas.py)
+#
+# A rule says how one catalogue item's quantity follows from other lines on the same BOQ:
+#     round((sum of weight x driver quantity) x multiplier / divisor + constant)
+# with the G3 floor and an optional gate group. Rows and fields only: no expression text,
+# nothing parsed, never eval().
+#
+# NOTHING READS THESE YET, and on the day they ship there are no rows. B-2b hooks the BOQ
+# write paths; B-2c loads Praveen's rules after the B-1 catalogue import. The admin
+# registration is read-only, so rows arrive through a command or a data migration.
+#
+# EVERY SAVE IS CHECKED AS A WHOLE. save() on a rule, a driver or a group member runs
+# full_clean(), writes the row, then re-reads the stored rules (validate_formula_rules) in
+# the same transaction: a loop, or a rule that mixes project types, raises ValidationError
+# and the row is rolled back. bulk_create() and QuerySet.update() bypass save() and so
+# bypass the check; a loader must save rows one at a time.
+# ---------------------------------------------------------------------------
+
+
+class BOQItemGroup(models.Model):
+    """A named, EXPLICIT list of catalogue items a rule can sum ("all inverters").
+
+    A LIST, NOT A CATALOGUE CATEGORY (B-2a P2). Two of Praveen's five groups (earthing
+    electrodes, lightning arresters) are not categories at all, category is free text an
+    admin can edit, and B-1 will rename categories; a renamed category would silently change
+    a formula. Membership ignores is_active: a retired item still on a BOQ still counts.
+    """
+
+    name       = models.CharField(max_length=64, unique=True)  # Stable identifier the loader refers to, e.g. "all inverters"
+    label      = models.CharField(max_length=64)  # Plural noun the explanation uses, e.g. "inverters"
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def save(self, *args, **kwargs):
+        # Rows come from commands, not forms, so the field checks run here.
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.name
+
+
+class BOQItemGroupMember(models.Model):
+    """One catalogue item in a BOQItemGroup.
+
+    AN EXPLICIT ROW rather than a plain ManyToManyField, because .add() on a plain one
+    writes the link without calling any save(), and adding an item to a group can close a
+    rule loop (a computed item joining a group its own rule reads).
+    """
+
+    group = models.ForeignKey(BOQItemGroup, on_delete=models.CASCADE, related_name='members')
+    item  = models.ForeignKey('BOQItemMaster', on_delete=models.PROTECT,
+                              related_name='formula_group_memberships')  # PROTECT: catalogue rows are retired, never deleted; a delete must not silently shrink a group
+
+    class Meta:
+        ordering = ['group', 'item__code']
+        constraints = [
+            models.UniqueConstraint(fields=['group', 'item'],
+                                    name='boqitemgroupmember_unique_item_per_group'),
+        ]
+
+    def save(self, *args, **kwargs):
+        # Written, then the stored rules re-checked in the same transaction; a refusal
+        # rolls this row back (see the section comment above).
+        with transaction.atomic():
+            self.full_clean()
+            super().save(*args, **kwargs)
+            validate_formula_rules()
+
+    def __str__(self):
+        return f"{self.group} — {self.item.code}"
+
+
+class BOQFormulaRule(models.Model):
+    """How one catalogue item's quantity is computed from other lines on the same BOQ.
+
+    ONE ACTIVE RULE PER ITEM (database UNIQUE where is_active). A rule is retired by
+    clearing is_active and a replacement added, so the old definition stays on record.
+
+    TARGETS ARE NEVER THE CONFIGURED-ACCB ROW: a line on that code is written only by the
+    ACCB section, Qty 1 by definition.
+    """
+
+    target     = models.ForeignKey('BOQItemMaster', on_delete=models.PROTECT,
+                                   related_name='formula_rules')  # The item whose quantity this rule computes
+    summary    = models.CharField(max_length=200)  # Praveen's words, e.g. "5 m per lightning arrester"; the explanation starts with it
+    multiplier = models.DecimalField(max_digits=12, decimal_places=6, default=1)  # Exact decimal, never float: 0.1, 0.4, 0.64
+    divisor    = models.DecimalField(max_digits=12, decimal_places=6, default=1)  # "÷ 1.5 ÷ 100" is stored as 150; above 0 (CHECK)
+    constant   = models.DecimalField(max_digits=12, decimal_places=4, default=0)  # Added after dividing: R20's "+ 4", or the whole value of a driverless constant
+    rounding   = models.CharField(max_length=8, choices=ROUNDING_CHOICES, default=ROUND_UP)  # 'up' = whole number; 'none' = exact to 0.01 (kWp)
+    floor_one_when_driven = models.BooleanField(default=False)  # G3: at least 1, only when the driver sum is above 0
+    requires_group = models.ForeignKey(BOQItemGroup, null=True, blank=True,
+                                       on_delete=models.PROTECT,
+                                       related_name='gated_rules')  # Gives 0 (constant included) unless the site has one of these; empty = always applies
+    is_active  = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['target__code', 'pk']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['target'], condition=models.Q(is_active=True),
+                name='boqformularule_one_active_per_target',
+                violation_error_message='This item already has an active formula rule.'),
+            models.CheckConstraint(
+                condition=models.Q(divisor__gt=0), name='boqformularule_divisor_positive',
+                violation_error_message='The divisor must be above 0.'),
+            models.CheckConstraint(
+                condition=models.Q(rounding__in=[ROUND_UP, ROUND_NONE]),
+                name='boqformularule_rounding_known'),
+        ]
+
+    def clean(self):
+        if self.target_id and self.target.code == ACCB_CONFIGURED_CODE:
+            raise ValidationError({'target': 'A configured ACCB line is always Qty 1 and '
+                                             'is written only by the ACCB section; it '
+                                             'cannot be computed by a formula.'})
+
+    def save(self, *args, **kwargs):
+        # Written, then the stored rules re-checked in the same transaction (activating a
+        # rule or changing its target can close a loop); a refusal rolls this row back.
+        with transaction.atomic():
+            self.full_clean()
+            super().save(*args, **kwargs)
+            validate_formula_rules()
+
+    def __str__(self):
+        return f"Rule for {self.target.code}{'' if self.is_active else ' (retired)'}"
+
+
+class BOQFormulaDriver(models.Model):
+    """One term of a rule's sum: an item OR a group (exactly one), times a weight."""
+
+    rule   = models.ForeignKey(BOQFormulaRule, on_delete=models.CASCADE, related_name='drivers')
+    item   = models.ForeignKey('BOQItemMaster', null=True, blank=True, on_delete=models.PROTECT,
+                               related_name='formula_driver_uses')  # Set for a one-item driver; retired items still count
+    group  = models.ForeignKey(BOQItemGroup, null=True, blank=True, on_delete=models.PROTECT,
+                               related_name='drivers')  # Set for a group driver ("all inverters")
+    weight = models.DecimalField(max_digits=12, decimal_places=6, default=1)  # This term's factor inside the sum
+    label  = models.CharField(max_length=64, blank=True)  # Short name in the explanation; blank = the item code or the group's label
+
+    class Meta:
+        ordering = ['rule', 'pk']
+        constraints = [
+            models.CheckConstraint(
+                condition=(models.Q(item__isnull=False, group__isnull=True)
+                           | models.Q(item__isnull=True, group__isnull=False)),
+                name='boqformuladriver_item_xor_group',
+                violation_error_message='A driver is exactly one of an item or a group.'),
+        ]
+
+    def clean(self):
+        # Caught here with a plain message; the whole-graph check would also refuse it,
+        # as a loop of one.
+        if self.item_id and self.rule_id and self.item_id == self.rule.target_id:
+            raise ValidationError({'item': "A rule's target cannot be its own driver."})
+
+    def save(self, *args, **kwargs):
+        # Written, then the stored rules re-checked in the same transaction; a refusal
+        # rolls this row back.
+        with transaction.atomic():
+            self.full_clean()
+            super().save(*args, **kwargs)
+            validate_formula_rules()
+
+    def __str__(self):
+        what = self.item.code if self.item_id else self.group.name
+        return f"{self.rule} ← {self.weight} × {what}"
 
 
 class Notification(models.Model):

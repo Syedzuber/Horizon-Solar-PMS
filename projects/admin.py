@@ -23,6 +23,7 @@ from .models import (
     NotificationTemplate, NotificationEventSetting, NotificationEventSettingChange,
     ContractorAttendance, ContractorAttendanceRevision,
     ScheduleBlock, ScheduleBlockTask, log_activity,
+    BOQItemGroup, BOQItemGroupMember, BOQFormulaRule, BOQFormulaDriver,
 )
 from .forms import check_typed_date
 from .attendance import VOID_NOTE_REQUIRED, AttendanceRefused, void_attendance
@@ -1274,3 +1275,51 @@ class ContractorAttendanceAdmin(_ApprovalRecordAdmin):
 class ContractorAttendanceRevisionAdmin(_ApprovalRecordAdmin):
     list_display  = ['pk', 'attendance', 'action', 'changed_by', 'changed_at']
     list_filter   = ['action']
+
+
+# ---------------------------------------------------------------------------
+# B-2a — BOQ formula rules. VIEW-ONLY: rules are loaded by a command or a data migration
+# (B-2c), where every row goes through save()'s whole-graph check. An editable admin
+# form would be a second, unreviewed way to change how quantities are computed.
+# ---------------------------------------------------------------------------
+
+class _ReadOnlyInline(admin.TabularInline):
+    """View-only inline: no add, change or delete, every field shown read-only."""
+    extra = 0
+
+    def get_readonly_fields(self, request, obj=None):
+        return [f.name for f in self.model._meta.fields]
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+class BOQItemGroupMemberInline(_ReadOnlyInline):
+    model = BOQItemGroupMember
+
+
+class BOQFormulaDriverInline(_ReadOnlyInline):
+    model = BOQFormulaDriver
+    fk_name = 'rule'
+
+
+@admin.register(BOQItemGroup)
+class BOQItemGroupAdmin(_ApprovalRecordAdmin):
+    list_display = ['name', 'label', 'updated_at']
+    inlines      = [BOQItemGroupMemberInline]
+
+
+@admin.register(BOQFormulaRule)
+class BOQFormulaRuleAdmin(_ApprovalRecordAdmin):
+    list_display = ['target', 'summary', 'multiplier', 'divisor', 'constant', 'rounding',
+                    'floor_one_when_driven', 'requires_group', 'is_active']
+    list_filter  = ['is_active', 'rounding']
+    # Joined so the changelist does not query once per row for the target's code.
+    list_select_related = ['target', 'requires_group']
+    inlines      = [BOQFormulaDriverInline]
