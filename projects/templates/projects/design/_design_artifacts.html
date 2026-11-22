@@ -57,9 +57,30 @@ stored anywhere (settled decision 8).
               {% endif %}
             </td>
             <td>
-              {# derived_from_arka is NOT NULL — there is always a version to name here. #}
-              <span class="ver-tag">Arka v{{ f.derived_from_arka.version }}</span>
-              {% if arka and f.derived_from_arka_id != arka.id %}
+              {% comment %}
+              derived_from_arka is NOT NULL — there is always a version to name here.
+
+              W-7: THAT ARKA MAY BE ON AN EARLIER ATTEMPT. A fail that named the Arka but
+              not the CAD carries the CAD forward still paired to the Arka it was drawn
+              from, so "Arka v1" alone would be ambiguous beside this attempt's own v1 —
+              the attempt is named whenever it is not this one.
+
+              Two different situations, two different marks:
+                * SAME attempt, not the current Arka — the Arka was rejected and replaced
+                  inside this attempt and nobody re-asked for the drawing. Yellow warning,
+                  unchanged.
+                * EARLIER attempt — the reviewer failed the Arka and did NOT tick the CAD,
+                  i.e. judged the drawing sound (Praveen F1). Grey note, not a warning.
+              Accepted trade-off (Zuber, 22 Nov): a CAD already stale inside its attempt and
+              then carried by a {BOQ} fail shows the grey note. W-5 revisits the
+              same-attempt case when reviewers can upload a new Arka.
+              {% endcomment %}
+              <span class="ver-tag">Arka v{{ f.derived_from_arka.version }}{% if attempt and f.derived_from_arka.attempt_id != attempt.id %} · attempt {{ f.derived_from_arka.attempt.attempt_number }}{% endif %}</span>
+              {% if attempt and f.derived_from_arka.attempt_id != attempt.id %}
+                <div><span class="badge bg-secondary-subtle text-secondary-emphasis">
+                  kept from attempt {{ f.derived_from_arka.attempt.attempt_number }} — the fail did not ask for a new {% if 'cad' in f.kind %}CAD{% else %}BOQ{% endif %}
+                </span></div>
+              {% elif arka and f.derived_from_arka_id != arka.id %}
                 <span class="badge bg-warning text-dark">not the current Arka</span>
               {% endif %}
             </td>

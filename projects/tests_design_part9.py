@@ -979,12 +979,22 @@ class ScopedReworkTests(Part9Base):
         self.assertEqual(self.a.status, DESIGN_ARTIFACTS_UPLOADED,
                          'the package should be back in the QC queue without a new Arka')
 
-    def test_redoing_the_arka_forces_redoing_the_cad(self):
-        """A CAD carried across a new Arka would be paired to a superseded layout."""
+    def test_redoing_the_arka_no_longer_forces_redoing_the_cad(self):
+        """W-7 (Praveen F1): REWRITTEN from test_redoing_the_arka_forces_redoing_the_cad.
+
+        The old test asserted that {arka, boq} was refused because "a new Arka means new
+        CAD". That rule is removed: the reviewer who leaves the CAD unticked has judged it
+        sound. Same POST, opposite outcome — the fail is recorded and the CAD carries,
+        still paired to the Arka it was drawn from on attempt 1."""
         self._fail_qc(ERR_LAYOUT, redo=['arka', 'boq'])
         self.attempt.refresh_from_db()
-        self.assertEqual(self.attempt.qc_verdict, QC_PENDING, 'the failure was recorded')
-        self.assertEqual(self.a.attempts.count(), 1, 'an attempt was opened anyway')
+        self.assertEqual(self.attempt.qc_verdict, QC_FAILED)
+        self.assertEqual(self.attempt.redo_required, ['arka', 'boq'])
+        n1 = self._new_attempt()
+        self.assertEqual(n1.attempt_number, 2)
+        carried = n1.design_files.get(is_current=True)
+        self.assertEqual(carried.carried_forward_from_id, self.cad.pk)
+        self.assertEqual(carried.derived_from_arka_id, self.arka.pk)
 
     def test_redoing_nothing_is_refused(self):
         self._fail_qc(ERR_BOQ_QUANTITY, redo=[])

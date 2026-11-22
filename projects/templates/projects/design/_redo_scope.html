@@ -16,9 +16,9 @@ layout error is fixable in CAD alone.
 checkboxes and the reviewer unticked them all" from "this POST predates the feature".
 Without it an empty selection is ambiguous, and the two cases need opposite answers.
 
-ARKA IMPLIES CAD, enforced in the view AND mirrored here so the reviewer sees it happen
-rather than being refused after submitting: every drawing records the Arka version it was
-made from, so a CAD carried across a new Arka would be paired to a superseded layout.
+THE BOXES ARE INDEPENDENT (W-7, Praveen F1, 22 Nov 2026). Failing the Arka no longer
+ticks and locks the CAD: a CAD the reviewer leaves unticked is carried forward still
+paired to the Arka it was drawn from, and the artifacts panel names that Arka's attempt.
 
 Caller must set `scope_id` to keep ids unique when both gates' forms share a page.
 {% endcomment %}
@@ -42,7 +42,5 @@ Caller must set `scope_id` to keep ids unique when both gates' forms share a pag
   </div>
 </div>
 <div class="text-muted mt-1" style="font-size:.7rem;">
-  Ticked from the category — change it if you disagree. Anything left unticked is carried
-  forward to the next attempt with its approvals, so the designer does not re-make it and
-  neither gate re-approves it.
+  Tick only what failed. Items not ticked carry into the next attempt.
 </div>

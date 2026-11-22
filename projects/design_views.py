@@ -3355,9 +3355,13 @@ def _require_current_arka(attempt):
     that is later rejected. Within one attempt a rejection is answered by a NEW ARKA
     VERSION, not a new attempt, and nothing stands the already-uploaded CAD down when
     that happens — so the designer, not the system, is now responsible for re-uploading a
-    drawing whose layout moved under it. `REDO_ARKA => REDO_CAD` in _posted_redo_scope()
-    does NOT cover this: that rule governs the QC rework loop, and an in-attempt Arka
-    rejection never reaches it. See the session report.
+    drawing whose layout moved under it.
+
+    W-7: A CAD MAY ALSO STAND WITH AN ARKA FROM A LATER ATTEMPT. A fail that names the
+    Arka but not the CAD carries the CAD into the next attempt, still paired to the Arka
+    it was drawn from on the earlier attempt (_carry_forward_artifacts()). This helper is
+    only asked at UPLOAD, where the pairing is always the current attempt's Arka; a carried
+    row is never re-paired by it.
 
     BOQ COMPLETION NO LONGER CALLS THIS AT ALL. It has no FK to an Arka version and never
     did — see design_boq_complete().
@@ -3449,18 +3453,21 @@ def _posted_redo_scope(request, attempt):
     """Return (redo_set, error_message) — what the failing reviewer says must be redone.
 
     Part 9.1. The checkboxes are the reviewer's answer to "what does the designer actually
-    have to make again?", pre-ticked from the error category and freely overridable. Two
-    rules are enforced server-side, because a hand-crafted POST must not be able to reach
-    a state the UI cannot produce:
+    have to make again?", pre-ticked from the error category and freely overridable. One
+    rule is enforced server-side, because a hand-crafted POST must not be able to reach a
+    state the UI cannot produce:
 
     AT LEAST ONE. A failure that requires nothing to be redone is not a failure — the
     designer would receive a reopened attempt with nothing to do and no way to progress it.
 
-    REDOING THE ARKA FORCES REDOING THE CAD. Every artifact records the Arka version it
-    was drawn against (DesignFile.derived_from_arka), and the whole point of that field is
-    that QC never reviews a CAD produced from a superseded layout. Carrying a CAD across a
-    new Arka would create exactly that. So the pair is coupled, and it is coupled here
-    rather than left to the reviewer to remember.
+    ANY COMBINATION IS OTHERWISE ACCEPTED, INCLUDING THE ARKA WITHOUT THE CAD (W-7,
+    Praveen F1 and ruling 8, 22 Nov 2026). The old rule coupled them: "a new Arka means
+    new CAD". The reviewer is the one who looked at both, so a CAD they did not tick is a
+    CAD they judged sound — forcing a redraw of it was churn, not safety. The carried CAD
+    keeps `derived_from_arka` pointing at the Arka it was really made from, on whatever
+    attempt that is (see _carry_forward_artifacts()), so nothing about the pairing is
+    hidden. The same rule serves all three callers: the QC fail, the Head fail and the
+    Head's send-back of a PM rejection.
 
     A missing checkbox set (an old form, a bare POST) falls back to the category's
     defaults rather than to nothing — the safe direction, and identical to what the form
@@ -3477,11 +3484,6 @@ def _posted_redo_scope(request, attempt):
         return set(), ('say what the designer has to redo — a failure that requires '
                        'nothing to be re-made leaves them with a reopened attempt and '
                        'nothing to act on')
-
-    if REDO_ARKA in redo and REDO_CAD not in redo:
-        return set(), ('a new Arka means new CAD too — every drawing records the Arka '
-                       'version it was made from, and QC must never review a CAD drawn '
-                       'against a layout that has been replaced')
 
     return redo, ''
 
@@ -3528,8 +3530,11 @@ def _attempt_files(attempt):
     version it derives from preloaded — the pairing is what the screens exist to show."""
     if attempt is None:
         return []
+    # W-7: `derived_from_arka__attempt` too. A carried CAD may pair to an Arka on an
+    # EARLIER attempt, and the panel names that attempt — without the join it would cost
+    # one query per row.
     return list(attempt.design_files
-                .select_related('derived_from_arka', 'uploaded_by__user')
+                .select_related('derived_from_arka__attempt', 'uploaded_by__user')
                 .order_by('kind', '-version'))
 
 
@@ -3563,6 +3568,11 @@ def _boq_provenance(attempt, arka, arka_history):
     """
     if attempt is None or attempt.boq_submitted_at is None or arka is None:
         return None, False
+    # TODO (W-7, fixed separately per Zuber 22 Nov): a BOQ stamp CARRIED from an earlier
+    # attempt predates every Arka on this one, so the footer says "completed before any
+    # Arka was submitted" — untrue, it was completed under the earlier attempt's Arka.
+    # Possible since Part 9.1 after an {Arka, CAD} fail; W-7 makes it routine ({Arka}
+    # fails). Deferred because the fix is a provenance change, not part of the fail scope.
     # `arka_history` is already in hand for the version panel — reuse it rather than
     # issuing a second query per screen. It is newest-version-first.
     submitted_by_then = [a for a in arka_history
@@ -4401,6 +4411,9 @@ def _carry_forward_artifacts(old_attempt, new_attempt, redo):
     THE CAD COPY SHARES THE STORED OBJECT — `bucket` and `path` verbatim. Nothing is
     re-uploaded and no second copy of a 25 MB archive is written.
 
+    W-7: every box is independent. Arka, CAD and BOQ each carry unless ticked; BOQ Excel /
+    PDF files follow the BOQ box. A carried CAD keeps `derived_from_arka` — see below.
+
     Returns a list of the human-readable things carried, for the log line.
     """
     carried = []
@@ -4432,26 +4445,46 @@ def _carry_forward_artifacts(old_attempt, new_attempt, redo):
         )
         carried.append(f'Arka v{old_arka.version}')
 
-    # CAD can only be carried if the Arka was: `derived_from_arka` must point at an Arka
-    # on the SAME attempt, and a CAD paired to a superseded layout is precisely what that
-    # field exists to prevent. The view refuses the combination before reaching here; this
-    # guard is the backstop.
-    if REDO_CAD not in redo and arka_for_new is not None:
-        for old_file in old_attempt.design_files.filter(is_current=True):
-            DesignFile.objects.create(
-                attempt=new_attempt, kind=old_file.kind, version=1,
-                bucket=old_file.bucket, path=old_file.path,
-                original_filename=old_file.original_filename,
-                size_bytes=old_file.size_bytes, content_type=old_file.content_type,
-                archive_listing=old_file.archive_listing,
-                derived_from_arka=arka_for_new,
-                uploaded_by=old_file.uploaded_by,
-                # As above — the upload note travels with the copy.
-                remarks=old_file.remarks,
-                carried_forward_from=old_file, is_current=True,
-            )
-            carried.append(f'{KIND_LABELS.get(old_file.kind, old_file.kind)}'
-                           f' ({old_file.original_filename or "file"})')
+    # EACH FILE FOLLOWS ITS OWN BOX (W-7). CAD kinds carry unless the CAD was ticked;
+    # the BOQ Excel / PDF files carry unless the BOQ was ticked. "Carry only what didn't
+    # fail" — the BOQ files used to ride on the CAD box, so a BOQ fail carried the very
+    # BOQ sheets it had just failed, and an {Arka} fail would now have carried them too.
+    #
+    # THE CAD NO LONGER NEEDS THE ARKA TO BE CARRIED (Praveen F1, ruling 8). It used to be
+    # dropped whenever the Arka was redone, because `derived_from_arka` was expected to
+    # point at an Arka on the SAME attempt. That expectation is gone: the field means "the
+    # Arka this drawing was made from", and that Arka may sit on an earlier attempt. No
+    # gate reads the pairing (completeness, release and the SE card ask only for a current
+    # cad_zip on the attempt), so a cross-attempt pairing is valid everywhere; only the
+    # artifacts panel shows it, and it says which attempt the Arka is on.
+    for old_file in old_attempt.design_files.filter(is_current=True):
+        box = REDO_CAD if old_file.kind in CAD_KINDS else REDO_BOQ
+        if box in redo:
+            continue
+        # RE-POINT ONLY TO A COPY OF THE SAME ARKA. When the Arka the file was drawn from
+        # is itself being carried, the copy on the new attempt IS that layout, so the file
+        # pairs to the copy and the panel shows no mismatch. Anything else keeps its
+        # original link: re-pointing it at the carried Arka would claim the drawing came
+        # from a layout it was never drawn against (e.g. an {Arka} fail followed by a
+        # {BOQ} fail, where the carried Arka is the NEW one and the CAD is the old one).
+        if arka_for_new is not None and old_file.derived_from_arka_id == old_arka.pk:
+            derived_from_id = arka_for_new.pk
+        else:
+            derived_from_id = old_file.derived_from_arka_id
+        DesignFile.objects.create(
+            attempt=new_attempt, kind=old_file.kind, version=1,
+            bucket=old_file.bucket, path=old_file.path,
+            original_filename=old_file.original_filename,
+            size_bytes=old_file.size_bytes, content_type=old_file.content_type,
+            archive_listing=old_file.archive_listing,
+            derived_from_arka_id=derived_from_id,
+            uploaded_by=old_file.uploaded_by,
+            # As above — the upload note travels with the copy.
+            remarks=old_file.remarks,
+            carried_forward_from=old_file, is_current=True,
+        )
+        carried.append(f'{KIND_LABELS.get(old_file.kind, old_file.kind)}'
+                       f' ({old_file.original_filename or "file"})')
 
     # The BOQ's line items are project-scoped and never reset; what carries here is the
     # per-attempt COMPLETION STAMP, so the designer does not have to re-tick a BOQ that

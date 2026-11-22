@@ -481,7 +481,11 @@ class RejectionAfterCombinedSubmissionTests(CombinedSubmissionBase):
 # ===========================================================================
 
 class RedoScopeCouplingTests(CombinedSubmissionBase):
-    """The rule is unchanged by this session and is re-asserted at the unit level.
+    """W-7 (22 Nov 2026) REMOVED THE RULE: failing the Arka no longer forces the CAD
+    (Praveen F1). The first test below was rewritten to assert acceptance; the rest of
+    this docstring is the history of the rule as it stood when this file was written.
+
+    The rule is unchanged by this session and is re-asserted at the unit level.
 
     IT IS ALSO NOT NEW. The brief recorded it as "never reachable until this session";
     it has been reachable through the QC-failure form since Part 9.1, and
@@ -491,7 +495,11 @@ class RedoScopeCouplingTests(CombinedSubmissionBase):
     because no attempt opens there.
     """
 
-    def test_redo_arka_without_redo_cad_is_still_refused(self):
+    def test_redo_arka_without_redo_cad_is_now_accepted(self):
+        """W-7 (Praveen F1): REWRITTEN from test_redo_arka_without_redo_cad_is_still_refused.
+
+        The "new Arka means new CAD" refusal is removed, so {arka, boq} comes back as
+        posted with no error. The end-to-end carry is pinned in tests_design_redo_scope."""
         from .design_views import _posted_redo_scope
 
         class _Req:
@@ -505,8 +513,8 @@ class RedoScopeCouplingTests(CombinedSubmissionBase):
         })()
 
         redo, error = _posted_redo_scope(request, None)
-        self.assertEqual(redo, set())
-        self.assertIn('new Arka means new CAD', error)
+        self.assertEqual(redo, {'arka', 'boq'})
+        self.assertEqual(error, '')
 
     def test_redo_arka_with_redo_cad_is_accepted(self):
         from .design_views import _posted_redo_scope
