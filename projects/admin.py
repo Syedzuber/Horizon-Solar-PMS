@@ -24,6 +24,7 @@ from .models import (
     ContractorAttendance, ContractorAttendanceRevision,
     ScheduleBlock, ScheduleBlockTask, log_activity,
     BOQItemGroup, BOQItemGroupMember, BOQFormulaRule, BOQFormulaDriver,
+    BOQLineOverride, BOQRecalculation,
 )
 from .forms import check_typed_date
 from .attendance import VOID_NOTE_REQUIRED, AttendanceRefused, void_attendance
@@ -1323,3 +1324,22 @@ class BOQFormulaRuleAdmin(_ApprovalRecordAdmin):
     # Joined so the changelist does not query once per row for the target's code.
     list_select_related = ['target', 'requires_group']
     inlines      = [BOQFormulaDriverInline]
+
+
+# B-2b — the designer's overrides and the record of each recalculated quantity. View-only:
+# rows are written by apply_formulas() and opex_boq_override, never by hand here.
+@admin.register(BOQLineOverride)
+class BOQLineOverrideAdmin(_ApprovalRecordAdmin):
+    list_display = ['line', 'note', 'set_by', 'set_at']
+    # Joined so the changelist does not query once per row for the line and the person.
+    list_select_related = ['line__boq__project', 'set_by__user']
+
+
+@admin.register(BOQRecalculation)
+class BOQRecalculationAdmin(_ApprovalRecordAdmin):
+    list_display = ['created_at', 'boq', 'item_code', 'quantity_before', 'quantity_after',
+                    'source', 'actor']
+    list_filter  = ['source']
+    search_fields = ['item_code', 'boq__project__project_id']
+    # Joined so the changelist does not query once per row for the BOQ and the person.
+    list_select_related = ['boq__project', 'actor__user']

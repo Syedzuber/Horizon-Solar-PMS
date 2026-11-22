@@ -360,6 +360,9 @@ urlpatterns = [
     # B-3a — opex_boq_accb: add / save / duplicate / remove one configured ACCB. The site's
     # assigned designer only, neither BOQ lock on. POST only.
     path('projects/<str:project_id>/boq/accb/',              views.opex_boq_accb,        name='opex_boq_accb'),
+    # B-2b — opex_boq_override: set or clear the designer's override on one calculated
+    # line. The site's assigned designer only, inside the picker's edit window.
+    path('projects/<str:project_id>/boq/override/',          views.opex_boq_override,    name='opex_boq_override'),
     # SESSION B — the REVIEWER's correction screen, and the only BOQ write path that is
     # exempt from the design lock. It takes permissions.user_can_correct_boq() — verdict
     # authority at either design gate, which structurally excludes the site's own designer

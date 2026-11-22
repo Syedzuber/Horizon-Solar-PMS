@@ -109,6 +109,15 @@ from .accb import (
     ACCB_REVIEWER_MESSAGE, ACCB_TYPES, ACCB_UPLOAD_REFUSED_MESSAGE,
     accb_description, accb_config_key, accb_summary, validate_accb_config,
 )
+# B-2b - the formula engine's apply step, run by the picker, the upload and boq_correct.
+from .boq_formulas import (
+    FORMULA_REVIEWER_MESSAGE, apply_formulas, formula_summary_messages,
+    prepare_formula_save,
+)
+from .models import (
+    BOQLineOverride, FORMULA_SOURCE_CORRECTION, FORMULA_SOURCE_OVERRIDE_CLEARED,
+    FORMULA_SOURCE_OVERRIDE_SET, FORMULA_SOURCE_PICKER, FORMULA_SOURCE_UPLOAD,
+)
 from .tender_stages import (
     STAGE_LABELS, STUCK_RULES, activated_progress, design_throughput, stage_summary,
     stuck_sites, tender_cards, tender_site_list,
@@ -9836,6 +9845,15 @@ def boq_detail(request, project_id):
 OPEX_PICKER_RESULT_CAP = 60
 
 
+def _formula_messages(request, summary):
+    """B-2b: flash what the formula engine did on a save. Nothing when nothing changed."""
+    info, warnings = formula_summary_messages(summary)
+    for text in info:
+        messages.info(request, text)
+    for text in warnings:
+        messages.warning(request, text)
+
+
 @login_required
 def opex_boq_entry(request, project_id):
     """OPEX BOQ entry — search the catalogue, add what this site uses, enter quantities.
@@ -9958,12 +9976,22 @@ def opex_boq_entry(request, project_id):
                     # row into existence on a site nobody has entered anything for.
                     boq = BOQ.objects.create(project=project)
 
+                # B-2b: the formula rules, and with them the BOQ row lock, BEFORE any line is
+                # read. One exists() query when no rule exists; see prepare_formula_save().
+                formulas = prepare_formula_save(boq, project.project_type)
+                # COMPUTED LINES ARE THE ENGINE'S, NOT THE POST'S (Zuber, B-2b Q1/Q7). Their
+                # posted quantity is ignored, they are kept out of the delete loop (the
+                # engine removes one when it works out to 0, D1), and a computed item posted
+                # but not on the BOQ is not created here: apply_formulas() adds it when its
+                # rule gives more than 0. A designer changes one only through an override.
+                computed = formulas.targets
+
                 existing_on, existing_off = split_opex_boq_rows(boq, set(catalogue_by_id))
                 by_master = {row.item_master_id: row for row in existing_on}
 
                 # Removed catalogue rows, and removed off-catalogue rows.
                 for master_id, row in by_master.items():
-                    if master_id not in chosen_set:
+                    if master_id not in chosen_set and master_id not in computed:
                         row.delete()
                 for row in existing_off:
                     if row.pk not in keep_off:
@@ -9973,6 +10001,8 @@ def opex_boq_entry(request, project_id):
                 # sort_order, the same rule the Residential template uses, so a row's number is
                 # stable regardless of the order it was added in.
                 for master_id in chosen:
+                    if master_id in computed:
+                        continue
                     master = catalogue_by_id[master_id]
                     row    = by_master.get(master_id)
                     if row is None:
@@ -10000,11 +10030,18 @@ def opex_boq_entry(request, project_id):
                 # very save. Caught just below; the designer sees every refused box.
                 if qty_errors:
                     raise ValidationError(qty_errors)
+
+                # B-2b: computed lines follow the sheet just saved, in this transaction.
+                formula_summary = apply_formulas(
+                    boq, formulas, source=FORMULA_SOURCE_PICKER,
+                    actor=getattr(request.user, 'profile', None))
         except ValidationError as exc:
             for error in exc.messages:
                 messages.error(request, error)
             messages.error(request, 'Nothing was saved.')
             return redirect('opex_boq_entry', project_id=project_id)
+
+        _formula_messages(request, formula_summary)
 
         # SAY SO WHEN A ROW WAS PUT BACK. Silent re-add is the correct behaviour and a
         # confusing one at the same time: a designer who removed a row and watched it
@@ -10360,6 +10397,155 @@ def opex_boq_accb(request, project_id):
         action_code, text = log_line
         log_activity(project, profile, text, entity_type='BOQ', entity_id=boq.pk,
                      action_code=action_code)
+    return back
+
+
+# ---------------------------------------------------------------------------
+# B-2b — the designer's override of a calculated BOQ line
+#
+# ITS OWN ENDPOINT, NOT A FIELD IN THE PICKER'S FORM, for the ACCB section's reason: the
+# picker's POST reconciles the whole sheet, and setting or clearing one override must not
+# depend on, or be able to disturb, that. One line per POST. The form and the Clear control
+# are drawn in B-2b.1; until then this answers a POST only.
+# ---------------------------------------------------------------------------
+
+#: The note's share of an override log line, so the whole line fits ActivityLog.action
+#: (255) with the designer's name (_ACCB_LOG_NAME_MAX), a code, a site code and two numbers.
+_OVERRIDE_LOG_NOTE_MAX = 80
+
+
+def _override_note_for_log(note):
+    return note if len(note) <= _OVERRIDE_LOG_NOTE_MAX else note[:_OVERRIDE_LOG_NOTE_MAX - 1] + '…'
+
+
+@login_required
+@require_POST
+def opex_boq_override(request, project_id):
+    """Set or clear the designer's override on one calculated line of an OPEX BOQ (B-2b).
+
+    Access: the site's assigned designer only (user_can_edit_project_boq, the picker's
+    W-narrow rule, Zuber B-2b), and only while neither the procurement group lock nor the
+    design lock is on: the upload/edit window (ruling 5). A reviewer never overrides (D2);
+    they correct what the line is calculated from, or fail the BOQ.
+
+    Actions, one line per POST (`item_id` names the BOQ line):
+        set   — `quantity` and a non-blank `note` are both required. The line takes the
+                quantity and stops recalculating; later rules read it.
+        clear — the override row is deleted and the line recalculates in this request
+                (it is removed if it now works out to 0, D1).
+    Only a CALCULATED line (an active rule targets its item) can be overridden.
+    """
+    project = _active_project(project_id)
+
+    if project.project_type != 'OPEX':
+        raise Http404('Calculated BOQ lines exist on RESCO BOQs only.')
+
+    # The picker's write rule: only the site's assigned designer. QC, the Head, PM, SCM and
+    # Admin never set an override; a reviewer's lever is the driver or a failed BOQ (D2).
+    if not user_can_edit_project_boq(request.user, project):
+        return HttpResponseForbidden()
+
+    back = redirect('opex_boq_entry', project_id=project_id)
+
+    # The two locks, most final first, in the picker's words.
+    if project_boq_is_group_locked(project):
+        messages.error(request, 'This site is in a locked procurement group — its BOQ '
+                                'quantities are final and can no longer be changed. A '
+                                'correction now needs a variance against the order.')
+        return back
+    if project_boq_is_design_locked(project):
+        messages.error(request, 'This BOQ has been marked complete and is with design '
+                                'review — it cannot be changed until a reviewer sends '
+                                'it back or a change request opens a new attempt.')
+        return back
+
+    action = request.POST.get('action', '')
+    if action not in ('set', 'clear'):
+        messages.error(request, 'That is not an override action.')
+        return back
+
+    raw = request.POST.get('item_id', '')
+    try:
+        boq = project.boq
+    except BOQ.DoesNotExist:
+        boq = None
+    if boq is None or not raw.isdigit():
+        raise Http404('No such line on this BOQ.')
+
+    quantity = note = None
+    if action == 'set':
+        # Both refusals are collected and shown together; nothing is written.
+        errors = []
+        try:
+            quantity = parse_decimal_input(
+                request.POST.get('quantity'), places=2, min_value=0,
+                max_value=decimal_field_max(BOQItem, 'boq_quantity'),
+                field_label='Override quantity')
+        except ValidationError as exc:
+            errors.extend(exc.messages)
+        if quantity is None and not errors:
+            errors.append('Enter the quantity this line should carry.')
+        note = (request.POST.get('note') or '').strip()
+        if not note:
+            errors.append('An override needs a note saying why the calculated figure is '
+                          'wrong for this site.')
+        if errors:
+            for error in errors:
+                messages.error(request, error)
+            messages.error(request, 'Nothing was saved.')
+            return back
+
+    profile = request.user.profile
+    log_line = None
+    with transaction.atomic():
+        # The rules and the BOQ row lock before the line is read (one exists() query when
+        # no rule exists, and then nothing is calculated, so there is nothing to override).
+        formulas = prepare_formula_save(boq, project.project_type)
+        # Object consistency: the line must be on THIS site's BOQ; read under the lock.
+        line = get_object_or_404(BOQItem.objects.select_related('item_master'),
+                                 pk=int(raw), boq=boq)
+        code = line.item_master.code if line.item_master_id else ''
+        if line.item_master_id not in formulas.targets:
+            messages.error(request, f'{code or "That line"} is not a calculated line, so '
+                                    f'there is nothing to override. Change its quantity on '
+                                    f'the BOQ.')
+            return back
+
+        name = _accb_actor_name(profile)
+        if action == 'set':
+            before = line.boq_quantity
+            line.boq_quantity = quantity
+            line.save(update_fields=['boq_quantity'])
+            BOQLineOverride.objects.update_or_create(
+                line=line, defaults={'note': note, 'set_by': profile})
+            # Later rules read the overridden value, so the lines that follow it move now.
+            summary = apply_formulas(boq, formulas, source=FORMULA_SOURCE_OVERRIDE_SET,
+                                     actor=profile)
+            was = 'blank' if before is None else f'{before.normalize():f}'
+            log_line = ('boq_formula_override_set',
+                        f'{name} overrode {code} on {project.project_id}: {was} → '
+                        f'{quantity.normalize():f} ({_override_note_for_log(note)})')
+            messages.success(request, f'{code} set to {quantity.normalize():f} by hand. It '
+                                      f'will not recalculate until the override is cleared.')
+        else:
+            deleted, _detail = BOQLineOverride.objects.filter(line=line).delete()
+            if not deleted:
+                messages.info(request, f'{code} has no override — nothing changed.')
+                return back
+            summary = apply_formulas(boq, formulas, source=FORMULA_SOURCE_OVERRIDE_CLEARED,
+                                     actor=profile)
+            result = summary.results.get(line.item_master_id)
+            now = '—' if result is None else f'{result.quantity.normalize():f}'
+            log_line = ('boq_formula_override_cleared',
+                        f'{name} cleared the override on {code} on {project.project_id} '
+                        f'(calculated: {now})')
+            messages.success(request, f'Override on {code} cleared; it is calculated again '
+                                      f'({now}).')
+
+    _formula_messages(request, summary)
+    # After the write commits, never inside it — log_activity's own rule.
+    log_activity(project, profile, log_line[1], entity_type='BOQItem', entity_id=line.pk,
+                 action_code=log_line[0])
     return back
 
 
@@ -11004,15 +11190,22 @@ def opex_boq_upload(request, project_id):
             ctx.update({'stage': 'errors', 'errors': errors, 'error_count': len(errors)})
             return render(request, 'projects/opex_boq_upload.html', ctx)
 
-        boq, added, changed, readded = _boq_upload_apply(project, clean)
+        profile = getattr(request.user, 'profile', None)
+        boq, added, changed, readded, formula = _boq_upload_apply(project, clean,
+                                                                  actor=profile)
+        # B-2b: the file itself never removes a row; a calculated line that now works out
+        # to 0 does (D1), so the count is no longer always 0.
+        removed = len(formula['summary'].removed)
+        replaced = formula['replaced']
 
         # After the primary save, never inline — and `boq` comes back from the apply
         # rather than being re-read off `project`, whose reverse one-to-one may still
         # be caching the miss from before the row existed.
         log_activity(
-            project, getattr(request.user, 'profile', None),
+            project, profile,
             f'BOQ spreadsheet uploaded — {added} row(s) added, {changed} quantity(ies) '
-            f'changed, 0 removed',
+            f'changed, {removed} removed'
+            + (f', {len(replaced)} calculated line(s) replaced' if replaced else ''),
             entity_type='BOQ', entity_id=boq.pk,
             action_code='boq_uploaded',
         )
@@ -11026,10 +11219,13 @@ def opex_boq_upload(request, project_id):
         messages.success(
             request,
             f'BOQ updated from the spreadsheet: {added} row(s) added, {changed} '
-            f'quantity(ies) changed. Nothing was removed — rows are removed on the BOQ '
-            f'screen.')
+            f'quantity(ies) changed.'
+            + ('' if removed else ' Nothing was removed — rows are removed on the BOQ '
+                                  'screen.'))
+        _formula_messages(request, formula['summary'])
         ctx.update({'stage': 'result', 'added': added, 'changed': changed,
-                    'readded': readded})
+                    'removed': removed, 'readded': readded, 'replaced': replaced,
+                    'kept_override': formula['kept_override']})
         return render(request, 'projects/opex_boq_upload.html', ctx)
 
     # GET, or an unrecognised phase — the initial upload screen.
@@ -11086,18 +11282,26 @@ def _boq_upload_missing_mandatory(by_master, clean):
             if m.pk not in by_master and m.code not in file_codes]
 
 
-def _boq_upload_apply(project, clean):
-    """Apply the validated rows. Returns (boq, added, changed, readded).
+def _boq_upload_apply(project, clean, actor=None):
+    """Apply the validated rows. Returns (boq, added, changed, readded, formula).
 
     THE PICKER'S PERSISTENCE BLOCK MINUS ITS TWO DELETE LOOPS (see opex_boq_entry).
     The lazy BOQ create, split_opex_boq_rows(), the by_master index and the
     create/update loop's field mapping are all the picker's, so a row this writes
     is indistinguishable from a row the picker writes. What is absent is absent on
-    purpose: there is no branch here that can delete a BOQItem.
+    purpose: there is no branch here that can delete a BOQItem. (B-2b: the formula
+    engine can, when a calculated line works out to 0 — D1, the same rule as the
+    picker. That removal is apply_formulas()'s, reported in `formula`.)
 
     OFF-CATALOGUE ROWS ARE NOT EVEN READ. The file never carries them — they live
     on their own sheet, which the parser skips by name — so they cannot be changed
     and cannot be removed by any file.
+
+    B-2b D3 — A CALCULATED ITEM'S ROW IN THE FILE IS NOT WRITTEN. Its quantity comes from
+    its rule (or the designer's override, which survives the upload); the file's figure
+    is reported in `formula['replaced']` (or `formula['kept_override']`) when it differs.
+    `formula` = {'summary': FormulaSummary, 'replaced': [...], 'kept_override': [...]},
+    each list entry {'code', 'file', 'calculated'}.
     """
     added = changed = 0
 
@@ -11109,11 +11313,22 @@ def _boq_upload_apply(project, clean):
             # never on the upload screen's GET and never at preview.
             boq = BOQ.objects.create(project=project)
 
+        # B-2b: the rules and the BOQ row lock before any line is read (one exists()
+        # query when no rule exists).
+        formulas = prepare_formula_save(boq, project.project_type)
+        computed = formulas.targets
+
         existing_on, _existing_off = split_opex_boq_rows(
             boq, {m.pk for m in get_opex_boq_catalogue()})
         by_master = {row.item_master_id: row for row in existing_on}
 
-        readded = _boq_upload_missing_mandatory(by_master, clean)
+        # A calculated item is never put back blank: the engine adds it when its rule gives
+        # more than 0, as on the picker.
+        readded = [m for m in _boq_upload_missing_mandatory(by_master, clean)
+                   if m.pk not in computed]
+
+        # The file's rows for calculated items, compared with the engine's figure below.
+        held = []
 
         # serial_no comes from the catalogue's sort_order, category/description/uom
         # from the MASTER — never from the file. The spreadsheet's specification
@@ -11121,6 +11336,9 @@ def _boq_upload_apply(project, clean):
         # server re-derives the truth.
         for entry in clean:
             master = entry['master']
+            if master.pk in computed:
+                held.append(entry)
+                continue
             row    = by_master.get(master.pk)
             if row is None:
                 BOQItem.objects.create(
@@ -11148,7 +11366,27 @@ def _boq_upload_apply(project, clean):
                 uom=master.unit, boq_quantity=None, is_standard_item=True,
             )
 
-    return boq, added, changed, readded
+        summary = apply_formulas(boq, formulas, source=FORMULA_SOURCE_UPLOAD, actor=actor)
+
+    # D3 — what happened to the file's figure for each calculated item. A blank cell is
+    # "leave it alone" here as everywhere in the upload, so it is never "replaced". An item
+    # on 2+ lines was not written at all and is reported by the summary's own warning.
+    replaced, kept_override = [], []
+    for entry in held:
+        result = summary.results.get(entry['master'].pk)
+        if (entry['quantity'] is None or result is None
+                or entry['master'].code in summary.skipped_multiple):
+            continue
+        row = {'code': entry['master'].code, 'file': entry['quantity'],
+               'calculated': result.quantity}
+        if result.overridden:
+            if entry['quantity'] != result.quantity:
+                kept_override.append(row)
+        elif entry['quantity'] != result.computed:
+            replaced.append(row)
+
+    return boq, added, changed, readded, {
+        'summary': summary, 'replaced': replaced, 'kept_override': kept_override}
 
 
 # ---------------------------------------------------------------------------
@@ -11348,12 +11586,20 @@ def boq_correct(request, project_id):
             # is_standard_item True so it is a real catalogue line rather than an ad-hoc
             # one. A reviewer's line is not a second class of row.
             with transaction.atomic():
+                # B-2b: the rules and the BOQ row lock first (one exists() query when no
+                # rule exists).
+                formulas = prepare_formula_save(boq, project.project_type)
+                # D2: a calculated item is the engine's. A reviewer adding one by hand is
+                # refused, the same as setting its quantity; nothing is written.
+                if master.pk in formulas.targets:
+                    messages.error(request, FORMULA_REVIEWER_MESSAGE)
+                    return redirect('boq_correct', project_id=project_id)
                 item = BOQItem.objects.create(
                     boq=boq, item_master=master, serial_no=master.sort_order,
                     category=master.category, description=master.description,
                     uom=master.unit, boq_quantity=quantity, is_standard_item=True,
                 )
-                BOQCorrection.objects.create(
+                correction = BOQCorrection.objects.create(
                     boq=boq, item=item,
                     item_code=master.code, item_description=master.description,
                     action=BOQ_CORRECTION_LINE_ADDED,
@@ -11364,8 +11610,15 @@ def boq_correct(request, project_id):
                     # needs the assignment, so it exists here.
                     designer_at_correction_id=project.design_assignment.assigned_to_id,
                 )
+                # Z2: the lines that follow from this correction are recorded as
+                # recalculations linked to it, never as more BOQCorrection rows. Q4: this
+                # screen never deletes a line, so one that falls to 0 is set to 0.
+                formula_summary = apply_formulas(
+                    boq, formulas, source=FORMULA_SOURCE_CORRECTION, actor=profile,
+                    driving_correction=correction, remove_zero=False)
             messages.success(request, f'Added {master.code} {master.description}. The '
                                       f'correction is recorded against your name.')
+            _formula_messages(request, formula_summary)
             return redirect('boq_correct', project_id=project_id)
 
         if action == 'set_quantity':
@@ -11398,17 +11651,31 @@ def boq_correct(request, project_id):
                 messages.error(request, f'That quantity is not usable: {qty_error}.')
                 return redirect('boq_correct', project_id=project_id)
 
-            before = item.boq_quantity
-            if before is not None and quantity == before:
-                messages.info(request, 'That row already carries that quantity — nothing '
-                                       'was changed and nothing was recorded.')
-                return redirect('boq_correct', project_id=project_id)
-
             code, description = _boq_correction_identity(item)
             with transaction.atomic():
+                # B-2b: the rules and the BOQ row lock first (one exists() query when no
+                # rule exists).
+                formulas = prepare_formula_save(boq, project.project_type)
+                # D2: a calculated line (an active rule targets its item, overridden or not)
+                # is not a reviewer's to set, the same pattern as the ACCB refusal above.
+                # The way to move it is to correct what it is calculated from.
+                if item.item_master_id in formulas.targets:
+                    messages.error(request, FORMULA_REVIEWER_MESSAGE)
+                    return redirect('boq_correct', project_id=project_id)
+                if formulas.active:
+                    # Under the lock: another save may have moved this line since it was
+                    # read above. Only with rules, so a site without them pays no query.
+                    item.refresh_from_db(fields=['boq_quantity'])
+
+                before = item.boq_quantity
+                if before is not None and quantity == before:
+                    messages.info(request, 'That row already carries that quantity — '
+                                           'nothing was changed and nothing was recorded.')
+                    return redirect('boq_correct', project_id=project_id)
+
                 item.boq_quantity = quantity
                 item.save(update_fields=['boq_quantity'])
-                BOQCorrection.objects.create(
+                correction = BOQCorrection.objects.create(
                     boq=boq, item=item,
                     item_code=code, item_description=description,
                     action=BOQ_CORRECTION_QUANTITY_CHANGED,
@@ -11417,11 +11684,18 @@ def boq_correct(request, project_id):
                     # BC-4: frozen designer credit, as on add_line above.
                     designer_at_correction_id=project.design_assignment.assigned_to_id,
                 )
+                # Z2: exactly one BOQCorrection (above), for the driving edit; the lines
+                # that follow are BOQRecalculation rows linked to it. Q4: never a delete
+                # here, so a line that falls to 0 is set to 0.
+                formula_summary = apply_formulas(
+                    boq, formulas, source=FORMULA_SOURCE_CORRECTION, actor=profile,
+                    driving_correction=correction, remove_zero=False)
             messages.success(
                 request,
                 f'{code or description[:40]} — quantity corrected from '
                 f'{"blank" if before is None else before} to {quantity}. The correction is '
                 f'recorded against your name.')
+            _formula_messages(request, formula_summary)
             return redirect('boq_correct', project_id=project_id)
 
         # NO OTHER ACTION EXISTS ON THIS ENDPOINT, and an unrecognised one is refused

@@ -25,15 +25,15 @@ that is parsed, and nothing here ever calls eval().
 
 PURE WHERE IT MATTERS. evaluate() and build_rule_set() take plain data and touch no
 database, request or model. load_rules() is the one reader and issues the same three
-queries however many rules exist. NOTHING CALLS THIS YET: the BOQ write paths are hooked
-in B-2b, and Praveen's real rules are loaded in B-2c. On the day this ships there are no
-rule rows at all.
+queries however many rules exist. B-2b hooks the BOQ write paths through
+prepare_formula_save() and apply_formulas() at the end of this module; Praveen's real rules
+are loaded in B-2c, so until then there are no rule rows and those hooks cost one query.
 
 THIS MODULE IMPORTS NO MODELS AT MODULE LEVEL. models.py imports the rounding constants and
 validate_formula_rules() from here, so the two functions that read the database import
 models inside themselves.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, Decimal, localcontext
 from typing import Mapping
 
@@ -379,13 +379,17 @@ def _compute(rule, values, codes, unit, computed_ids):
 # Loading and save-time validation (the only functions that touch the database)
 # ---------------------------------------------------------------------------
 
-def _load_specs(include_retired_targets):
+def _load_specs(include_retired_targets, project_type=None):
     """(specs, codes, units, types) from the rule tables in three queries, always three.
 
     include_retired_targets=False is load_rules(): a rule whose target item is retired is
     skipped (Q8). Retired items still count as drivers and group members, because a retired
     inverter on a BOQ still needs fasteners. Validation passes True, so a loop through a
     retired target is refused too: it would return the day the item is reactivated.
+
+    project_type (B-2b Q3) keeps only the rules whose target is of that type. Q9 makes every
+    rule one type throughout, so filtering on the target is filtering the whole rule. None
+    is every type, which is what validation needs.
     """
     # Lazy import: models.py imports ROUNDING_CHOICES and validate_formula_rules from this
     # module, so importing models at module level here would be circular.
@@ -397,6 +401,9 @@ def _load_specs(include_retired_targets):
     if not include_retired_targets:
         rule_q &= Q(target__is_active=True)
         driver_q &= Q(rule__target__is_active=True)
+    if project_type is not None:
+        rule_q &= Q(target__project_type=project_type)
+        driver_q &= Q(rule__target__project_type=project_type)
 
     # 1. Active rules with their target (code, unit, type) and gate group label.
     rules = list(BOQFormulaRule.objects.filter(rule_q)
@@ -450,9 +457,15 @@ def _load_specs(include_retired_targets):
     return specs, codes, units, types
 
 
-def load_rules():
-    """The active rule set, ordered for evaluate(). Three queries whatever the rule count."""
-    specs, codes, units, _types = _load_specs(include_retired_targets=False)
+def load_rules(project_type=None):
+    """The active rule set, ordered for evaluate(). Three queries whatever the rule count.
+
+    project_type='OPEX' keeps only RESCO rules (B-2b Q3). The write paths always pass the
+    site's type: without it a Residential constant rule would put a Residential catalogue
+    line on every RESCO BOQ it saved. None (the default) is every type, as before.
+    """
+    specs, codes, units, _types = _load_specs(include_retired_targets=False,
+                                              project_type=project_type)
     return build_rule_set(specs, codes, units)
 
 
@@ -479,3 +492,284 @@ def validate_formula_rules():
                 f'The rule for {codes[spec.target_id]} mixes project types '
                 f'({", ".join(sorted(kinds))}). A rule, its drivers and its groups must all '
                 f'be one project type.')
+
+
+# ---------------------------------------------------------------------------
+# B-2b — applying the rules to one BOQ, inside a write path's own transaction
+#
+# THE HOOKED PATHS (Zuber, 22 Nov): the picker save, the spreadsheet upload, and the
+# reviewer's add_line and set_quantity. NOT the ACCB endpoint and NOT
+# fix_tin_shade_ballast --apply-counts (that hook is B-2c's). Each path calls
+# prepare_formula_save() at the START of its transaction, before it reads or writes a line,
+# and apply_formulas() at the END, after its own writes.
+#
+# A LINE IS COMPUTED BECAUSE AN ACTIVE RULE TARGETS ITS CATALOGUE ITEM. That is worked out
+# here, from the loaded rules, every time; nothing on BOQItem records it. A designer may
+# override a computed line (BOQLineOverride, a one-to-one beside the line); an overridden
+# line keeps its quantity until the override is cleared, and later rules read that value.
+#
+# WITH NO ACTIVE RULES FOR THE SITE'S TYPE, ALL OF THIS COSTS ONE exists() QUERY and
+# writes nothing: prepare_formula_save() returns an inactive marker and apply_formulas()
+# returns at once. That is the state B-2b ships in.
+# ---------------------------------------------------------------------------
+
+#: D2 — what a reviewer is told when they try to set or add a computed item.
+FORMULA_REVIEWER_MESSAGE = ("This quantity is calculated. Correct the item it's calculated "
+                            "from, or fail the BOQ to send it back.")
+
+
+@dataclass(frozen=True)
+class FormulaSave:
+    """What a hooked write path needs from the start of its transaction to the end.
+
+    `rules` is None when no active rule exists for the site's type: then nothing is
+    computed, `targets` is empty and apply_formulas() does nothing."""
+    rules: RuleSet | None = None
+
+    @property
+    def active(self):
+        return self.rules is not None
+
+    @property
+    def targets(self):
+        """Catalogue item ids computed on this save: every active rule's target."""
+        if self.rules is None:
+            return frozenset()
+        return frozenset(rule.target_id for rule in self.rules.rules)
+
+
+@dataclass(frozen=True)
+class FormulaChange:
+    """One computed line apply_formulas() wrote, for the caller's message."""
+    code: str
+    before: Decimal | None        # None = there was no line
+    after: Decimal | None         # None = the line was removed (D1)
+    unit: str
+
+
+@dataclass
+class FormulaSummary:
+    """What apply_formulas() did. Falsy when nothing changed and nothing was skipped."""
+    added: list = field(default_factory=list)               # FormulaChange
+    changed: list = field(default_factory=list)             # FormulaChange
+    removed: list = field(default_factory=list)             # FormulaChange
+    kept_at_zero: list = field(default_factory=list)        # FormulaChange: fell to 0, line kept (reviewer path, or ordered)
+    skipped_overridden: list = field(default_factory=list)  # Item codes left at their override
+    skipped_multiple: list = field(default_factory=list)    # Item codes on 2+ lines, not written (Q9)
+    results: dict = field(default_factory=dict)             # evaluate()'s output, by item id
+
+    @property
+    def changes(self):
+        return self.added + self.changed + self.removed + self.kept_at_zero
+
+    def __bool__(self):
+        return bool(self.changes or self.skipped_multiple)
+
+
+def formula_rules_exist(project_type):
+    """True if an active rule with an active target of `project_type` exists. One query.
+
+    The same terms as load_rules(project_type): a rule on a retired target is not applied,
+    so it must not make a save pay for the lock and the load either."""
+    # Lazy import: models.py imports this module, so importing models at the top would be
+    # circular.
+    from .models import BOQFormulaRule
+    return BOQFormulaRule.objects.filter(
+        is_active=True, target__is_active=True, target__project_type=project_type,
+    ).exists()
+
+
+def lock_boq(boq):
+    """Lock the BOQ row for the rest of the caller's transaction (B-2b Q2). One query.
+
+    TAKEN AT THE START OF THE HOOKED TRANSACTION, BEFORE ANY LINE IS READ OR WRITTEN. Two
+    saves on one BOQ (QC and the Head both in awaiting_head_qc, two designer tabs, an upload
+    beside a picker save) would otherwise each compute from the other's uncommitted driver,
+    and the later commit would leave a stale computed line. Taking it here, not inside
+    apply_formulas(), also avoids a deadlock: the picker updates every row on the sheet, so
+    a lock taken only at the end could wait on a line the other save holds while that save
+    waits on the BOQ. Django drops FOR UPDATE on SQLite, which has no row locks."""
+    # Lazy import: models.py imports this module (see formula_rules_exist).
+    from .models import BOQ
+    list(BOQ.objects.select_for_update().filter(pk=boq.pk).values_list('pk', flat=True))
+
+
+def prepare_formula_save(boq, project_type):
+    """Start of a hooked write. One query with no rules; with rules, the lock plus three.
+
+    The caller must be inside transaction.atomic() and must call this before it reads the
+    lines it is about to change."""
+    if not formula_rules_exist(project_type):
+        return FormulaSave()
+    lock_boq(boq)
+    return FormulaSave(rules=load_rules(project_type))
+
+
+def _override_of(line):
+    """The line's BOQLineOverride or None, with no query (select_related loaded it)."""
+    from django.core.exceptions import ObjectDoesNotExist
+    try:
+        return line.formula_override
+    except ObjectDoesNotExist:
+        return None
+
+
+def apply_formulas(boq, prepared, *, source, actor, driving_correction=None,
+                   remove_zero=True):
+    """Bring every computed line on `boq` up to date. Returns a FormulaSummary.
+
+    Runs inside the caller's transaction, after the caller's own writes, with the rules and
+    the lock from prepare_formula_save(). With no rules it returns at once: no query, no
+    write.
+
+    THE INPUT (pre-flight P4). Every line with a catalogue item, ACCB lines included (Qty 1
+    each), summed per item; lines with no item are left out; a blank quantity counts as
+    nothing; retired items count. An OVERRIDDEN computed line goes to evaluate() as an
+    override, so later rules read the quantity on the sheet, not the rule's.
+
+    WHAT IS WRITTEN, per rule in dependency order:
+      * an overridden line: left alone (reported).
+      * 2+ lines on the target item: left alone and reported (Q9). Not summed, not picked.
+      * no line: created from the catalogue's current wording (Z1) if the result is above
+        0; nothing if it is 0 (D1).
+      * one line: only boq_quantity changes, and only if it differs.
+      * one line whose result is 0 (D1): removed, unless remove_zero is False (the reviewer
+        path, Q4: boq_correct never deletes a line, so it is set to 0 and the designer's
+        next save removes it), or the line has an ordered quantity or an order line (kept
+        at 0; neither is reachable on a RESCO BOQ today, pre-flight P5).
+    Every line that changes gets one BOQRecalculation, all written in one INSERT.
+    """
+    summary = FormulaSummary()
+    if not prepared.active:
+        return summary
+
+    # Lazy import: models.py imports this module, so importing models at the top would be
+    # circular.
+    from .models import BOQItem, BOQItemMaster, BOQRecalculation, VendorOrderLine
+
+    rules = prepared.rules
+    codes = rules.codes
+
+    # One read of the whole sheet, each line with its override joined in, after the
+    # caller's writes and under the caller's BOQ lock: this is the sheet the computed lines
+    # must follow.
+    lines = list(boq.items.select_related('formula_override').order_by('pk'))
+    quantities, lines_of = {}, {}
+    for line in lines:
+        if line.item_master_id is None:
+            continue
+        lines_of.setdefault(line.item_master_id, []).append(line)
+        if line.boq_quantity is not None:
+            quantities[line.item_master_id] = (quantities.get(line.item_master_id, ZERO)
+                                               + line.boq_quantity)
+
+    overrides = {}
+    for target in prepared.targets:
+        own = lines_of.get(target, [])
+        if len(own) == 1 and _override_of(own[0]) is not None:
+            overrides[target] = own[0].boq_quantity if own[0].boq_quantity is not None else ZERO
+
+    try:
+        results = evaluate(quantities, rules, overrides)
+    except FormulaError as exc:
+        # A result the BOQ column cannot hold (or a loop, which load_rules never returns).
+        # As a ValidationError the picker refuses the save with the reason, the same way it
+        # refuses a bad quantity box; on the other paths the transaction rolls back.
+        raise ValidationError(str(exc))
+    summary.results = results
+
+    records, to_create = [], []
+
+    def record(result, line, before, after, description, unit):
+        records.append(BOQRecalculation(
+            boq=boq, line=line, item_code=codes.get(result.item_id, ''),
+            item_description=description, item_unit=unit, rule_id=result.rule_id,
+            quantity_before=before, quantity_after=after, source=source,
+            explanation=result.explanation, actor=actor,
+            driving_correction=driving_correction))
+        return FormulaChange(code=codes.get(result.item_id, ''), before=before, after=after,
+                             unit=unit)
+
+    for result in results.values():      # evaluation (dependency) order
+        code = codes.get(result.item_id, '')
+        own = lines_of.get(result.item_id, [])
+        if len(own) > 1:
+            summary.skipped_multiple.append(code)
+            continue
+        if result.overridden:
+            summary.skipped_overridden.append(code)
+            continue
+        line = own[0] if own else None
+        new = result.computed
+
+        if line is None:
+            if new > 0:
+                to_create.append(result)
+            continue
+
+        before = line.boq_quantity
+        if new == 0:
+            # P5 blockers. The order-line query runs only for a line about to fall to 0.
+            blocked = (line.ordered_quantity is not None
+                       or VendorOrderLine.objects.filter(boq_item=line).exists())
+            if remove_zero and not blocked:
+                # Recorded first, with no line: the record survives the line it describes.
+                summary.removed.append(record(result, None, before, None,
+                                              line.description, line.uom))
+                line.delete()
+                continue
+            if before is not None and before == 0:
+                continue
+            line.boq_quantity = new
+            line.save(update_fields=['boq_quantity'])
+            summary.kept_at_zero.append(record(result, line, before, new,
+                                               line.description, line.uom))
+            continue
+
+        if before is not None and before == new:
+            continue
+        line.boq_quantity = new
+        line.save(update_fields=['boq_quantity'])
+        summary.changed.append(record(result, line, before, new, line.description, line.uom))
+
+    if to_create:
+        # The catalogue rows for the new lines: one query, only when a line is added.
+        masters = BOQItemMaster.objects.in_bulk([r.item_id for r in to_create])
+        for result in to_create:
+            master = masters[result.item_id]
+            # THE PICKER'S CREATE, FIELD FOR FIELD (Z1): the catalogue's current wording.
+            line = BOQItem.objects.create(
+                boq=boq, item_master=master, serial_no=master.sort_order,
+                category=master.category, description=master.description,
+                uom=master.unit, boq_quantity=result.computed, is_standard_item=True)
+            summary.added.append(record(result, line, None, result.computed,
+                                        master.description, master.unit))
+
+    if records:
+        BOQRecalculation.objects.bulk_create(records)
+    return summary
+
+
+def formula_summary_messages(summary):
+    """(info lines, warning lines) describing a save's FormulaSummary. Pure."""
+    def qty(value):
+        return 'blank' if value is None else _num(value)
+
+    info = []
+    if summary.added:
+        info.append('Calculated lines added: ' + ', '.join(
+            f'{c.code} {qty(c.after)} {c.unit}'.rstrip() for c in summary.added) + '.')
+    if summary.changed:
+        info.append('Calculated lines updated: ' + ', '.join(
+            f'{c.code} {qty(c.before)} → {qty(c.after)}' for c in summary.changed) + '.')
+    if summary.removed:
+        info.append('Calculated lines removed because they now work out to 0: '
+                    + ', '.join(c.code for c in summary.removed) + '.')
+    if summary.kept_at_zero:
+        info.append('Calculated lines set to 0: '
+                    + ', '.join(c.code for c in summary.kept_at_zero) + '.')
+    warnings = [
+        f'{code} is on this BOQ more than once, so its calculated quantity was not '
+        f'written. Remove the extra line.'
+        for code in summary.skipped_multiple]
+    return info, warnings

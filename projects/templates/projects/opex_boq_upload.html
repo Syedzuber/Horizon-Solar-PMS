@@ -224,8 +224,29 @@ STAGES, all driven off `stage`, the same shape opex_site_bulk_upload.html uses:
   <div class="alert alert-success">
     <div class="fw-semibold mb-1">BOQ updated.</div>
     {{ added }} row{{ added|pluralize }} added · {{ changed }} quantit{{ changed|pluralize:"y,ies" }}
-    changed · <strong>0 removed</strong>.
+    changed · <strong>{{ removed }} removed</strong>.
   </div>
+  {% comment %}
+    B-2b D3: a calculated item's quantity comes from its rule, not from the file. Listed
+    here so the designer sees which figures in the file were not used, and why.
+  {% endcomment %}
+  {% if replaced %}
+    <div class="alert alert-warning small" id="boqUploadReplaced">
+      <div class="fw-semibold mb-1">{{ replaced|length }} calculated line{{ replaced|length|pluralize }} replaced</div>
+      {% for r in replaced %}
+        <div><code>{{ r.code }}</code> file {{ r.file }} → calculated {{ r.calculated }}</div>
+      {% endfor %}
+      These quantities are calculated from other lines on the BOQ, so the file's figure was not used.
+    </div>
+  {% endif %}
+  {% if kept_override %}
+    <div class="alert alert-info small" id="boqUploadKeptOverride">
+      <div class="fw-semibold mb-1">Override kept</div>
+      {% for r in kept_override %}
+        <div><code>{{ r.code }}</code> file {{ r.file }} → kept at {{ r.calculated }} (set by hand)</div>
+      {% endfor %}
+    </div>
+  {% endif %}
   {% if readded %}
     <div class="alert alert-info small">
       <div class="fw-semibold mb-1">Put back</div>

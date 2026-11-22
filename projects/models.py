@@ -1723,6 +1723,17 @@ class BOQFormulaDriver(models.Model):
                            | models.Q(item__isnull=True, group__isnull=False)),
                 name='boqformuladriver_item_xor_group',
                 violation_error_message='A driver is exactly one of an item or a group.'),
+            # B-2b (0153): an item or a group is named at most once per rule. Partial,
+            # because the other column is NULL on every row and a plain UNIQUE would say
+            # nothing about it anyway; the condition states the intent.
+            models.UniqueConstraint(
+                fields=['rule', 'item'], condition=models.Q(item__isnull=False),
+                name='boqformuladriver_unique_item_per_rule',
+                violation_error_message='This rule already has a driver on that item.'),
+            models.UniqueConstraint(
+                fields=['rule', 'group'], condition=models.Q(group__isnull=False),
+                name='boqformuladriver_unique_group_per_rule',
+                violation_error_message='This rule already has a driver on that group.'),
         ]
 
     def clean(self):
@@ -1742,6 +1753,119 @@ class BOQFormulaDriver(models.Model):
     def __str__(self):
         what = self.item.code if self.item_id else self.group.name
         return f"{self.rule} ← {self.weight} × {what}"
+
+
+# ---------------------------------------------------------------------------
+# B-2b — the formula engine on BOQ saves: the designer's override, and the record of each
+# recalculated quantity. Written by boq_formulas.apply_formulas() and views.opex_boq_override.
+# ---------------------------------------------------------------------------
+
+#: BOQRecalculation.source — which write caused the recalculation.
+FORMULA_SOURCE_PICKER           = 'picker'
+FORMULA_SOURCE_UPLOAD           = 'upload'
+FORMULA_SOURCE_CORRECTION       = 'correction'
+FORMULA_SOURCE_OVERRIDE_SET     = 'override_set'
+FORMULA_SOURCE_OVERRIDE_CLEARED = 'override_cleared'
+FORMULA_SOURCE_CHOICES = [
+    (FORMULA_SOURCE_PICKER,           'BOQ picker save'),
+    (FORMULA_SOURCE_UPLOAD,           'BOQ spreadsheet upload'),
+    (FORMULA_SOURCE_CORRECTION,       'Reviewer correction'),
+    (FORMULA_SOURCE_OVERRIDE_SET,     'Override set'),
+    (FORMULA_SOURCE_OVERRIDE_CLEARED, 'Override cleared'),
+]
+
+
+class BOQLineOverride(models.Model):
+    """A designer's hand-set quantity on a COMPUTED BOQ line, with the reason.
+
+    A ONE-TO-ONE BESIDE THE LINE, NOT A FIELD ON IT (B-2b, agreed): BOQItem gains nothing.
+    The quantity itself stays on BOQItem.boq_quantity, the one number every reader already
+    uses; this row is the fact that it was set by hand, why, by whom and when.
+
+    WHILE THIS ROW EXISTS THE LINE DOES NOT RECALCULATE, and later rules read its quantity
+    (pre-flight P4). Clearing it (deleting the row) recalculates the line in the same
+    request. A line is "computed" because an active rule targets its catalogue item; an
+    override on a line whose rule is later retired is inert and harmless.
+
+    GOES WITH ITS LINE (CASCADE). The picker keeps computed lines out of its delete loop,
+    so in practice the line goes only when the engine removes it (D1), which it never does
+    to an overridden line.
+    """
+
+    line   = models.OneToOneField(BOQItem, on_delete=models.CASCADE,
+                                  related_name='formula_override')
+    note   = models.TextField()  # Required: why the calculated figure is wrong for this site
+    set_by = models.ForeignKey('UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+                               related_name='boq_line_overrides')  # SET_NULL: profiles are deactivated, not deleted
+    set_at = models.DateTimeField(auto_now=True)  # Moves when the override is changed, not only when first set
+
+    class Meta:
+        constraints = [
+            # The view strips the note before saving, so whitespace never reaches here; the
+            # database refuses the empty string as the backstop.
+            models.CheckConstraint(condition=~models.Q(note=''),
+                                   name='boqlineoverride_note_not_blank',
+                                   violation_error_message='An override needs a note.'),
+        ]
+
+    def clean(self):
+        if not (self.note or '').strip():
+            raise ValidationError({'note': 'An override needs a note.'})
+
+    def __str__(self):
+        return f"Override on BOQ line {self.line_id}"
+
+
+class BOQRecalculation(models.Model):
+    """One computed BOQ quantity that changed because the formula engine recalculated it.
+
+    ITS OWN TABLE, NOT A BOQCorrection ACTION (Z2). BOQCorrection has six readers, one of
+    which decides a change request (the Head's `corrected` verdict accepts any uncited
+    correction since the raise) and another counts edits against the designer (BC-2). A
+    recalculation is neither a reviewer's edit nor the designer's: it follows from one. A
+    reviewer correction that moves a driver still writes exactly one BOQCorrection, and the
+    lines that follow from it are recorded here, linked to it by `driving_correction`.
+
+    WRITTEN ONLY WHEN A COMPUTED QUANTITY ACTUALLY CHANGES (including a line added or
+    removed), on every hooked path. Append-only by convention, like BOQCorrection.
+
+    THE LINE'S IDENTITY IS COPIED BESIDE THE FK (code, description, unit), as on
+    VendorOrderLine and BOQCorrection, so the record survives the line: D1 removes lines.
+    """
+
+    boq  = models.ForeignKey(BOQ, on_delete=models.CASCADE, related_name='recalculations')
+    line = models.ForeignKey(BOQItem, null=True, blank=True, on_delete=models.SET_NULL,
+                             related_name='recalculations')  # NULL once the line is removed (D1)
+
+    #: Point-in-time identity of the line, so the record survives it.
+    item_code        = models.CharField(max_length=32, blank=True, default='')
+    item_description = models.TextField(blank=True, default='')
+    item_unit        = models.CharField(max_length=20, blank=True, default='')
+
+    rule = models.ForeignKey(BOQFormulaRule, on_delete=models.PROTECT,
+                             related_name='recalculations')  # PROTECT: rules are retired, never deleted
+
+    quantity_before = models.DecimalField(max_digits=10, decimal_places=2,
+                                          null=True, blank=True)  # NULL = no line, or a blank quantity
+    quantity_after  = models.DecimalField(max_digits=10, decimal_places=2,
+                                          null=True, blank=True)  # NULL = the line was removed (D1)
+
+    source      = models.CharField(max_length=20, choices=FORMULA_SOURCE_CHOICES)
+    explanation = models.TextField(blank=True, default='')  # evaluate()'s plain words at the time
+    actor       = models.ForeignKey('UserProfile', null=True, blank=True,
+                                    on_delete=models.SET_NULL, related_name='boq_recalculations')
+    # The reviewer correction that moved a driver, when one did. related_name='+' so
+    # BOQCorrection gains no accessor and none of its readers can reach these rows (Z2).
+    driving_correction = models.ForeignKey(BOQCorrection, null=True, blank=True,
+                                           on_delete=models.SET_NULL, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-pk']
+
+    def __str__(self):
+        return (f"Recalculated {self.item_code or '(item)'}: "
+                f"{self.quantity_before} → {self.quantity_after} ({self.source})")
 
 
 class Notification(models.Model):
