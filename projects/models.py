@@ -1318,6 +1318,7 @@ class BOQ(models.Model):
     submitted_at = models.DateTimeField(null=True, blank=True)
     status       = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Draft')
     version      = models.IntegerField(default=1)  # Increments on each resubmission after revision
+    next_accb_number = models.PositiveIntegerField(default=1)  # B-3a.1: number the next configured ACCB on this BOQ takes; only ever rises, so a removed "ACCB 3" is never reused
     notes        = models.TextField(null=True, blank=True)
 
     def __str__(self):

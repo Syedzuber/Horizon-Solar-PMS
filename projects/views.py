@@ -10188,10 +10188,23 @@ def _accb_line_values(master, config):
 def _accb_create(boq, master, config, profile):
     """Create one ACCB line and its configuration with the next number. Returns the config.
 
-    The caller holds the BOQ row lock (select_for_update), so max+1 cannot be computed twice
-    for the same number; the (boq, number) UNIQUE constraint is the backstop.
+    B-3a.1 — NUMBERS ARE NEVER REUSED (Zuber, Q2). The number comes from the BOQ's
+    next_accb_number counter, which only rises, so removing ACCB 3 retires "3" for good —
+    people and the activity log refer to ACCBs by number. The caller holds the BOQ row lock
+    (select_for_update) and passes that locked instance, so two posts cannot take the same
+    number; the (boq, number) UNIQUE constraint is the backstop.
+
+    The max+1 term is a guard, not the rule: if the counter were ever behind the numbers in
+    use (a hand edit, a restored backup), taking it as-is would hit the UNIQUE constraint and
+    fail the save. With a consistent counter it never wins.
     """
-    number = (boq.accb_configs.aggregate(m=Max('number'))['m'] or 0) + 1
+    in_use = (boq.accb_configs.aggregate(m=Max('number'))['m'] or 0) + 1
+    number = max(boq.next_accb_number, in_use)
+    # filter().update() rather than save(): this writes one column and must not overwrite
+    # anything else on a BOQ row the caller loaded. No race — the row is locked by the
+    # caller's select_for_update for the rest of this transaction.
+    BOQ.objects.filter(pk=boq.pk).update(next_accb_number=number + 1)
+    boq.next_accb_number = number + 1
     line = BOQItem.objects.create(boq=boq, **_accb_line_values(master, config))
     return ACCBConfig.objects.create(
         boq=boq, boq_item=line, number=number,

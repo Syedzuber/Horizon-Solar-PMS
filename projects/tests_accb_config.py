@@ -866,3 +866,128 @@ class CatalogueTests(ACCBBase):
         other = self._master('OPX-002')
         url = reverse('design_boq_catalogue_edit', kwargs={'item_id': other.pk})
         self.assertEqual(self.client.get(url).status_code, 200)
+
+
+# ===========================================================================
+# B-3a.1 — numbers are never reused; the group screen counts ACCBs
+# ===========================================================================
+
+class NumberCounterTests(ACCBBase):
+
+    def setUp(self):
+        super().setUp()
+        self._login(self.designer)
+
+    def _numbers(self):
+        return [line.accb_config.number for line in self._accb_lines()]
+
+    def test_a_removed_highest_number_is_not_reused(self):
+        for _ in range(3):
+            self._accb_post('add', EX_TYPE2)
+        third = self._accb_lines()[2]
+        self._accb_post('remove', accb_id=third.accb_config.pk)
+        self.assertEqual(self._numbers(), [1, 2])
+        self._accb_post('add', EX_TYPE1)
+        self.assertEqual(self._numbers(), [1, 2, 4])
+        self.assertEqual(BOQ.objects.get(project=self.site).next_accb_number, 5)
+
+    def test_duplicate_takes_its_number_from_the_counter(self):
+        self._accb_post('add', EX_TYPE2)
+        self._accb_post('add', EX_TYPE1)
+        lines = self._accb_lines()
+        self._accb_post('remove', accb_id=lines[1].accb_config.pk)
+        self._accb_post('duplicate', accb_id=lines[0].accb_config.pk)
+        self.assertEqual(self._numbers(), [1, 3])
+
+    def test_a_counter_behind_the_numbers_in_use_cannot_collide(self):
+        self._accb_post('add', EX_TYPE2)
+        self._accb_post('add', EX_TYPE2)
+        BOQ.objects.filter(project=self.site).update(next_accb_number=1)
+        self._accb_post('add', EX_TYPE1)
+        self.assertEqual(self._numbers(), [1, 2, 3])
+        self.assertEqual(BOQ.objects.get(project=self.site).next_accb_number, 4)
+
+    def test_the_backfill_sets_max_plus_one_and_leaves_empty_boqs_at_1(self):
+        import importlib
+        from django.apps import apps
+        backfill = importlib.import_module(
+            'projects.migrations.0150_boq_next_accb_number').backfill_next_accb_number
+        gapped = self._boq()
+        for number in (1, 3):   # ACCB 2 was removed
+            line = BOQItem.objects.create(boq=gapped, item_master=self.accb_master,
+                                          serial_no=273, category='ACCB',
+                                          description=EX_TYPE2_TEXT, uom='Nos',
+                                          boq_quantity=Decimal('1'))
+            ACCBConfig.objects.create(boq=gapped, boq_item=line, number=number,
+                                      accb_type='Type-2', has_spd=True,
+                                      feeders={'in': EX_TYPE2['in'], 'out': EX_TYPE2['out']},
+                                      config_key=accb_config_key(EX_TYPE2))
+        other_site, _ = self._opex_site('AC-EMPTY')
+        empty = self._boq(other_site)
+        BOQ.objects.filter(pk__in=[gapped.pk, empty.pk]).update(next_accb_number=1)
+        backfill(apps, None)
+        self.assertEqual(BOQ.objects.get(pk=gapped.pk).next_accb_number, 4)
+        self.assertEqual(BOQ.objects.get(pk=empty.pk).next_accb_number, 1)
+
+
+class GroupScreenCountTests(ACCBBase):
+
+    def setUp(self):
+        super().setUp()
+        from .models import SITE_GROUP_DRAFT
+        self.site_b, _ = self._opex_site('AC-B')
+        self.scm = _profile('scmacc2', 'SCM')
+        self.group = SiteGroup.objects.create(program=self.program, name='G3',
+                                              status=SITE_GROUP_DRAFT, created_by=self.scm)
+        for site in (self.site, self.site_b):
+            SiteGroupMembership.objects.create(group=self.group, project=site,
+                                               added_by=self.scm)
+        self._login(self.scm)
+        self.url = reverse('site_group_detail', kwargs={'pk': self.group.pk})
+
+    def _page(self):
+        import re
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        return re.sub(r'\s+', ' ', response.content.decode())
+
+    def test_nothing_at_all_says_nothing_to_aggregate(self):
+        html = self._page()
+        self.assertIn('id="groupNothingToAggregate"', html)
+        self.assertIn('2 sites, 0 items </span>', html)
+        self.assertNotIn('ACCB configuration', html)
+
+    def test_catalogue_quantities_only_omit_the_accb_count(self):
+        self._line('OPX-001', 10)
+        html = self._page()
+        self.assertIn('2 sites, 1 item </span>', html)
+        self.assertNotIn('ACCB configuration', html)
+        self.assertNotIn('id="groupNothingToAggregate"', html)
+
+    def test_accbs_only_are_counted_and_not_called_nothing(self):
+        self._seed_accb(EX_TYPE2)
+        self._seed_accb(EX_TYPE2, site=self.site_b)
+        html = self._page()
+        self.assertIn('2 sites, 0 items, 1 ACCB configuration </span>', html)
+        self.assertNotIn('id="groupNothingToAggregate"', html)
+        self.assertIn('id="groupAccbsOnly"', html)
+
+    def test_the_header_counts_each_configuration(self):
+        self._line('OPX-001', 10)
+        self._seed_accb(EX_TYPE2)
+        self._seed_accb(EX_TYPE1, site=self.site_b)
+        html = self._page()
+        self.assertIn('2 sites, 1 item, 2 ACCB configurations </span>', html)
+
+    def test_accbs_add_no_query_to_the_group_screen(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        self._line('OPX-001', 10)
+        self.client.get(self.url)   # warm the session
+        with CaptureQueriesContext(connection) as without:
+            self.client.get(self.url)
+        self._seed_accb(EX_TYPE2)
+        self._seed_accb(EX_TYPE1, site=self.site_b)
+        with CaptureQueriesContext(connection) as with_accbs:
+            self.client.get(self.url)
+        self.assertEqual(len(with_accbs), len(without))

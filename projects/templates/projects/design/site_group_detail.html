@@ -49,7 +49,7 @@ Bootstrap only, matching dashboard/scm.html and the Part 5 tender dashboard.
   <div class="card-body py-3">
     <div class="d-flex flex-wrap justify-content-between align-items-baseline gap-2">
       <span class="fs-5 fw-bold">
-        {{ agg.site_count }} site{{ agg.site_count|pluralize }}, {{ agg.item_count }} item{{ agg.item_count|pluralize }}
+        {{ agg.site_count }} site{{ agg.site_count|pluralize }}, {{ agg.item_count }} item{{ agg.item_count|pluralize }}{% if agg.accb_lines %}, {{ agg.accb_lines|length }} ACCB configuration{{ agg.accb_lines|length|pluralize }}{% endif %}
       </span>
       <span class="text-muted small">
         Completeness: <span class="fw-semibold">{{ released }} of {{ total_sites }}</span>
@@ -94,9 +94,17 @@ Bootstrap only, matching dashboard/scm.html and the Part 5 tender dashboard.
 {# ── Aggregated BOQ ──────────────────────────────────────────────────────── #}
 <div class="card shadow-sm border-0 mb-4">
   <div class="card-header fw-semibold py-2">Aggregated BOQ</div>
-  {% if not agg.lines %}
-    <div class="card-body text-center text-muted py-4">
+  {% comment %}
+  B-3a.1: "nothing to aggregate" only when there are no catalogue quantities AND no ACCBs.
+  With ACCBs only, the card says where they are rather than that the group is empty.
+  {% endcomment %}
+  {% if not agg.lines and not agg.accb_lines %}
+    <div class="card-body text-center text-muted py-4" id="groupNothingToAggregate">
       No quantities to aggregate yet — no member site has a BOQ quantity entered.
+    </div>
+  {% elif not agg.lines %}
+    <div class="card-body text-center text-muted py-4" id="groupAccbsOnly">
+      No catalogue item quantities yet. The configured ACCBs are listed below.
     </div>
   {% else %}
   <div class="table-responsive">
