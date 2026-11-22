@@ -357,6 +357,9 @@ urlpatterns = [
     # takes the W-narrow edit gate and both locks. Its own screen because rejecting a file
     # means listing every offending row, and boq/entry/ has no validation-error render.
     path('projects/<str:project_id>/boq/upload/',            views.opex_boq_upload,      name='opex_boq_upload'),       # OPEX Design only
+    # B-3a — opex_boq_accb: add / save / duplicate / remove one configured ACCB. The site's
+    # assigned designer only, neither BOQ lock on. POST only.
+    path('projects/<str:project_id>/boq/accb/',              views.opex_boq_accb,        name='opex_boq_accb'),
     # SESSION B — the REVIEWER's correction screen, and the only BOQ write path that is
     # exempt from the design lock. It takes permissions.user_can_correct_boq() — verdict
     # authority at either design gate, which structurally excludes the site's own designer

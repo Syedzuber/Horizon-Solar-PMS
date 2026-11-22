@@ -130,6 +130,47 @@ Bootstrap only, matching dashboard/scm.html and the Part 5 tender dashboard.
   {% endif %}
 </div>
 
+{% comment %}
+B-3a — configured ACCBs, kept apart by configuration. They all link to one catalogue row
+(OPX-273), so they are NOT in the aggregated table above; one row here per configuration
+(type, SPD and the breakers and ratings on each side, in any feeder order), with the count
+of ACCBs and the sites behind it.
+{% endcomment %}
+{% if agg.accb_lines %}
+<div class="card shadow-sm border-0 mb-4" id="groupAccbs">
+  <div class="card-header fw-semibold py-2">
+    Configured ACCBs
+    <span class="text-muted small fw-normal">— {{ agg.accb_lines|length }} configuration{{ agg.accb_lines|length|pluralize }}</span>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm mb-0 align-middle">
+      <thead class="table-light">
+        <tr>
+          <th>Description</th>
+          <th style="width:5rem;">Unit</th>
+          <th style="width:9rem;" class="text-end">Count</th>
+          <th style="width:7rem;" class="text-center">Sites</th>
+          <th>Contributing sites</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for line in agg.accb_lines %}
+        <tr>
+          <td class="small">{{ line.description }}</td>
+          <td class="small text-muted">{{ line.unit }}</td>
+          <td class="text-end fw-semibold">{{ line.total_quantity|floatformat:"0" }}</td>
+          <td class="text-center">{{ line.site_count }}</td>
+          <td class="small text-muted">
+            {% for pid, qty in line.contributions %}{{ pid }} ({{ qty|floatformat:"0" }}){% if not forloop.last %}, {% endif %}{% endfor %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
 {# ── Members ─────────────────────────────────────────────────────────────── #}
 <div class="card shadow-sm border-0 mb-4">
   <div class="card-header fw-semibold py-2 d-flex justify-content-between align-items-center">

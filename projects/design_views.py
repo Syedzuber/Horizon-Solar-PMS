@@ -133,6 +133,8 @@ from .models import (
     # screen groups the sheet exactly the way the entry screen does.
     get_opex_boq_catalogue, opex_catalogue_category_order, get_opex_mandatory_items,
     split_opex_boq_rows, group_boq_rows_by_category,
+    # B-3a — configured ACCB lines: the read-only review block and the SCM grouping.
+    accb_rows,
     # Part 12 — the catalogue table itself, managed by the Design Head at the foot of
     # this module. Read here directly; the helpers above stay the only readers elsewhere.
     BOQItemMaster,
@@ -140,6 +142,8 @@ from .models import (
     # link, and the count comes from the section's own query rather than per row.
     VendorOrderProgram, VendorOrderSite,
 )
+# B-3a — OPX-273 is locked on the Design Head's catalogue screen too.
+from .accb import ACCB_CONFIGURED_CODE, ACCB_CATALOGUE_LOCKED_MESSAGE
 from .permissions import (
     project_boq_is_group_locked, user_can_edit_project_boq,
     user_can_manage_site_groups, user_can_qc_design, user_can_request_design_change,
@@ -3656,22 +3660,27 @@ def _boq_review_panel(boq):
     cannot list categories in a different order from the designer's.
     """
     if boq is None:
-        return {'boq_by_category': [], 'boq_off_catalogue': [],
+        return {'boq_by_category': [], 'boq_off_catalogue': [], 'boq_accb_rows': [],
                 'boq_row_count': 0, 'boq_quantity_count': 0,
                 'boq_mandatory_ids': set()}
 
     category_order = opex_catalogue_category_order()
     catalogue_ids  = {m.pk for m in get_opex_boq_catalogue()}
     on_rows, off_rows = split_opex_boq_rows(boq, catalogue_ids)
+    # B-3a: configured ACCB lines are in neither list above; the reviewer sees them in a
+    # block of their own, so a bill that carries ACCBs is never shown without them.
+    accb_lines = accb_rows(boq)
+    all_rows = on_rows + off_rows + accb_lines
 
     return {
         'boq_by_category':    group_boq_rows_by_category(on_rows, category_order),
         'boq_off_catalogue':  group_boq_rows_by_category(off_rows, category_order),
+        'boq_accb_rows':      accb_lines,
         # Only catalogue-linked rows can be mandatory, so this is never consulted for the
         # off-catalogue half — an ad-hoc row has no master to carry the flag.
         'boq_mandatory_ids':  {m.pk for m in get_opex_mandatory_items()},
-        'boq_row_count':      len(on_rows) + len(off_rows),
-        'boq_quantity_count': sum(1 for row in on_rows + off_rows
+        'boq_row_count':      len(all_rows),
+        'boq_quantity_count': sum(1 for row in all_rows
                                   if row.boq_quantity and row.boq_quantity > 0),
     }
 
@@ -8661,11 +8670,18 @@ def aggregate_group_boq(member_ids):
     Returns a dict; `contributions` maps item_master_id -> [(project_id, quantity)] so the
     per-line site count can be checked against the sites that produced it without a query
     per line.
+
+    B-3a — CONFIGURED ACCBs ARE KEPT APART BY CONFIGURATION, NOT BY CATALOGUE ITEM. Every
+    configured ACCB links to the one OPX-273 row, so joining on item_master would add every
+    ACCB in the group into one meaningless total. They are left out of `lines` (the
+    `accb_config__isnull=True` term — which changes no other item's rows, because only ACCB
+    lines have a configuration) and come back in `accb_lines`, one row per config_key. See
+    _aggregate_accbs().
     """
     lines = list(
         BOQItem.objects
         .filter(boq__project_id__in=member_ids, boq_quantity__gt=0,
-                item_master__isnull=False)
+                item_master__isnull=False, accb_config__isnull=True)
         .values('item_master', 'item_master__code', 'item_master__description',
                 'item_master__unit', 'item_master__sort_order')
         .annotate(total_quantity=Sum('boq_quantity'),
@@ -8676,12 +8692,23 @@ def aggregate_group_boq(member_ids):
     # Per-site breakdown, one query for the whole table. Lets the screen show WHICH sites
     # are behind each line, which is what makes the aggregate auditable rather than a
     # number SCM has to trust.
+    #
+    # B-3a: THE SAME QUERY ALSO CARRIES THE CONFIGURED ACCB LINES (LEFT JOIN to their
+    # ACCBConfig), and they are split off here rather than fetched by a query of their own,
+    # so the raise page's fixed query count does not grow (tests_vendor_order_group pins
+    # it). A row with a config_key is an ACCB and never reaches `contributions`; every
+    # other row is handled exactly as before.
     contributions = {}
+    accb_source = []
     for row in (BOQItem.objects
                 .filter(boq__project_id__in=member_ids, boq_quantity__gt=0,
                         item_master__isnull=False)
-                .values('item_master', 'boq__project__project_id', 'boq_quantity')
+                .values('item_master', 'boq__project__project_id', 'boq_quantity',
+                        'accb_config__config_key', 'description', 'uom')
                 .order_by('boq__project__project_id')):
+        if row['accb_config__config_key'] is not None:
+            accb_source.append(row)
+            continue
         contributions.setdefault(row['item_master'], []).append(
             (row['boq__project__project_id'], row['boq_quantity']))
     for line in lines:
@@ -8698,9 +8725,48 @@ def aggregate_group_boq(member_ids):
     return {
         'lines':      lines,
         'unlinked':   unlinked,
+        'accb_lines': _aggregate_accbs(accb_source),
         'item_count': len(lines),
         'site_count': len(member_ids),
     }
+
+
+def _aggregate_accbs(rows):
+    """Configured ACCBs, one row per configuration (B-3a), from the ACCB rows of
+    aggregate_group_boq()'s per-site query (already filtered to the group's sites and to a
+    quantity > 0). Pure: no query of its own.
+
+    Two ACCBs are one thing to buy when their config_key matches — type, SPD and the
+    multiset of (breaker, rating) on each side, independent of feeder order
+    (accb.accb_config_key). The total is the summed quantity (each line is 1, so it is the
+    count of ACCBs); `contributions` is [(site code, quantity)] summed per site, the same
+    shape aggregate_group_boq()'s catalogue lines carry.
+
+    THE DESCRIPTION IS ANY LINE'S STORED TEXT, which is accb_description() of that line's
+    configuration. Lines with the same key have the same description, because the wording
+    depends only on the multiset the key encodes (asserted by the tests).
+    """
+    groups = {}
+    for row in rows:
+        group = groups.setdefault(row['accb_config__config_key'], {
+            'config_key':     row['accb_config__config_key'],
+            'description':    row['description'],
+            'unit':           row['uom'],
+            'total_quantity': Decimal('0'),
+            'by_site':        {},
+        })
+        group['total_quantity'] += row['boq_quantity']
+        site = row['boq__project__project_id']
+        group['by_site'][site] = group['by_site'].get(site, Decimal('0')) + row['boq_quantity']
+    result = []
+    # Ordered by key so the table is stable from one load to the next.
+    for key in sorted(groups):
+        group = groups[key]
+        by_site = group.pop('by_site')
+        group['contributions'] = sorted(by_site.items())
+        group['site_count'] = len(by_site)
+        result.append(group)
+    return result
 
 
 def _age_days(stamp, now):
@@ -9509,6 +9575,8 @@ def design_boq_catalogue(request):
         # denominator the filter chips are read against, so filtering must not move them.
         'active_count':  _opex_catalogue_qs().filter(is_active=True).count(),
         'total_count':   _opex_catalogue_qs().count(),
+        # B-3a: the row drawn as locked instead of with Edit / Deactivate.
+        'accb_code':     ACCB_CONFIGURED_CODE,
     })
 
 
@@ -9582,6 +9650,12 @@ def design_boq_catalogue_edit(request, item_id):
 
     item = _opex_catalogue_item(item_id)
 
+    # B-3 Q2: OPX-273 is locked — configured ACCB lines link to it. Refused on GET too, so
+    # the Head is never offered a form that could make it mandatory or retire it.
+    if item.code == ACCB_CONFIGURED_CODE:
+        messages.error(request, ACCB_CATALOGUE_LOCKED_MESSAGE)
+        return redirect('design_boq_catalogue')
+
     if request.method == 'POST':
         # Before binding: is_valid() writes the posted values onto `item`.
         before = catalogue_snapshot(item)
@@ -9630,6 +9704,11 @@ def design_boq_catalogue_toggle(request, item_id):
         return HttpResponseForbidden(_CATALOGUE_FORBIDDEN)
 
     item = _opex_catalogue_item(item_id)
+
+    # B-3 Q2: OPX-273 cannot be deactivated or reactivated here either.
+    if item.code == ACCB_CONFIGURED_CODE:
+        messages.error(request, ACCB_CATALOGUE_LOCKED_MESSAGE)
+        return redirect('design_boq_catalogue')
 
     # A FLAGGED ITEM CANNOT BE DEACTIVATED WHILE STILL FLAGGED, the same rule and the same
     # wording as the Admin screen's toggle. Deactivating would leave a mandatory item the

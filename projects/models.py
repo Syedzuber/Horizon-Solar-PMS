@@ -8,6 +8,9 @@ from django.contrib.auth.models import User
 from django.utils import timezone
 
 from .units import MEASURED_UNITS, UNIT_CHOICES, UNIT_CODES
+# B-3: the configured-ACCB catalogue code and type list. accb.py imports no models, so
+# this direction is the only one and there is no cycle.
+from .accb import ACCB_CONFIGURED_CODE, ACCB_TYPES
 # NTF-DCG 5b: NotificationEventRecipient.save() asks the registry whether an event takes
 # named recipients. The registry imports nothing from this module, so there is no cycle.
 from .notify_registry import NOTIFICATION_EVENTS
@@ -1158,10 +1161,17 @@ def get_opex_boq_catalogue():
     Returns [] on an empty catalogue rather than raising, unlike its Residential
     counterpart: an empty picker renders as "nothing to add", which is a legible screen,
     whereas the Residential path would silently create a BOQ with no rows at all.
+
+    B-3: THE CONFIGURED-ACCB ROW (OPX-273) IS LEFT OUT. A line on that code is only ever
+    written by the ACCB section, together with its ACCBConfig; offering it here would let
+    the picker, the spreadsheet upload or a reviewer's add_line create a bare ACCB line with
+    no configuration behind it. Every one of those paths validates against this list, so
+    leaving the row out here closes all three at once.
     """
     return list(
         BOQItemMaster.objects
         .filter(is_active=True, project_type='OPEX')
+        .exclude(code=ACCB_CONFIGURED_CODE)
         .order_by('sort_order', 'code')
     )
 
@@ -1208,10 +1218,15 @@ def opex_catalogue_category_order():
     thing to keep in step with sort_order, and the two would eventually disagree. Used to
     group both halves of the picker and the read-only review panel, so the catalogue, the
     saved sheet and the reviewer's copy all list categories the same way.
+
+    B-3: the configured-ACCB row is left out for the same reason get_opex_boq_catalogue()
+    leaves it out — otherwise "ACCB" would show in the picker as a category with nothing
+    added that the picker can never fill.
     """
     seen = []
     for category in (BOQItemMaster.objects
                      .filter(is_active=True, project_type='OPEX')
+                     .exclude(code=ACCB_CONFIGURED_CODE)
                      .order_by('sort_order', 'code')
                      .values_list('category', flat=True)):
         if category not in seen:
@@ -1232,13 +1247,38 @@ def split_opex_boq_rows(boq, catalogue_ids):
 
     Lives here rather than in views.py because BOTH the entry screen and the Part 9 review
     screen need it, and design_views must not import views.
+
+    B-3: CONFIGURED ACCB LINES ARE IN NEITHER LIST. This is the guard that keeps the picker
+    save, the spreadsheet upload and the reviewer's correction screen off them. The picker's
+    two delete loops and its by_master index, and the upload's by_master index, iterate only
+    what this returns, so a line with an ACCBConfig cannot be deleted, recreated or
+    re-quantified by either of them. Screens that show ACCB lines ask accb_rows() for them
+    explicitly and render them read-only.
     """
     on, off = [], []
     if boq is None:
         return on, off
-    for item in boq.items.select_related('item_master').order_by('serial_no', 'pk'):
+    # LEFT JOIN on the reverse one-to-one: lines with no ACCBConfig row only.
+    for item in (boq.items.filter(accb_config__isnull=True)
+                 .select_related('item_master').order_by('serial_no', 'pk')):
         (on if item.item_master_id in catalogue_ids else off).append(item)
     return on, off
+
+
+def accb_rows(boq):
+    """This BOQ's configured ACCB lines, ACCB 1 first, each with its `accb_config` loaded.
+
+    The other half of split_opex_boq_rows()'s B-3 exclusion: every screen that shows a
+    sheet reads its ACCBs from here, so an ACCB line is never in the general row lists and
+    never missing from the screen either. [] for a site with no BOQ yet.
+    """
+    if boq is None:
+        return []
+    # select_related follows the reverse one-to-one, so the template reads the number and
+    # configuration without a query per line.
+    return list(boq.items.filter(accb_config__isnull=False)
+                .select_related('accb_config', 'item_master')
+                .order_by('accb_config__number'))
 
 
 def group_boq_rows_by_category(rows, category_order):
@@ -1356,6 +1396,67 @@ class BOQRevision(models.Model):
 
     def __str__(self):
         return f"BOQ {self.boq.project.project_id} — v{self.version} by {self.revised_by}"
+
+
+class ACCBConfig(models.Model):
+    """B-3 — the configuration behind ONE configured ACCB line on an OPEX site's BOQ.
+
+    ONE ACCB, ONE BOQ LINE, QUANTITY ALWAYS 1 (prototype answer 4). Two identical ACCBs on a
+    site are two lines of Qty 1, each with its own row here. The line carries the generated
+    description (accb.accb_description) and links to the OPX-273 catalogue row; this row
+    carries what the description was generated from, so it can be edited, duplicated and
+    grouped.
+
+    WRITTEN ONLY BY views.opex_boq_accb, which validates through accb.validate_accb_config
+    first. The JSON column cannot be checked by the database, so that single writer is the
+    guarantee that it only holds accepted values.
+
+    DELETED WITH ITS LINE (CASCADE on boq_item). Removing an ACCB deletes the line and this
+    goes with it. split_opex_boq_rows() leaves lines that have one of these out of the
+    picker, upload and correction screens, which is what stops those paths from deleting or
+    re-quantifying a configured line.
+
+    `boq` IS DENORMALISED from boq_item.boq so "ACCB 2" can be UNIQUE per BOQ in the
+    database. The writer sets both from the same BOQ in the same create.
+    """
+
+    ACCB_TYPE_CHOICES = [(value, value) for value in ACCB_TYPES]
+
+    boq        = models.ForeignKey(BOQ, on_delete=models.CASCADE, related_name='accb_configs')  # Same BOQ as boq_item.boq — here so (boq, number) can be a database UNIQUE
+    boq_item   = models.OneToOneField(BOQItem, on_delete=models.CASCADE, related_name='accb_config')  # The one BOQ line this ACCB is; deleting the line deletes this row
+    number     = models.PositiveSmallIntegerField()  # "ACCB 2": given at creation as max+1 on this BOQ, never renumbered (B-3 Q5) — people and the activity log refer to it
+    accb_type  = models.CharField(max_length=10, choices=ACCB_TYPE_CHOICES)  # Type-1 / Type-2 — a label the designer picks (ruling 28, F7)
+    has_spd    = models.BooleanField(default=False)  # One SPD tick per ACCB, not per feeder (prototype answer 2)
+    feeders    = models.JSONField()  # {"in": [{"breaker": "MCCB", "rating": 100}, ...], "out": [...]} in the designer's order
+    config_key = models.CharField(max_length=512, db_index=True)  # accb.accb_config_key(): feeder-order-independent identity the SCM aggregate groups on
+    created_by = models.ForeignKey('UserProfile', null=True, blank=True,
+                                   on_delete=models.SET_NULL, related_name='+')
+    updated_by = models.ForeignKey('UserProfile', null=True, blank=True,
+                                   on_delete=models.SET_NULL, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['number']
+        constraints = [
+            # Two concurrent adds both computing max+1 would otherwise share a number; the
+            # writer locks the BOQ row, and this is the backstop if anything ever does not.
+            models.UniqueConstraint(fields=['boq', 'number'],
+                                    name='accbconfig_number_unique_per_boq'),
+            models.CheckConstraint(condition=models.Q(number__gte=1),
+                                   name='accbconfig_number_from_one'),
+            models.CheckConstraint(condition=models.Q(accb_type__in=list(ACCB_TYPES)),
+                                   name='accbconfig_type_known'),
+        ]
+
+    def as_config(self):
+        """The configuration dict accb.py's functions take (see that module's docstring)."""
+        return {'type': self.accb_type, 'spd': self.has_spd,
+                'in': list(self.feeders.get('in', [])),
+                'out': list(self.feeders.get('out', []))}
+
+    def __str__(self):
+        return f"ACCB {self.number} — BOQ {self.boq_id}"
 
 
 #: What a single reviewer correction did. Two values and no third — removing a line is

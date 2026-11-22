@@ -67,4 +67,30 @@ Needs order_views._picker_context()'s requirement, requirement_open and unlinked
       <div class="text-muted js-vo-unlinked-empty">None among the added sites.</div>
     </div>
     {% endif %}
+    {% comment %}
+    B-3a — configured ACCBs, one row per configuration with the count for the added sites.
+    READ-ONLY UNTIL B-3b: no checkbox and no amount input, so nothing here can be posted
+    and nothing here becomes an order line. Re-summed by vendor_order_picker_script.html
+    from data-contrib, exactly like the requirement rows above.
+    {% endcomment %}
+    {% if accb_requirement %}
+    <div class="card-body border-top py-2 small" id="voAccbCard">
+      <div class="fw-semibold">ACCBs are not ordered from here yet</div>
+      <div class="text-muted mb-1">Configured ACCBs of the added sites, one row per
+        configuration. Shown for reference; they are not part of this order.</div>
+      <table class="table table-sm mb-0 small align-middle">
+        <tbody>
+          {% for row in accb_requirement %}
+          <tr class="js-vo-accb d-none" data-contrib="{{ row.contrib }}">
+            <td>{{ row.description }}</td>
+            <td style="width:4rem;" class="text-muted">{{ row.unit }}</td>
+            <td style="width:6rem;" class="text-end fw-semibold js-vo-accb-count">—</td>
+            <td style="width:6rem;" class="text-end text-muted js-vo-accb-sites"></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <div class="text-muted js-vo-accb-empty">None among the added sites.</div>
+    </div>
+    {% endif %}
   </details>

@@ -1524,6 +1524,17 @@ def _picker_context(entering_program, post, default_programs=(), default_sites=(
         # rather than dropped: a requirement that is silently short is worse than one
         # that says what it left out (aggregate_group_boq).
         'unlinked':         agg['unlinked'],
+        # B-3a — configured ACCBs, one row per configuration, READ-ONLY until B-3b (Zuber,
+        # B-3 Q3). They are not in agg['lines'], so _parse_requirement() never makes an
+        # order line of one and no amount input is drawn for them. `contrib` is keyed by
+        # site pk like the requirement rows, so the page re-sums them for the added sites.
+        'accb_requirement': [{
+            'description': line['description'],
+            'unit':        line['unit'],
+            'contrib':     json.dumps({str(pk_of[code]): str(quantity)
+                                       for code, quantity in line['contributions']
+                                       if code in pk_of}),
+        } for line in agg['accb_lines']],
         # O8a. Empty, and the template draws no Residential row or block, unless asked.
         'picker_residential': include_residential,
         'residential_rows': [{'project': project, 'added': str(project.pk) in added}

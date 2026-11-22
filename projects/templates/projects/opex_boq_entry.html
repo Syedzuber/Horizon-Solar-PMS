@@ -38,7 +38,23 @@ authority and both locks on the POST regardless of what this template chose to r
   .boq-chip-empty { background:#fff3cd; color:#7a5b00; }
   .boq-chip-fill  { background:#1a7a4a; color:#fff; }
   mark            { background:#fff3cd; padding:0; }
+  /* B-3a — the ACCB section */
+  [x-cloak]       { display:none !important; }
+  .accb-card      { border:1px solid #dee2e6; border-radius:.5rem; background:#fff; }
+  .accb-head      { width:100%; text-align:left; background:none; border:0; padding:.5rem .75rem; }
+  .accb-head:focus-visible { outline:2px solid #1a7a4a; outline-offset:-2px; }
+  .accb-desc      { font-size:.83rem; line-height:1.35; }
+  .accb-feeder    { display:flex; gap:.4rem; align-items:center; margin-bottom:.3rem; }
+  .accb-feeder select { width:92px; }
+  .accb-feeder input  { width:110px; }
+  .accb-preview   { background:#f8f9fa; border-radius:.375rem; padding:.5rem .6rem; }
 </style>
+{% comment %}
+B-3a. Alpine for the ACCB section only. base.html does NOT load Alpine (checked: no
+"alpine" anywhere in it), so this page loads it once here, the same pinned version the
+dashboards load. The picker above stays plain JS and does not depend on it.
+{% endcomment %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
 {% endblock %}
 
 {% block content %}
@@ -244,6 +260,294 @@ authority and both locks on the POST regardless of what this template chose to r
   </div>
 </form>
 
+{% comment %}
+B-3a — CONFIGURED ACCBs. OUTSIDE boqForm on purpose: HTML forbids nested forms, and each
+ACCB card is its own <form> posting to opex_boq_accb with one action naming one ACCB. The
+picker's save never sees these lines (split_opex_boq_rows leaves them out), so saving the
+sheet cannot delete or change them, and saving an ACCB cannot disturb the sheet.
+
+Posting an ACCB form leaves this page. The picker's unsaved-changes guard still fires if
+the sheet has unsaved quantities, and the section's own guard fires for other ACCB cards
+with unsaved edits, so nothing typed is lost without a warning.
+{% endcomment %}
+<div class="boq-panel p-2 mt-3" id="accb">
+  <div class="fw-semibold mb-2 px-1 d-flex align-items-center">
+    <span>ACCBs</span>
+    <span class="text-muted fw-normal small ms-2">{{ accb_count }} on this BOQ · each is one line, Nos, Qty 1</span>
+  </div>
+
+  {% if can_edit %}
+    {{ accb_data|json_script:"accbData" }}
+    <datalist id="accbRatings">
+      {% for rating in accb_data.common_ratings %}<option value="{{ rating }}"></option>{% endfor %}
+    </datalist>
+
+    <div x-data="accbSection" x-cloak>
+      <div class="small text-muted px-1 mb-2">
+        Each ACCB saves on its own. If you have unsaved quantities in the sheet above, save
+        the sheet first.
+      </div>
+
+      <template x-for="card in cards" :key="card.key">
+        <div class="accb-card mb-2">
+          {# Collapsed by default; click (not hover) opens it. #}
+          <button type="button" class="accb-head d-flex gap-2 align-items-start"
+                  @click="card.open = !card.open" :aria-expanded="card.open">
+            <span class="fw-semibold text-nowrap" x-text="card.id ? 'ACCB ' + card.number : 'New ACCB'"></span>
+            <span class="accb-desc flex-grow-1 text-muted" x-text="card.id && !isDirty(card) ? card.description : describe(card)"></span>
+            <span class="badge text-bg-warning" x-show="isDirty(card)">Unsaved</span>
+            <i class="bi" :class="card.open ? 'bi-chevron-up' : 'bi-chevron-down'"></i>
+          </button>
+
+          <form method="post" action="{% url 'opex_boq_accb' project.project_id %}"
+                class="px-3 pb-3" x-show="card.open" @submit="submitting = card.key">
+            {% csrf_token %}
+            <input type="hidden" name="accb_id" :value="card.id || ''">
+
+            <div class="d-flex flex-wrap gap-3 align-items-center mb-2">
+              {# Segmented buttons: the radios must be direct children of .btn-group. #}
+              <div class="btn-group btn-group-sm" role="group" aria-label="ACCB type">
+                {% for accb_type in accb_data.types %}
+                  <input type="radio" class="btn-check" name="accb_type" value="{{ accb_type }}"
+                         :id="'accbType' + card.key + '-{{ forloop.counter }}'" x-model="card.type" required>
+                  <label class="btn btn-outline-success"
+                         :for="'accbType' + card.key + '-{{ forloop.counter }}'">{{ accb_type }}</label>
+                {% endfor %}
+              </div>
+              <span class="badge text-bg-light border">4P · 415V</span>
+              <div class="form-check mb-0">
+                <input class="form-check-input" type="checkbox" name="has_spd" value="1"
+                       :id="'accbSpd' + card.key" x-model="card.spd">
+                <label class="form-check-label small" :for="'accbSpd' + card.key">SPD</label>
+              </div>
+            </div>
+
+            <div class="row g-3">
+              <template x-for="side in sides" :key="side.key">
+                <div class="col-md-6">
+                  <div class="d-flex align-items-center gap-2 mb-1">
+                    <span class="small fw-semibold" x-text="side.label"></span>
+                    <div class="btn-group btn-group-sm" role="group">
+                      <button type="button" class="btn btn-outline-secondary"
+                              @click="setCount(card, side.key, card[side.key].length - 1)"
+                              :disabled="card[side.key].length <= limits.min_feeders"
+                              :aria-label="'Fewer ' + side.label + ' feeders'">&minus;</button>
+                      <span class="btn btn-outline-secondary disabled" style="min-width:2.5rem"
+                            x-text="card[side.key].length"></span>
+                      <button type="button" class="btn btn-outline-secondary"
+                              @click="setCount(card, side.key, card[side.key].length + 1)"
+                              :disabled="card[side.key].length >= limits.max_feeders"
+                              :aria-label="'More ' + side.label + ' feeders'">+</button>
+                    </div>
+                  </div>
+                  <template x-for="(feeder, index) in card[side.key]" :key="index">
+                    <div class="accb-feeder">
+                      <span class="small text-muted" style="width:1.5rem" x-text="index + 1"></span>
+                      <select class="form-select form-select-sm" :name="side.key + '_breaker'"
+                              x-model="feeder.breaker" :aria-label="side.label + ' feeder ' + (index + 1) + ' breaker'">
+                        <option value="MCCB">MCCB</option>
+                        <option value="MCB">MCB</option>
+                      </select>
+                      <input class="form-control form-control-sm" type="number" inputmode="numeric"
+                             :name="side.key + '_rating'" x-model="feeder.rating" list="accbRatings"
+                             :min="limits.rating_min" :max="limits.rating_max" step="1" required
+                             placeholder="Amps" :aria-label="side.label + ' feeder ' + (index + 1) + ' rating in amps'">
+                      <span class="small text-muted">A</span>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+
+            <div class="accb-preview mt-2">
+              <div class="accb-desc" x-text="describe(card)"></div>
+              <div class="small text-muted mt-1" x-text="describe(card).length + ' characters'"></div>
+            </div>
+
+            <div class="d-flex flex-wrap gap-2 mt-2 align-items-center" x-show="!card.confirmRemove">
+              <button type="submit" name="action" :value="card.id ? 'save' : 'add'"
+                      class="btn btn-sm text-white" style="background-color:#1a7a4a;">Save</button>
+              <template x-if="card.id">
+                <span class="d-flex gap-2">
+                  <button type="submit" name="action" value="duplicate" formnovalidate
+                          class="btn btn-sm btn-outline-secondary" :disabled="isDirty(card)"
+                          :title="isDirty(card) ? 'Save first — duplicate copies the saved ACCB' : 'Copy this ACCB as a new one'">Duplicate</button>
+                  <button type="button" class="btn btn-sm btn-outline-danger"
+                          @click="card.confirmRemove = true">Remove</button>
+                </span>
+              </template>
+              <template x-if="!card.id">
+                <button type="button" class="btn btn-sm btn-outline-secondary"
+                        @click="discard(card)">Discard</button>
+              </template>
+            </div>
+            {# Remove is confirmed in the page, not with a browser dialog. #}
+            <div class="alert alert-danger py-2 mt-2 mb-0 small d-flex flex-wrap gap-2 align-items-center"
+                 x-show="card.confirmRemove">
+              <span class="me-auto" x-text="'Remove ACCB ' + card.number + '? Its BOQ line is deleted.'"></span>
+              <button type="submit" name="action" value="remove" formnovalidate
+                      class="btn btn-sm btn-danger" x-text="'Yes, remove ACCB ' + card.number"></button>
+              <button type="button" class="btn btn-sm btn-outline-secondary"
+                      @click="card.confirmRemove = false">Cancel</button>
+            </div>
+          </form>
+        </div>
+      </template>
+
+      <div class="px-1 small text-muted" x-show="!cards.length">No ACCBs on this BOQ.</div>
+      <button type="button" class="btn btn-sm btn-outline-success mt-1" @click="addCard()">
+        <i class="bi bi-plus-lg"></i> Add ACCB
+      </button>
+    </div>
+  {% else %}
+    {% comment %}Read-only: the same lock_reason the top of the page states applies here.{% endcomment %}
+    {% if accb_lines %}
+      <table class="table table-sm mb-0">
+        <tbody>
+          {% for line in accb_lines %}
+            <tr>
+              <td class="fw-semibold text-nowrap" style="width:80px">ACCB {{ line.accb_config.number }}</td>
+              <td class="boq-desc">{{ line.description }}</td>
+              <td class="boq-muted" style="width:60px">{{ line.uom }}</td>
+              <td class="small" style="width:60px">{{ line.boq_quantity|floatformat:"-2" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="px-1 small text-muted">No ACCBs on this BOQ.</div>
+    {% endif %}
+  {% endif %}
+</div>
+
+{% if can_edit %}
+<script>
+/* B-3a — the ACCB section (Alpine). Registered on alpine:init, which fires after this
+   inline script has run because Alpine itself loads with `defer`. */
+(function () {
+  var DATA = JSON.parse(document.getElementById('accbData').textContent);
+  var BREAKERS = ['MCCB', 'MCB'];   // description order: MCCB first, then MCB
+
+  /* ---------------------------------------------------------------------------------
+     DISPLAY-ONLY COPY. The source of truth for this wording is accb_description() in
+     projects/accb.py. The server regenerates the text from the saved configuration on
+     every save and never reads this one; this exists only so the designer sees the line
+     while typing. If the two ever disagree, accb.py is right.
+
+     Test vectors (the two approved examples, B-3 rulings) — check by eye:
+       Type-2 · I/C MCCB 100, MCCB 63 · O/G MCCB 150 · SPD ticked
+         ACCB Type-2, I/C Feeder 2 Nos. with MCCB 4P 415V 100A and 63A; O/G Feeder 1 No. with MCCB 4P 415V 150A, with SPD
+       Type-1 · I/C MCCB 100, MCB 32, MCB 32, MCB 25 · O/G MCCB 100 · SPD not ticked
+         ACCB Type-1, I/C Feeder 4 Nos. with MCCB 4P 415V 100A + MCB 4P 415V 2×32A and 25A; O/G Feeder 1 No. with MCCB 4P 415V 100A, without SPD
+     --------------------------------------------------------------------------------- */
+  function ratingsText(ratings) {
+    var counts = {};
+    ratings.forEach(function (r) { counts[r] = (counts[r] || 0) + 1; });
+    var parts = Object.keys(counts).map(Number).sort(function (a, b) { return b - a; })
+      .map(function (r) { return counts[r] > 1 ? counts[r] + '×' + r + 'A' : r + 'A'; });
+    if (parts.length === 1) { return parts[0]; }
+    return parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1];
+  }
+  function sideText(feeders) {
+    var head = feeders.length === 1 ? '1 No.' : feeders.length + ' Nos.';
+    var groups = [];
+    BREAKERS.forEach(function (b) {
+      var rs = feeders.filter(function (f) { return f.breaker === b; })
+                      .map(function (f) { return f.rating; });
+      if (rs.length) { groups.push(b + ' 4P 415V ' + ratingsText(rs)); }
+    });
+    return head + ' with ' + groups.join(' + ');
+  }
+  function validRating(value) {
+    var text = String(value === undefined || value === null ? '' : value).trim();
+    if (!/^\d+$/.test(text)) { return null; }
+    var n = parseInt(text, 10);
+    return (n >= DATA.rating_min && n <= DATA.rating_max) ? n : null;
+  }
+  function describe(card) {
+    var sides = {};
+    var ok = true;
+    ['in', 'out'].forEach(function (key) {
+      sides[key] = card[key].map(function (f) {
+        var r = validRating(f.rating);
+        if (r === null) { ok = false; }
+        return {breaker: f.breaker, rating: r};
+      });
+    });
+    if (!ok) {
+      return 'Enter every rating (a whole number, ' + DATA.rating_min + ' to ' +
+             DATA.rating_max + ' A) to see the description.';
+    }
+    return 'ACCB ' + card.type + ', I/C Feeder ' + sideText(sides['in']) +
+           '; O/G Feeder ' + sideText(sides['out']) +
+           (card.spd ? ', with SPD' : ', without SPD');
+  }
+
+  function state(card) {
+    // What "unsaved" compares: everything the form posts, as text.
+    return JSON.stringify([card.type, !!card.spd,
+      card['in'].map(function (f) { return [f.breaker, String(f.rating)]; }),
+      card['out'].map(function (f) { return [f.breaker, String(f.rating)]; })]);
+  }
+
+  var nextKey = 1;
+  function makeCard(source) {
+    var card = {
+      key: nextKey++, id: source.id || null, number: source.number || null,
+      type: source.type, spd: !!source.spd, description: source.description || '',
+      'in':  source['in'].map(function (f) { return {breaker: f.breaker, rating: String(f.rating)}; }),
+      'out': source['out'].map(function (f) { return {breaker: f.breaker, rating: String(f.rating)}; }),
+      open: false, confirmRemove: false
+    };
+    card.saved = source.id ? state(card) : null;
+    return card;
+  }
+
+  document.addEventListener('alpine:init', function () {
+    Alpine.data('accbSection', function () {
+      return {
+        cards: DATA.accbs.map(makeCard),
+        types: DATA.types,
+        sides: [{key: 'in', label: 'I/C feeders'}, {key: 'out', label: 'O/G feeders'}],
+        limits: DATA,
+        submitting: null,
+        describe: describe,
+        isDirty: function (card) { return card.saved === null || state(card) !== card.saved; },
+        setCount: function (card, key, n) {
+          n = Math.max(DATA.min_feeders, Math.min(DATA.max_feeders, n));
+          while (card[key].length < n) { card[key].push({breaker: 'MCCB', rating: ''}); }
+          while (card[key].length > n) { card[key].pop(); }
+        },
+        addCard: function () {
+          var card = makeCard({type: DATA.types[0], spd: false,
+                               'in': [{breaker: 'MCCB', rating: ''}],
+                               'out': [{breaker: 'MCCB', rating: ''}]});
+          card.open = true;
+          this.cards.push(card);
+        },
+        discard: function (card) {
+          this.cards = this.cards.filter(function (c) { return c.key !== card.key; });
+        },
+        init: function () {
+          var self = this;
+          // Warn before leaving with unsaved ACCB edits — except the card being submitted,
+          // whose edits are exactly what is being sent.
+          window.addEventListener('beforeunload', function (event) {
+            var lost = self.cards.some(function (c) {
+              return c.key !== self.submitting && self.isDirty(c);
+            });
+            if (!lost) { return; }
+            event.preventDefault();
+            event.returnValue = '';
+          });
+        }
+      };
+    });
+  });
+})();
+</script>
+{% endif %}
+
 <script id="boqCatalogueData" type="application/json">{{ catalogue_json|safe }}</script>
 <script id="boqAddedData" type="application/json">{{ added_json|safe }}</script>
 
@@ -272,6 +576,9 @@ authority and both locks on the POST regardless of what this template chose to r
   });
 
   var offRows = {{ added_off_count }};
+  // B-3a: configured ACCB lines are drawn by the ACCB section, not this sheet, but they
+  // are lines on this BOQ, so the item count includes them.
+  var accbRows = {{ accb_count }};
   var dirty   = false;
 
   var elSearch  = document.getElementById('boqSearch');
@@ -339,12 +646,12 @@ authority and both locks on the POST regardless of what this template chose to r
   }
 
   function renderSheet() {
-    var total = order.length + offRows;
+    var total = order.length + offRows + accbRows;
     elCount.textContent = total + ' item' + (total === 1 ? '' : 's');
     if (elTotal) { elTotal.textContent = total; }
 
     if (!order.length) {
-      elSheet.innerHTML = offRows
+      elSheet.innerHTML = (offRows || accbRows)
         ? '<div class="p-3 boq-muted text-center">No catalogue items yet — ' +
           'search on the left and add what this site needs.</div>'
         : '<div class="p-4 text-center boq-muted">Nothing on this BOQ yet.<br>' +

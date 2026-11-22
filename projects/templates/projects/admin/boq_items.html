@@ -78,7 +78,11 @@
           {% else %}bg-gray-100 text-gray-600{% endif %}">{{ item.get_project_type_display }}</span>
       </td>
       <td class="px-4 py-3 text-gray-800">
+        {% if item.code == accb_code %}
+        {{ item.description }}
+        {% else %}
         <a href="{% url 'admin_boq_item_edit' item.pk %}" class="text-green-700 hover:underline">{{ item.description }}</a>
+        {% endif %}
       </td>
       <td class="px-4 py-3 text-gray-600">{{ item.unit }}</td>
       <td class="px-4 py-3 text-gray-600">{{ item.category|default:"—" }}</td>
@@ -106,6 +110,15 @@
         {% endif %}
       </td>
       <td class="px-4 py-3 text-right whitespace-nowrap">
+        {% comment %}
+        B-3a: OPX-273 is locked — configured ACCB lines link to it. admin_boq_item_edit and
+        admin_boq_item_toggle refuse it too; this only stops the controls being offered.
+        {% endcomment %}
+        {% if item.code == accb_code %}
+        <span class="inline-flex items-center gap-1 text-xs text-gray-500" title="Configured ACCBs link to this item">
+          <i data-lucide="lock" class="w-4 h-4"></i> Locked — used by configured ACCBs
+        </span>
+        {% else %}
         <a href="{% url 'admin_boq_item_edit' item.pk %}" class="text-gray-500 hover:text-gray-800 inline-flex items-center gap-1 mr-3">
           <i data-lucide="pencil" class="w-4 h-4"></i> Edit
         </a>
@@ -119,6 +132,7 @@
             {% endif %}
           </button>
         </form>
+        {% endif %}
       </td>
     </tr>
     {% empty %}

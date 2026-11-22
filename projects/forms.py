@@ -9,6 +9,8 @@ from django.utils.dateparse import parse_date
 from django.utils.functional import cached_property
 from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory, Program, BOQItemMaster, StockLocation, VENDOR_KIND_SUPPLIER
 from .models import ActivityLog, BOQItem, log_activity
+# B-3a: the configured-ACCB catalogue code is locked on every catalogue form.
+from .accb import ACCB_CONFIGURED_CODE, ACCB_CATALOGUE_LOCKED_MESSAGE
 from .units import UNIT_CHOICES, canonical_unit
 from .utils import roles_for_phase
 from .permissions import (
@@ -997,6 +999,12 @@ class BOQItemMasterForm(forms.ModelForm):
         delete that field, and a rule reading it would break on all three.
         """
         cleaned = super().clean()
+        # B-3 Q2: OPX-273 is locked on both catalogue screens. Both edit views already
+        # refuse it before building this form; this is the backstop for any other caller,
+        # and the one place that covers the mandatory flag — a mandatory OPX-273 would make
+        # the picker save put a bare ACCB line on every sheet.
+        if self.instance.pk and self.instance.code == ACCB_CONFIGURED_CODE:
+            raise forms.ValidationError(ACCB_CATALOGUE_LOCKED_MESSAGE)
         if not cleaned.get('is_mandatory'):
             return cleaned
         # ACTIVE-NESS IS TESTED FIRST, AND ABOVE THE `project_type` EARLY RETURN BELOW.

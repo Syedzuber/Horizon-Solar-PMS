@@ -142,6 +142,26 @@ document.addEventListener('DOMContentLoaded', function () {
       card.querySelector('.js-vo-unlinked-empty').classList.toggle('d-none', shown > 0);
     }
 
+    /* B-3a: configured ACCBs, read-only. The same re-sum as a requirement row, minus the
+       amount input — there is nothing on these rows to post. */
+    var accbCard = document.getElementById('voAccbCard');
+    if (accbCard) {
+      var accbShown = 0;
+      accbCard.querySelectorAll('.js-vo-accb').forEach(function (tr) {
+        var contrib = JSON.parse(tr.dataset.contrib || '{}');
+        var sum = 0, sites = 0;
+        for (var pk in contrib) {
+          if (added[pk]) { sum += parseFloat(contrib[pk]); sites += 1; }
+        }
+        tr.classList.toggle('d-none', sites === 0);
+        if (sites === 0) return;
+        accbShown += 1;
+        tr.querySelector('.js-vo-accb-count').textContent = sum.toFixed(0);
+        tr.querySelector('.js-vo-accb-sites').textContent = sites + ' site' + (sites === 1 ? '' : 's');
+      });
+      accbCard.querySelector('.js-vo-accb-empty').classList.toggle('d-none', accbShown > 0);
+    }
+
     renderResults();
     amountNote();
     form.dispatchEvent(new CustomEvent('vo:picked'));

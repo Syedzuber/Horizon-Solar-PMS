@@ -35,6 +35,9 @@ from .models import (
     BOQCorrection, BOQ_CORRECTION_LINE_ADDED, BOQ_CORRECTION_QUANTITY_CHANGED,
     get_opex_boq_catalogue, opex_catalogue_category_order, get_opex_mandatory_items,
     split_opex_boq_rows, group_boq_rows_by_category,
+    # B-3a - configured ACCBs: the configuration behind one ACCB line, and the
+    # helper every sheet screen reads ACCB lines through.
+    ACCBConfig, accb_rows,
     PaymentMilestone, ProjectDocument, TaskAttachment,
     Issue, ActivityLog, Comment, log_activity,
     # 2.3a - the durable record of what a rejection was about. Separate from Issue
@@ -99,6 +102,13 @@ from .phase_rules import (
     start_warnings,
 )
 from .models import PhaseRuleOverride
+# B-3a - the ACCB configurator's pure rules (wording, grouping key, validation).
+from .accb import (
+    ACCB_CONFIGURED_CODE, ACCB_CATALOGUE_LOCKED_MESSAGE, ACCB_COMMON_RATINGS,
+    ACCB_MAX_FEEDERS, ACCB_MIN_FEEDERS, ACCB_RATING_MAX, ACCB_RATING_MIN,
+    ACCB_REVIEWER_MESSAGE, ACCB_TYPES, ACCB_UPLOAD_REFUSED_MESSAGE,
+    accb_description, accb_config_key, accb_summary, validate_accb_config,
+)
 from .tender_stages import (
     STAGE_LABELS, STUCK_RULES, activated_progress, design_throughput, stage_summary,
     stuck_sites, tender_cards, tender_site_list,
@@ -10082,7 +10092,23 @@ def opex_boq_entry(request, project_id):
         lock_reason = ('Only the designer named in this site\'s assigned_design may enter '
                        'its BOQ.')
 
+    # B-3a — the ACCB section. These lines are NOT in added_on / added_off (see
+    # split_opex_boq_rows), so the picker's own form never posts them and its save can never
+    # touch them; they are drawn by the ACCB section below the picker form instead.
+    accbs = accb_rows(boq)
+
     return render(request, 'projects/opex_boq_entry.html', {
+        'accb_lines':       accbs,
+        'accb_count':       len(accbs),
+        # Read by the Alpine section through json_script. Every value is a validated type,
+        # tick, breaker or whole number, or text generated from them.
+        'accb_data': {
+            'accbs': [_accb_card(line) for line in accbs],
+            'types': list(ACCB_TYPES),
+            'common_ratings': list(ACCB_COMMON_RATINGS),
+            'min_feeders': ACCB_MIN_FEEDERS, 'max_feeders': ACCB_MAX_FEEDERS,
+            'rating_min': ACCB_RATING_MIN, 'rating_max': ACCB_RATING_MAX,
+        },
         'project':          project,
         'boq':              boq,
         'catalogue_count':  len(catalogue),
@@ -10097,6 +10123,231 @@ def opex_boq_entry(request, project_id):
         'lock_reason':      lock_reason,
         'result_cap':       OPEX_PICKER_RESULT_CAP,
     })
+
+
+# ---------------------------------------------------------------------------
+# B-3a — configured ACCBs (the designer's ACCB section on the OPEX BOQ screen)
+#
+# ONE ACCB IS ONE BOQ LINE, Qty 1, on the OPX-273 catalogue row, with an ACCBConfig beside
+# it holding what the description was generated from. Two identical ACCBs are two lines.
+#
+# A SEPARATE ENDPOINT FROM THE PICKER, NOT A MODE OF IT. The picker's POST reconciles the
+# whole sheet and deletes what is absent; an ACCB edit must not depend on, or be able to
+# disturb, that. Each ACCB card is its own <form> posting here with one action naming one
+# ACCB, so a stale or partial POST can never remove an ACCB it does not name.
+# ---------------------------------------------------------------------------
+
+#: ActivityLog.action is 255 characters. The ACCB log line is built from a name, a number,
+#: a site code and accb_summary() (at most 34 characters each side of an arrow), so capping
+#: the name is the one thing needed for every line to fit without log_activity's "…".
+_ACCB_LOG_NAME_MAX = 60
+
+
+def _accb_card(line):
+    """One configured ACCB line as the ACCB section's Alpine data."""
+    config = line.accb_config.as_config()
+    return {'id': line.accb_config.pk, 'number': line.accb_config.number,
+            'type': config['type'], 'spd': config['spd'],
+            'in': config['in'], 'out': config['out'],
+            'description': line.description}
+
+
+def _accb_actor_name(profile):
+    """The designer's name for an ACCB log line, cut to _ACCB_LOG_NAME_MAX characters."""
+    name = profile.user.get_full_name() or profile.user.username
+    return name if len(name) <= _ACCB_LOG_NAME_MAX else name[:_ACCB_LOG_NAME_MAX - 1] + '…'
+
+
+def accb_log_text(profile, verb, number, project, detail):
+    """'<designer> changed ACCB 2 on <site> (<detail>)' — the B-3 Q6 short form.
+
+    Module-level so the test can build the longest case and prove it fits in 255.
+    """
+    return (f'{_accb_actor_name(profile)} {verb} ACCB {number} on {project.project_id} '
+            f'({detail})')
+
+
+def _accb_line_values(master, config):
+    """The BOQ-line fields a configured ACCB always carries.
+
+    Quantity is ALWAYS 1 (prototype answer 4). The description is generated, never posted.
+    serial_no / category / uom come from the OPX-273 master exactly as the picker copies any
+    catalogue row, so the line is an ordinary catalogue-linked BOQ line to every reader.
+    """
+    return {
+        'item_master':      master,
+        'serial_no':        master.sort_order,
+        'category':         master.category,
+        'description':      accb_description(config),
+        'uom':              master.unit,
+        'boq_quantity':     Decimal('1'),
+        'is_standard_item': True,
+    }
+
+
+def _accb_create(boq, master, config, profile):
+    """Create one ACCB line and its configuration with the next number. Returns the config.
+
+    The caller holds the BOQ row lock (select_for_update), so max+1 cannot be computed twice
+    for the same number; the (boq, number) UNIQUE constraint is the backstop.
+    """
+    number = (boq.accb_configs.aggregate(m=Max('number'))['m'] or 0) + 1
+    line = BOQItem.objects.create(boq=boq, **_accb_line_values(master, config))
+    return ACCBConfig.objects.create(
+        boq=boq, boq_item=line, number=number,
+        accb_type=config['type'], has_spd=config['spd'],
+        feeders={'in': config['in'], 'out': config['out']},
+        config_key=accb_config_key(config),
+        created_by=profile, updated_by=profile,
+    )
+
+
+@login_required
+@require_POST
+def opex_boq_accb(request, project_id):
+    """Add, save, duplicate or remove one configured ACCB on an OPEX site's BOQ (B-3a).
+
+    Access: the site's assigned designer only, and only while neither the procurement group
+    lock nor the design lock is on — exactly the picker's write rule. POST only.
+
+    Actions, one ACCB per POST:
+        add       — validate the posted configuration; create a line + configuration with
+                    the next ACCB number
+        save      — validate; replace the named ACCB's configuration and regenerate its
+                    line's description (Qty stays 1)
+        duplicate — copy the named ACCB's SAVED configuration into a new line with the next
+                    number (B-3 Q8)
+        remove    — delete the named ACCB's line; its configuration goes with it (CASCADE)
+
+    Every outcome redirects back to the BOQ screen's ACCB section, with a message.
+    """
+    project = _active_project(project_id)
+
+    if project.project_type != 'OPEX':
+        raise Http404('ACCBs are configured on RESCO BOQs only.')
+
+    # Only the site's assigned designer authors its BOQ (user_can_edit_project_boq, the
+    # W-narrow rule the picker and the upload use). QC, the Head, PM, SCM and Admin read the
+    # ACCBs but never write them — a reviewer fails the BOQ instead (B-3 P7).
+    if not user_can_edit_project_boq(request.user, project):
+        return HttpResponseForbidden()
+
+    back = redirect(reverse('opex_boq_entry', kwargs={'project_id': project_id}) + '#accb')
+
+    # The two locks, most final first, in the picker's own words: a BOQ committed to a
+    # purchase, or one handed to design review, is not changed by anyone here.
+    if project_boq_is_group_locked(project):
+        messages.error(request, 'This site is in a locked procurement group — its BOQ '
+                                'quantities are final and can no longer be changed. A '
+                                'correction now needs a variance against the order.')
+        return back
+    if project_boq_is_design_locked(project):
+        messages.error(request, 'This BOQ has been marked complete and is with design '
+                                'review — it cannot be changed until a reviewer sends '
+                                'it back or a change request opens a new attempt.')
+        return back
+
+    action = request.POST.get('action', '')
+    if action not in ('add', 'save', 'duplicate', 'remove'):
+        messages.error(request, 'That is not an ACCB action.')
+        return back
+
+    master = (BOQItemMaster.objects
+              .filter(code=ACCB_CONFIGURED_CODE, project_type='OPEX').first())
+    if master is None:
+        # Migration 0149 writes this row; without it there is nothing to link a line to.
+        messages.error(request, f'The ACCB catalogue item {ACCB_CONFIGURED_CODE} is missing, '
+                                f'so no ACCB can be saved. Tell the administrator.')
+        return back
+
+    config = None
+    if action in ('add', 'save'):
+        try:
+            config = validate_accb_config(
+                request.POST.get('accb_type'), request.POST.get('has_spd'),
+                request.POST.getlist('in_breaker'), request.POST.getlist('in_rating'),
+                request.POST.getlist('out_breaker'), request.POST.getlist('out_rating'))
+        except ValidationError as exc:
+            for error in exc.messages:
+                messages.error(request, error)
+            messages.error(request, 'Nothing was saved.')
+            return back
+
+    profile = request.user.profile
+    log_line = None
+    with transaction.atomic():
+        # Created on first write, never on a page load — the picker's rule. get_or_create
+        # rather than a bare create because the picker may have created it a moment ago.
+        boq, _created = BOQ.objects.get_or_create(project=project)
+        # Lock the BOQ row so two ACCB posts on one site cannot both take the same number.
+        boq = BOQ.objects.select_for_update().get(pk=boq.pk)
+
+        if action == 'add':
+            accb = _accb_create(boq, master, config, profile)
+            log_line = ('boq_accb_added', accb_log_text(
+                profile, 'added', accb.number, project, accb_summary(config)))
+            messages.success(request, f'ACCB {accb.number} added.')
+        else:
+            raw = request.POST.get('accb_id', '')
+            # Object consistency: the ACCB must be on THIS site's BOQ. An id from another
+            # site is a 404, not a silent no-op reported as success.
+            if not raw.isdigit():
+                raise Http404('No such ACCB on this BOQ.')
+            accb = get_object_or_404(ACCBConfig.objects.select_related('boq_item'),
+                                     pk=int(raw), boq=boq)
+
+            if action == 'save':
+                before = accb.as_config()
+                if before == config:
+                    messages.info(request, f'ACCB {accb.number}: nothing changed.')
+                    return back
+                old_summary, new_summary = accb_summary(before), accb_summary(config)
+                accb.accb_type  = config['type']
+                accb.has_spd    = config['spd']
+                accb.feeders    = {'in': config['in'], 'out': config['out']}
+                accb.config_key = accb_config_key(config)
+                accb.updated_by = profile
+                accb.save(update_fields=['accb_type', 'has_spd', 'feeders', 'config_key',
+                                         'updated_by', 'updated_at'])
+                line = accb.boq_item
+                for field, value in _accb_line_values(master, config).items():
+                    setattr(line, field, value)
+                line.save(update_fields=['item_master', 'serial_no', 'category',
+                                         'description', 'uom', 'boq_quantity',
+                                         'is_standard_item'])
+                # The summary holds counts, not ratings, so a rating or breaker change
+                # leaves it equal; say that rather than log "X → X".
+                detail = (f'{old_summary} → {new_summary}' if old_summary != new_summary
+                          else f'{new_summary}; feeders changed')
+                log_line = ('boq_accb_changed', accb_log_text(
+                    profile, 'changed', accb.number, project, detail))
+                messages.success(request, f'ACCB {accb.number} saved.')
+
+            elif action == 'duplicate':
+                source = accb.as_config()
+                copy = _accb_create(boq, master, source, profile)
+                log_line = ('boq_accb_added', accb_log_text(
+                    profile, 'added', copy.number, project,
+                    f'{accb_summary(source)}; copy of ACCB {accb.number}'))
+                messages.success(request, f'ACCB {accb.number} duplicated as ACCB '
+                                          f'{copy.number}.')
+
+            else:  # remove
+                summary = accb_summary(accb.as_config())
+                number = accb.number
+                # Deleting the line deletes the ACCBConfig (CASCADE) — one statement, so the
+                # line can never be left without its configuration or the reverse.
+                accb.boq_item.delete()
+                log_line = ('boq_accb_removed', accb_log_text(
+                    profile, 'removed', number, project, summary))
+                messages.success(request, f'ACCB {number} removed.')
+
+    # After the write commits, never inside it — log_activity's own rule.
+    if log_line:
+        action_code, text = log_line
+        log_activity(project, profile, text, entity_type='BOQ', entity_id=boq.pk,
+                     action_code=action_code)
+    return back
 
 
 # ---------------------------------------------------------------------------
@@ -10154,6 +10405,9 @@ BOQ_DOWNLOAD_QUANTITY_COL = [k for _h, k in BOQ_DOWNLOAD_COLUMNS].index('quantit
 BOQ_DOWNLOAD_SHEET      = 'BOQ'
 BOQ_DOWNLOAD_OFF_SHEET  = 'Not In Catalogue'
 BOQ_DOWNLOAD_INFO_SHEET = 'Instructions'
+#: B-3a — configured ACCBs, reference only. Never read on upload: the parser reads
+#: BOQ_DOWNLOAD_SHEET by name and nothing else.
+BOQ_DOWNLOAD_ACCB_SHEET = 'ACCB'
 
 
 def _boq_download_row(row):
@@ -10241,6 +10495,10 @@ def opex_boq_download(request, project_id):
     catalogue      = get_opex_boq_catalogue()
     category_order = opex_catalogue_category_order()
     added_on, added_off = split_opex_boq_rows(boq, {m.pk for m in catalogue})
+    # B-3a: configured ACCB lines are in neither list above and get a sheet of their own.
+    # They cannot go on the data sheet — their code is not in the upload's catalogue, so
+    # the file would be refused — and must not be missing from the file either.
+    accbs = accb_rows(boq)
 
     # THE SAME COMPOSITION THE PICKER'S GET PERFORMS (see opex_boq_entry), so the
     # file and the screen carry the same set: mandatory rows this BOQ does not hold
@@ -10318,6 +10576,26 @@ def opex_boq_download(request, project_id):
             off.column_dimensions[column_letter].width = width
         off.protection.sheet = True
 
+    # ---- Sheet: configured ACCBs (B-3a) -------------------------------------
+    # Omitted when there are none, like the off-catalogue sheet. The description is the
+    # line's stored text, which IS accb_description() of its configuration.
+    if accbs:
+        accb_ws = wb.create_sheet(BOQ_DOWNLOAD_ACCB_SHEET)
+        accb_ws.append(['Configured ACCBs on this BOQ. Shown for reference only — they are '
+                        'NOT read when you upload this file.'])
+        accb_ws.append(['Add, change or remove ACCBs in the ACCB section of the BOQ '
+                        'screen.'])
+        accb_ws.append([])
+        accb_ws.append(['ACCB', 'Code', 'Description', 'Unit', 'Quantity'])
+        for cell in accb_ws[4]:
+            cell.font = Font(bold=True)
+        for line in accbs:
+            accb_ws.append([line.accb_config.number, line.item_master.code,
+                            line.description, line.uom, line.boq_quantity])
+        for column_letter, width in (('A', 7), ('B', 11), ('C', 100), ('D', 9), ('E', 10)):
+            accb_ws.column_dimensions[column_letter].width = width
+        accb_ws.protection.sheet = True
+
     # ---- Sheet 3: instructions ----------------------------------------------
     # Kept OFF the data sheet, the same convention opex_site_bulk_template uses,
     # so no guidance line can ever be read as a BOQ row. This copy is the
@@ -10346,8 +10624,13 @@ def opex_boq_download(request, project_id):
                        'blank quantities. If one is missing from your file it is put back '
                        'on upload and a message says which, and every one of them needs a '
                        'quantity before the BOQ can be marked complete.'])
-    info.append(['6.', f'The other sheets are not read. "{BOQ_DOWNLOAD_OFF_SHEET}" is '
-                       f'reference only, and this sheet is ignored.'])
+    info.append(['6.', f'The other sheets are not read. "{BOQ_DOWNLOAD_OFF_SHEET}" and '
+                       f'"{BOQ_DOWNLOAD_ACCB_SHEET}" are reference only, and this sheet is '
+                       f'ignored.'])
+    info.append(['7.', f'Configured ACCBs are managed in the ACCB section of the BOQ '
+                       f'screen, never by upload. A file that carries the ACCB code '
+                       f'{ACCB_CONFIGURED_CODE} on the "{BOQ_DOWNLOAD_SHEET}" sheet is '
+                       f'refused.'])
     info.append([])
     info.append(['A blank Quantity means no quantity has been entered. It is not the '
                  'same as 0 — enter 0 only if this site genuinely needs none.'])
@@ -10552,6 +10835,14 @@ def _validate_boq_rows(rows, catalogue_by_code):
 
         if not code:
             errors.append(f'Row {index}: no item code.')
+            continue
+
+        # B-3a: the configured-ACCB code is refused BY NAME, ahead of the catalogue test
+        # that would refuse it anyway, so the designer is told where ACCBs are edited
+        # rather than that the code does not exist (Zuber, B-3 Q7). Any error refuses the
+        # whole file, so no ACCB line's quantity can move off 1 through an upload.
+        if code == ACCB_CONFIGURED_CODE:
+            errors.append(f'Row {index}: {ACCB_UPLOAD_REFUSED_MESSAGE}')
             continue
 
         # ONE MEMBERSHIP TEST COVERS THREE QUESTIONS. catalogue_by_code is built
@@ -11074,6 +11365,14 @@ def boq_correct(request, project_id):
             # no-op reported as success.
             item = get_object_or_404(BOQItem, pk=int(raw), boq=boq)
 
+            # B-3 P7: a reviewer may not change a configured ACCB line. Its quantity is 1 by
+            # definition (one ACCB, one line) and its text is generated from the designer's
+            # configuration, so the only correction is to fail the BOQ back to the designer.
+            # The GET never offers a form for these lines; this answers a crafted POST.
+            if ACCBConfig.objects.filter(boq_item=item).exists():
+                messages.error(request, ACCB_REVIEWER_MESSAGE)
+                return redirect('boq_correct', project_id=project_id)
+
             posted = (request.POST.get('quantity', '') or '').strip()
             if not posted:
                 messages.error(request, 'Enter the quantity this row should carry. A '
@@ -11145,6 +11444,9 @@ def boq_correct(request, project_id):
         'group_locked':    group_locked,
         'design_locked':   project_boq_is_design_locked(project),
         'corrections':     corrections,
+        # B-3a: configured ACCB lines, shown read-only with the reason (P7).
+        'accb_lines':      accb_rows(boq),
+        'accb_reviewer_message': ACCB_REVIEWER_MESSAGE,
     })
 
 
@@ -18182,6 +18484,8 @@ def admin_boq_items(request):
                           for value, label in Project.PROJECT_TYPE_CHOICES],
         'active_count':  BOQItemMaster.objects.filter(is_active=True).count(),
         'total_count':   BOQItemMaster.objects.count(),
+        # B-3a: the row drawn as locked instead of with Edit / Deactivate.
+        'accb_code':     ACCB_CONFIGURED_CODE,
     })
 
 
@@ -18221,6 +18525,13 @@ def admin_boq_item_edit(request, item_id):
     old → new. Access: Admin only."""
     item = get_object_or_404(BOQItemMaster, pk=item_id)
 
+    # B-3 Q2: OPX-273 is locked. Every configured ACCB line links to it, and an edit here
+    # could make it mandatory (a bare ACCB line forced onto every sheet) or retire it. Refused
+    # on GET as well, so the form is never offered.
+    if item.code == ACCB_CONFIGURED_CODE:
+        messages.error(request, ACCB_CATALOGUE_LOCKED_MESSAGE)
+        return redirect('admin_boq_items')
+
     if request.method == 'POST':
         # Before binding: is_valid() writes the posted values onto `item`.
         before = catalogue_snapshot(item)
@@ -18255,6 +18566,12 @@ def admin_boq_item_toggle(request, item_id):
         return redirect('admin_boq_items')
 
     item = get_object_or_404(BOQItemMaster, pk=item_id)
+
+    # B-3 Q2: OPX-273 cannot be deactivated (or reactivated) — configured ACCB lines link
+    # to it, and the ACCB section refuses to save while it is missing.
+    if item.code == ACCB_CONFIGURED_CODE:
+        messages.error(request, ACCB_CATALOGUE_LOCKED_MESSAGE)
+        return redirect('admin_boq_items')
 
     # A FLAGGED ITEM CANNOT BE DEACTIVATED WHILE STILL FLAGGED. The picker offers active
     # rows only, so the mandatory flag would become unsatisfiable — the item would never be

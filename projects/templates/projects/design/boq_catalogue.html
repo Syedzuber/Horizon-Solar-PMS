@@ -73,8 +73,12 @@ removal this product has, and it changes what every future sheet is offered.
           <td class="text-center text-muted">{{ item.sort_order }}</td>
           <td><code class="small">{{ item.code }}</code></td>
           <td>
+            {% if item.code == accb_code %}
+              {{ item.description }}
+            {% else %}
             <a href="{% url 'design_boq_catalogue_edit' item.pk %}"
                class="text-decoration-none" style="color:#1a7a4a;">{{ item.description }}</a>
+            {% endif %}
           </td>
           <td class="text-muted">{{ item.unit }}</td>
           <td class="text-muted">{{ item.category|default:"—" }}</td>
@@ -103,6 +107,15 @@ removal this product has, and it changes what every future sheet is offered.
             {% endif %}
           </td>
           <td class="text-end text-nowrap">
+            {% comment %}
+            B-3a: OPX-273 is locked — every configured ACCB line links to it, so it is never
+            edited, deactivated or marked mandatory. The views refuse it as well; this only
+            stops the buttons being offered.
+            {% endcomment %}
+            {% if item.code == accb_code %}
+            <span class="badge rounded-pill text-bg-light border" title="Configured ACCBs link to this item">
+              <i class="bi bi-lock"></i> Locked — used by configured ACCBs</span>
+            {% else %}
             <a href="{% url 'design_boq_catalogue_edit' item.pk %}"
                class="btn btn-sm btn-outline-secondary">
               <i class="bi bi-pencil"></i> Edit
@@ -130,6 +143,7 @@ removal this product has, and it changes what every future sheet is offered.
                 </button>
               {% endif %}
             </form>
+            {% endif %}
           </td>
         </tr>
         {% empty %}
