@@ -14,7 +14,8 @@ WHAT THIS FILE PROVES
   * EVERY OTHER WRITE PATH LEAVES ACCB LINES ALONE: the picker save that omits them, the
     spreadsheet upload, the reviewer's correction screen.
   * SCM keeps different configurations apart and changes no other item's total; the order
-    raise lists ACCBs read-only.
+    raise lists ACCBs as orderable rows, one per configuration (B-3b; the raise itself is
+    in tests_accb_order).
   * OPX-273 is locked on both catalogue screens and in the form.
 
 RUNNER: like tests_boq_upload, this seeds catalogue codes in setUp, so it runs with
@@ -47,7 +48,7 @@ from .models import (
     ATTEMPT_REASON_INITIAL, DESIGN_IN_DESIGN, DESIGN_IN_QC, SITE_GROUP_LOCKED,
     get_opex_boq_catalogue, get_opex_mandatory_items, opex_catalogue_category_order,
 )
-from .order_views import _parse_requirement, _picker_context
+from .order_views import _parse_requirement, _picker_context, accb_amount_field
 from .views import (
     BOQ_DOWNLOAD_ACCB_SHEET, BOQ_DOWNLOAD_COLUMNS, BOQ_DOWNLOAD_SHEET, _accb_create,
     accb_log_text,
@@ -744,25 +745,37 @@ class SCMGroupingTests(ACCBBase):
         self.assertEqual(after['unlinked'], before['unlinked'])
         self.assertNotIn(self.accb_master.pk, [line['item_master'] for line in after['lines']])
 
-    def test_the_order_raise_lists_accbs_read_only_and_none_can_be_ordered(self):
+    def test_the_order_raise_lists_accbs_as_orderable_rows(self):
+        """B-3b (rewritten from B-3a's read-only test): one orderable row per
+        configuration, under its own amount field. tests_accb_order covers the raise."""
         self._seed_accb(EX_TYPE1, site=self.site)
         self._seed_accb(EX_TYPE1, site=self.site_b)
         context = _picker_context(self.program, {})
         self.assertEqual(len(context['accb_requirement']), 1)
-        self.assertEqual(json.loads(context['accb_requirement'][0]['contrib']),
+        row = context['accb_requirement'][0]
+        self.assertEqual(json.loads(row['contrib']),
                          {str(self.site.pk): '1.00', str(self.site_b.pk): '1.00'})
+        self.assertEqual(row['field'], accb_amount_field(accb_config_key(EX_TYPE1)))
         html = render_to_string('projects/partials/vendor_order_requirement.html', context)
-        self.assertIn('ACCBs are not ordered from here yet', html)
+        self.assertNotIn('ACCBs are not ordered from here yet', html)
+        self.assertNotIn('voAccbCard', html)
+        self.assertIn(f'name="{row["field"]}"', html)
+        # Never amount_<OPX-273 pk>: that one field would be shared by every ACCB.
         self.assertNotIn(f'name="amount_{self.accb_master.pk}"', html)
-        block = html.split('id="voAccbCard"', 1)[1]
-        self.assertNotIn('<input', block)
-        # A crafted amount for the ACCB catalogue row does not make an order line.
         errors = []
-        lines, _priced = _parse_requirement(
-            {f'amount_{self.accb_master.pk}': '5000'}, self.ids, errors)
+        lines, priced = _parse_requirement(
+            {row['field']: '5000', f'amount_{self.accb_master.pk}': '9999'}, self.ids, errors)
         self.assertEqual(errors, [])
-        self.assertNotIn(self.accb_master.pk, [line['item_master_id'] for line in lines])
-        self.assertEqual(sorted(line['code'] for line in lines), ['OPX-001', 'OPX-002'])
+        accb = [line for line in lines if line['accb_config_key']]
+        self.assertEqual(len(accb), 1)
+        self.assertEqual((accb[0]['item_master_id'], accb[0]['description'],
+                          accb[0]['quantity'], accb[0]['amount'], accb[0]['accb_config_key']),
+                         (self.accb_master.pk, EX_TYPE1_TEXT, Decimal('2'), Decimal('5000'),
+                          accb_config_key(EX_TYPE1)))
+        # The catalogue-row amount for OPX-273 is ignored; it is not how an ACCB is priced.
+        self.assertEqual(priced, Decimal('5000'))
+        self.assertEqual(sorted(line['code'] for line in lines if not line['accb_config_key']),
+                         ['OPX-001', 'OPX-002'])
 
     def test_the_group_screen_draws_the_accb_rows(self):
         from .models import SITE_GROUP_DRAFT

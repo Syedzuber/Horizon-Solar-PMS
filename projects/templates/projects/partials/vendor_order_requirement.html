@@ -3,7 +3,8 @@ Section 4 (Requirement) of a raise page: every candidate requirement row, render
 with its per-site quantities in data-contrib, shown and re-summed by
 partials/vendor_order_picker_script.html for the sites added in section 3
 (partials/vendor_order_picker.html). Read-only; only an optional amount per item posts.
-Needs order_views._picker_context()'s requirement, requirement_open and unlinked.
+Needs order_views._picker_context()'s requirement, accb_requirement, requirement_open and
+unlinked.
 {% endcomment %}
   {# ── 4. Requirement ───────────────────────────────────────────────────── #}
   <details class="card shadow-sm mb-3" id="voRequirement"{% if requirement_open %} open{% endif %}>
@@ -42,6 +43,29 @@ Needs order_views._picker_context()'s requirement, requirement_open and unlinked
             </td>
           </tr>
           {% endfor %}
+          {% comment %}
+          B-3b — configured ACCBs, one orderable row per configuration, in the same table
+          and with the same classes as the catalogue rows, so the script shows, re-sums and
+          totals them once each. The amount field is order_views.accb_amount_field() — never
+          amount_<pk>, which would be the same OPX-273 field for every ACCB. data-whole: the
+          count shows as a whole number (display only).
+          {% endcomment %}
+          {% for row in accb_requirement %}
+          <tr class="js-vo-req js-vo-accb d-none" data-whole="1" data-contrib="{{ row.contrib }}">
+            <td>
+              <div class="fw-semibold">{{ row.code }}</div>
+              <div class="text-muted" style="font-size:.75rem;">{{ row.description }}</div>
+            </td>
+            <td class="text-muted">{{ row.unit }}</td>
+            <td class="text-end js-vo-agg">—</td>
+            <td class="text-end text-muted js-vo-sites"></td>
+            <td>
+              <input type="number" step="0.01" min="0.01" inputmode="decimal"
+                     class="form-control form-control-sm js-vo-amount" name="{{ row.field }}"
+                     value="{{ row.amount }}" aria-label="Amount for {{ row.description }}" disabled>
+            </td>
+          </tr>
+          {% endfor %}
         </tbody>
       </table>
     </div>
@@ -65,32 +89,6 @@ Needs order_views._picker_context()'s requirement, requirement_open and unlinked
         {% endfor %}
       </ul>
       <div class="text-muted js-vo-unlinked-empty">None among the added sites.</div>
-    </div>
-    {% endif %}
-    {% comment %}
-    B-3a — configured ACCBs, one row per configuration with the count for the added sites.
-    READ-ONLY UNTIL B-3b: no checkbox and no amount input, so nothing here can be posted
-    and nothing here becomes an order line. Re-summed by vendor_order_picker_script.html
-    from data-contrib, exactly like the requirement rows above.
-    {% endcomment %}
-    {% if accb_requirement %}
-    <div class="card-body border-top py-2 small" id="voAccbCard">
-      <div class="fw-semibold">ACCBs are not ordered from here yet</div>
-      <div class="text-muted mb-1">Configured ACCBs of the added sites, one row per
-        configuration. Shown for reference; they are not part of this order.</div>
-      <table class="table table-sm mb-0 small align-middle">
-        <tbody>
-          {% for row in accb_requirement %}
-          <tr class="js-vo-accb d-none" data-contrib="{{ row.contrib }}">
-            <td>{{ row.description }}</td>
-            <td style="width:4rem;" class="text-muted">{{ row.unit }}</td>
-            <td style="width:6rem;" class="text-end fw-semibold js-vo-accb-count">—</td>
-            <td style="width:6rem;" class="text-end text-muted js-vo-accb-sites"></td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      <div class="text-muted js-vo-accb-empty">None among the added sites.</div>
     </div>
     {% endif %}
   </details>

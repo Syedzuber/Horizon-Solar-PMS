@@ -3718,6 +3718,12 @@ class VendorOrderLine(models.Model):
     quantity = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     amount   = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
 
+    # B-3b — set only on a configured-ACCB line from the group raise or Add PO / PI, null on
+    # every catalogue line. Every ACCB is item_master OPX-273, so this is what keeps two
+    # configurations apart for B-5 consolidation and receipts. No index: nothing filters on
+    # it yet (B-5 adds one if it does).
+    accb_config_key = models.CharField(max_length=512, null=True, blank=True)  # ACCBConfig.config_key copied at raise; same length
+
     class Meta:
         ordering = ['pk']
         constraints = [

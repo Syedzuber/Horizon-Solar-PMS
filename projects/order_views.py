@@ -54,6 +54,7 @@ payment_hold_respond — each locking the request row and re-checking its predic
 that lock. The only screen O4 touches is this module's order detail page; the Finance
 queue and the mark-paid path are O5. See the O4 section note at the foot of this module.
 """
+import hashlib
 import json
 import logging
 import uuid as _uuid
@@ -69,6 +70,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 
+from .accb import ACCB_CONFIGURED_CODE
 from .approval_forms import pre_order_coverage
 from .decorators import login_required
 from .design_views import aggregate_group_boq
@@ -1311,6 +1313,43 @@ def _parse_payment_within(post, order_total, errors):
     return payment
 
 
+#: Prefix of an ACCB row's amount field on the raise pages (B-3b). Distinct from the
+#: catalogue rows' `amount_<pk>` so neither can be read as the other.
+ACCB_AMOUNT_PREFIX = 'accb_amount_'
+
+#: B-3b — the refusal for a priced ACCB that is not in the submitted sites' requirement.
+ACCB_GONE_MESSAGE = 'This ACCB is no longer on the selected sites; reload the page.'
+
+
+def accb_amount_field(config_key):
+    """The form field name for one ACCB configuration's amount (B-3b).
+
+    WHY A HASH AND NOT THE KEY ITSELF OR A ROW NUMBER. Every configured ACCB is the one
+    OPX-273 catalogue row, so `amount_<pk>` would be the same field for all of them. The
+    config_key is up to ~430 characters of '|', ':' and ',' — not something to put in a
+    field name. A row number would not survive the round trip either: the page draws the
+    requirement for every candidate site, the POST recomputes it for the submitted sites
+    only, so the rows are numbered differently. A short hash of config_key is
+    deterministic, so the server recomputes it from its own requirement and trusts nothing
+    posted but the amount. 16 hex digits (64 bits) cannot plausibly collide within one
+    requirement; _parse_requirement() refuses rather than guesses if it ever did.
+    """
+    return ACCB_AMOUNT_PREFIX + hashlib.sha256(config_key.encode('utf-8')).hexdigest()[:16]
+
+
+def _parse_amount(post, field, label, errors):
+    """One optional item amount: (amount or None, ok). Blank means not priced; anything
+    else must be a positive figure, or `errors` gets a line naming `label`."""
+    raw = (post.get(field) or '').strip()
+    if not raw:
+        return None, True
+    amount = _parse_decimal(raw, 12)
+    if amount is None:
+        errors.append(f'{label}: an item amount must be more than 0, or left blank.')
+        return None, False
+    return amount, True
+
+
 def _parse_requirement(post, site_ids, errors):
     """Section 4. Returns (lines, priced_total).
 
@@ -1323,26 +1362,47 @@ def _parse_requirement(post, site_ids, errors):
     figure. An amount posted for an item that is not in the submitted sites' requirement
     is ignored — the item is not on this order.
 
+    B-3b — CONFIGURED ACCBs ARE ORDERED TOO, ONE LINE PER CONFIGURATION (Zuber, 22 Nov),
+    priced or not, exactly like a catalogue item. Description, unit, quantity (the summed
+    count) and config_key all come from aggregate_group_boq()'s `accb_lines`; only the
+    amount is read from the POST, under accb_amount_field(). They are kept apart from
+    one another by `accb_config_key`, because every one of them is the same OPX-273
+    catalogue row.
+
+    A PRICED ACCB THAT IS NOT IN THE REQUIREMENT IS REFUSED, NOT IGNORED (Zuber, 22 Nov):
+    it means the ACCB was removed or changed after the page was drawn, and SCM priced
+    something that will not be on the order. A blank one is ignored — a visible ACCB row
+    posts its field even when unpriced. Catalogue items still ignore it (see above); the
+    difference is recorded in the B-3b report to be aligned later.
+
     `priced_total` is the sum of the amounts given, or None when none was. It feeds the
     warning only; the order's value is the total entered in section 2.
     """
     if not site_ids:
         return [], None
-    rows = aggregate_group_boq(site_ids)['lines']
-    # The snapshot carries the category as the Residential line does; one query.
-    category = dict(BOQItemMaster.objects
-                    .filter(pk__in=[row['item_master'] for row in rows])
-                    .values_list('pk', 'category'))
+    agg = aggregate_group_boq(site_ids)
+    rows, accb_rows = agg['lines'], agg['accb_lines']
+
+    # The snapshot carries the category as the Residential line does; one query. When
+    # ACCBs are in the requirement the OPX-273 row is fetched by code in the SAME query,
+    # because aggregate_group_boq() does not return its pk for ACCB rows. With neither,
+    # pk__in=[] makes Django skip the query entirely, as before.
+    master_q = Q(pk__in=[row['item_master'] for row in rows])
+    if accb_rows:
+        master_q |= Q(code=ACCB_CONFIGURED_CODE)
+    masters = list(BOQItemMaster.objects.filter(master_q)
+                   .values('pk', 'code', 'category', 'unit'))
+    category = {master['pk']: master['category'] for master in masters}
+    accb_master = next((master for master in masters
+                        if master['code'] == ACCB_CONFIGURED_CODE), None) or {}
+
     lines, priced = [], []
     for row in rows:
-        raw = (post.get(f'amount_{row["item_master"]}') or '').strip()
-        amount = None
-        if raw:
-            amount = _parse_decimal(raw, 12)
-            if amount is None:
-                errors.append(f'{row["item_master__description"]}: an item amount must be '
-                              'more than 0, or left blank.')
-                continue
+        amount, ok = _parse_amount(post, f'amount_{row["item_master"]}',
+                                   row['item_master__description'], errors)
+        if not ok:
+            continue
+        if amount is not None:
             priced.append(amount)
         lines.append({'item_master_id': row['item_master'],
                       'code': row['item_master__code'],
@@ -1350,7 +1410,39 @@ def _parse_requirement(post, site_ids, errors):
                       'unit': row['item_master__unit'],
                       'category': category.get(row['item_master']) or '',
                       'quantity': row['total_quantity'],
-                      'amount': amount})
+                      'amount': amount,
+                      'accb_config_key': None})
+
+    by_field = {}
+    for row in accb_rows:
+        field = accb_amount_field(row['config_key'])
+        if field in by_field:
+            # Two configurations, one field name: an amount could land on the wrong ACCB,
+            # so the whole submission is refused rather than guessed at.
+            errors.append('Two ACCB configurations could not be told apart on this form. '
+                          'Report this to the PMS team before ordering ACCBs.')
+            return [], None
+        by_field[field] = row
+        amount, ok = _parse_amount(post, field, row['description'], errors)
+        if not ok:
+            continue
+        if amount is not None:
+            priced.append(amount)
+        lines.append({'item_master_id': accb_master.get('pk'),
+                      'code': accb_master.get('code', ''),
+                      'description': row['description'],
+                      'unit': row['unit'] or accb_master.get('unit', ''),
+                      'category': accb_master.get('category') or '',
+                      'quantity': row['total_quantity'],
+                      'amount': amount,
+                      'accb_config_key': row['config_key']})
+
+    # Any other accb_amount_ field is a configuration the submitted sites no longer have.
+    gone = [key for key in post.keys()
+            if key.startswith(ACCB_AMOUNT_PREFIX) and key not in by_field
+            and (post.get(key) or '').strip()]
+    if gone:
+        errors.append(ACCB_GONE_MESSAGE)
     return lines, (sum(priced, Decimal('0')) if priced else None)
 
 
@@ -1513,28 +1605,37 @@ def _picker_context(entering_program, post, default_programs=(), default_sites=(
         'amount':      post.get(f'amount_{line["item_master"]}', ''),
     } for line in agg['lines']]
 
+    # B-3b — configured ACCBs are orderable rows of the same table, one per configuration,
+    # with the amount field accb_amount_field() names (all ACCBs are OPX-273, so the
+    # catalogue rows' amount_<pk> cannot tell them apart). `contrib` is keyed by site pk
+    # like the catalogue rows, so the page re-sums them for the added sites. Built from the
+    # same aggregate_group_boq() call: no query of its own.
+    accb_requirement = []
+    for line in agg['accb_lines']:
+        field = accb_amount_field(line['config_key'])
+        accb_requirement.append({
+            'code':        ACCB_CONFIGURED_CODE,
+            'description': line['description'],
+            'unit':        line['unit'],
+            'field':       field,
+            'contrib':     json.dumps({str(pk_of[code]): str(quantity)
+                                       for code, quantity in line['contributions']
+                                       if code in pk_of}),
+            'amount':      post.get(field, ''),
+        })
+
     return {
         'tenders':          tenders,
         'group_rows':       group_rows,
         'requirement':      requirement,
         # Collapsed by default; open when a refused submission brings amounts back, so an
         # amount the server refused is not hidden inside a closed section.
-        'requirement_open': any(row['amount'] for row in requirement),
+        'requirement_open': any(row['amount'] for row in requirement + accb_requirement),
         # item_master IS NULL, so these cannot be summed across sites. Shown read-only
         # rather than dropped: a requirement that is silently short is worse than one
         # that says what it left out (aggregate_group_boq).
         'unlinked':         agg['unlinked'],
-        # B-3a — configured ACCBs, one row per configuration, READ-ONLY until B-3b (Zuber,
-        # B-3 Q3). They are not in agg['lines'], so _parse_requirement() never makes an
-        # order line of one and no amount input is drawn for them. `contrib` is keyed by
-        # site pk like the requirement rows, so the page re-sums them for the added sites.
-        'accb_requirement': [{
-            'description': line['description'],
-            'unit':        line['unit'],
-            'contrib':     json.dumps({str(pk_of[code]): str(quantity)
-                                       for code, quantity in line['contributions']
-                                       if code in pk_of}),
-        } for line in agg['accb_lines']],
+        'accb_requirement': accb_requirement,
         # O8a. Empty, and the template draws no Residential row or block, unless asked.
         'picker_residential': include_residential,
         'residential_rows': [{'project': project, 'added': str(project.pk) in added}
@@ -1647,6 +1748,9 @@ def _write_order_record(cleaned, profile, client_uuid):
             item_unit=line['unit'] or '',
             item_category=line['category'],
             quantity=line['quantity'], amount=line['amount'],
+            # B-3b: the configuration of an ACCB line, None on every catalogue line. All
+            # ACCBs share item_master OPX-273, so this is what tells two of them apart.
+            accb_config_key=line['accb_config_key'],
         )
         for line in cleaned['lines']
     ])
