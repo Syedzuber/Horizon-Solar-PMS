@@ -27,17 +27,20 @@ from .models import (
     FORMULA_SOURCE_COPY, SITE_GROUP_LOCKED,
 )
 from .tests_boq_formula_display import DisplayBase
+from .tests_accb_config import accb_post_data
 from .tests_boq_formula_apply import _profile
 from .views import boq_clear_log_text, boq_copy_log_text
 
 D = Decimal
 
-TYPE2 = {'type': 'Type-2', 'spd': True,
-         'in': [{'breaker': 'MCCB', 'rating': 100}, {'breaker': 'MCCB', 'rating': 63}],
-         'out': [{'breaker': 'MCCB', 'rating': 150}]}
-TYPE1 = {'type': 'Type-1', 'spd': False,
-         'in': [{'breaker': 'MCB', 'rating': 32}],
-         'out': [{'breaker': 'MCCB', 'rating': 100}]}
+#: B-3c shapes: switchgear from the fixed list, SPD per O/G feeder (mixed on TYPE2).
+TYPE2 = {'type': 'Type-2',
+         'in': [{'breaker': 'MCCB', 'rating': 100}, {'breaker': 'MCB', 'rating': 63}],
+         'out': [{'breaker': 'MCCB', 'rating': 200, 'spd': True},
+                 {'breaker': 'MCCB', 'rating': 200, 'spd': False}]}
+TYPE1 = {'type': 'Type-1',
+         'in': [{'breaker': 'MCB', 'rating': 40}],
+         'out': [{'breaker': 'MCCB', 'rating': 100, 'spd': False}]}
 
 #: Picker GET, measured on 54aab27 (before B-4) with this file's fixture under
 #: solarpms.test_settings: an empty BOQ (no BOQ row) and DisplayBase.SHEET. B-4 adds nothing:
@@ -63,12 +66,7 @@ class DuplicateBase(DisplayBase):
     # ── fixtures ────────────────────────────────────────────────────────────
 
     def _accb_add(self, config, site):
-        data = {'action': 'add', 'accb_type': config['type']}
-        if config['spd']:
-            data['has_spd'] = '1'
-        for side in ('in', 'out'):
-            data[f'{side}_breaker'] = [f['breaker'] for f in config[side]]
-            data[f'{side}_rating'] = [str(f['rating']) for f in config[side]]
+        data = {'action': 'add', **accb_post_data(config)}
         response = self.client.post(
             reverse('opex_boq_accb', kwargs={'project_id': site.project_id}), data)
         self.assertEqual(response.status_code, 302)
@@ -369,8 +367,12 @@ class CopyTests(DuplicateBase):
         self._commit()
         source, target = self._accbs(self.site), self._accbs(self.target)
         self.assertEqual([a.number for a in target], [3, 4])
-        self.assertEqual([(a.config_key, a.boq_item.description, a.as_config()) for a in target],
-                         [(a.config_key, a.boq_item.description, a.as_config()) for a in source])
+        # B-3c: every option and every O/G SPD tick comes across, and has_spd with them.
+        self.assertEqual([(a.config_key, a.boq_item.description, a.as_config(), a.feeders,
+                           a.has_spd) for a in target],
+                         [(a.config_key, a.boq_item.description, a.as_config(), a.feeders,
+                           a.has_spd) for a in source])
+        self.assertEqual(target[0].as_config(), TYPE2)
         self.assertEqual([a.boq_item.boq_quantity for a in target], [D('1'), D('1')])
         self.assertEqual(BOQ.objects.get(project=self.target).next_accb_number, 5)
 
@@ -378,15 +380,19 @@ class CopyTests(DuplicateBase):
         self._line('FX-LA1', 2)
         self._accb_add(TYPE2, self.site)
         self._accb_add(TYPE1, self.site)
+        # B-3c: ACCB 2 as B-3 stored it — a typed rating not in the list, and no
+        # per-feeder SPD (one SPD per ACCB).
         ACCBConfig.objects.filter(boq__project=self.site, number=2).update(
-            feeders={'in': [{'breaker': 'MCB', 'rating': 5000}],
+            feeders={'in': [{'breaker': 'MCB', 'rating': 32}],
                      'out': [{'breaker': 'MCCB', 'rating': 100}]})
         result = self._commit()
         self.assertEqual([a.number for a in self._accbs(self.target)], [1])
+        self.assertEqual(self._accbs(self.target)[0].as_config(), TYPE2)
         (code, description, reason), = result.context['copy_summary']['skipped']
         self.assertEqual((code, description), ('OPX-273', 'ACCB 2'))
         self.assertIn("fails today's ACCB rules", reason)
-        self.assertIn('5000 A is outside 1 to 1600 A', reason)
+        self.assertIn('I/C feeder 1: choose the switchgear from the list.', reason)
+        self.assertIn('O/G feeder 1: SPD must be ticked or not ticked.', reason)
 
     def test_blank_quantities_copy_blank_and_are_counted(self):
         self._source()

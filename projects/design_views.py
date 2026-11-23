@@ -8747,11 +8747,12 @@ def _aggregate_accbs(rows):
     aggregate_group_boq()'s per-site query (already filtered to the group's sites and to a
     quantity > 0). Pure: no query of its own.
 
-    Two ACCBs are one thing to buy when their config_key matches — type, SPD and the
-    multiset of (breaker, rating) on each side, independent of feeder order
-    (accb.accb_config_key). The total is the summed quantity (each line is 1, so it is the
-    count of ACCBs); `contributions` is [(site code, quantity)] summed per site, the same
-    shape aggregate_group_boq()'s catalogue lines carry.
+    Two ACCBs are one thing to buy when their config_key matches — type, the multiset of
+    switchgear options on the I/C side and the multiset of (option, SPD) on the O/G side,
+    independent of feeder order (accb.accb_config_key, B-3c ruling 4). The total is the
+    summed quantity (each line is 1, so it is the count of ACCBs); `contributions` is
+    [(site code, quantity)] summed per site, the same shape aggregate_group_boq()'s
+    catalogue lines carry.
 
     THE DESCRIPTION IS ANY LINE'S STORED TEXT, which is accb_description() of that line's
     configuration. Lines with the same key have the same description, because the wording

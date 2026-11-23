@@ -3,12 +3,17 @@ B-3 — the ACCB configurator's rules: what a configured ACCB says, how two are 
 identical, and what a valid one is.
 
 PURE, AND THAT IS THE POINT. Nothing here touches the database, a request or a model.
-The four functions below are the single definition of the approved description wording
-(Praveen rulings 26-31, F7; prototype answers of 22 Nov), of the SCM grouping identity, of
-the one-line summary the activity log carries, and of the server-side validation. The
-ACCB view, the SCM aggregate and the tests all call these; the designer's live preview in
-opex_boq_entry.html is a JavaScript COPY of accb_description() for display only, and the
-server always regenerates the text from the stored configuration.
+The functions below are the single definition of the approved description wording, of the
+SCM grouping identity, of the one-line summary the activity log carries, and of the
+server-side validation. The ACCB view, the B-4 copy, the SCM aggregate and the tests all
+call these; the designer's live preview in opex_boq_entry.html is a JavaScript COPY of
+accb_description() for display only, and the server always regenerates the text from the
+stored configuration.
+
+B-3c (Zuber, 23 Nov) — SWITCHGEAR FROM A FIXED LIST, SPD PER O/G FEEDER. Every feeder picks
+one of the 11 options in ACCB_SWITCHGEAR (no typed rating, no separate breaker choice) and
+each O/G feeder carries its own SPD tick. This supersedes ruling 26 and the B-3 decisions
+on ratings and on one SPD per ACCB.
 
 THIS MODULE IMPORTS NO MODELS. models.py imports the constants from here (the catalogue
 code, the type list), so an import in the other direction would be circular.
@@ -16,14 +21,13 @@ code, the type list), so an import in the other direction would be circular.
 A CONFIGURATION is a plain dict, the shape validate_accb_config() returns and
 ACCBConfig.as_config() rebuilds:
 
-    {'type': 'Type-2', 'spd': True,
-     'in':  [{'breaker': 'MCCB', 'rating': 100}, {'breaker': 'MCCB', 'rating': 63}],
-     'out': [{'breaker': 'MCCB', 'rating': 150}]}
+    {'type': 'Type-2',
+     'in':  [{'breaker': 'MCCB', 'rating': 100}, {'breaker': 'MCB', 'rating': 63}],
+     'out': [{'breaker': 'MCCB', 'rating': 200, 'spd': True}]}
 
 Feeders are kept in the designer's order. Order matters for display (the card shows them as
 entered) and does not matter for identity (accb_config_key sorts them).
 """
-import re
 from collections import Counter
 
 from django.core.exceptions import ValidationError
@@ -37,26 +41,39 @@ ACCB_CONFIGURED_CODE = 'OPX-273'
 #: Ruling 28 / F7 — a label the designer picks. Exactly these two.
 ACCB_TYPES = ('Type-1', 'Type-2')
 
-#: Ruling 27 — chosen per feeder. ORDER IS LOAD-BEARING: it is the order breaker groups
-#: appear in the description ("MCCB first, then MCB") and in the grouping key.
-ACCB_BREAKERS = ('MCCB', 'MCB')
-
 #: Ruling 30 — no business maximum; the UI (and therefore the server) caps each side at 20.
 ACCB_MIN_FEEDERS = 1
 ACCB_MAX_FEEDERS = 20
 
-#: Prototype answer 1 — any whole number of amps in this range is accepted.
-ACCB_RATING_MIN = 1
-ACCB_RATING_MAX = 1600
-
-#: Prototype answer 1 — offered in the rating datalist. Suggestions only; never a whitelist.
-ACCB_COMMON_RATINGS = (16, 20, 25, 32, 40, 50, 63, 80, 100, 125, 160, 200, 250, 315, 400, 630)
-
 #: Ruling 31 — every ACCB is 4-pole, 415 V. Fixed text, never stored.
 ACCB_POLES_VOLTAGE = '4P 415V'
 
-#: The two sides, as (config key, the word the description uses).
-ACCB_SIDES = (('in', 'I/C Feeder'), ('out', 'O/G Feeder'))
+#: The words every MCCB option shares after its rating (B-3c ruling 1). Praveen's sheet
+#: spaces the commas unevenly ("100A,4P, 36kA,MCCB"); normalised to ", " (Zuber, 23 Nov).
+_MCCB_TEXT = ('4P, 36kA, MCCB with S/C & O/L TM Based Extended Rotary Handle + '
+              'Spreader Terminals')
+
+#: B-3c ruling 1 — THE switchgear list: (breaker, rating, text), in the ruling's order.
+#: The same 11 on the I/C and the O/G side. The dropdown, the validator, the description,
+#: the grouping key and the tests all read this one constant; nothing else may list them.
+#: Every rating belongs to exactly one breaker, which is what lets the description and the
+#: key sort by rating alone.
+ACCB_SWITCHGEAR = (
+    ('MCB', 25, '25A, 4P, MCB'),
+    ('MCB', 30, '30A, 4P, MCB'),
+    ('MCB', 40, '40A, 4P, MCB'),
+    ('MCB', 63, '63A, 4P, MCB'),
+    ('MCCB', 100, f'100A, {_MCCB_TEXT}'),
+    ('MCCB', 125, f'125A, {_MCCB_TEXT}'),
+    ('MCCB', 200, f'200A, {_MCCB_TEXT}'),
+    ('MCCB', 250, f'250A, {_MCCB_TEXT}'),
+    ('MCCB', 320, f'320A, {_MCCB_TEXT}'),
+    ('MCCB', 400, f'400A, {_MCCB_TEXT}'),
+    ('MCCB', 630, f'630A, {_MCCB_TEXT}'),
+)
+
+#: (breaker, rating) -> the option's text.
+_TEXT_BY_PAIR = {(breaker, rating): text for breaker, rating, text in ACCB_SWITCHGEAR}
 
 #: Zuber, B-3 Q7 — the upload refuses a file that carries the ACCB code, in these words.
 ACCB_UPLOAD_REFUSED_MESSAGE = ('ACCB lines are managed in the ACCB section, not by upload. '
@@ -66,6 +83,9 @@ ACCB_UPLOAD_REFUSED_MESSAGE = ('ACCB lines are managed in the ACCB section, not 
 ACCB_REVIEWER_MESSAGE = ('ACCB lines are edited by the designer; fail the BOQ to send it '
                          'back.')
 
+#: B-3c answer 7 — what Duplicate says about an ACCB saved before the fixed list.
+ACCB_REENTER_MESSAGE = 're-enter the switchgear first'
+
 #: B-3 Q2 — why OPX-273 cannot be edited, deactivated or marked mandatory on either
 #: catalogue screen. Mandatory matters most: get_opex_mandatory_items() would return it and
 #: the picker save would try to put a bare ACCB line on every sheet.
@@ -73,152 +93,221 @@ ACCB_CATALOGUE_LOCKED_MESSAGE = (
     f'{ACCB_CONFIGURED_CODE} "ACCB (configured)" is locked: every configured ACCB line on a '
     f'site BOQ links to it. It cannot be edited, deactivated or marked mandatory.')
 
-_WHOLE_NUMBER = re.compile(r'^\d+$')
 
+def accb_option_code(breaker, rating):
+    """'MCCB-100' — the value a feeder's dropdown posts, and the token the key is made of.
 
-def _ratings_text(ratings):
-    """'100A and 63A', '2×32A and 25A', '1600A, 1599A and 1598A'.
-
-    Approved rules: high to low; a rating that repeats is written once as "N×R A"; the list
-    is joined with ", " and the last pair with " and ".
+    Names a (breaker, rating) pair rather than a list position, so a stored feeder, a POST
+    and a grouping key all read the same and the codes survive a reordering of the list.
     """
-    counts = Counter(ratings)
-    parts = [f'{counts[r]}×{r}A' if counts[r] > 1 else f'{r}A'
-             for r in sorted(counts, reverse=True)]
-    if len(parts) == 1:
-        return parts[0]
-    return ', '.join(parts[:-1]) + ' and ' + parts[-1]
+    return f'{breaker}-{rating}'
 
 
-def _side_text(feeders):
-    """'2 Nos. with MCCB 4P 415V 100A and 63A' — one side of the description.
+#: option code -> (breaker, rating). The validator's whitelist.
+_PAIR_BY_CODE = {accb_option_code(breaker, rating): (breaker, rating)
+                 for breaker, rating, _text in ACCB_SWITCHGEAR}
 
-    "1 No." for a single feeder, "N Nos." otherwise. Breaker groups MCCB first, then MCB,
-    joined with " + "; a breaker the side does not use is left out entirely.
-    """
-    count = len(feeders)
-    head = '1 No.' if count == 1 else f'{count} Nos.'
-    groups = []
-    for breaker in ACCB_BREAKERS:
-        ratings = [f['rating'] for f in feeders if f['breaker'] == breaker]
-        if ratings:
-            groups.append(f'{breaker} {ACCB_POLES_VOLTAGE} {_ratings_text(ratings)}')
-    return f'{head} with ' + ' + '.join(groups)
+
+def accb_switchgear_choices():
+    """[{'code', 'rating', 'text'}] in the list's order — what the dropdown offers, and what
+    the card's live preview sorts (by rating) and writes (the text) from."""
+    return [{'code': accb_option_code(breaker, rating), 'rating': rating, 'text': text}
+            for breaker, rating, text in ACCB_SWITCHGEAR]
+
+
+def _count_text(count):
+    """'1 No.' for a single feeder, 'N Nos.' otherwise (ruling 3)."""
+    return '1 No.' if count == 1 else f'{count} Nos.'
+
+
+def _incomer_groups(feeders):
+    """'2 x 40A, 4P, MCB; 1 x 25A, 4P, MCB' — identical options grouped, rating high to low."""
+    counts = Counter((f['breaker'], f['rating']) for f in feeders)
+    return '; '.join(f'{counts[pair]} x {_TEXT_BY_PAIR[pair]}'
+                     for pair in sorted(counts, key=lambda pair: -pair[1]))
+
+
+def _outgoing_groups(feeders):
+    """'1 x <text>, with SPD; 1 x <text>, without SPD' — grouped by option AND SPD, rating
+    high to low, then "with SPD" before "without SPD" for the same option."""
+    counts = Counter((f['breaker'], f['rating'], f['spd']) for f in feeders)
+    ordered = sorted(counts, key=lambda group: (-group[1], not group[2]))
+    return '; '.join(
+        f'{counts[group]} x {_TEXT_BY_PAIR[group[:2]]}, '
+        f'{"with SPD" if group[2] else "without SPD"}'
+        for group in ordered)
 
 
 def accb_description(config):
-    """The approved BOQ-line text for one configured ACCB (prototype answer 5).
+    """The approved BOQ-line text for one configured ACCB (B-3c ruling 3, tested word for
+    word):
+
+        ACCB Type-N, 4P 415V. I/C Feeder <count>: <groups>. O/G Feeder <count>: <groups>.
 
     THE SOURCE OF TRUTH for the wording. It is stored on BOQItem.description when the
     designer saves, so the download, the snapshots, the review panel, the SE drawings card
-    and the vendor order snapshot all show it without knowing it was generated. The longest
-    text the rules can produce is 416 characters (B-3 pre-flight P2); the line column is
-    unbounded text.
+    and the vendor order line all show it without knowing it was generated. The longest
+    text the rules can produce is 2,446 characters (B-3c pre-flight P5); every column it is
+    copied into automatically is unbounded text.
     """
-    sides = [f'{label} {_side_text(config[key])}' for key, label in ACCB_SIDES]
-    return (f'ACCB {config["type"]}, ' + '; '.join(sides) +
-            (', with SPD' if config['spd'] else ', without SPD'))
-
-
-def _side_key(feeders):
-    """One side's identity: breaker then rating high to low, so feeder order is irrelevant."""
-    ordered = sorted(feeders, key=lambda f: (ACCB_BREAKERS.index(f['breaker']), -f['rating']))
-    return ','.join(f'{f["breaker"]}-{f["rating"]}' for f in ordered)
+    return (f'ACCB {config["type"]}, {ACCB_POLES_VOLTAGE}. '
+            f'I/C Feeder {_count_text(len(config["in"]))}: {_incomer_groups(config["in"])}. '
+            f'O/G Feeder {_count_text(len(config["out"]))}: '
+            f'{_outgoing_groups(config["out"])}.')
 
 
 def accb_config_key(config):
-    """The SCM grouping identity — 'Type-2|SPD|IN:MCCB-100,MCCB-63|OUT:MCCB-150'.
+    """The SCM grouping identity — 'Type-2|IN:MCCB-100,MCB-63|OUT:MCCB-200+SPD'.
 
-    Two ACCBs are the same thing to buy when their type, their SPD tick and the MULTISET of
-    (breaker, rating) on each side all match (B-3 "SCM grouping"). Sorting each side makes
-    the key independent of the order the designer entered the feeders in, which is the one
-    property the SCM aggregate depends on. Readable on purpose, so a group can be checked
-    by eye in the database. At most about 430 characters; the column holds 512.
+    Two ACCBs are the same thing to buy when their type, the MULTISET of options on the I/C
+    side and the multiset of (option, SPD) on the O/G side all match (B-3c ruling 4).
+    Sorting each side makes the key independent of feeder order — including which of two
+    identical O/G feeders carries an SPD tick — which is the one property the SCM aggregate
+    depends on. Readable on purpose, so a group can be checked by eye in the database.
+
+    At most 453 characters; the column (and VendorOrderLine.accb_config_key) holds 512. A
+    B-3 key always had SPD or NOSPD as its second part, so an old key can never equal a
+    new one.
     """
+    incomers = sorted(config['in'], key=lambda f: -f['rating'])
+    outgoings = sorted(config['out'], key=lambda f: (-f['rating'], not f['spd']))
     return '|'.join([
         config['type'],
-        'SPD' if config['spd'] else 'NOSPD',
-        'IN:' + _side_key(config['in']),
-        'OUT:' + _side_key(config['out']),
+        'IN:' + ','.join(accb_option_code(f['breaker'], f['rating']) for f in incomers),
+        'OUT:' + ','.join(accb_option_code(f['breaker'], f['rating']) +
+                          ('+SPD' if f['spd'] else '') for f in outgoings),
     ])
 
 
-def accb_summary(config):
-    """'Type-2 · I/C 2 · O/G 1 · SPD' — the short form the activity log carries (B-3 Q6).
+def accb_has_spd(config):
+    """True when any O/G feeder has SPD — what ACCBConfig.has_spd stores (B-3c answer 2)."""
+    return any(f['spd'] for f in config['out'])
 
-    BOUNDED BY CONSTRUCTION (at most 34 characters), so a log line built from it always
+
+def accb_summary(config):
+    """'Type-2 · I/C 2 · O/G 3 · SPD 2' — the short form the activity log carries (B-3 Q6;
+    B-3c answer 4). The SPD figure is the number of O/G feeders with SPD.
+
+    BOUNDED BY CONSTRUCTION (at most 33 characters), so a log line built from it always
     fits ActivityLog.action's 255. The full text lives on the BOQ line and in the BOQ
     snapshots, never in the log.
     """
+    # Read defensively: the save and remove log lines summarise the STORED configuration,
+    # and one saved before B-3c has no per-feeder SPD. Such a feeder counts as no SPD.
+    spd_count = sum(1 for f in config['out'] if isinstance(f, dict) and f.get('spd') is True)
     return (f'{config["type"]} · I/C {len(config["in"])} · '
-            f'O/G {len(config["out"])} · {"SPD" if config["spd"] else "no SPD"}')
+            f'O/G {len(config["out"])} · SPD {spd_count}')
 
 
 def _parse_spd(raw):
-    """A posted SPD tick. An unticked checkbox is absent, so absent or blank means False."""
-    if raw is None:
-        return False, None
-    value = str(raw).strip().lower()
-    if value in ('', '0', 'false', 'off'):
-        return False, None
-    if value in ('1', 'true', 'on'):
-        return True, None
-    return None, 'SPD must be ticked or not ticked.'
+    """One O/G feeder's posted SPD value: '1' ticked, '0' not ticked, anything else refused.
+
+    The card posts a hidden '1'/'0' per O/G feeder rather than a checkbox, because an
+    unticked checkbox posts nothing and the SPD list would fall out of step with the
+    feeder list. So a missing value is a fault, never "not ticked".
+    """
+    value = str(raw).strip() if raw is not None else ''
+    if value == '1':
+        return True
+    if value == '0':
+        return False
+    return None
 
 
-def _parse_side(label, breakers, ratings, errors):
-    """One side's feeders from two parallel posted lists. Appends to `errors`; returns the
-    feeders (possibly partial — only meaningful when no error was added)."""
-    breakers = list(breakers or [])
-    ratings = list(ratings or [])
-    if len(breakers) != len(ratings):
-        errors.append(f'{label}: every feeder needs both a breaker and a rating.')
-        return []
-    if not ACCB_MIN_FEEDERS <= len(breakers) <= ACCB_MAX_FEEDERS:
+def _parse_side(label, options, errors):
+    """One side's (breaker, rating) pairs from its posted option codes. Appends to
+    `errors`; returns the pairs (possibly partial — only meaningful when no error was
+    added)."""
+    options = list(options or [])
+    if not ACCB_MIN_FEEDERS <= len(options) <= ACCB_MAX_FEEDERS:
         errors.append(f'{label}: enter between {ACCB_MIN_FEEDERS} and {ACCB_MAX_FEEDERS} '
-                      f'feeders (this ACCB has {len(breakers)}).')
+                      f'feeders (this ACCB has {len(options)}).')
         return []
-    feeders = []
-    for position, (breaker_raw, rating_raw) in enumerate(zip(breakers, ratings), start=1):
-        breaker = str(breaker_raw or '').strip().upper()
-        if breaker not in ACCB_BREAKERS:
-            errors.append(f'{label} feeder {position}: choose MCB or MCCB.')
+    pairs = []
+    for position, raw in enumerate(options, start=1):
+        pair = _PAIR_BY_CODE.get(str(raw if raw is not None else '').strip())
+        if pair is None:
+            # A rating not in the list, a swapped breaker/rating pair and a blank all land
+            # here: none of them is one of the 11 options.
+            errors.append(f'{label} feeder {position}: choose the switchgear from the list.')
             continue
-        rating_text = str(rating_raw if rating_raw is not None else '').strip()
-        if not _WHOLE_NUMBER.fullmatch(rating_text):
-            errors.append(f'{label} feeder {position}: the rating must be a whole number of '
-                          f'amps from {ACCB_RATING_MIN} to {ACCB_RATING_MAX}.')
-            continue
-        rating = int(rating_text)
-        if not ACCB_RATING_MIN <= rating <= ACCB_RATING_MAX:
-            errors.append(f'{label} feeder {position}: {rating} A is outside '
-                          f'{ACCB_RATING_MIN} to {ACCB_RATING_MAX} A.')
-            continue
-        feeders.append({'breaker': breaker, 'rating': rating})
-    return feeders
+        pairs.append(pair)
+    return pairs
 
 
-def validate_accb_config(accb_type, spd, in_breakers, in_ratings, out_breakers, out_ratings):
+def validate_accb_config(accb_type, in_options, out_options, out_spds, in_spds=()):
     """Validate a posted configuration and return it normalised, or raise ValidationError
     naming EVERY fault at once.
 
     THE ONLY WAY A CONFIGURATION REACHES THE DATABASE. The ACCB view calls this before it
     writes anything, and the stored JSON is exactly what this returns — so the JSON column,
-    which the database cannot check, only ever holds values this function accepted.
+    which the database cannot check, only ever holds values this function accepted. The
+    B-4 copy and Duplicate re-check a stored configuration through the same function
+    (stored_accb_config).
 
-    Rules (B-3 T1): type in Type-1 / Type-2; 1 to 20 feeders on each side; breaker MCB or
-    MCCB; rating a whole number 1 to 1600; SPD a boolean. No check that the output rating
-    covers the inputs (prototype answer 3 — the designer's judgement).
+    Rules (B-3c T1): type in Type-1 / Type-2; 1 to 20 feeders on each side; each feeder one
+    of the 11 options in ACCB_SWITCHGEAR; each O/G feeder a '1'/'0' SPD value; no SPD value
+    on any I/C feeder. No check that the output rating covers the inputs (prototype answer
+    3 — the designer's judgement).
     """
     errors = []
     accb_type = str(accb_type or '').strip()
     if accb_type not in ACCB_TYPES:
         errors.append('Choose the ACCB type: Type-1 or Type-2.')
-    has_spd, spd_error = _parse_spd(spd)
-    if spd_error:
-        errors.append(spd_error)
-    incomers = _parse_side('I/C', in_breakers, in_ratings, errors)
-    outgoings = _parse_side('O/G', out_breakers, out_ratings, errors)
+    if list(in_spds or []):
+        errors.append('I/C feeders have no SPD; SPD is ticked on O/G feeders only.')
+    incomers = _parse_side('I/C', in_options, errors)
+    outgoings = _parse_side('O/G', out_options, errors)
+    out_spds = list(out_spds or [])
+    spds = []
+    if outgoings or out_options:
+        if len(out_spds) != len(list(out_options or [])):
+            errors.append('O/G: every feeder needs its SPD ticked or not ticked.')
+        else:
+            for position, raw in enumerate(out_spds, start=1):
+                spd = _parse_spd(raw)
+                if spd is None:
+                    errors.append(f'O/G feeder {position}: SPD must be ticked or not ticked.')
+                spds.append(spd)
     if errors:
         raise ValidationError(errors)
-    return {'type': accb_type, 'spd': has_spd, 'in': incomers, 'out': outgoings}
+    return {'type': accb_type,
+            'in': [{'breaker': b, 'rating': r} for b, r in incomers],
+            'out': [{'breaker': b, 'rating': r, 'spd': spd}
+                    for (b, r), spd in zip(outgoings, spds)]}
+
+
+def stored_feeder_option(feeder):
+    """A stored feeder's option code, or '' when it is not one of the 11 (a configuration
+    saved before B-3c, or a malformed entry). Never raises."""
+    if not isinstance(feeder, dict):
+        return ''
+    code = accb_option_code(feeder.get('breaker'), feeder.get('rating'))
+    return code if code in _PAIR_BY_CODE else ''
+
+
+def _stored_spd(feeder):
+    """A stored O/G feeder's SPD as the '1'/'0' the validator takes, or None if it has none."""
+    spd = feeder.get('spd') if isinstance(feeder, dict) else None
+    return {True: '1', False: '0'}.get(spd) if isinstance(spd, bool) else None
+
+
+def stored_accb_config(accb_type, feeders):
+    """Re-check a STORED configuration against today's rules; return it normalised or raise
+    ValidationError.
+
+    Used where a saved ACCB is copied without the designer re-entering it — Duplicate
+    (B-3c answer 7) and the B-4 copy from another site — so a configuration saved before
+    the fixed list (a typed rating, one SPD per ACCB) can never be copied into a new one.
+    Goes through validate_accb_config(), so there is one definition of "valid".
+    """
+    feeders = feeders if isinstance(feeders, dict) else {}
+    incomers = feeders.get('in') or []
+    outgoings = feeders.get('out') or []
+    return validate_accb_config(
+        accb_type,
+        [stored_feeder_option(f) for f in incomers],
+        [stored_feeder_option(f) for f in outgoings],
+        [_stored_spd(f) for f in outgoings],
+        # An I/C feeder carrying an SPD value is refused, as it would be from a POST.
+        [f.get('spd') for f in incomers if isinstance(f, dict) and 'spd' in f])

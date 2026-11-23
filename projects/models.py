@@ -1430,8 +1430,8 @@ class ACCBConfig(models.Model):
     boq_item   = models.OneToOneField(BOQItem, on_delete=models.CASCADE, related_name='accb_config')  # The one BOQ line this ACCB is; deleting the line deletes this row
     number     = models.PositiveSmallIntegerField()  # "ACCB 2": given at creation as max+1 on this BOQ, never renumbered (B-3 Q5) — people and the activity log refer to it
     accb_type  = models.CharField(max_length=10, choices=ACCB_TYPE_CHOICES)  # Type-1 / Type-2 — a label the designer picks (ruling 28, F7)
-    has_spd    = models.BooleanField(default=False)  # One SPD tick per ACCB, not per feeder (prototype answer 2)
-    feeders    = models.JSONField()  # {"in": [{"breaker": "MCCB", "rating": 100}, ...], "out": [...]} in the designer's order
+    has_spd    = models.BooleanField(default=False)  # B-3c: DERIVED — True when any O/G feeder has SPD (accb.accb_has_spd); SPD itself is per O/G feeder in `feeders`. Kept so no migration was needed; nothing reads it for meaning
+    feeders    = models.JSONField()  # {"in": [{"breaker": "MCB", "rating": 63}, ...], "out": [{"breaker": "MCCB", "rating": 200, "spd": true}, ...]} in the designer's order; each pair one of accb.ACCB_SWITCHGEAR (B-3c)
     config_key = models.CharField(max_length=512, db_index=True)  # accb.accb_config_key(): feeder-order-independent identity the SCM aggregate groups on
     created_by = models.ForeignKey('UserProfile', null=True, blank=True,
                                    on_delete=models.SET_NULL, related_name='+')
@@ -1454,8 +1454,13 @@ class ACCBConfig(models.Model):
         ]
 
     def as_config(self):
-        """The configuration dict accb.py's functions take (see that module's docstring)."""
-        return {'type': self.accb_type, 'spd': self.has_spd,
+        """The configuration dict accb.py's functions take (see that module's docstring).
+
+        B-3c: SPD is read from each O/G feeder, never from has_spd. The feeders are returned
+        as stored, so a configuration saved before the fixed switchgear list comes back as
+        it was; accb.stored_accb_config() is what tells whether it is still valid.
+        """
+        return {'type': self.accb_type,
                 'in': list(self.feeders.get('in', [])),
                 'out': list(self.feeders.get('out', []))}
 

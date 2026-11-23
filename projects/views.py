@@ -105,11 +105,13 @@ from .phase_rules import (
 )
 from .models import PhaseRuleOverride
 # B-3a - the ACCB configurator's pure rules (wording, grouping key, validation).
+# B-3c - the fixed switchgear list, and the re-check of a stored configuration.
 from .accb import (
-    ACCB_CONFIGURED_CODE, ACCB_CATALOGUE_LOCKED_MESSAGE, ACCB_COMMON_RATINGS,
-    ACCB_MAX_FEEDERS, ACCB_MIN_FEEDERS, ACCB_RATING_MAX, ACCB_RATING_MIN,
-    ACCB_REVIEWER_MESSAGE, ACCB_TYPES, ACCB_UPLOAD_REFUSED_MESSAGE,
-    accb_description, accb_config_key, accb_summary, validate_accb_config,
+    ACCB_CONFIGURED_CODE, ACCB_CATALOGUE_LOCKED_MESSAGE, ACCB_MAX_FEEDERS,
+    ACCB_MIN_FEEDERS, ACCB_REENTER_MESSAGE, ACCB_REVIEWER_MESSAGE, ACCB_TYPES,
+    ACCB_UPLOAD_REFUSED_MESSAGE, accb_description, accb_config_key, accb_has_spd,
+    accb_summary, accb_switchgear_choices, stored_accb_config, stored_feeder_option,
+    validate_accb_config,
 )
 # B-2b - the formula engine's apply step, run by the picker, the upload and boq_correct.
 from .boq_formulas import (
@@ -10233,13 +10235,14 @@ def opex_boq_entry(request, project_id):
         'accb_lines':       accbs,
         'accb_count':       len(accbs),
         # Read by the Alpine section through json_script. Every value is a validated type,
-        # tick, breaker or whole number, or text generated from them.
+        # tick or option code, a fixed switchgear text, or text generated from them.
+        # B-3c: `switchgear` is the fixed list the dropdown offers and the live preview
+        # reads its texts from, so the page never holds a second copy of the 11 texts.
         'accb_data': {
             'accbs': [_accb_card(line) for line in accbs],
             'types': list(ACCB_TYPES),
-            'common_ratings': list(ACCB_COMMON_RATINGS),
+            'switchgear': accb_switchgear_choices(),
             'min_feeders': ACCB_MIN_FEEDERS, 'max_feeders': ACCB_MAX_FEEDERS,
-            'rating_min': ACCB_RATING_MIN, 'rating_max': ACCB_RATING_MAX,
         },
         'project':          project,
         'boq':              boq,
@@ -10283,12 +10286,24 @@ _ACCB_LOG_NAME_MAX = 60
 
 
 def _accb_card(line):
-    """One configured ACCB line as the ACCB section's Alpine data."""
+    """One configured ACCB line as the ACCB section's Alpine data.
+
+    B-3c: each feeder is sent as its option code (the dropdown's value) and, on the O/G
+    side, its SPD tick. A feeder saved before the fixed list has no option ('' — the
+    dropdown shows "Choose switchgear…") and `legacy` tells the card to ask for the
+    switchgear to be re-entered; the server refuses the save until every feeder is chosen.
+    """
     config = line.accb_config.as_config()
+    incomers = [{'option': stored_feeder_option(f)} for f in config['in']]
+    outgoings = [{'option': stored_feeder_option(f),
+                  'spd': f.get('spd') is True if isinstance(f, dict) else False}
+                 for f in config['out']]
+    legacy = (any(not f['option'] for f in incomers + outgoings) or
+              any(not (isinstance(f, dict) and isinstance(f.get('spd'), bool))
+                  for f in config['out']))
     return {'id': line.accb_config.pk, 'number': line.accb_config.number,
-            'type': config['type'], 'spd': config['spd'],
-            'in': config['in'], 'out': config['out'],
-            'description': line.description}
+            'type': config['type'], 'in': incomers, 'out': outgoings,
+            'legacy': legacy, 'description': line.description}
 
 
 def _accb_actor_name(profile):
@@ -10347,7 +10362,7 @@ def _accb_create(boq, master, config, profile):
     line = BOQItem.objects.create(boq=boq, **_accb_line_values(master, config))
     return ACCBConfig.objects.create(
         boq=boq, boq_item=line, number=number,
-        accb_type=config['type'], has_spd=config['spd'],
+        accb_type=config['type'], has_spd=accb_has_spd(config),
         feeders={'in': config['in'], 'out': config['out']},
         config_key=accb_config_key(config),
         created_by=profile, updated_by=profile,
@@ -10368,7 +10383,7 @@ def opex_boq_accb(request, project_id):
         save      — validate; replace the named ACCB's configuration and regenerate its
                     line's description (Qty stays 1)
         duplicate — copy the named ACCB's SAVED configuration into a new line with the next
-                    number (B-3 Q8)
+                    number (B-3 Q8), after re-checking it against today's rules (B-3c)
         remove    — delete the named ACCB's line; its configuration goes with it (CASCADE)
 
     Every outcome redirects back to the BOQ screen's ACCB section, with a message.
@@ -10415,10 +10430,13 @@ def opex_boq_accb(request, project_id):
     config = None
     if action in ('add', 'save'):
         try:
+            # B-3c: one option code per feeder, and one '1'/'0' SPD value per O/G feeder
+            # (a hidden field, so the list stays in step with the feeders). `in_spd` is
+            # read only so that an SPD posted on an I/C feeder is refused by name.
             config = validate_accb_config(
-                request.POST.get('accb_type'), request.POST.get('has_spd'),
-                request.POST.getlist('in_breaker'), request.POST.getlist('in_rating'),
-                request.POST.getlist('out_breaker'), request.POST.getlist('out_rating'))
+                request.POST.get('accb_type'),
+                request.POST.getlist('in_option'), request.POST.getlist('out_option'),
+                request.POST.getlist('out_spd'), request.POST.getlist('in_spd'))
         except ValidationError as exc:
             for error in exc.messages:
                 messages.error(request, error)
@@ -10455,7 +10473,7 @@ def opex_boq_accb(request, project_id):
                     return back
                 old_summary, new_summary = accb_summary(before), accb_summary(config)
                 accb.accb_type  = config['type']
-                accb.has_spd    = config['spd']
+                accb.has_spd    = accb_has_spd(config)
                 accb.feeders    = {'in': config['in'], 'out': config['out']}
                 accb.config_key = accb_config_key(config)
                 accb.updated_by = profile
@@ -10476,7 +10494,16 @@ def opex_boq_accb(request, project_id):
                 messages.success(request, f'ACCB {accb.number} saved.')
 
             elif action == 'duplicate':
-                source = accb.as_config()
+                # B-3c answer 7: the saved configuration is re-checked against today's
+                # rules before it is copied, the way the B-4 copy does. An ACCB saved
+                # before the fixed switchgear list would otherwise be copied into a NEW
+                # ACCB that no save could have produced.
+                try:
+                    source = stored_accb_config(accb.accb_type, accb.feeders)
+                except ValidationError:
+                    messages.error(request, f'ACCB {accb.number} cannot be duplicated: '
+                                            f'{ACCB_REENTER_MESSAGE}.')
+                    return back
                 copy = _accb_create(boq, master, source, profile)
                 log_line = ('boq_accb_added', accb_log_text(
                     profile, 'added', copy.number, project,
@@ -11717,17 +11744,6 @@ def _boq_copy_whole_count(line):
     return quantity is None or quantity == quantity.to_integral_value()
 
 
-def _accb_feeder_lists(feeders):
-    """(breakers, ratings) from one stored side, in the shape validate_accb_config() takes
-    from a POST. A malformed entry becomes a blank, which the validator refuses by name."""
-    breakers, ratings = [], []
-    for feeder in feeders or []:
-        feeder = feeder if isinstance(feeder, dict) else {}
-        breakers.append(feeder.get('breaker'))
-        ratings.append(feeder.get('rating'))
-    return breakers, ratings
-
-
 def _boq_copy_source(user, code, target):
     """(source Project, '') for the typed site code, or (None, the refusal). Reads only.
 
@@ -11850,13 +11866,11 @@ def _boq_copy_plan(source_boq, target_boq, formulas, *, predict):
     accb_master = None
     next_number = max(target_boq.next_accb_number if target_boq is not None else 1, 1)
     for line, config in sorted(accb_lines, key=lambda pair: pair[1].number):
-        in_breakers, in_ratings = _accb_feeder_lists(config.feeders.get('in')
-                                                     if isinstance(config.feeders, dict) else None)
-        out_breakers, out_ratings = _accb_feeder_lists(config.feeders.get('out')
-                                                       if isinstance(config.feeders, dict) else None)
         try:
-            valid = validate_accb_config(config.accb_type, 'on' if config.has_spd else '',
-                                         in_breakers, in_ratings, out_breakers, out_ratings)
+            # B-3c: the same re-check Duplicate uses. A configuration saved before the
+            # fixed switchgear list (a typed rating, one SPD per ACCB) fails it and is
+            # skipped and listed, never copied.
+            valid = stored_accb_config(config.accb_type, config.feeders)
         except ValidationError as exc:
             skipped.append({'code': ACCB_CONFIGURED_CODE,
                             'description': f'ACCB {config.number}',

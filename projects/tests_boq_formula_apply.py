@@ -681,8 +681,8 @@ class NotHookedACCBTests(FormulaBase):
         self._login(self.designer)
         self.client.post(reverse('opex_boq_accb', kwargs={'project_id': self.site.project_id}),
                          {'action': 'add', 'accb_type': 'Type-1',
-                          'in_breaker': ['MCCB'], 'in_rating': ['100'],
-                          'out_breaker': ['MCCB'], 'out_rating': ['100']})
+                          'in_option': ['MCCB-100'], 'out_option': ['MCCB-100'],
+                          'out_spd': ['0']})
         self.assertEqual(BOQItem.objects.filter(item_master=self.accb_master).count(), 1)
         self.assertEqual(self._qty('FX-EARTH'), 'absent')
         self.assertFalse(BOQRecalculation.objects.exists())

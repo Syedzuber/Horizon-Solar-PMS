@@ -27,20 +27,23 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.urls import reverse
+from django.utils.html import escape
 
-from .accb import ACCB_CONFIGURED_CODE, accb_config_key
+from .accb import ACCB_CONFIGURED_CODE, accb_config_key, accb_description
 from .models import BOQ, BOQItemMaster, VendorOrder, VendorOrderLine
 from .order_views import (
     ACCB_GONE_MESSAGE, _parse_requirement, _picker_context, accb_amount_field,
 )
-from .tests_accb_config import EX_TYPE1, EX_TYPE1_TEXT, EX_TYPE2, EX_TYPE2_TEXT, cfg
+from .tests_accb_config import (
+    EX_TYPE1, EX_TYPE1_TEXT, EX_TYPE2, EX_TYPE2_TEXT, _longest_config, cfg,
+)
 from .tests_purchases_workspace import WorkspaceFixture
 from .tests_vendor_order_group import _Capture
 from .tests_vendor_order_raise import _assert_keyed_redirect, _client
 from .views import _accb_create, _boq_snapshot
 
 #: EX_TYPE2 with its incomers entered the other way round: the same thing to buy.
-EX_TYPE2_REORDERED = cfg('Type-2', True, [('MCCB', 63), ('MCCB', 100)], [('MCCB', 150)])
+EX_TYPE2_REORDERED = cfg('Type-2', [('MCB', 63), ('MCCB', 100)], [('MCCB', 200, True)])
 
 KEY1 = accb_config_key(EX_TYPE1)
 KEY2 = accb_config_key(EX_TYPE2)
@@ -163,6 +166,15 @@ class ACCBRaiseTests(ACCBOrderFixture):
         self.assertEqual(sorted(line.item_code for line in catalogue), ['OPX-901', 'OPX-902'])
         self.assertEqual(order.lines.count(), 4)
 
+    def test_the_longest_description_is_carried_onto_the_order_line_in_full(self):
+        """B-3c pre-flight P5: the 2,446-character worst case, uncut."""
+        longest = _longest_config()
+        self.accb(self.a1, longest)
+        self.raise_a1_a2()
+        line = self.accb_lines()[accb_config_key(longest)]
+        self.assertEqual(line.item_description, accb_description(longest))
+        self.assertEqual(len(line.item_description), 2446)
+
     def test_an_unpriced_accb_is_still_an_order_line(self):
         self.accb(self.a1, EX_TYPE1)
         self.raise_a1_a2()
@@ -270,8 +282,9 @@ class ACCBOrderReaderTests(ACCBOrderFixture):
         accb = [line for line in response.context['lines'] if line.accb_config_key]
         self.assertEqual(sorted(line.accb_config_key for line in accb), sorted([KEY1, KEY2]))
         html = response.content.decode()
-        self.assertEqual(html.count(EX_TYPE1_TEXT), 1)
-        self.assertEqual(html.count(EX_TYPE2_TEXT), 1)
+        # B-3c: the text holds '&', which the page escapes.
+        self.assertEqual(html.count(escape(EX_TYPE1_TEXT)), 1)
+        self.assertEqual(html.count(escape(EX_TYPE2_TEXT)), 1)
         self.assertIn('2.00 Nos', html)
         self.assertIn('90000.00', html)
         self.assertIn('40000.00', html)

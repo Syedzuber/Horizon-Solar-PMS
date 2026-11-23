@@ -3,11 +3,19 @@ B-3a verification — configured ACCBs: one configured BOQ line per ACCB.
 
 WHAT THIS FILE PROVES
 ---------------------
-  * The wording. accb_description() reproduces the two approved examples word for word,
-    and each rule behind them (1 vs N feeders, "2×" repeats, MCCB before MCB, without SPD).
-  * The grouping identity. accb_config_key() ignores feeder order and changes with any
-    change to type, breaker, rating or SPD. The SCM aggregate depends on exactly that.
-  * Validation is server-side and refuses with NOTHING saved.
+  * B-3c: the switchgear list is the ruling's 11 options word for word.
+  * The wording. accb_description() reproduces B-3c ruling 3's two examples word for word,
+    and each rule behind them (1 vs N feeders, grouping, rating high to low, "with SPD"
+    before "without SPD" for the same option).
+  * The grouping identity. accb_config_key() ignores feeder order (and which of two
+    identical O/G feeders carries the SPD tick) and changes with any change to type,
+    option or O/G SPD. The SCM aggregate depends on exactly that.
+  * Validation is server-side and refuses with NOTHING saved: an option not in the list,
+    a swapped breaker/rating pair, SPD on an I/C feeder, a missing O/G SPD value.
+  * An ACCB saved before B-3c draws, is refused on save and on Duplicate until its
+    switchgear is re-entered, and can still be removed.
+  * Ruling 6's markup: the remove confirmation exists only on a saved ACCB after Remove.
+  * The query counts measured in the B-3c pre-flight.
   * The designer's add / edit / duplicate / remove each touch exactly one line and its
     configuration, Qty is always 1, and the BOQ's own write rule (author, no group lock,
     not submitted) applies.
@@ -28,17 +36,19 @@ from io import BytesIO
 from types import SimpleNamespace
 
 from django.contrib.auth.models import User
+from django.contrib.messages import get_messages
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.template.loader import render_to_string
 from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.html import escape
 
 from .accb import (
-    ACCB_CATALOGUE_LOCKED_MESSAGE, ACCB_CONFIGURED_CODE, ACCB_REVIEWER_MESSAGE,
-    ACCB_UPLOAD_REFUSED_MESSAGE, accb_config_key, accb_description, accb_summary,
-    validate_accb_config,
+    ACCB_CATALOGUE_LOCKED_MESSAGE, ACCB_CONFIGURED_CODE, ACCB_REENTER_MESSAGE,
+    ACCB_REVIEWER_MESSAGE, ACCB_SWITCHGEAR, ACCB_UPLOAD_REFUSED_MESSAGE, accb_config_key,
+    accb_description, accb_summary, stored_accb_config, validate_accb_config,
 )
 from .design_views import _boq_review_panel, aggregate_group_boq
 from .forms import BOQItemMasterForm
@@ -55,111 +65,187 @@ from .views import (
 )
 
 
-def cfg(accb_type, spd, incomers, outgoings):
-    """A configuration dict from (breaker, rating) pairs — the shape accb.py takes."""
-    return {'type': accb_type, 'spd': spd,
+def cfg(accb_type, incomers, outgoings):
+    """A configuration dict — the shape accb.py takes (B-3c): I/C feeders from (breaker,
+    rating) pairs, O/G feeders from (breaker, rating, spd)."""
+    return {'type': accb_type,
             'in': [{'breaker': b, 'rating': r} for b, r in incomers],
-            'out': [{'breaker': b, 'rating': r} for b, r in outgoings]}
+            'out': [{'breaker': b, 'rating': r, 'spd': s} for b, r, s in outgoings]}
 
 
-#: The two approved examples (B-3 rulings), configuration and exact text.
-EX_TYPE2 = cfg('Type-2', True, [('MCCB', 100), ('MCCB', 63)], [('MCCB', 150)])
-EX_TYPE2_TEXT = ('ACCB Type-2, I/C Feeder 2 Nos. with MCCB 4P 415V 100A and 63A; '
-                 'O/G Feeder 1 No. with MCCB 4P 415V 150A, with SPD')
-EX_TYPE1 = cfg('Type-1', False,
-               [('MCCB', 100), ('MCB', 32), ('MCB', 32), ('MCB', 25)], [('MCCB', 100)])
-EX_TYPE1_TEXT = ('ACCB Type-1, I/C Feeder 4 Nos. with MCCB 4P 415V 100A + MCB 4P 415V '
-                 '2×32A and 25A; O/G Feeder 1 No. with MCCB 4P 415V 100A, without SPD')
+#: The full MCCB wording, as B-3c ruling 1 writes it.
+MCCB = ('4P, 36kA, MCCB with S/C & O/L TM Based Extended Rotary Handle + Spreader '
+        'Terminals')
+
+#: The two examples of B-3c ruling 3, configuration and exact text.
+EX_TYPE2 = cfg('Type-2', [('MCCB', 100), ('MCB', 63)], [('MCCB', 200, True)])
+EX_TYPE2_TEXT = (
+    'ACCB Type-2, 4P 415V. I/C Feeder 2 Nos.: 1 x 100A, 4P, 36kA, MCCB with S/C & O/L TM '
+    'Based Extended Rotary Handle + Spreader Terminals; 1 x 63A, 4P, MCB. O/G Feeder 1 No.: '
+    '1 x 200A, 4P, 36kA, MCCB with S/C & O/L TM Based Extended Rotary Handle + Spreader '
+    'Terminals, with SPD.')
+EX_TYPE1 = cfg('Type-1', [('MCB', 40), ('MCB', 25), ('MCB', 40)],
+               [('MCCB', 125, True), ('MCCB', 125, False)])
+EX_TYPE1_TEXT = (
+    'ACCB Type-1, 4P 415V. I/C Feeder 3 Nos.: 2 x 40A, 4P, MCB; 1 x 25A, 4P, MCB. O/G Feeder '
+    '2 Nos.: 1 x 125A, 4P, 36kA, MCCB with S/C & O/L TM Based Extended Rotary Handle + '
+    'Spreader Terminals, with SPD; 1 x 125A, 4P, 36kA, MCCB with S/C & O/L TM Based Extended '
+    'Rotary Handle + Spreader Terminals, without SPD.')
+
+#: B-3c ruling 1, copied from the ruling's table by hand: the constant must equal it.
+RULING_SWITCHGEAR = (
+    ('MCB', 25, '25A, 4P, MCB'),
+    ('MCB', 30, '30A, 4P, MCB'),
+    ('MCB', 40, '40A, 4P, MCB'),
+    ('MCB', 63, '63A, 4P, MCB'),
+    ('MCCB', 100, '100A, 4P, 36kA, MCCB with S/C & O/L TM Based Extended Rotary Handle + Spreader Terminals'),
+    ('MCCB', 125, '125A, 4P, 36kA, MCCB with S/C & O/L TM Based Extended Rotary Handle + Spreader Terminals'),
+    ('MCCB', 200, '200A, 4P, 36kA, MCCB with S/C & O/L TM Based Extended Rotary Handle + Spreader Terminals'),
+    ('MCCB', 250, '250A, 4P, 36kA, MCCB with S/C & O/L TM Based Extended Rotary Handle + Spreader Terminals'),
+    ('MCCB', 320, '320A, 4P, 36kA, MCCB with S/C & O/L TM Based Extended Rotary Handle + Spreader Terminals'),
+    ('MCCB', 400, '400A, 4P, 36kA, MCCB with S/C & O/L TM Based Extended Rotary Handle + Spreader Terminals'),
+    ('MCCB', 630, '630A, 4P, 36kA, MCCB with S/C & O/L TM Based Extended Rotary Handle + Spreader Terminals'),
+)
+
+
+#: What B-3 wrote on the line of the legacy ACCB the tests seed (_seed_legacy_accb).
+LEGACY_TEXT = ('ACCB Type-2, I/C Feeder 1 No. with MCCB 4P 415V 100A; O/G Feeder 1 No. with '
+               'MCCB 4P 415V 150A, with SPD')
 
 
 def _longest_config():
-    """20 + 20 feeders, mixed breakers, all-different 4-digit ratings (pre-flight P2)."""
-    return cfg('Type-1', False,
-               [('MCCB', 1600 - i) for i in range(10)] + [('MCB', 1500 - i) for i in range(10)],
-               [('MCCB', 1400 - i) for i in range(10)] + [('MCB', 1300 - i) for i in range(10)])
+    """The longest description the rules allow (B-3c pre-flight P5): 20 I/C feeders using
+    all 11 options, and 20 O/G feeders in 20 different (option, SPD) groups, MCCBs first."""
+    incomers = [(b, r) for b, r, _t in ACCB_SWITCHGEAR] + [('MCCB', 630)] * 9
+    groups = [(b, r, s) for b, r, _t in ACCB_SWITCHGEAR for s in (True, False)]
+    outgoings = sorted(groups, key=lambda g: g[0] != 'MCCB')[:20]
+    return cfg('Type-2', incomers, outgoings)
+
+
+def _longest_key_config():
+    """The longest grouping key: 20 + 20 feeders of the longest code, all with SPD."""
+    return cfg('Type-2', [('MCCB', 630)] * 20, [('MCCB', 630, True)] * 20)
+
+
+def accb_post_data(config):
+    """The POST fields the card sends for a configuration (B-3c): one option code per
+    feeder, and one '1'/'0' SPD value per O/G feeder."""
+    return {'accb_type': config['type'],
+            'in_option': [f'{f["breaker"]}-{f["rating"]}' for f in config['in']],
+            'out_option': [f'{f["breaker"]}-{f["rating"]}' for f in config['out']],
+            'out_spd': ['1' if f['spd'] else '0' for f in config['out']]}
 
 
 # ===========================================================================
 # The pure rules — wording, key, summary, validation
 # ===========================================================================
 
+class SwitchgearListTests(SimpleTestCase):
+
+    def test_the_list_is_the_ruling_word_for_word(self):
+        self.assertEqual(ACCB_SWITCHGEAR, RULING_SWITCHGEAR)
+
+    def test_every_rating_belongs_to_one_breaker(self):
+        # What lets the description and the key sort by rating alone.
+        ratings = [rating for _b, rating, _t in ACCB_SWITCHGEAR]
+        self.assertEqual(len(ratings), len(set(ratings)))
+
+
 class DescriptionTests(SimpleTestCase):
 
-    def test_approved_type2_example_word_for_word(self):
+    def test_ruling_example_1_word_for_word(self):
         self.assertEqual(accb_description(EX_TYPE2), EX_TYPE2_TEXT)
 
-    def test_approved_type1_example_word_for_word(self):
+    def test_ruling_example_2_word_for_word(self):
         self.assertEqual(accb_description(EX_TYPE1), EX_TYPE1_TEXT)
 
     def test_one_feeder_is_1_No_and_several_are_N_Nos(self):
-        text = accb_description(cfg('Type-1', True, [('MCCB', 63)],
-                                    [('MCCB', 100), ('MCCB', 80), ('MCCB', 50)]))
-        self.assertIn('I/C Feeder 1 No. with', text)
-        self.assertIn('O/G Feeder 3 Nos. with', text)
+        text = accb_description(cfg('Type-1', [('MCB', 63)],
+                                    [('MCCB', 100, True), ('MCCB', 200, False),
+                                     ('MCB', 25, False)]))
+        self.assertIn('I/C Feeder 1 No.: 1 x 63A, 4P, MCB.', text)
+        self.assertIn('O/G Feeder 3 Nos.: ', text)
 
-    def test_repeats_are_written_as_N_times(self):
-        text = accb_description(cfg('Type-1', True,
-                                    [('MCB', 32), ('MCB', 32), ('MCB', 32), ('MCB', 16)],
-                                    [('MCCB', 100)]))
-        self.assertIn('MCB 4P 415V 3×32A and 16A', text)
+    def test_identical_options_are_grouped_and_sorted_by_rating_high_to_low(self):
+        text = accb_description(cfg('Type-2',
+                                    [('MCB', 25), ('MCCB', 400), ('MCB', 25), ('MCB', 63),
+                                     ('MCCB', 400), ('MCB', 25)],
+                                    [('MCB', 30, False)]))
+        self.assertIn(f'I/C Feeder 6 Nos.: 2 x 400A, {MCCB}; 1 x 63A, 4P, MCB; '
+                      f'3 x 25A, 4P, MCB. O/G', text)
 
-    def test_mccb_group_comes_before_mcb_whatever_the_entry_order(self):
-        text = accb_description(cfg('Type-2', False, [('MCB', 25), ('MCCB', 125)],
-                                    [('MCCB', 160)]))
-        self.assertIn('with MCCB 4P 415V 125A + MCB 4P 415V 25A;', text)
+    def test_og_groups_by_option_and_spd_with_spd_first_for_the_same_option(self):
+        text = accb_description(cfg('Type-1', [('MCB', 40)],
+                                    [('MCB', 30, False), ('MCCB', 250, False),
+                                     ('MCB', 30, True), ('MCCB', 250, True),
+                                     ('MCB', 30, False)]))
+        self.assertTrue(text.endswith(
+            f'O/G Feeder 5 Nos.: 1 x 250A, {MCCB}, with SPD; 1 x 250A, {MCCB}, without SPD; '
+            f'1 x 30A, 4P, MCB, with SPD; 2 x 30A, 4P, MCB, without SPD.'))
 
-    def test_ratings_within_a_group_run_high_to_low(self):
-        text = accb_description(cfg('Type-2', False,
-                                    [('MCCB', 63), ('MCCB', 250), ('MCCB', 100)],
-                                    [('MCCB', 400)]))
-        self.assertIn('MCCB 4P 415V 250A, 100A and 63A;', text)
-
-    def test_without_spd(self):
-        self.assertTrue(accb_description(EX_TYPE1).endswith(', without SPD'))
-        self.assertTrue(accb_description(EX_TYPE2).endswith(', with SPD'))
-
-    def test_the_longest_description_is_416_characters(self):
-        # Pre-flight P2: fits BOQItem.description (unbounded text).
-        self.assertEqual(len(accb_description(_longest_config())), 416)
+    def test_the_longest_description_is_2446_characters(self):
+        # Pre-flight P5: every column it is copied into automatically is unbounded text.
+        self.assertEqual(len(accb_description(_longest_config())), 2446)
 
 
 class ConfigKeyTests(SimpleTestCase):
 
+    def test_ruling_example_keys(self):
+        self.assertEqual(accb_config_key(EX_TYPE2), 'Type-2|IN:MCCB-100,MCB-63|OUT:MCCB-200+SPD')
+        self.assertEqual(accb_config_key(EX_TYPE1),
+                         'Type-1|IN:MCB-40,MCB-40,MCB-25|OUT:MCCB-125+SPD,MCCB-125')
+
     def test_feeder_order_does_not_change_the_key(self):
-        shuffled = cfg('Type-1', False,
-                       [('MCB', 25), ('MCB', 32), ('MCCB', 100), ('MCB', 32)], [('MCCB', 100)])
+        shuffled = cfg('Type-1', [('MCB', 25), ('MCB', 40), ('MCB', 40)],
+                       [('MCCB', 125, False), ('MCCB', 125, True)])
         self.assertEqual(accb_config_key(shuffled), accb_config_key(EX_TYPE1))
+        self.assertEqual(accb_description(shuffled), EX_TYPE1_TEXT)
 
-    def test_same_key_means_same_description(self):
-        shuffled = cfg('Type-1', False,
-                       [('MCB', 32), ('MCB', 25), ('MCB', 32), ('MCCB', 100)], [('MCCB', 100)])
-        self.assertEqual(accb_description(shuffled), accb_description(EX_TYPE1))
+    def test_moving_an_spd_tick_between_identical_og_feeders_does_not_change_the_key(self):
+        first = cfg('Type-1', [('MCB', 40)], [('MCCB', 200, True), ('MCCB', 200, False)])
+        second = cfg('Type-1', [('MCB', 40)], [('MCCB', 200, False), ('MCCB', 200, True)])
+        self.assertEqual(accb_config_key(first), accb_config_key(second))
 
-    def test_any_change_to_type_breaker_rating_or_spd_changes_the_key(self):
-        base = accb_config_key(EX_TYPE2)
+    def test_any_change_to_type_option_or_an_og_spd_tick_changes_the_key(self):
+        base = accb_config_key(EX_TYPE1)
         variants = {
-            'type':    cfg('Type-1', True, [('MCCB', 100), ('MCCB', 63)], [('MCCB', 150)]),
-            'breaker': cfg('Type-2', True, [('MCCB', 100), ('MCB', 63)], [('MCCB', 150)]),
-            'rating':  cfg('Type-2', True, [('MCCB', 100), ('MCCB', 80)], [('MCCB', 150)]),
-            'spd':     cfg('Type-2', False, [('MCCB', 100), ('MCCB', 63)], [('MCCB', 150)]),
-            'side':    cfg('Type-2', True, [('MCCB', 100)], [('MCCB', 150), ('MCCB', 63)]),
-            'count':   cfg('Type-2', True, [('MCCB', 100), ('MCCB', 63), ('MCCB', 63)],
-                           [('MCCB', 150)]),
+            'type':       dict(EX_TYPE1, type='Type-2'),
+            'I/C option': cfg('Type-1', [('MCB', 40), ('MCB', 30), ('MCB', 40)],
+                              [('MCCB', 125, True), ('MCCB', 125, False)]),
+            'O/G option': cfg('Type-1', [('MCB', 40), ('MCB', 25), ('MCB', 40)],
+                              [('MCCB', 200, True), ('MCCB', 125, False)]),
+            'SPD ticked': cfg('Type-1', [('MCB', 40), ('MCB', 25), ('MCB', 40)],
+                              [('MCCB', 125, True), ('MCCB', 125, True)]),
+            'SPD off':    cfg('Type-1', [('MCB', 40), ('MCB', 25), ('MCB', 40)],
+                              [('MCCB', 125, False), ('MCCB', 125, False)]),
+            'side':       cfg('Type-1', [('MCB', 40), ('MCB', 25)],
+                              [('MCCB', 125, True), ('MCCB', 125, False), ('MCB', 40, False)]),
+            'count':      cfg('Type-1', [('MCB', 40), ('MCB', 25), ('MCB', 40), ('MCB', 40)],
+                              [('MCCB', 125, True), ('MCCB', 125, False)]),
         }
         for name, variant in variants.items():
             with self.subTest(change=name):
                 self.assertNotEqual(accb_config_key(variant), base)
 
-    def test_the_longest_key_fits_the_column(self):
-        limit = ACCBConfig._meta.get_field('config_key').max_length
-        self.assertLessEqual(len(accb_config_key(_longest_config())), limit)
+    def test_the_longest_key_fits_both_columns(self):
+        from .models import VendorOrderLine
+        longest = len(accb_config_key(_longest_key_config()))
+        self.assertEqual(longest, 453)
+        self.assertLessEqual(longest, ACCBConfig._meta.get_field('config_key').max_length)
+        self.assertLessEqual(longest,
+                             VendorOrderLine._meta.get_field('accb_config_key').max_length)
 
 
 class SummaryAndLogTests(SimpleTestCase):
 
     def test_summary_wording(self):
-        self.assertEqual(accb_summary(EX_TYPE2), 'Type-2 · I/C 2 · O/G 1 · SPD')
-        self.assertEqual(accb_summary(EX_TYPE1), 'Type-1 · I/C 4 · O/G 1 · no SPD')
+        self.assertEqual(accb_summary(EX_TYPE2), 'Type-2 · I/C 2 · O/G 1 · SPD 1')
+        self.assertEqual(accb_summary(EX_TYPE1), 'Type-1 · I/C 3 · O/G 2 · SPD 1')
+
+    def test_a_stored_feeder_without_spd_counts_as_no_spd(self):
+        legacy = {'type': 'Type-2', 'in': [{'breaker': 'MCCB', 'rating': 150}],
+                  'out': [{'breaker': 'MCCB', 'rating': 150}]}
+        self.assertEqual(accb_summary(legacy), 'Type-2 · I/C 1 · O/G 1 · SPD 0')
 
     def test_the_longest_log_line_fits_in_255(self):
         """Q6: no truncation in normal use. Built from the worst case of every part: a
@@ -168,7 +254,8 @@ class SummaryAndLogTests(SimpleTestCase):
         user = SimpleNamespace(get_full_name=lambda: 'N' * 301, username='u')
         profile = SimpleNamespace(user=user)
         project = SimpleNamespace(project_id='S' * Project._meta.get_field('project_id').max_length)
-        longest = accb_summary(_longest_config())
+        longest = accb_summary(_longest_key_config())
+        self.assertEqual(len(longest), 33)
         detail = f'{longest} → {longest}'
         text = accb_log_text(profile, 'changed', 32767, project, detail)
         self.assertLessEqual(len(text), ActivityLog._meta.get_field('action').max_length)
@@ -177,42 +264,44 @@ class SummaryAndLogTests(SimpleTestCase):
 class ValidationTests(SimpleTestCase):
 
     def _ok(self, **overrides):
-        args = {'accb_type': 'Type-2', 'spd': '1',
-                'in_breakers': ['MCCB'], 'in_ratings': ['100'],
-                'out_breakers': ['MCCB'], 'out_ratings': ['150']}
+        args = {'accb_type': 'Type-2', 'in_options': ['MCCB-100'],
+                'out_options': ['MCCB-200'], 'out_spds': ['1'], 'in_spds': []}
         args.update(overrides)
-        return validate_accb_config(args['accb_type'], args['spd'],
-                                    args['in_breakers'], args['in_ratings'],
-                                    args['out_breakers'], args['out_ratings'])
+        return validate_accb_config(args['accb_type'], args['in_options'],
+                                    args['out_options'], args['out_spds'], args['in_spds'])
 
     def test_a_valid_configuration_is_normalised(self):
-        self.assertEqual(self._ok(in_breakers=['mccb'], in_ratings=[' 100 ']),
-                         cfg('Type-2', True, [('MCCB', 100)], [('MCCB', 150)]))
+        self.assertEqual(self._ok(in_options=[' MCCB-100 ', 'MCB-63']), EX_TYPE2)
+        self.assertEqual(self._ok(out_spds=['0'])['out'][0]['spd'], False)
 
-    def test_the_bounds_are_accepted(self):
-        self.assertEqual(self._ok(in_ratings=['1'])['in'][0]['rating'], 1)
-        self.assertEqual(self._ok(in_ratings=['1600'])['in'][0]['rating'], 1600)
-        config = self._ok(in_breakers=['MCB'] * 20, in_ratings=['32'] * 20)
-        self.assertEqual(len(config['in']), 20)
-
-    def test_unticked_spd_is_false(self):
-        self.assertFalse(self._ok(spd=None)['spd'])
+    def test_every_option_and_twenty_feeders_are_accepted(self):
+        codes = [f'{b}-{r}' for b, r, _t in ACCB_SWITCHGEAR]
+        config = self._ok(in_options=codes, out_options=codes, out_spds=['1', '0'] * 5 + ['1'])
+        self.assertEqual([(f['breaker'], f['rating']) for f in config['out']],
+                         [(b, r) for b, r, _t in ACCB_SWITCHGEAR])
+        config = self._ok(in_options=['MCB-25'] * 20, out_options=['MCB-25'] * 20,
+                          out_spds=['0'] * 20)
+        self.assertEqual((len(config['in']), len(config['out'])), (20, 20))
 
     def test_each_rule_is_refused(self):
         cases = {
-            'type':            {'accb_type': 'Type-3'},
-            'blank type':      {'accb_type': ''},
-            'no I/C feeder':   {'in_breakers': [], 'in_ratings': []},
-            '21 O/G feeders':  {'out_breakers': ['MCB'] * 21, 'out_ratings': ['32'] * 21},
-            'breaker':         {'in_breakers': ['RCCB']},
-            'rating 0':        {'in_ratings': ['0']},
-            'rating 1601':     {'in_ratings': ['1601']},
-            'rating decimal':  {'in_ratings': ['12.5']},
-            'rating text':     {'in_ratings': ['abc']},
-            'rating blank':    {'in_ratings': ['']},
-            'rating negative': {'in_ratings': ['-5']},
-            'spd':             {'spd': 'maybe'},
-            'mismatched':      {'in_breakers': ['MCCB', 'MCB'], 'in_ratings': ['100']},
+            'type':                 {'accb_type': 'Type-3'},
+            'blank type':           {'accb_type': ''},
+            'no I/C feeder':        {'in_options': []},
+            '21 O/G feeders':       {'out_options': ['MCB-25'] * 21, 'out_spds': ['0'] * 21},
+            '32 MCB not listed':    {'in_options': ['MCB-32']},
+            '63 MCCB not listed':   {'in_options': ['MCCB-63']},
+            '160 MCCB not listed':  {'out_options': ['MCCB-160']},
+            'swapped MCCB 25':      {'in_options': ['MCCB-25']},
+            'swapped MCB 100':      {'out_options': ['MCB-100']},
+            'blank option':         {'in_options': ['']},
+            'old breaker only':     {'in_options': ['MCCB']},
+            'SPD on an I/C feeder': {'in_spds': ['1']},
+            'I/C SPD of 0':         {'in_spds': ['0']},
+            'missing O/G SPD':      {'out_options': ['MCCB-200', 'MCB-25'], 'out_spds': ['1']},
+            'no O/G SPD at all':    {'out_spds': []},
+            'O/G SPD not 1 or 0':   {'out_spds': ['on']},
+            'O/G SPD blank':        {'out_spds': ['']},
         }
         for name, override in cases.items():
             with self.subTest(rule=name):
@@ -221,8 +310,35 @@ class ValidationTests(SimpleTestCase):
 
     def test_every_fault_is_named_at_once(self):
         with self.assertRaises(ValidationError) as caught:
-            self._ok(accb_type='X', in_ratings=['0'], out_breakers=['RCCB'])
-        self.assertEqual(len(caught.exception.messages), 3)
+            self._ok(accb_type='X', in_options=['MCB-32'], in_spds=['1'], out_spds=['maybe'])
+        self.assertEqual(len(caught.exception.messages), 4)
+
+
+class StoredConfigTests(SimpleTestCase):
+    """B-3c: the re-check Duplicate and the B-4 copy run on a SAVED configuration."""
+
+    def test_a_valid_stored_configuration_comes_back_unchanged(self):
+        for config in (EX_TYPE1, EX_TYPE2):
+            with self.subTest(type=config['type']):
+                self.assertEqual(
+                    stored_accb_config(config['type'], {'in': config['in'], 'out': config['out']}),
+                    config)
+
+    def test_an_old_format_configuration_is_refused(self):
+        cases = {
+            'typed rating':      {'in': [{'breaker': 'MCCB', 'rating': 150}],
+                                  'out': [{'breaker': 'MCCB', 'rating': 200, 'spd': True}]},
+            'no per-feeder SPD': {'in': [{'breaker': 'MCCB', 'rating': 100}],
+                                  'out': [{'breaker': 'MCCB', 'rating': 200}]},
+            'SPD on I/C':        {'in': [{'breaker': 'MCCB', 'rating': 100, 'spd': False}],
+                                  'out': [{'breaker': 'MCCB', 'rating': 200, 'spd': True}]},
+            'malformed':         {'in': ['x'], 'out': None},
+            'not a dict':        None,
+        }
+        for name, feeders in cases.items():
+            with self.subTest(case=name):
+                with self.assertRaises(ValidationError):
+                    stored_accb_config('Type-2', feeders)
 
 
 # ===========================================================================
@@ -308,6 +424,23 @@ class ACCBBase(TestCase):
         """An ACCB written by the view's own create helper."""
         return _accb_create(self._boq(site), self.accb_master, config, self.designer)
 
+    def _seed_legacy_accb(self, site=None):
+        """An ACCB exactly as B-3 saved it, before the fixed switchgear list: a typed
+        rating (150, not in the list), one SPD per ACCB, no per-feeder SPD, the old wording
+        and the old key."""
+        boq = self._boq(site)
+        line = BOQItem.objects.create(
+            boq=boq, item_master=self.accb_master, serial_no=273, category='ACCB',
+            description=LEGACY_TEXT, uom='Nos', boq_quantity=Decimal('1'),
+            is_standard_item=True)
+        number = boq.next_accb_number
+        BOQ.objects.filter(pk=boq.pk).update(next_accb_number=number + 1)
+        return ACCBConfig.objects.create(
+            boq=boq, boq_item=line, number=number, accb_type='Type-2', has_spd=True,
+            feeders={'in': [{'breaker': 'MCCB', 'rating': 100}],
+                     'out': [{'breaker': 'MCCB', 'rating': 150}]},
+            config_key='Type-2|SPD|IN:MCCB-100|OUT:MCCB-150')
+
     def _design_lock(self, assignment=None):
         assignment = assignment or self.assignment
         DesignAttempt.objects.create(
@@ -331,12 +464,7 @@ class ACCBBase(TestCase):
         if accb_id is not None:
             data['accb_id'] = str(accb_id)
         if config is not None:
-            data['accb_type'] = config['type']
-            if config['spd']:
-                data['has_spd'] = '1'
-            for side in ('in', 'out'):
-                data[f'{side}_breaker'] = [f['breaker'] for f in config[side]]
-                data[f'{side}_rating'] = [str(f['rating']) for f in config[side]]
+            data.update(accb_post_data(config))
         data.update(extra or {})
         return self.client.post(
             reverse('opex_boq_accb', kwargs={'project_id': (site or self.site).project_id}),
@@ -372,10 +500,27 @@ class DesignerACCBTests(ACCBBase):
         self.assertEqual(line.accb_config.number, 1)
         self.assertEqual(line.accb_config.config_key, accb_config_key(EX_TYPE2))
         self.assertEqual(line.accb_config.as_config(), EX_TYPE2)
+        self.assertTrue(line.accb_config.has_spd)
         self.assertEqual(BOQItem.objects.filter(boq__project=self.site).count(), 1)
         log = ActivityLog.objects.get(action_code='boq_accb_added')
         self.assertEqual(log.action,
-                         'Desacc added ACCB 1 on AC-A (Type-2 · I/C 2 · O/G 1 · SPD)')
+                         'Desacc added ACCB 1 on AC-A (Type-2 · I/C 2 · O/G 1 · SPD 1)')
+
+    def test_has_spd_is_derived_from_the_og_feeders(self):
+        """B-3c answer 2: True when any O/G feeder has SPD, False when none has."""
+        none = cfg('Type-1', [('MCB', 25)], [('MCB', 30, False), ('MCB', 40, False)])
+        self._accb_post('add', none)
+        self._accb_post('add', EX_TYPE1)
+        self.assertEqual([l.accb_config.has_spd for l in self._accb_lines()], [False, True])
+        # An edit that ticks one O/G SPD flips it; unticking every one flips it back.
+        first = self._accb_lines()[0].accb_config
+        self._accb_post('save', cfg('Type-1', [('MCB', 25)],
+                                    [('MCB', 30, False), ('MCB', 40, True)]), accb_id=first.pk)
+        first.refresh_from_db()
+        self.assertTrue(first.has_spd)
+        self._accb_post('save', none, accb_id=first.pk)
+        first.refresh_from_db()
+        self.assertFalse(first.has_spd)
 
     def test_both_approved_examples_become_two_lines_nos_qty_1(self):
         self._accb_post('add', EX_TYPE2)
@@ -388,7 +533,7 @@ class DesignerACCBTests(ACCBBase):
     def test_edit_updates_the_same_line(self):
         self._accb_post('add', EX_TYPE2)
         line = self._accb_lines()[0]
-        changed = cfg('Type-2', True, [('MCCB', 125), ('MCCB', 63)], [('MCCB', 150)])
+        changed = cfg('Type-2', [('MCCB', 125), ('MCB', 63)], [('MCCB', 200, True)])
         self._accb_post('save', changed, accb_id=line.accb_config.pk)
         lines = self._accb_lines()
         self.assertEqual(len(lines), 1)
@@ -398,7 +543,7 @@ class DesignerACCBTests(ACCBBase):
         self.assertEqual(lines[0].boq_quantity, Decimal('1'))
         log = ActivityLog.objects.get(action_code='boq_accb_changed')
         self.assertEqual(log.action, 'Desacc changed ACCB 1 on AC-A '
-                                     '(Type-2 · I/C 2 · O/G 1 · SPD; '
+                                     '(Type-2 · I/C 2 · O/G 1 · SPD 1; '
                                      'feeders changed)')
 
     def test_an_edit_that_changes_the_counts_logs_old_and_new_summary(self):
@@ -406,8 +551,8 @@ class DesignerACCBTests(ACCBBase):
         accb_id = self._accb_lines()[0].accb_config.pk
         self._accb_post('save', EX_TYPE1, accb_id=accb_id)
         log = ActivityLog.objects.get(action_code='boq_accb_changed')
-        self.assertIn('(Type-2 · I/C 2 · O/G 1 · SPD → '
-                      'Type-1 · I/C 4 · O/G 1 · no SPD)', log.action)
+        self.assertIn('(Type-2 · I/C 2 · O/G 1 · SPD 1 → '
+                      'Type-1 · I/C 3 · O/G 2 · SPD 1)', log.action)
 
     def test_a_save_that_changes_nothing_logs_nothing(self):
         self._accb_post('add', EX_TYPE2)
@@ -429,6 +574,28 @@ class DesignerACCBTests(ACCBBase):
         self.assertEqual(copy.accb_config.as_config(), EX_TYPE2)
         self.assertEqual(copy.boq_quantity, Decimal('1'))
 
+    def test_duplicate_copies_every_option_and_spd_in_order(self):
+        mixed = cfg('Type-1', [('MCB', 40), ('MCCB', 630), ('MCB', 25)],
+                    [('MCCB', 125, False), ('MCB', 63, True), ('MCCB', 125, True)])
+        self._accb_post('add', mixed)
+        source = self._accb_lines()[0].accb_config
+        self._accb_post('duplicate', accb_id=source.pk)
+        copy = self._accb_lines()[1].accb_config
+        self.assertEqual(copy.feeders, source.feeders)
+        self.assertEqual(copy.as_config(), mixed)
+        self.assertEqual((copy.config_key, copy.has_spd), (source.config_key, True))
+        self.assertEqual(copy.boq_item.description, accb_description(mixed))
+
+    def test_duplicate_of_an_old_format_accb_is_refused_and_creates_nothing(self):
+        legacy = self._seed_legacy_accb()
+        response = self._accb_post('duplicate', accb_id=legacy.pk)
+        self.assertEqual(ACCBConfig.objects.count(), 1)
+        self.assertEqual(BOQItem.objects.count(), 1)
+        self.assertFalse(ActivityLog.objects.filter(action_code='boq_accb_added').exists())
+        shown = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertEqual(shown, [f'ACCB {legacy.number} cannot be duplicated: '
+                                 f'{ACCB_REENTER_MESSAGE}.'])
+
     def test_remove_deletes_the_line_and_its_configuration_and_numbers_stay(self):
         self._accb_post('add', EX_TYPE2)
         self._accb_post('add', EX_TYPE1)
@@ -449,23 +616,33 @@ class DesignerACCBTests(ACCBBase):
         self.assertEqual(self._accb_lines()[0].boq_quantity, Decimal('1'))
 
     def test_an_invalid_configuration_saves_nothing(self):
+        """B-3c T5: each refused, nothing saved — not even the BOQ row."""
         bad = {
-            'type':    dict(EX_TYPE2, type='Type-9'),
-            'feeders': dict(EX_TYPE2, **{'in': []}),
-            '21':      dict(EX_TYPE2, out=[{'breaker': 'MCB', 'rating': 32}] * 21),
-            'breaker': dict(EX_TYPE2, **{'in': [{'breaker': 'RCCB', 'rating': 63}]}),
-            'rating':  dict(EX_TYPE2, **{'in': [{'breaker': 'MCB', 'rating': 1601}]}),
-            'decimal': dict(EX_TYPE2, **{'in': [{'breaker': 'MCB', 'rating': '12.5'}]}),
+            'type':                 {'accb_type': 'Type-9'},
+            'no I/C feeder':        {'in_option': []},
+            '21 O/G feeders':       {'out_option': ['MCB-25'] * 21, 'out_spd': ['0'] * 21},
+            '32 MCB not listed':    {'in_option': ['MCB-32', 'MCB-63']},
+            '63 MCCB not listed':   {'in_option': ['MCCB-63', 'MCB-63']},
+            '160 MCCB not listed':  {'out_option': ['MCCB-160']},
+            'swapped MCCB 25':      {'in_option': ['MCCB-25', 'MCB-63']},
+            'SPD on an I/C feeder': {'in_spd': ['1', '0']},
+            'missing O/G SPD':      {'out_spd': []},
+            'O/G SPD not 1 or 0':   {'out_spd': ['on']},
+            # A page drawn before B-3c posts the old fields: no option is chosen.
+            'old fields':           {'in_option': [], 'out_option': [], 'out_spd': [],
+                                     'in_breaker': ['MCCB'], 'in_rating': ['100'],
+                                     'out_breaker': ['MCCB'], 'out_rating': ['200'],
+                                     'has_spd': '1'},
         }
-        for name, config in bad.items():
+        for name, override in bad.items():
             with self.subTest(rule=name):
-                response = self._accb_post('add', config)
+                response = self._accb_post('add', EX_TYPE2, extra=override)
                 self.assertEqual(response.status_code, 302)
+                self.assertIn('Nothing was saved.',
+                              [str(m) for m in get_messages(response.wsgi_request)])
                 self.assertFalse(BOQ.objects.filter(project=self.site).exists())
                 self.assertEqual(ACCBConfig.objects.count(), 0)
                 self.assertEqual(BOQItem.objects.count(), 0)
-        response = self._accb_post('add', EX_TYPE2, extra={'has_spd': 'maybe'})
-        self.assertEqual(ACCBConfig.objects.count(), 0)
 
     def test_an_invalid_edit_leaves_the_saved_accb_unchanged(self):
         self._accb_post('add', EX_TYPE2)
@@ -506,6 +683,84 @@ class DesignerACCBTests(ACCBBase):
         self.assertEqual(data['accbs'][0]['description'], EX_TYPE2_TEXT)
         self.assertNotIn(self.accb_master.pk,
                          [item['id'] for item in json.loads(response.context['catalogue_json'])])
+
+    def _page(self):
+        response = self.client.get(reverse('opex_boq_entry',
+                                           kwargs={'project_id': self.site.project_id}))
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode()
+        data = json.loads(html.split('id="accbData" type="application/json">', 1)[1]
+                          .split('</script>', 1)[0])
+        return html, data
+
+    def test_each_feeder_offers_the_11_options_and_saved_ones_come_back_by_code(self):
+        """B-3c: one dropdown of the fixed list; no ampere box, breaker select or card-level
+        SPD; the saved ACCB's feeders come back as option codes with their SPD ticks."""
+        self._seed_accb(EX_TYPE1)
+        html, data = self._page()
+        self.assertEqual([(o['code'], o['text']) for o in data['switchgear']],
+                         [(f'{b}-{r}', t) for b, r, t in RULING_SWITCHGEAR])
+        self.assertIn('<option value="">Choose switchgear…</option>', html)
+        for breaker, rating, text in RULING_SWITCHGEAR:
+            # Drawn by Django, so the & in "S/C & O/L" is escaped.
+            self.assertIn(f'<option value="{breaker}-{rating}">'
+                          f'{text.replace("&", "&amp;")}</option>', html)
+        for gone in ('accbRatings', 'name="has_spd"', "'_breaker'", "'_rating'",
+                     'rating_min', 'common_ratings'):
+            self.assertNotIn(gone, html)
+        self.assertIn('name="out_spd"', html)
+        card = data['accbs'][0]
+        self.assertEqual(card['in'], [{'option': 'MCB-40'}, {'option': 'MCB-25'},
+                                      {'option': 'MCB-40'}])
+        self.assertEqual(card['out'], [{'option': 'MCCB-125', 'spd': True},
+                                       {'option': 'MCCB-125', 'spd': False}])
+        self.assertFalse(card['legacy'])
+        self.assertNotIn('spd', card)
+
+    def test_the_remove_confirmation_is_drawn_only_for_a_saved_accb_after_remove(self):
+        """B-3c ruling 6. No test runs the JavaScript; this pins the markup: the buttons and
+        the confirmation are x-if blocks (x-show lost to Bootstrap's d-flex !important),
+        and the confirmation needs a saved ACCB."""
+        html, _data = self._page()
+        self.assertIn('<template x-if="!card.confirmRemove">', html)
+        self.assertIn('<template x-if="card.id && card.confirmRemove">', html)
+        self.assertNotIn('x-show="card.confirmRemove"', html)
+        self.assertNotIn('x-show="!card.confirmRemove"', html)
+
+    def test_an_old_format_accb_shows_and_is_refused_until_re_entered(self):
+        """B-3c T4: an ACCB saved before the fixed list draws (no crash) with every unlisted
+        feeder blank and the card marked legacy; a save that leaves it as it was is
+        refused; a save with the switchgear chosen fixes it."""
+        legacy = self._seed_legacy_accb()
+        html, data = self._page()
+        card = data['accbs'][0]
+        self.assertTrue(card['legacy'])
+        self.assertEqual(card['in'], [{'option': 'MCCB-100'}])
+        self.assertEqual(card['out'], [{'option': '', 'spd': False}])
+        self.assertEqual(card['description'], LEGACY_TEXT)
+        self.assertIn('Re-enter the switchgear', html)
+        # What the card posts while the O/G dropdown is still blank.
+        self._accb_post('save', accb_id=legacy.pk, extra={
+            'accb_type': 'Type-2', 'in_option': ['MCCB-100'], 'out_option': [''],
+            'out_spd': ['1']})
+        legacy.refresh_from_db()
+        self.assertEqual(legacy.boq_item.description, LEGACY_TEXT)
+        self.assertEqual(legacy.config_key, 'Type-2|SPD|IN:MCCB-100|OUT:MCCB-150')
+        self._accb_post('save', EX_TYPE2, accb_id=legacy.pk)
+        legacy.refresh_from_db()
+        legacy.boq_item.refresh_from_db()
+        self.assertEqual(legacy.boq_item.description, EX_TYPE2_TEXT)
+        self.assertEqual(legacy.as_config(), EX_TYPE2)
+        self.assertEqual(legacy.config_key, accb_config_key(EX_TYPE2))
+        _html, data = self._page()
+        self.assertFalse(data['accbs'][0]['legacy'])
+
+    def test_an_old_format_accb_can_still_be_removed(self):
+        legacy = self._seed_legacy_accb()
+        self._accb_post('remove', accb_id=legacy.pk)
+        self.assertFalse(ACCBConfig.objects.exists())
+        log = ActivityLog.objects.get(action_code='boq_accb_removed')
+        self.assertIn('(Type-2 · I/C 1 · O/G 1 · SPD 0)', log.action)
 
 
 class DesignerWriteRuleTests(ACCBBase):
@@ -554,7 +809,8 @@ class DesignerWriteRuleTests(ACCBBase):
         response = self.client.get(reverse('opex_boq_entry',
                                            kwargs={'project_id': self.site.project_id}))
         html = response.content.decode()
-        self.assertIn(EX_TYPE2_TEXT, html)
+        # B-3c: the text holds '&', which the page escapes.
+        self.assertIn(escape(EX_TYPE2_TEXT), html)
         self.assertNotIn(reverse('opex_boq_accb', kwargs={'project_id': self.site.project_id}),
                          html)
 
@@ -675,7 +931,8 @@ class ReviewerTests(ACCBBase):
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, 200)
         html = response.content.decode()
-        self.assertIn(EX_TYPE2_TEXT, html)
+        # B-3c: the text holds '&', which the page escapes.
+        self.assertIn(escape(EX_TYPE2_TEXT), html)
         self.assertIn(ACCB_REVIEWER_MESSAGE.replace("'", '&#x27;'), html)
         self.assertNotIn(f'name="item_id" value="{self.accb.boq_item_id}"', html)
 
@@ -714,8 +971,10 @@ class SCMGroupingTests(ACCBBase):
         self.ids = [self.site.pk, self.site_b.pk]
 
     def test_same_configuration_in_a_different_feeder_order_is_one_row_count_2(self):
-        reordered = cfg('Type-1', False,
-                        [('MCB', 25), ('MCB', 32), ('MCB', 32), ('MCCB', 100)], [('MCCB', 100)])
+        """B-3c: the feeders in a different order AND the SPD tick on the other of two
+        identical O/G feeders — still the same thing to buy."""
+        reordered = cfg('Type-1', [('MCB', 25), ('MCB', 40), ('MCB', 40)],
+                        [('MCCB', 125, False), ('MCCB', 125, True)])
         self._seed_accb(EX_TYPE1, site=self.site)
         self._seed_accb(reordered, site=self.site_b)
         rows = aggregate_group_boq(self.ids)['accb_lines']
@@ -734,6 +993,20 @@ class SCMGroupingTests(ACCBBase):
         self.assertEqual(rows[EX_TYPE1_TEXT]['total_quantity'], Decimal('2'))
         self.assertEqual(rows[EX_TYPE1_TEXT]['site_count'], 1)
         self.assertEqual(rows[EX_TYPE2_TEXT]['total_quantity'], Decimal('1'))
+
+    def test_a_different_spd_pattern_gets_its_own_row(self):
+        both_spd = cfg('Type-1', [('MCB', 40), ('MCB', 25), ('MCB', 40)],
+                       [('MCCB', 125, True), ('MCCB', 125, True)])
+        self._seed_accb(EX_TYPE1, site=self.site)
+        self._seed_accb(both_spd, site=self.site_b)
+        rows = {row['config_key']: row for row in aggregate_group_boq(self.ids)['accb_lines']}
+        self.assertEqual(set(rows), {accb_config_key(EX_TYPE1), accb_config_key(both_spd)})
+        self.assertEqual([row['total_quantity'] for row in rows.values()],
+                         [Decimal('1'), Decimal('1')])
+        self.assertEqual(rows[accb_config_key(both_spd)]['description'],
+                         accb_description(both_spd))
+        self.assertTrue(rows[accb_config_key(both_spd)]['description'].endswith(
+            f'O/G Feeder 2 Nos.: 2 x 125A, {MCCB}, with SPD.'))
 
     def test_non_accb_totals_are_unchanged_by_adding_accbs(self):
         before = aggregate_group_boq(self.ids)
@@ -789,7 +1062,7 @@ class SCMGroupingTests(ACCBBase):
         response = self.client.get(reverse('site_group_detail', kwargs={'pk': group.pk}))
         self.assertEqual(response.status_code, 200)
         self.assertIn('id="groupAccbs"', response.content.decode())
-        self.assertIn(EX_TYPE1_TEXT, response.content.decode())
+        self.assertIn(escape(EX_TYPE1_TEXT), response.content.decode())
 
 
 # ===========================================================================
@@ -1004,3 +1277,40 @@ class GroupScreenCountTests(ACCBBase):
         with CaptureQueriesContext(connection) as with_accbs:
             self.client.get(self.url)
         self.assertEqual(len(with_accbs), len(without))
+
+
+class QueryCountTests(ACCBBase):
+    """B-3c: the counts measured before B-3c (pre-flight), unchanged by it. The group order
+    raise page's 14 is pinned in tests_accb_order; the SCM group screen's "ACCBs add no
+    query" is pinned in GroupScreenCountTests."""
+
+    def setUp(self):
+        super().setUp()
+        self._login(self.designer)
+        self._line('OPX-001', 10)
+        self.url = reverse('opex_boq_entry', kwargs={'project_id': self.site.project_id})
+        self.client.get(self.url)   # warm the session
+
+    def _count(self, call):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        with CaptureQueriesContext(connection) as queries:
+            call()
+        return len(queries)
+
+    def test_the_picker_page_is_19_queries_with_0_or_3_accbs(self):
+        self.assertEqual(self._count(lambda: self.client.get(self.url)), 19)
+        for config in (EX_TYPE1, EX_TYPE2, EX_TYPE1):
+            self._seed_accb(config)
+        self.assertEqual(self._count(lambda: self.client.get(self.url)), 19)
+
+    def test_the_accb_save_post_is_17_queries(self):
+        accb = self._seed_accb(EX_TYPE1)
+        self.assertEqual(
+            self._count(lambda: self._accb_post('save', EX_TYPE2, accb_id=accb.pk)), 17)
+
+    def test_the_duplicate_post_is_19_queries(self):
+        # The re-check added by B-3c is pure Python: no query.
+        accb = self._seed_accb(EX_TYPE1)
+        self._seed_accb(EX_TYPE2)
+        self.assertEqual(self._count(lambda: self._accb_post('duplicate', accb_id=accb.pk)), 19)
