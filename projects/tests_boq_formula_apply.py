@@ -81,7 +81,11 @@ CATALOGUE = [
 
 #: Measured on 6765ef8 (before B-2b) with this file's fixture and requests, each POST plus
 #: the page it redirects to (follow=True), under solarpms.test_settings. B-2b adds exactly
-#: one query to each with no rules: formula_rules_exist()'s exists().
+#: one query to each with no rules: formula_rules_exist()'s exists(). B-2b.1 adds one more
+#: to the three that follow a redirect, because the page they land on (the picker, the
+#: correction screen) now asks the same exists() to mark calculated lines: REDIRECTED_EXTRA.
+#: The upload commit renders its result in place, so it stays at +1.
+REDIRECTED_EXTRA = 1
 BASELINE = {'picker': 36, 'upload': 19, 'add_line': 40, 'set_quantity': 42}
 
 
@@ -301,7 +305,7 @@ class NoRulesTests(FormulaBase):
     def test_picker_query_count(self):
         self._login(self.designer)
         n = self._count(lambda: self._picker({'FX-LA1': 2, 'FX-EARTH': 7}))
-        self.assertEqual(n, BASELINE['picker'] + 1)
+        self.assertEqual(n, BASELINE['picker'] + 1 + REDIRECTED_EXTRA)
 
     def test_upload_query_count(self):
         self._login(self.designer)
@@ -315,7 +319,7 @@ class NoRulesTests(FormulaBase):
         codes = iter(['FX-EARTH', 'FX-LOG'])
         n = self._count(lambda: self._correct(
             self.review, 'add_line', master_id=str(self.items[next(codes)].pk), quantity='9'))
-        self.assertEqual(n, BASELINE['add_line'] + 1)
+        self.assertEqual(n, BASELINE['add_line'] + 1 + REDIRECTED_EXTRA)
 
     def test_set_quantity_query_count(self):
         self._login(self.qc)
@@ -323,7 +327,7 @@ class NoRulesTests(FormulaBase):
         quantities = iter(['12', '13'])
         n = self._count(lambda: self._correct(self.review, 'set_quantity',
                                               item_id=str(line.pk), quantity=next(quantities)))
-        self.assertEqual(n, BASELINE['set_quantity'] + 1)
+        self.assertEqual(n, BASELINE['set_quantity'] + 1 + REDIRECTED_EXTRA)
 
     def test_no_rules_takes_no_lock_and_loads_nothing(self):
         self._login(self.designer)
@@ -412,8 +416,10 @@ class PickerWithRulesTests(FormulaBase):
         response = self._picker({'FX-LA1': 2})
         self.assertEqual([l.boq_quantity for l in self._lines('FX-EARTH')], [D(3), D(4)])
         self.assertFalse(BOQRecalculation.objects.filter(item_code='FX-EARTH').exists())
-        self.assertIn('FX-EARTH is on this BOQ more than once, so its calculated quantity '
-                      'was not written. Remove the extra line.', self._messages(response))
+        # B-2b.1 Q9 wording: the lines are ordinary until one is left.
+        self.assertIn('FX-EARTH is on this BOQ more than once, so it is not calculated: its '
+                      'lines are ordinary lines. Remove the extra line; when one is left, it '
+                      'is calculated again on the next save.', self._messages(response))
 
     def test_a_residential_rule_never_touches_a_resco_boq(self):
         res = BOQItemMaster.objects.create(code='FX-RES', description='Res item', unit='Nos',
@@ -512,7 +518,8 @@ class OverrideTests(FormulaBase):
     def test_later_rules_read_the_overridden_value(self):
         self._override('set', self.logger, quantity='4', note='two roofs')
         self.assertEqual(self._qty('FX-RS485'), D(20))
-        record = BOQRecalculation.objects.order_by('-pk').first()
+        # B-2b.1 Q3: the overridden line has a record of its own now, so pick RS485's.
+        record = BOQRecalculation.objects.filter(item_code='FX-RS485').order_by('-pk').first()
         self.assertEqual((record.item_code, record.quantity_before, record.quantity_after),
                          ('FX-RS485', D(10), D(20)))
 

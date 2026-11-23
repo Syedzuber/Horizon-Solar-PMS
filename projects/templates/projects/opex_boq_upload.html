@@ -133,18 +133,50 @@ STAGES, all driven off `stage`, the same shape opex_site_bulk_upload.html uses:
       <span class="badge bg-light text-dark border fs-6">Quantities changed: <strong>{{ plan_change|length }}</strong></span>
       <span class="badge bg-light text-dark border fs-6">Unchanged: <strong>{{ plan_unchanged }}</strong></span>
       {% comment %}
-      ALWAYS SHOWN, AND ALWAYS ZERO. Someone who deleted rows in Excel expecting them to
-      disappear needs to be told plainly why nothing happened, and the only reliable moment
-      to tell them is the one where they are looking for that number.
+      ALWAYS SHOWN. Someone who deleted rows in Excel expecting them to disappear needs to
+      be told plainly why nothing happened, and the only reliable moment to tell them is
+      the one where they are looking for that number. B-2b.1 (Q6): the one thing an upload
+      can remove is a calculated line that now works out to 0 (D1), so the count is the
+      engine's prediction, the same figure the result page will show.
       {% endcomment %}
-      <span class="badge bg-light text-dark border fs-6">Rows removed: <strong>0</strong></span>
+      <span class="badge bg-light text-dark border fs-6">Rows removed: <strong>{{ plan_removed|length }}</strong></span>
     </div>
     <div class="small text-muted mt-2">
-      Rows are never removed by an upload — deletions are made on the
-      <a href="{% url 'opex_boq_entry' project.project_id %}">BOQ screen</a>.
+      Rows you delete in Excel are never removed by an upload — deletions are made on the
+      <a href="{% url 'opex_boq_entry' project.project_id %}">BOQ screen</a>. The only
+      exception is a calculated line that now works out to 0, which is removed.
       Description, Unit and Category in your file were ignored; they come from the catalogue.
     </div>
   </div>
+
+  {% comment %}
+  B-2b.1 A2 — the file's rows for calculated items, marked exactly as the result page will
+  list them. Built by the commit's own planning and summary functions, from the engine's
+  prediction on the sheet as it will be after the commit.
+  {% endcomment %}
+  {% if replaced %}
+    <div class="alert alert-warning small" id="boqPreviewReplaced">
+      <div class="fw-semibold mb-1">Calculated lines in your file</div>
+      {% for r in replaced %}
+        <div><code>{{ r.code }}</code> file {{ r.file }} — Calculated: will be replaced by {{ r.calculated }}</div>
+      {% endfor %}
+      These quantities are calculated from other lines on the BOQ, so the file's figure will not be used.
+    </div>
+  {% endif %}
+  {% if kept_override %}
+    <div class="alert alert-info small" id="boqPreviewKeptOverride">
+      <div class="fw-semibold mb-1">Overridden lines in your file</div>
+      {% for r in kept_override %}
+        <div><code>{{ r.code }}</code> file {{ r.file }} — Override kept: stays at {{ r.calculated }} (set by hand)</div>
+      {% endfor %}
+    </div>
+  {% endif %}
+  {% if plan_removed %}
+    <div class="alert alert-info small" id="boqPreviewRemoved">
+      <div class="fw-semibold mb-1">Calculated lines that will be removed</div>
+      {% for code in plan_removed %}<div><code>{{ code }}</code> works out to 0</div>{% endfor %}
+    </div>
+  {% endif %}
 
   {% if plan_readded %}
     <div class="alert alert-info small">

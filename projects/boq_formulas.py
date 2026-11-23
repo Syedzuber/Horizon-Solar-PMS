@@ -605,6 +605,17 @@ def prepare_formula_save(boq, project_type):
     return FormulaSave(rules=load_rules(project_type))
 
 
+def read_formula_rules(project_type):
+    """The rules for a READ (a screen or the upload preview): no lock. One query with no
+    rules, four with any number.
+
+    The write paths use prepare_formula_save(), which also locks the BOQ row; a page load
+    must not take a row lock, so the screens come here instead."""
+    if not formula_rules_exist(project_type):
+        return FormulaSave()
+    return FormulaSave(rules=load_rules(project_type))
+
+
 def _override_of(line):
     """The line's BOQLineOverride or None, with no query (select_related loaded it)."""
     from django.core.exceptions import ObjectDoesNotExist
@@ -612,6 +623,151 @@ def _override_of(line):
         return line.formula_override
     except ObjectDoesNotExist:
         return None
+
+
+# ---------------------------------------------------------------------------
+# B-2b.1 — the sheet as the engine sees it, and what the engine would write.
+#
+# ONE INPUT BUILDER AND ONE WRITE DECISION, shared by the save (apply_formulas), the
+# upload preview (which predicts the commit) and the screens (which explain the lines).
+# Three copies of "which lines count, which are overridden, which are removed at 0" is how
+# a preview would come to promise something the save does not do.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SheetLine:
+    """One BOQ line as the engine reads it. Not frozen: the upload preview edits copies to
+    stand for the sheet as it will be after the commit."""
+    pk: int | None                        # None for a line the upload preview would create
+    item_master_id: int | None
+    boq_quantity: Decimal | None
+    overridden: bool = False
+    override_note: str = ''
+    ordered_quantity: Decimal | None = None
+    line: object = None                   # The BOQItem, for a stored line
+
+
+def sheet_line(line):
+    """A stored BOQItem as a SheetLine. Its override must already be joined in
+    (select_related('formula_override')), so this costs no query."""
+    override = _override_of(line)
+    return SheetLine(pk=line.pk, item_master_id=line.item_master_id,
+                     boq_quantity=line.boq_quantity, overridden=override is not None,
+                     override_note=override.note if override is not None else '',
+                     ordered_quantity=line.ordered_quantity, line=line)
+
+
+def read_sheet(boq):
+    """Every line on `boq` as SheetLines, overrides joined in. One query; none for no BOQ."""
+    if boq is None:
+        return []
+    return [sheet_line(line)
+            for line in boq.items.select_related('formula_override').order_by('pk')]
+
+
+def sheet_inputs(sheet, targets):
+    """(quantities, lines_of, overrides): evaluate()'s input from a sheet. Pure.
+
+    Every line with a catalogue item counts, ACCB lines included, summed per item; a blank
+    quantity counts as nothing; lines with no item are left out.
+
+    OVERRIDES, two kinds, both "use the figure on the sheet, not the rule's":
+      * a computed item on ONE line with a BOQLineOverride: that line's quantity.
+      * A3 (Zuber, B-2b.1) — a computed item on TWO OR MORE lines: the sheet's total for it.
+        Those lines are not written (Q9), so what is on the BOQ is what later rules are
+        sized from, exactly as with an override. Without this, evaluate() would put the
+        rule's own figure in front of the later rules, a number that is on no line.
+    """
+    quantities, lines_of = {}, {}
+    for line in sheet:
+        if line.item_master_id is None:
+            continue
+        lines_of.setdefault(line.item_master_id, []).append(line)
+        if line.boq_quantity is not None:
+            quantities[line.item_master_id] = (quantities.get(line.item_master_id, ZERO)
+                                               + line.boq_quantity)
+    overrides = {}
+    for target in targets:
+        own = lines_of.get(target, [])
+        if len(own) > 1:
+            overrides[target] = quantities.get(target, ZERO)
+        elif len(own) == 1 and own[0].overridden:
+            overrides[target] = own[0].boq_quantity if own[0].boq_quantity is not None else ZERO
+    return quantities, lines_of, overrides
+
+
+#: What the engine does to one computed item (FormulaAction.kind).
+ACTION_ADD = 'add'                      # no line, result above 0: create it
+ACTION_CHANGE = 'change'                # one line, a different figure: set it
+ACTION_REMOVE = 'remove'                # one line, result 0: remove it (D1)
+ACTION_ZERO = 'zero'                    # one line, result 0, kept: set it to 0
+ACTION_SKIP_MULTIPLE = 'skip_multiple'  # 2+ lines: not written (Q9)
+ACTION_SKIP_OVERRIDE = 'skip_override'  # overridden: left alone
+
+
+@dataclass(frozen=True)
+class FormulaAction:
+    kind: str
+    result: Result
+    line: SheetLine | None = None
+
+
+def formula_line_blocked(line):
+    """True if a line that works out to 0 must be kept at 0 rather than removed (P5): it has
+    an ordered quantity or an order line. The order-line query runs only for a stored line,
+    and only when it is about to fall to 0."""
+    if line.ordered_quantity is not None:
+        return True
+    if line.pk is None:
+        return False
+    # Lazy import: models.py imports this module, so importing models at the top would be
+    # circular.
+    from .models import VendorOrderLine
+    return VendorOrderLine.objects.filter(boq_item_id=line.pk).exists()
+
+
+def work_out_formulas(sheet, prepared, *, remove_zero=True):
+    """(results, actions) for one sheet: evaluate() and then what a save would write.
+
+    THE ONE PLACE THE WRITE RULES LIVE. apply_formulas() carries the actions out; the upload
+    preview reports them for a sheet that is not saved yet. Raises FormulaError when a rule
+    cannot produce its figure (too large for the column, or a loop).
+
+      * 2+ lines on the target item: not written (Q9), and its sheet total feeds later
+        rules (A3, in sheet_inputs()).
+      * an overridden line: left alone.
+      * no line: created if the result is above 0; nothing at 0 (D1).
+      * one line: changed only if the figure differs.
+      * one line at 0 (D1): removed, unless remove_zero is False (the reviewer path, Q4) or
+        formula_line_blocked() says it must be kept, in which case it is set to 0.
+    """
+    quantities, lines_of, overrides = sheet_inputs(sheet, prepared.targets)
+    results = evaluate(quantities, prepared.rules, overrides)
+    actions = []
+    for result in results.values():      # evaluation (dependency) order
+        own = lines_of.get(result.item_id, [])
+        if len(own) > 1:
+            actions.append(FormulaAction(ACTION_SKIP_MULTIPLE, result))
+            continue
+        if result.overridden:
+            actions.append(FormulaAction(ACTION_SKIP_OVERRIDE, result, own[0]))
+            continue
+        line = own[0] if own else None
+        new = result.computed
+        if line is None:
+            if new > 0:
+                actions.append(FormulaAction(ACTION_ADD, result))
+            continue
+        before = line.boq_quantity
+        if new == 0:
+            if remove_zero and not formula_line_blocked(line):
+                actions.append(FormulaAction(ACTION_REMOVE, result, line))
+            elif before is None or before != 0:
+                actions.append(FormulaAction(ACTION_ZERO, result, line))
+            continue
+        if before is None or before != new:
+            actions.append(FormulaAction(ACTION_CHANGE, result, line))
+    return results, actions
 
 
 def apply_formulas(boq, prepared, *, source, actor, driving_correction=None,
@@ -622,22 +778,16 @@ def apply_formulas(boq, prepared, *, source, actor, driving_correction=None,
     the lock from prepare_formula_save(). With no rules it returns at once: no query, no
     write.
 
-    THE INPUT (pre-flight P4). Every line with a catalogue item, ACCB lines included (Qty 1
-    each), summed per item; lines with no item are left out; a blank quantity counts as
-    nothing; retired items count. An OVERRIDDEN computed line goes to evaluate() as an
-    override, so later rules read the quantity on the sheet, not the rule's.
-
-    WHAT IS WRITTEN, per rule in dependency order:
-      * an overridden line: left alone (reported).
-      * 2+ lines on the target item: left alone and reported (Q9). Not summed, not picked.
-      * no line: created from the catalogue's current wording (Z1) if the result is above
-        0; nothing if it is 0 (D1).
-      * one line: only boq_quantity changes, and only if it differs.
-      * one line whose result is 0 (D1): removed, unless remove_zero is False (the reviewer
-        path, Q4: boq_correct never deletes a line, so it is set to 0 and the designer's
-        next save removes it), or the line has an ordered quantity or an order line (kept
-        at 0; neither is reachable on a RESCO BOQ today, pre-flight P5).
+    THE INPUT is sheet_inputs() and WHAT IS WRITTEN is work_out_formulas(): both shared with
+    the upload preview, so the preview can only promise what this does. In short: an
+    overridden line and an item on 2+ lines are left alone; a missing line is created above
+    0; one line follows its rule; a line at 0 is removed (D1) unless remove_zero is False
+    (the reviewer path, Q4: boq_correct never deletes a line, so it is set to 0 and the
+    designer's next save removes it) or it has an ordered quantity or an order line.
     Every line that changes gets one BOQRecalculation, all written in one INSERT.
+
+    Raises ValidationError with the engine's reason when a rule cannot produce its figure;
+    every caller refuses the save with it and its transaction rolls back (A4).
     """
     summary = FormulaSummary()
     if not prepared.active:
@@ -645,36 +795,20 @@ def apply_formulas(boq, prepared, *, source, actor, driving_correction=None,
 
     # Lazy import: models.py imports this module, so importing models at the top would be
     # circular.
-    from .models import BOQItem, BOQItemMaster, BOQRecalculation, VendorOrderLine
+    from .models import BOQItem, BOQItemMaster, BOQRecalculation
 
-    rules = prepared.rules
-    codes = rules.codes
+    codes = prepared.rules.codes
 
     # One read of the whole sheet, each line with its override joined in, after the
     # caller's writes and under the caller's BOQ lock: this is the sheet the computed lines
     # must follow.
-    lines = list(boq.items.select_related('formula_override').order_by('pk'))
-    quantities, lines_of = {}, {}
-    for line in lines:
-        if line.item_master_id is None:
-            continue
-        lines_of.setdefault(line.item_master_id, []).append(line)
-        if line.boq_quantity is not None:
-            quantities[line.item_master_id] = (quantities.get(line.item_master_id, ZERO)
-                                               + line.boq_quantity)
-
-    overrides = {}
-    for target in prepared.targets:
-        own = lines_of.get(target, [])
-        if len(own) == 1 and _override_of(own[0]) is not None:
-            overrides[target] = own[0].boq_quantity if own[0].boq_quantity is not None else ZERO
-
+    sheet = read_sheet(boq)
     try:
-        results = evaluate(quantities, rules, overrides)
+        results, actions = work_out_formulas(sheet, prepared, remove_zero=remove_zero)
     except FormulaError as exc:
         # A result the BOQ column cannot hold (or a loop, which load_rules never returns).
-        # As a ValidationError the picker refuses the save with the reason, the same way it
-        # refuses a bad quantity box; on the other paths the transaction rolls back.
+        # As a ValidationError every hooked path refuses the save with the reason, the same
+        # way the picker refuses a bad quantity box, and its transaction rolls back.
         raise ValidationError(str(exc))
     summary.results = results
 
@@ -690,47 +824,32 @@ def apply_formulas(boq, prepared, *, source, actor, driving_correction=None,
         return FormulaChange(code=codes.get(result.item_id, ''), before=before, after=after,
                              unit=unit)
 
-    for result in results.values():      # evaluation (dependency) order
+    for action in actions:               # evaluation (dependency) order
+        result = action.result
         code = codes.get(result.item_id, '')
-        own = lines_of.get(result.item_id, [])
-        if len(own) > 1:
+        if action.kind == ACTION_SKIP_MULTIPLE:
             summary.skipped_multiple.append(code)
             continue
-        if result.overridden:
+        if action.kind == ACTION_SKIP_OVERRIDE:
             summary.skipped_overridden.append(code)
             continue
-        line = own[0] if own else None
-        new = result.computed
-
-        if line is None:
-            if new > 0:
-                to_create.append(result)
+        if action.kind == ACTION_ADD:
+            to_create.append(result)
             continue
 
+        line = action.line.line           # the stored BOQItem
         before = line.boq_quantity
-        if new == 0:
-            # P5 blockers. The order-line query runs only for a line about to fall to 0.
-            blocked = (line.ordered_quantity is not None
-                       or VendorOrderLine.objects.filter(boq_item=line).exists())
-            if remove_zero and not blocked:
-                # Recorded first, with no line: the record survives the line it describes.
-                summary.removed.append(record(result, None, before, None,
-                                              line.description, line.uom))
-                line.delete()
-                continue
-            if before is not None and before == 0:
-                continue
-            line.boq_quantity = new
-            line.save(update_fields=['boq_quantity'])
-            summary.kept_at_zero.append(record(result, line, before, new,
-                                               line.description, line.uom))
+        if action.kind == ACTION_REMOVE:
+            # Recorded first, with no line: the record survives the line it describes.
+            summary.removed.append(record(result, None, before, None,
+                                          line.description, line.uom))
+            line.delete()
             continue
-
-        if before is not None and before == new:
-            continue
+        new = result.computed
         line.boq_quantity = new
         line.save(update_fields=['boq_quantity'])
-        summary.changed.append(record(result, line, before, new, line.description, line.uom))
+        bucket = summary.kept_at_zero if action.kind == ACTION_ZERO else summary.changed
+        bucket.append(record(result, line, before, new, line.description, line.uom))
 
     if to_create:
         # The catalogue rows for the new lines: one query, only when a line is added.
@@ -768,8 +887,127 @@ def formula_summary_messages(summary):
     if summary.kept_at_zero:
         info.append('Calculated lines set to 0: '
                     + ', '.join(c.code for c in summary.kept_at_zero) + '.')
-    warnings = [
-        f'{code} is on this BOQ more than once, so its calculated quantity was not '
-        f'written. Remove the extra line.'
-        for code in summary.skipped_multiple]
+    warnings = [multiple_lines_message(code) for code in summary.skipped_multiple]
     return info, warnings
+
+
+def multiple_lines_message(code):
+    """Q9 (Zuber, B-2b.1): what a designer is told about a computed item on 2+ lines."""
+    return (f'{code} is on this BOQ more than once, so it is not calculated: its lines are '
+            f'ordinary lines. Remove the extra line; when one is left, it is calculated '
+            f'again on the next save.')
+
+
+# ---------------------------------------------------------------------------
+# B-2b.1 — what the screens show about calculated lines (read only)
+# ---------------------------------------------------------------------------
+
+#: LineFormula.kind
+LINE_CALCULATED = 'calculated'
+LINE_OVERRIDDEN = 'overridden'
+LINE_MULTIPLE = 'multiple'
+
+
+@dataclass(frozen=True)
+class LineFormula:
+    """What a screen shows beside one line of a computed item."""
+    kind: str                       # LINE_CALCULATED, LINE_OVERRIDDEN or LINE_MULTIPLE
+    explanation: str = ''           # The rule in plain words; '' when it could not be worked out
+    computed: Decimal | None = None  # The rule's figure; None when it could not be worked out
+    stale: bool = False             # The stored figure is not what the next save writes (Q2)
+    note: str = ''                  # The override's note
+
+    @property
+    def is_calculated(self):
+        return self.kind == LINE_CALCULATED
+
+    @property
+    def is_overridden(self):
+        return self.kind == LINE_OVERRIDDEN
+
+    @property
+    def is_multiple(self):
+        return self.kind == LINE_MULTIPLE
+
+    @property
+    def stale_text(self):
+        """Q2: the STORED figure is shown; this says what the next save will make of it."""
+        if not self.stale or self.computed is None:
+            return ''
+        if self.computed == 0:
+            return 'Works out to 0, so the next save removes this line.'
+        return f'Recalculates to {_num(self.computed)} on the next save.'
+
+
+@dataclass
+class FormulaView:
+    """The rules applied to one BOQ for display: nothing is written.
+
+    `error` is the engine's reason when the rules cannot be worked out for this sheet (a
+    figure too large for the column); the screens then mark the calculated lines without
+    an explanation and show the reason once."""
+    rules: RuleSet | None = None
+    results: dict = field(default_factory=dict)
+    lines_of: dict = field(default_factory=dict)     # item id -> [SheetLine]
+    error: str = ''
+
+    @property
+    def active(self):
+        return self.rules is not None
+
+    @property
+    def targets(self):
+        if self.rules is None:
+            return frozenset()
+        return frozenset(rule.target_id for rule in self.rules.rules)
+
+    def code(self, item_id):
+        return self.rules.codes.get(item_id, '') if self.rules else ''
+
+    def unit(self, item_id):
+        return self.rules.units.get(item_id, '') if self.rules else ''
+
+    def info_for(self, line):
+        """LineFormula for a stored BOQItem, or None when its item is not computed."""
+        if line.item_master_id not in self.targets:
+            return None
+        own = self.lines_of.get(line.item_master_id, [])
+        if len(own) > 1:
+            return LineFormula(kind=LINE_MULTIPLE,
+                               explanation=multiple_lines_message(self.code(line.item_master_id)))
+        stored = next((s for s in own if s.pk == line.pk), None)
+        result = self.results.get(line.item_master_id)
+        explanation = result.explanation if result else ''
+        computed = result.computed if result else None
+        if stored is not None and stored.overridden:
+            return LineFormula(kind=LINE_OVERRIDDEN, explanation=explanation,
+                               computed=computed, note=stored.override_note)
+        return LineFormula(kind=LINE_CALCULATED, explanation=explanation, computed=computed,
+                           stale=(computed is not None and line.boq_quantity != computed))
+
+    def absent(self):
+        """[(item id, Result or None)] for computed items with no line, in evaluation order:
+        the A1 block ("Calculated items not on this BOQ")."""
+        if self.rules is None:
+            return []
+        return [(rule.target_id, self.results.get(rule.target_id))
+                for rule in self.rules.rules if not self.lines_of.get(rule.target_id)]
+
+
+def formula_view(boq, project_type):
+    """FormulaView for one BOQ. One exists() query with no rules; with rules, that plus
+    load_rules()'s three plus one read of the lines, however many rules exist.
+
+    Built from the same sheet_inputs() the save uses, so an explanation on the screen is
+    the one the next save would record."""
+    prepared = read_formula_rules(project_type)
+    if not prepared.active:
+        return FormulaView()
+    sheet = read_sheet(boq)
+    quantities, lines_of, overrides = sheet_inputs(sheet, prepared.targets)
+    view = FormulaView(rules=prepared.rules, lines_of=lines_of)
+    try:
+        view.results = evaluate(quantities, prepared.rules, overrides)
+    except FormulaError as exc:
+        view.error = str(exc)
+    return view

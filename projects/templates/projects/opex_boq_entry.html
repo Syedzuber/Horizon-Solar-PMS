@@ -38,6 +38,10 @@ authority and both locks on the POST regardless of what this template chose to r
   .boq-chip-empty { background:#fff3cd; color:#7a5b00; }
   .boq-chip-fill  { background:#1a7a4a; color:#fff; }
   mark            { background:#fff3cd; padding:0; }
+  /* B-2b.1 — calculated lines */
+  .boq-chip-calc  { background:#cff4fc; color:#055160; }
+  .boq-chip-ovr   { background:#fff3cd; color:#7a5b00; }
+  .boq-ovr-btn    { font-size:.7rem; padding:0 .35rem; }
   /* B-3a — the ACCB section */
   [x-cloak]       { display:none !important; }
   .accb-card      { border:1px solid #dee2e6; border-radius:.5rem; background:#fff; }
@@ -101,6 +105,12 @@ dashboards load. The picker above stays plain JS and does not depend on it.
     {{ lock_reason }}
   </div>
 {% endif %}
+{% if formula_error %}
+  <div class="alert alert-warning py-2 small" id="boqFormulaError">
+    The calculated lines can't be worked out for this sheet: {{ formula_error }} A save is
+    refused until the line it names is corrected.
+  </div>
+{% endif %}
 
 <form method="post" id="boqForm">
   {% csrf_token %}
@@ -152,7 +162,99 @@ dashboards load. The picker above stays plain JS and does not depend on it.
           <span>This site's BOQ</span>
           <span class="text-muted fw-normal small ms-2" id="boqCount"></span>
         </div>
+        {% if can_edit and formulas_active %}
+          {% comment %}
+          Q7 (B-2b.1): Override and Clear leave this page, so they are disabled while the
+          sheet has unsaved changes, rather than warning: no path loses typed figures.
+          {% endcomment %}
+          <div class="small text-muted px-1 mb-1" id="boqOvrHint" hidden>
+            Save your changes first: Override and Clear work on the saved BOQ.
+          </div>
+        {% endif %}
         <div class="boq-sheet" id="boqSheet"></div>
+
+        {% if calc_multi_rows %}
+          {% comment %}
+          Q9 (Zuber, B-2b.1) — A CALCULATED ITEM ON 2+ LINES IS NOT CALCULATED, so its lines
+          are ordinary lines: editable, removable, no override form. Drawn line by line
+          here, not in the per-item sheet above, which keys rows by catalogue item. Removal
+          is EXPLICIT (the hidden drop_line input is enabled), never by absence, so a page
+          drawn before the item had two lines cannot delete either. Once one line is left,
+          the save that leaves it calculates it again.
+          {% endcomment %}
+          <div class="border-top mt-2 pt-2" id="boqCalcMulti">
+            <div class="small fw-semibold px-1 mb-1">On this BOQ more than once</div>
+            {% for message in calc_multi_messages %}
+              <div class="small text-warning-emphasis px-1 mb-1">{{ message }}</div>
+            {% endfor %}
+            <table class="table table-sm mb-0">
+              <tbody>
+                {% for row in calc_multi_rows %}
+                  <tr id="multiRow{{ row.pk }}">
+                    <td class="boq-muted ps-3" style="width:74px">{{ row.item_master.code }}</td>
+                    <td class="boq-desc">{{ row.description }}</td>
+                    <td class="boq-muted" style="width:60px">{{ row.uom }}</td>
+                    <td style="width:112px">
+                      {% if can_edit %}
+                        <input class="form-control form-control-sm boq-qty" type="number"
+                               min="0" step="any" name="qty_row_{{ row.pk }}"
+                               value="{{ row.boq_quantity|default_if_none:'' }}">
+                        <input type="hidden" name="drop_line" value="{{ row.pk }}" disabled>
+                      {% else %}
+                        <span class="small">{{ row.boq_quantity|default_if_none:"—" }}</span>
+                      {% endif %}
+                    </td>
+                    <td style="width:38px">
+                      {% if can_edit %}
+                        <button type="button" class="btn btn-sm btn-link text-danger p-0"
+                                onclick="boqDropCalcLine({{ row.pk }})"
+                                title="Remove this line">&times;</button>
+                      {% endif %}
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endif %}
+
+        {% if calculated_absent %}
+          {% comment %}
+          A1 (Zuber, B-2b.1) — calculated items whose rule gives 0, so they have no line.
+          Collapsed: with the full rule set most sites will have several. Each says why it
+          is 0, and the designer can put it on with an override (quantity and a note).
+          {% endcomment %}
+          <details class="border-top mt-2 pt-2 px-1" id="boqCalcAbsent">
+            <summary class="small fw-semibold">
+              Calculated items not on this BOQ ({{ calculated_absent|length }})
+            </summary>
+            <table class="table table-sm mb-0 mt-1">
+              <tbody>
+                {% for item in calculated_absent %}
+                  <tr>
+                    <td class="boq-muted" style="width:74px">{{ item.code }}</td>
+                    <td class="boq-desc">
+                      {{ item.description }}
+                      <span class="boq-chip boq-chip-calc">Calculated</span>
+                      {% if item.explanation %}<div class="boq-muted">{{ item.explanation }}</div>{% endif %}
+                      {% if item.stale %}<div class="boq-muted text-warning-emphasis">{{ item.stale }}</div>{% endif %}
+                    </td>
+                    <td class="boq-muted" style="width:60px">{{ item.unit }}</td>
+                    <td style="width:112px">
+                      {% if can_edit %}
+                        <button type="button" class="btn btn-outline-secondary boq-ovr-btn" data-ovr
+                                data-bs-toggle="modal" data-bs-target="#boqOverrideModal"
+                                data-master="{{ item.master_id }}" data-code="{{ item.code }}"
+                                data-desc="{{ item.description }}" data-expl="{{ item.explanation }}"
+                                data-qty="">Override</button>
+                      {% endif %}
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </details>
+        {% endif %}
 
         {% if added_off %}
           {% comment %}
@@ -259,6 +361,56 @@ dashboards load. The picker above stays plain JS and does not depend on it.
     </div>
   </div>
 </form>
+
+{% if can_edit and formulas_active %}
+  {% comment %}
+  B-2b.1 — THE OVERRIDE FORMS, OUTSIDE boqForm because HTML forbids nested forms. Both post
+  to opex_boq_override, which re-checks the designer, both locks and that the line is
+  calculated. Clear is one shared form: each row's Clear button names it with form= and
+  carries its own item_id. Override is one modal, filled from the button that opened it:
+  `item_id` for a line, `master_id` for a calculated item with no line (A1); the unused one
+  is disabled so it is not posted.
+  {% endcomment %}
+  <form method="post" action="{% url 'opex_boq_override' project.project_id %}" id="boqOverrideClear">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="clear">
+  </form>
+  <div class="modal fade" id="boqOverrideModal" tabindex="-1" aria-labelledby="boqOverrideTitle" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <form method="post" action="{% url 'opex_boq_override' project.project_id %}" id="boqOverrideForm">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="set">
+          <input type="hidden" name="item_id" id="boqOvrItem" disabled>
+          <input type="hidden" name="master_id" id="boqOvrMaster" disabled>
+          <div class="modal-header">
+            <h6 class="modal-title" id="boqOverrideTitle">Override a calculated line</h6>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <div class="small mb-1"><code id="boqOvrCode"></code> <span id="boqOvrDesc"></span></div>
+            <div class="small text-muted mb-3" id="boqOvrExpl"></div>
+            <label class="form-label small mb-1" for="boqOvrQty">Quantity</label>
+            <input class="form-control form-control-sm mb-2" id="boqOvrQty" name="quantity"
+                   type="text" inputmode="decimal" required>
+            <label class="form-label small mb-1" for="boqOvrNote">
+              Note <span class="text-muted">(required: why the calculated figure is wrong for this site)</span>
+            </label>
+            <textarea class="form-control form-control-sm" id="boqOvrNote" name="note" rows="2" required></textarea>
+            <div class="small text-muted mt-2">
+              The line keeps this figure and stops recalculating until the override is
+              cleared. Lines calculated from it follow it.
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button type="submit" class="btn btn-sm text-white" style="background-color:#1a7a4a;">Save override</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+{% endif %}
 
 {% comment %}
 B-3a — CONFIGURED ACCBs. OUTSIDE boqForm on purpose: HTML forbids nested forms, and each
@@ -568,14 +720,21 @@ with unsaved edits, so nothing typed is lost without a warning.
   });
 
   // The draft: master id -> quantity string. Seeded from what is saved.
+  // B-2b.1: CALC holds what a calculated row shows (its rule in words, the override and
+  // note, and the line id the override endpoint takes). Only calculated rows carry it.
   var chosen = {};
   var order  = [];
+  var CALC   = {};
   JSON.parse(document.getElementById('boqAddedData').textContent).forEach(function (row) {
     chosen[row.id] = row.qty;
     order.push(row.id);
+    if (row.calc) { CALC[row.id] = row; }
   });
 
   var offRows = {{ added_off_count }};
+  // Q9: the lines of a calculated item that is on the BOQ more than once, drawn by the
+  // server in their own block.
+  var multiRows = {{ calc_multi_rows|length }};
   // B-3a: configured ACCB lines are drawn by the ACCB section, not this sheet, but they
   // are lines on this BOQ, so the item count includes them.
   var accbRows = {{ accb_count }};
@@ -619,6 +778,9 @@ with unsaved edits, so nothing typed is lost without a warning.
 
     var matches = CATALOGUE.filter(function (item) {
       if (item.id in chosen) { return false; }          // already on the sheet
+      // B-2b.1: a calculated item reaches the sheet through its rule (or an override),
+      // never by hand, so it is not offered. The server ignores one posted anyway.
+      if (item.calc) { return false; }
       if (cat !== '__all' && item.cat !== cat) { return false; }
       if (!query) { return true; }
       return item.desc.toLowerCase().indexOf(lower) >= 0 ||
@@ -645,13 +807,62 @@ with unsaved edits, so nothing typed is lost without a warning.
     elResults.innerHTML = html;
   }
 
+  // B-2b.1 — the Override (and, when set, Clear) buttons under a calculated row's figure.
+  // Override opens the one modal outside boqForm; Clear submits the one clear form outside
+  // it through form=, carrying this line's id.
+  function overrideControls(item, calc) {
+    var out = '<div class="d-flex flex-wrap gap-1 mt-1">' +
+      '<button type="button" class="btn btn-outline-secondary boq-ovr-btn" data-ovr ' +
+      'data-bs-toggle="modal" data-bs-target="#boqOverrideModal" data-line="' + calc.line +
+      '" data-code="' + esc(item.code) + '" data-desc="' + esc(item.desc) +
+      '" data-expl="' + esc(calc.expl || '') + '" data-qty="' + esc(chosen[item.id] || '') +
+      '">' + (calc.ovr ? 'Change' : 'Override') + '</button>';
+    if (calc.ovr) {
+      out += '<button type="submit" form="boqOverrideClear" name="item_id" value="' +
+             calc.line + '" class="btn btn-outline-danger boq-ovr-btn" data-ovr>Clear</button>';
+    }
+    return out + '</div>';
+  }
+
+  // A CALCULATED ROW IS READ-ONLY: its figure as text, the rule in plain words under the
+  // description, and the override controls. It keeps its hidden `item` input but sends NO
+  // qty_ field: the server ignores a calculated item's posted quantity, and if the rule is
+  // retired between this page and the save, an absent quantity means "unchanged" and the
+  // `item` keeps the line out of the delete loop.
+  function calcRow(item, calc) {
+    return '<tr><td class="boq-muted ps-3" style="width:74px">' + esc(item.code) +
+      '</td><td class="boq-desc">' + esc(item.desc) +
+      ' <span class="boq-chip boq-chip-calc">Calculated</span>' +
+      (calc.ovr ? ' <span class="boq-chip boq-chip-ovr">Overridden</span>' : '') +
+      (calc.expl ? '<div class="boq-muted">' + esc(calc.expl) + '</div>' : '') +
+      (calc.ovr ? '<div class="boq-muted">Note: ' + esc(calc.note) + '</div>' : '') +
+      (calc.stale ? '<div class="boq-muted text-warning-emphasis">' + esc(calc.stale) +
+                    '</div>' : '') +
+      '</td><td class="boq-muted" style="width:60px">' + esc(item.unit) + '</td>' +
+      '<td style="width:112px"><span class="small fw-semibold">' +
+      esc(chosen[item.id] || '—') + '</span>' +
+      (CAN_EDIT ? '<input type="hidden" name="item" value="' + item.id + '">' +
+                  overrideControls(item, calc) : '') +
+      '</td><td style="width:38px"></td></tr>';
+  }
+
+  // Q7: Override and Clear leave the page, so they are off while anything is unsaved.
+  function syncOverrides() {
+    document.querySelectorAll('[data-ovr]').forEach(function (button) {
+      button.disabled = dirty;
+      button.title = dirty ? 'Save your changes first' : '';
+    });
+    var hint = document.getElementById('boqOvrHint');
+    if (hint) { hint.hidden = !dirty; }
+  }
+
   function renderSheet() {
-    var total = order.length + offRows + accbRows;
+    var total = order.length + offRows + accbRows + multiRows;
     elCount.textContent = total + ' item' + (total === 1 ? '' : 's');
     if (elTotal) { elTotal.textContent = total; }
 
     if (!order.length) {
-      elSheet.innerHTML = (offRows || accbRows)
+      elSheet.innerHTML = (offRows || accbRows || multiRows)
         ? '<div class="p-3 boq-muted text-center">No catalogue items yet — ' +
           'search on the left and add what this site needs.</div>'
         : '<div class="p-4 text-center boq-muted">Nothing on this BOQ yet.<br>' +
@@ -676,6 +887,10 @@ with unsaved edits, so nothing typed is lost without a warning.
       html += '<tr><td colspan="5" class="boq-cat-hdr fw-semibold py-1 small">' +
               esc(cat) + ' <span class="boq-chip">' + items.length + '</span></td></tr>';
       items.forEach(function (item) {
+        if (CALC[item.id]) {
+          html += calcRow(item, CALC[item.id]);
+          return;
+        }
         html += '<tr><td class="boq-muted ps-3" style="width:74px">' + esc(item.code) +
                 '</td><td class="boq-desc">' + esc(item.desc) +
                 '</td><td class="boq-muted" style="width:60px">' + esc(item.unit) + '</td>' +
@@ -706,6 +921,7 @@ with unsaved edits, so nothing typed is lost without a warning.
     html += '</tbody></table>';
     elSheet.innerHTML = html;
     renderEmptyCats();
+    syncOverrides();
   }
 
   function renderEmptyCats() {
@@ -756,6 +972,21 @@ with unsaved edits, so nothing typed is lost without a warning.
     renderSheet();
   };
 
+  // Q9: removing one line of a calculated item that is on the BOQ more than once. The
+  // removal is EXPLICIT: the row's hidden drop_line input is enabled and its quantity is
+  // not posted. Hidden rather than detached, so reloading without saving undoes it.
+  window.boqDropCalcLine = function (pk) {
+    var row = document.getElementById('multiRow' + pk);
+    if (!row) { return; }
+    row.querySelectorAll('input').forEach(function (input) {
+      input.disabled = input.name !== 'drop_line';
+    });
+    row.style.display = 'none';
+    multiRows -= 1;
+    dirty = true;
+    renderSheet();
+  };
+
   window.boqSetAction = function (action) {
     document.getElementById('boqAction').value = action;
     dirty = false;   // we are submitting; the unload guard must not fire
@@ -764,7 +995,8 @@ with unsaved edits, so nothing typed is lost without a warning.
   if (CAN_EDIT) {
     elCat.innerHTML = '<option value="__all">All categories</option>' +
       CATS.map(function (c) {
-        var n = CATALOGUE.filter(function (i) { return i.cat === c; }).length;
+        // Calculated items are not offered, so they are not counted either.
+        var n = CATALOGUE.filter(function (i) { return i.cat === c && !i.calc; }).length;
         return '<option value="' + esc(c) + '">' + esc(c) + ' (' + n + ')</option>';
       }).join('');
 
@@ -791,7 +1023,42 @@ with unsaved edits, so nothing typed is lost without a warning.
       dirty = true;
       var field = elSheet.querySelector('[data-qtyfield="' + id + '"]');
       if (field) { field.value = target.value; }
+      syncOverrides();
     });
+
+    // Q9: a typed figure on a line of a multi-line calculated item is unsaved work too.
+    var elMulti = document.getElementById('boqCalcMulti');
+    if (elMulti) {
+      elMulti.addEventListener('input', function () {
+        dirty = true;
+        syncOverrides();
+      });
+    }
+
+    // The override modal, filled from the button that opened it: a line (`data-line`) or
+    // a calculated item with no line (`data-master`, A1). textContent, never innerHTML,
+    // for the item's words. The buttons are disabled while anything is unsaved; this is
+    // the backstop.
+    var elModal = document.getElementById('boqOverrideModal');
+    if (elModal) {
+      elModal.addEventListener('show.bs.modal', function (event) {
+        var button = event.relatedTarget;
+        if (!button || dirty) { event.preventDefault(); return; }
+        var line = button.getAttribute('data-line') || '';
+        var master = button.getAttribute('data-master') || '';
+        var fieldItem = document.getElementById('boqOvrItem');
+        var fieldMaster = document.getElementById('boqOvrMaster');
+        fieldItem.value = line;
+        fieldItem.disabled = !line;
+        fieldMaster.value = master;
+        fieldMaster.disabled = !master;
+        document.getElementById('boqOvrCode').textContent = button.getAttribute('data-code') || '';
+        document.getElementById('boqOvrDesc').textContent = button.getAttribute('data-desc') || '';
+        document.getElementById('boqOvrExpl').textContent = button.getAttribute('data-expl') || '';
+        document.getElementById('boqOvrQty').value = button.getAttribute('data-qty') || '';
+        document.getElementById('boqOvrNote').value = '';
+      });
+    }
 
     window.addEventListener('beforeunload', function (event) {
       if (!dirty) { return; }

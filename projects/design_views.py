@@ -144,6 +144,8 @@ from .models import (
 )
 # B-3a — OPX-273 is locked on the Design Head's catalogue screen too.
 from .accb import ACCB_CONFIGURED_CODE, ACCB_CATALOGUE_LOCKED_MESSAGE
+# B-2b.1 — the "Calculated" markers on the package review screen's BOQ panel.
+from .boq_formulas import formula_view
 from .permissions import (
     project_boq_is_group_locked, user_can_edit_project_boq,
     user_can_manage_site_groups, user_can_qc_design, user_can_request_design_change,
@@ -3672,7 +3674,16 @@ def _boq_review_panel(boq):
     accb_lines = accb_rows(boq)
     all_rows = on_rows + off_rows + accb_lines
 
+    # B-2b.1 — calculated lines are marked ("Calculated", "Overridden: note", or "on this
+    # BOQ more than once"), the same markers as boq_correct. One exists() query with no
+    # rules. boq.project is the cached reverse of project.boq, so reading the type costs
+    # nothing.
+    formulas = formula_view(boq, boq.project.project_type)
+    for row in on_rows + off_rows:
+        row.formula_info = formulas.info_for(row)
+
     return {
+        'boq_formula_error':  formulas.error,
         'boq_by_category':    group_boq_rows_by_category(on_rows, category_order),
         'boq_off_catalogue':  group_boq_rows_by_category(off_rows, category_order),
         'boq_accb_rows':      accb_lines,
