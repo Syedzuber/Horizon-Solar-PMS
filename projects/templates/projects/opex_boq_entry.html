@@ -357,6 +357,16 @@ dashboards load. The picker above stays plain JS and does not depend on it.
             changes quantities; it never removes anything.
           </span>
         </div>
+        {% if copy_offered %}
+          {% comment %}B-4 — a link, like the upload's: the copy has its own choose/preview
+          screen. Offered only while this BOQ is empty (ruling 32).{% endcomment %}
+          <div class="small mt-1" id="boqCopyLink">
+            <a href="{% url 'opex_boq_copy' project.project_id %}">Copy from another site</a>
+            <span class="text-muted">
+              — fill this empty BOQ from another RESCO site's, then adjust it here.
+            </span>
+          </div>
+        {% endif %}
       {% endif %}
     </div>
   </div>
@@ -571,6 +581,43 @@ with unsaved edits, so nothing typed is lost without a warning.
     {% endif %}
   {% endif %}
 </div>
+
+{% if clear_offered %}
+  {% comment %}
+  B-4 — Clear BOQ. ITS OWN FORM, OUTSIDE boqForm (HTML forbids nesting), posting to
+  opex_boq_clear. Confirmed in the page by typing the site code, never a browser dialog;
+  the server compares the typed code, so the button being enabled is only a convenience.
+  Offered only to the designer while the BOQ is editable and nothing on it is ordered.
+  {% endcomment %}
+  <details class="boq-panel p-2 mt-3" id="boqClear">
+    <summary class="small text-danger">Clear BOQ</summary>
+    <form method="post" action="{% url 'opex_boq_clear' project.project_id %}" class="mt-2">
+      {% csrf_token %}
+      <p class="small mb-2">
+        Removes every line on this BOQ, with its ACCBs and overrides. Reviewer corrections
+        stay in the history, and removed ACCB numbers are not reused.
+        Type <strong>{{ project.project_id }}</strong> to confirm.
+      </p>
+      <div class="d-flex align-items-center gap-2">
+        <input type="text" name="confirm_code" id="boqClearCode" autocomplete="off"
+               class="form-control form-control-sm" style="max-width:220px;"
+               data-site-code="{{ project.project_id }}">
+        <button type="submit" class="btn btn-sm btn-outline-danger" id="boqClearButton" disabled>
+          Clear BOQ
+        </button>
+      </div>
+    </form>
+  </details>
+  <script>
+  (function () {
+    var input = document.getElementById('boqClearCode');
+    var button = document.getElementById('boqClearButton');
+    input.addEventListener('input', function () {
+      button.disabled = input.value.trim().toUpperCase() !== input.dataset.siteCode.toUpperCase();
+    });
+  })();
+  </script>
+{% endif %}
 
 {% if can_edit %}
 <script>

@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import uuid as _uuid
+from collections import Counter
 from dataclasses import replace as dataclass_replace
 from datetime import date, timedelta, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -17,7 +18,7 @@ from django.db.models import (
     Prefetch, Q, Subquery, Sum, Value, When,
 )
 from django.db.models.functions import Coalesce
-from django.core.exceptions import PermissionDenied, ValidationError
+from django.core.exceptions import ObjectDoesNotExist, PermissionDenied, ValidationError
 from django.http import Http404, HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from django.urls import reverse
@@ -121,6 +122,8 @@ from .models import (
     FORMULA_SOURCE_OVERRIDE_CLEARED, FORMULA_SOURCE_OVERRIDE_SET, FORMULA_SOURCE_PICKER,
     FORMULA_SOURCE_UPLOAD,
 )
+# B-4 - copy a BOQ from another site, and Clear BOQ.
+from .models import FORMULA_SOURCE_COPY, VendorOrderLine
 from .tender_stages import (
     STAGE_LABELS, STUCK_RULES, activated_progress, design_throughput, stage_summary,
     stuck_sites, tender_cards, tender_site_list,
@@ -10215,7 +10218,18 @@ def opex_boq_entry(request, project_id):
     # touch them; they are drawn by the ACCB section below the picker form instead.
     accbs = accb_rows(boq)
 
+    # B-4 — the two entry points, from rows already loaded above (no query). Copy only into
+    # an empty BOQ (ruling 32); Clear only when there is something to clear and no loaded
+    # line has an ordered quantity. The order-line check is the clear POST's, so the page
+    # pays nothing for it.
+    has_lines = bool(added_on or added_off or accbs)
+    copy_offered = can_edit and not has_lines
+    clear_offered = can_edit and has_lines and not any(
+        row.ordered_quantity is not None for row in (*added_on, *added_off, *accbs))
+
     return render(request, 'projects/opex_boq_entry.html', {
+        'copy_offered':     copy_offered,
+        'clear_offered':    clear_offered,
         'accb_lines':       accbs,
         'accb_count':       len(accbs),
         # Read by the Alpine section through json_script. Every value is a validated type,
@@ -11557,6 +11571,43 @@ def _boq_upload_summary(plan, results, removed, multiple):
     }
 
 
+def _boq_upload_write(boq, plan):
+    """Carry out a _boq_upload_plan() on `boq`: create its `add` lines, set its `change`
+    quantities, put back its `readded` mandatory items blank. Writes nothing else.
+
+    THE ONE WRITE LOOP FOR A PLAN, shared by the upload commit and the B-4 copy (Zuber
+    Q9), so a line either path creates is indistinguishable from one the picker creates.
+    The caller holds the transaction and, with rules, the BOQ row lock.
+    """
+    # serial_no comes from the catalogue's sort_order, category/description/uom
+    # from the MASTER — never from the file. The spreadsheet's specification
+    # columns are read past entirely; sheet protection is an affordance and the
+    # server re-derives the truth.
+    for entry in plan['add']:
+        master = entry['master']
+        BOQItem.objects.create(
+            boq=boq, item_master=master, serial_no=master.sort_order,
+            category=master.category, description=master.description,
+            uom=master.unit, boq_quantity=entry['quantity'],
+            is_standard_item=True,
+        )
+    # A BLANK CELL NEVER REACHES THIS LIST (decision 5; see _boq_upload_plan).
+    for item in plan['change']:
+        row = item['row']
+        row.boq_quantity = item['entry']['quantity']
+        row.save(update_fields=['boq_quantity'])
+
+    # Counted separately from `added` rather than folded in, so the number the
+    # result reports is the number the preview promised — a put-back row was
+    # never something the designer asked the file to add.
+    for master in plan['readded']:
+        BOQItem.objects.create(
+            boq=boq, item_master=master, serial_no=master.sort_order,
+            category=master.category, description=master.description,
+            uom=master.unit, boq_quantity=None, is_standard_item=True,
+        )
+
+
 def _boq_upload_apply(project, clean, actor=None):
     """Apply the validated rows. Returns (boq, added, changed, readded, formula).
 
@@ -11602,34 +11653,7 @@ def _boq_upload_apply(project, clean, actor=None):
         # The preview's own plan, read under the lock. No `sheet`: the engine runs for real
         # below, in apply_formulas(), on the sheet these writes leave.
         plan = _boq_upload_plan(existing_on, clean, get_opex_mandatory_items(), formulas)
-
-        # serial_no comes from the catalogue's sort_order, category/description/uom
-        # from the MASTER — never from the file. The spreadsheet's specification
-        # columns are read past entirely; sheet protection is an affordance and the
-        # server re-derives the truth.
-        for entry in plan['add']:
-            master = entry['master']
-            BOQItem.objects.create(
-                boq=boq, item_master=master, serial_no=master.sort_order,
-                category=master.category, description=master.description,
-                uom=master.unit, boq_quantity=entry['quantity'],
-                is_standard_item=True,
-            )
-        # A BLANK CELL NEVER REACHES THIS LIST (decision 5; see _boq_upload_plan).
-        for item in plan['change']:
-            row = item['row']
-            row.boq_quantity = item['entry']['quantity']
-            row.save(update_fields=['boq_quantity'])
-
-        # Counted separately from `added` rather than folded in, so the number the
-        # result reports is the number the preview promised — a put-back row was
-        # never something the designer asked the file to add.
-        for master in plan['readded']:
-            BOQItem.objects.create(
-                boq=boq, item_master=master, serial_no=master.sort_order,
-                category=master.category, description=master.description,
-                uom=master.unit, boq_quantity=None, is_standard_item=True,
-            )
+        _boq_upload_write(boq, plan)
 
         summary = apply_formulas(boq, formulas, source=FORMULA_SOURCE_UPLOAD, actor=actor)
 
@@ -11642,6 +11666,519 @@ def _boq_upload_apply(project, clean, actor=None):
         'summary': summary, 'replaced': upload_summary['replaced'],
         'kept_override': upload_summary['kept_override'],
         'upload_summary': upload_summary}
+
+
+# ---------------------------------------------------------------------------
+# B-4 — Clear BOQ, and fill an empty BOQ by copying another site's
+#
+# RULINGS. 32: a BOQ is copied only into a site whose BOQ is empty, so the designer clears
+# first. F8: only the site's designer clears, and only before submission. Z1: copied lines
+# take the catalogue's current wording. Zuber's B-4 answers (23 Nov) Q1-Q9 are cited inline.
+#
+# THE COPY IS AN UPLOAD WHOSE ROWS COME FROM ANOTHER SITE (Q9). Its catalogue lines are
+# turned into the upload's `clean` rows and run through _boq_upload_plan() and
+# _boq_upload_write(), so wording, the mandatory put-backs and D3 (a calculated item is
+# never written from outside) are the upload's, unchanged. On top: configured ACCBs, lines
+# with no catalogue item, the Tin Shade / Ballast filter and source='copy'.
+#
+# THE SOURCE IS ONLY EVER READ. Every source access below is a SELECT; the activity entry
+# is written on the target.
+# ---------------------------------------------------------------------------
+
+#: OPX-037 Ballast Type Structure and OPX-038 Tin Shade are counted in Nos since B-0b
+#: (Praveen F5). A line on either is copied only as a whole count in Nos (Q5); anything
+#: else is a leftover kWp figure and the structures must be counted for the new site.
+_BOQ_COPY_STRUCTURE_CODES = frozenset({'OPX-037', 'OPX-038'})
+_BOQ_COPY_STRUCTURE_UNIT = 'Nos'
+
+#: Q1 — one message for "no such site" and "a site you cannot open", so the box cannot be
+#: used to find out which site codes exist.
+_BOQ_COPY_NO_SOURCE = 'No RESCO site with the code "{code}" that you can open has BOQ lines to copy.'
+
+_BOQ_COPY_NOT_EMPTY = ('This site\'s BOQ already has lines. A BOQ is copied only into an empty '
+                       'BOQ: clear it first.')
+
+
+def _joined_or_none(line, name):
+    """A reverse one-to-one that select_related() already joined, or None. No query."""
+    try:
+        return getattr(line, name)
+    except ObjectDoesNotExist:
+        return None
+
+
+def _boq_copy_whole_count(line):
+    """True if a Tin Shade / Ballast line is a count that can go to another site (Q5): its
+    unit is Nos and its quantity is whole. A blank quantity in Nos is copied blank, like
+    every other blank line (Zuber: null-quantity lines copy as null)."""
+    if line.uom != _BOQ_COPY_STRUCTURE_UNIT:
+        return False
+    quantity = line.boq_quantity
+    return quantity is None or quantity == quantity.to_integral_value()
+
+
+def _accb_feeder_lists(feeders):
+    """(breakers, ratings) from one stored side, in the shape validate_accb_config() takes
+    from a POST. A malformed entry becomes a blank, which the validator refuses by name."""
+    breakers, ratings = [], []
+    for feeder in feeders or []:
+        feeder = feeder if isinstance(feeder, dict) else {}
+        breakers.append(feeder.get('breaker'))
+        ratings.append(feeder.get('rating'))
+    return breakers, ratings
+
+
+def _boq_copy_source(user, code, target):
+    """(source Project, '') for the typed site code, or (None, the refusal). Reads only.
+
+    The source must be a site the designer can ALREADY open (user_can_view_project_boq,
+    Zuber Q1): this adds no read access. A site that does not exist and one the designer
+    may not open get the same words. Only once the site is readable does the refusal say
+    more (another project type, this site, no lines)."""
+    code = (code or '').strip()
+    if not code:
+        return None, 'Enter the code of the site to copy from.'
+    # project_id is unique but compared case-sensitively by the database; a designer types
+    # "jkrsi048" as often as "JKRSI048". An exact match wins if two differ only by case.
+    candidates = list(Project.objects.filter(project_id__iexact=code, is_deleted=False)[:2])
+    source = next((p for p in candidates if p.project_id == code),
+                  candidates[0] if candidates else None)
+    # Read gate: the designer may copy from a site only if they may already read its BOQ.
+    # Everyone else's sites stay as closed as they are on the BOQ screen itself.
+    if source is None or not user_can_view_project_boq(user, source):
+        return None, _BOQ_COPY_NO_SOURCE.format(code=code)
+    if source.pk == target.pk:
+        return None, 'That is this site. Enter the code of the site to copy from.'
+    if source.project_type != target.project_type:
+        return None, (f'{source.project_id} is a {source.project_type} site. Only another '
+                      f'RESCO site\'s BOQ can be copied here.')
+    try:
+        source_boq = source.boq
+    except BOQ.DoesNotExist:
+        source_boq = None
+    if source_boq is None or not source_boq.items.exists():
+        return None, f'{source.project_id}\'s BOQ has no lines to copy.'
+    return source, ''
+
+
+def _boq_copy_plan(source_boq, target_boq, formulas, *, predict):
+    """What copying `source_boq` into the EMPTY `target_boq` does. THE ONE PLANNING
+    FUNCTION: the preview (predict=True, rules from read_formula_rules) and the commit
+    (predict=False, rules and lock from prepare_formula_save) both call it, so the preview
+    can only promise what the commit does. Writes nothing; the source is only read.
+
+    `target_boq` may be None (no BOQ row yet). The caller has checked it is empty (C4), so
+    the target has no rows for the upload plan to change.
+
+    Each source line goes one of these ways (C3, Q5, Q6, Q8):
+      configured ACCB      re-validated against today's rules (Q8); copied as a new ACCB
+                           numbered from the target's own counter, or skipped and listed
+      no catalogue item    copied with its own text (the only wording it has)
+      not in the picker's  skipped and listed: retired, not a RESCO item (Q6), or a bare
+      catalogue            ACCB line
+      catalogue line       a `clean` row for the upload plan, which writes it with today's
+                           catalogue wording (Z1) or holds it if it is calculated (D3);
+                           unless it is OPX-037/038 and not a whole count in Nos, or its
+                           item is on the source more than once, when it is skipped
+    Overrides never travel (C3); every overridden source line is listed.
+
+    Returns a dict: upload (the _boq_upload_plan dict), off, accbs, accb_master, skipped,
+    overridden, null_quantity, error.
+    """
+    catalogue_by_id = {m.pk: m for m in get_opex_boq_catalogue()}
+    targets = formulas.targets
+    # The whole source sheet in one read, each line with its catalogue row, ACCB
+    # configuration and override joined in (both reverse one-to-ones), so classifying a
+    # line costs no query. Sheet order, so copied ACCBs keep the source's order.
+    lines = list(source_boq.items
+                 .select_related('item_master', 'accb_config', 'formula_override')
+                 .order_by('serial_no', 'pk'))
+
+    # How many times each picker item is on the source, outside the ACCB section. An
+    # ordinary item twice on one sheet cannot be one `clean` row without choosing a figure.
+    per_item = Counter(line.item_master_id for line in lines
+                       if line.item_master_id in catalogue_by_id
+                       and _joined_or_none(line, 'accb_config') is None)
+
+    clean, off, accb_lines, skipped, overridden = [], [], [], [], []
+
+    def skip(line, code, reason):
+        skipped.append({'code': code, 'description': line.description, 'reason': reason})
+
+    for line in lines:
+        master = line.item_master
+        code = master.code if master is not None else ''
+        override = _joined_or_none(line, 'formula_override')
+        if override is not None:
+            overridden.append({'code': code, 'description': line.description,
+                               'note': override.note})
+        config = _joined_or_none(line, 'accb_config')
+        if config is not None:
+            accb_lines.append((line, config))
+            continue
+        if master is None:
+            off.append(line)
+            continue
+        if master.pk not in catalogue_by_id:
+            if master.project_type != 'OPEX':
+                reason = 'not a RESCO catalogue item'
+            elif not master.is_active:
+                reason = 'retired from the catalogue'
+            elif code == ACCB_CONFIGURED_CODE:
+                reason = 'an ACCB line with no configuration; add it in the ACCB section'
+            else:
+                reason = 'not offered by the BOQ picker'
+            skip(line, code, reason)
+            continue
+        # A calculated item goes to the plan whatever its figure: the plan holds it (D3)
+        # and the engine computes it from the target's own lines.
+        if master.pk not in targets:
+            if per_item[master.pk] > 1:
+                skip(line, code, 'on the source BOQ more than once; add it by hand')
+                continue
+            if code in _BOQ_COPY_STRUCTURE_CODES and not _boq_copy_whole_count(line):
+                skip(line, code, 'count the structures on this site')
+                continue
+        clean.append({'index': line.pk, 'code': code, 'master': catalogue_by_id[master.pk],
+                      'quantity': line.boq_quantity})
+
+    # Configured ACCBs in the source's number order, re-validated as a new record (Q8) and
+    # numbered from the target's own counter: numbers are never carried, because a cleared
+    # target may already have used low ones (B-3a.1). The commit's _accb_create() gives the
+    # same numbers, from the same counter, under the lock.
+    accbs = []
+    accb_master = None
+    next_number = max(target_boq.next_accb_number if target_boq is not None else 1, 1)
+    for line, config in sorted(accb_lines, key=lambda pair: pair[1].number):
+        in_breakers, in_ratings = _accb_feeder_lists(config.feeders.get('in')
+                                                     if isinstance(config.feeders, dict) else None)
+        out_breakers, out_ratings = _accb_feeder_lists(config.feeders.get('out')
+                                                       if isinstance(config.feeders, dict) else None)
+        try:
+            valid = validate_accb_config(config.accb_type, 'on' if config.has_spd else '',
+                                         in_breakers, in_ratings, out_breakers, out_ratings)
+        except ValidationError as exc:
+            skipped.append({'code': ACCB_CONFIGURED_CODE,
+                            'description': f'ACCB {config.number}',
+                            'reason': 'fails today\'s ACCB rules: ' + ' '.join(exc.messages)})
+            continue
+        accb_master = accb_master or line.item_master
+        accbs.append({'source_number': config.number, 'config': valid,
+                      'number': next_number, 'description': accb_description(valid)})
+        next_number += 1
+    if accbs and accb_master is None:
+        # The source's ACCB lines lost their catalogue row (SET_NULL); find it the way
+        # opex_boq_accb does. Only reached on damaged data, so the query is rare.
+        accb_master = (BOQItemMaster.objects
+                       .filter(code=ACCB_CONFIGURED_CODE, project_type='OPEX').first())
+        if accb_master is None:
+            for accb in accbs:
+                skipped.append({'code': ACCB_CONFIGURED_CODE,
+                                'description': f'ACCB {accb["source_number"]}',
+                                'reason': f'the ACCB catalogue item {ACCB_CONFIGURED_CODE} '
+                                          f'is missing'})
+            accbs = []
+
+    # The preview predicts the engine on the sheet as the commit will leave it. The copied
+    # ACCB lines are on it (an ACCB line can drive a rule); lines with no catalogue item
+    # never drive one (sheet_inputs), so they are not.
+    sheet = None
+    if predict:
+        sheet = [SheetLine(pk=None, item_master_id=accb_master.pk, boq_quantity=Decimal('1'))
+                 for _accb in accbs]
+    upload = _boq_upload_plan([], clean, get_opex_mandatory_items(), formulas, sheet=sheet)
+
+    null_quantity = (sum(1 for entry in upload['add'] if entry['quantity'] is None)
+                     + sum(1 for line in off if line.boq_quantity is None))
+    return {'upload': upload, 'off': off, 'accbs': accbs, 'accb_master': accb_master,
+            'skipped': skipped, 'overridden': overridden, 'null_quantity': null_quantity,
+            'error': upload['error']}
+
+
+def _boq_copy_has_work(plan):
+    """True if the copy would put at least one line from the source on the target."""
+    return bool(plan['upload']['add'] or plan['off'] or plan['accbs'])
+
+
+def _boq_copy_summary(plan, results, removed, multiple):
+    """What the copy does, in one comparable shape: from the plan and the predicted results
+    on the preview, from the plan and the real results (and real ACCB numbers) on the
+    commit. The two must be equal for the same source, field by field
+    (tests_boq_duplicate pins it), as the upload's A2 summary is."""
+    upload = _boq_upload_summary(plan['upload'], results, removed, multiple)
+    return {
+        'lines':         len(plan['upload']['add']) + len(plan['off']),
+        'added':         upload['added'],
+        'off_catalogue': [line.description for line in plan['off']],
+        'readded':       upload['readded'],
+        'accbs':         [(accb['source_number'], accb['number'], accb['description'])
+                          for accb in plan['accbs']],
+        'calculated':    list(dict.fromkeys(entry['code'] for entry in plan['upload']['held'])),
+        'computed':      sorted((result.item_id, result.computed)
+                                for result in results.values()),
+        'replaced':      upload['replaced'],
+        'removed':       upload['removed'],
+        'skipped':       [(s['code'], s['description'], s['reason']) for s in plan['skipped']],
+        'overridden':    [(o['code'], o['description'], o['note']) for o in plan['overridden']],
+        'null_quantity': plan['null_quantity'],
+    }
+
+
+def _boq_copy_apply(project, source, profile):
+    """Copy `source`'s BOQ into `project`'s, which must be empty. Returns (boq, plan,
+    FormulaSummary). Raises ValidationError, with everything rolled back, if the target is
+    no longer empty, nothing can be copied, or a rule cannot produce its figure (A4).
+
+    ONE TRANSACTION UNDER THE TARGET'S ROW LOCK (C7): the lines, the ACCBs, then the
+    formula engine. The source is only read.
+    """
+    with transaction.atomic():
+        # Created the way opex_boq_accb creates it: on the first write, never on a page load.
+        boq, _created = BOQ.objects.get_or_create(project=project)
+        # Lock the target BOQ row whether or not rules exist (prepare_formula_save locks
+        # only with rules): two copies, or a copy beside a picker save, must not both find
+        # the BOQ empty, and the ACCB numbers below come from this row's counter.
+        boq = BOQ.objects.select_for_update().get(pk=boq.pk)
+        # C4 re-checked under the lock: the page that offered the copy may be stale.
+        if boq.items.exists():
+            raise ValidationError(_BOQ_COPY_NOT_EMPTY)
+
+        formulas = prepare_formula_save(boq, project.project_type)
+        plan = _boq_copy_plan(source.boq, boq, formulas, predict=False)
+        if not _boq_copy_has_work(plan):
+            raise ValidationError(f'Nothing on {source.project_id}\'s BOQ can be copied to '
+                                  f'this site.')
+
+        _boq_upload_write(boq, plan['upload'])
+        # No catalogue item: the line's own text is the only wording it has (C3). Quantity
+        # only; what SCM ordered against the source never travels.
+        for line in plan['off']:
+            BOQItem.objects.create(
+                boq=boq, item_master=None, serial_no=line.serial_no,
+                category=line.category, description=line.description, uom=line.uom,
+                boq_quantity=line.boq_quantity, is_standard_item=line.is_standard_item)
+        # Through the ACCB section's own create, so the number, description and
+        # config_key come from one place. The real number replaces the plan's prediction.
+        for accb in plan['accbs']:
+            created = _accb_create(boq, plan['accb_master'], accb['config'], profile)
+            accb['number'] = created.number
+
+        summary = apply_formulas(boq, formulas, source=FORMULA_SOURCE_COPY, actor=profile)
+    return boq, plan, summary
+
+
+def _boq_copy_skipped_codes(plan):
+    """The codes a copy left behind, for its activity entry: skipped lines and calculated
+    items (computed on the target instead), each once, ACCBs by number."""
+    codes = [s['description'] if s['code'] == ACCB_CONFIGURED_CODE else (s['code'] or s['description'])
+             for s in plan['skipped']]
+    codes.extend(entry['code'] for entry in plan['upload']['held'])
+    return list(dict.fromkeys(codes))
+
+
+def boq_copy_log_text(profile, source, target, lines, accbs, skipped_codes):
+    """'<designer> copied the BOQ from <source> to <target>: N lines, M ACCBs; skipped: …'
+    (C6, the short form), cut to fit ActivityLog.action (255). Module-level so the test can
+    build the longest case."""
+    head = (f'{_accb_actor_name(profile)} copied the BOQ from {source.project_id} to '
+            f'{target.project_id}: {lines} lines, {accbs} ACCBs')
+    if not skipped_codes:
+        return head
+    tail = '; skipped: '
+    room = 255 - len(head) - len(tail)
+    listed = ', '.join(skipped_codes)
+    if len(listed) > room:
+        listed = f'{len(skipped_codes)} items' if room < 12 else listed[:room - 1] + '…'
+    return head + tail + listed
+
+
+def boq_clear_log_text(profile, target, lines, accbs):
+    """'<designer> cleared the BOQ on <target>: N lines, M ACCBs' (C6, the short form)."""
+    return (f'{_accb_actor_name(profile)} cleared the BOQ on {target.project_id}: '
+            f'{lines} lines, {accbs} ACCBs')
+
+
+@login_required
+def opex_boq_copy(request, project_id):
+    """Fill this site's empty OPEX BOQ from another RESCO site's: choose, preview, copy (B-4).
+
+    Access: the site's assigned designer only (the picker's write rule), neither BOQ lock
+    on, and the BOQ empty (ruling 32). The source is any site the designer can already
+    open (Q1). GET shows the site-code box; POST phase=preview plans and shows what would be
+    copied and skipped; POST phase=commit plans again from scratch under the lock and
+    copies. Nothing rides from the preview to the commit except the site code.
+    """
+    project = _active_project(project_id)
+
+    if project.project_type != 'OPEX':
+        raise Http404('A BOQ is copied between RESCO sites only.')
+
+    # Only the site's assigned designer authors its BOQ (user_can_edit_project_boq, the
+    # W-narrow rule the picker, upload and ACCB section use). QC, the Head, PM, SCM and
+    # Admin read BOQs but never fill one.
+    if not user_can_edit_project_boq(request.user, project):
+        return HttpResponseForbidden()
+
+    ctx = {'project': project, 'stage': 'choose', 'source_code': '', 'source_error': ''}
+
+    # The two locks, most final first, in the upload's words: a BOQ committed to a purchase
+    # or handed to design review is not filled by anyone here.
+    if project_boq_is_group_locked(project):
+        ctx.update({'stage': 'locked', 'lock_reason': (
+            'This site is in a locked procurement group. Its BOQ quantities are final and '
+            'can no longer be changed.')})
+        return render(request, 'projects/opex_boq_copy.html', ctx)
+    if project_boq_is_design_locked(project):
+        ctx.update({'stage': 'locked', 'lock_reason': (
+            'This BOQ is marked complete and is with design review, so it cannot be '
+            'changed right now. It reopens if a reviewer sends it back, or if a change '
+            'request is accepted and opens a new attempt.')})
+        return render(request, 'projects/opex_boq_copy.html', ctx)
+
+    try:
+        boq = project.boq
+    except BOQ.DoesNotExist:
+        boq = None
+    # Ruling 32: only into an empty BOQ (C4: no lines; every ACCB is a line). Checked before
+    # either phase, and again under the lock by the commit.
+    if boq is not None and boq.items.exists():
+        ctx.update({'stage': 'not_empty', 'lock_reason': _BOQ_COPY_NOT_EMPTY})
+        return render(request, 'projects/opex_boq_copy.html', ctx)
+
+    phase = request.POST.get('phase') if request.method == 'POST' else None
+    if phase not in ('preview', 'commit'):
+        return render(request, 'projects/opex_boq_copy.html', ctx)
+
+    code = request.POST.get('source_code', '').strip()
+    ctx['source_code'] = code
+    source, error = _boq_copy_source(request.user, code, project)
+    if error:
+        ctx['source_error'] = error
+        return render(request, 'projects/opex_boq_copy.html', ctx)
+    ctx['source'] = source
+
+    if phase == 'preview':
+        # A read: the rules without the lock, and the plan predicts the engine.
+        formulas = read_formula_rules(project.project_type)
+        plan = _boq_copy_plan(source.boq, boq, formulas, predict=True)
+        if plan['error']:
+            ctx['source_error'] = (f'This BOQ can\'t be copied: {plan["error"]} Nothing has '
+                                   f'been changed.')
+        elif not _boq_copy_has_work(plan):
+            ctx['source_error'] = (f'Nothing on {source.project_id}\'s BOQ can be copied to '
+                                   f'this site.')
+            ctx['copy_summary'] = _boq_copy_summary(plan, plan['upload']['results'],
+                                                    plan['upload']['removed'],
+                                                    plan['upload']['multiple'])
+        else:
+            ctx['stage'] = 'preview'
+            ctx['copy_summary'] = _boq_copy_summary(plan, plan['upload']['results'],
+                                                    plan['upload']['removed'],
+                                                    plan['upload']['multiple'])
+        return render(request, 'projects/opex_boq_copy.html', ctx)
+
+    # ---- commit ----
+    profile = request.user.profile
+    try:
+        boq, plan, summary = _boq_copy_apply(project, source, profile)
+    except ValidationError as exc:
+        ctx['source_error'] = ' '.join(exc.messages) + ' Nothing was saved.'
+        return render(request, 'projects/opex_boq_copy.html', ctx)
+
+    copy_summary = _boq_copy_summary(plan, summary.results,
+                                     [change.code for change in summary.removed],
+                                     summary.skipped_multiple)
+    # After the write commits, never inside it — log_activity's own rule. On the target
+    # only: the source is never written, its log included.
+    log_activity(
+        project, profile,
+        boq_copy_log_text(profile, source, project, copy_summary['lines'],
+                          len(copy_summary['accbs']), _boq_copy_skipped_codes(plan)),
+        entity_type='BOQ', entity_id=boq.pk, action_code='boq_copied')
+    _formula_messages(request, summary)
+    ctx.update({'stage': 'result', 'copy_summary': copy_summary})
+    return render(request, 'projects/opex_boq_copy.html', ctx)
+
+
+@login_required
+@require_POST
+def opex_boq_clear(request, project_id):
+    """Remove every line from this site's OPEX BOQ, ACCBs and overrides with them (B-4, F8).
+
+    Access: the site's assigned designer only, while the picker can edit the BOQ (neither
+    lock on; a failed-back or change-request-reopened BOQ counts, Q2). Confirmed by typing
+    the site code. Refused when any line has an ordered quantity or an order line. POST only.
+
+    LINES ONLY, NEVER THE BOQ ROW. Deleting the BOQ would cascade its BOQCorrection rows
+    (the reviewer-corrections metric counts them by BOQ) and lose next_accb_number, which
+    is what keeps a removed ACCB's number retired. Deleting the lines cascades their
+    ACCBConfig and BOQLineOverride rows; corrections and recalculation records keep their
+    copied text with the line set to NULL. The engine does not run (Q4): a constant rule
+    would put lines straight back, and the BOQ must be empty for a copy.
+    """
+    project = _active_project(project_id)
+
+    if project.project_type != 'OPEX':
+        raise Http404('Clear BOQ is for RESCO BOQs only.')
+
+    # Only the site's assigned designer (F8): the picker's W-narrow write rule. QC, the
+    # Head, PM, SCM and Admin never clear a BOQ; a reviewer fails it instead.
+    if not user_can_edit_project_boq(request.user, project):
+        return HttpResponseForbidden()
+
+    back = redirect('opex_boq_entry', project_id=project_id)
+
+    # The two locks, most final first, in the picker's words. The design lock is "submitted
+    # or stamped" (the current attempt's boq_submitted_at).
+    if project_boq_is_group_locked(project):
+        messages.error(request, 'This site is in a locked procurement group — its BOQ '
+                                'quantities are final and can no longer be changed.')
+        return back
+    if project_boq_is_design_locked(project):
+        messages.error(request, 'This BOQ has been marked complete and is with design '
+                                'review — it cannot be cleared until a reviewer sends it '
+                                'back or a change request opens a new attempt.')
+        return back
+
+    typed = request.POST.get('confirm_code', '').strip()
+    if typed.upper() != project.project_id.upper():
+        messages.error(request, f'Type the site code {project.project_id} to confirm. '
+                                f'Nothing was removed.')
+        return back
+
+    try:
+        boq = project.boq
+    except BOQ.DoesNotExist:
+        messages.info(request, 'This BOQ has no lines to clear.')
+        return back
+
+    profile = request.user.profile
+    with transaction.atomic():
+        # Lock the BOQ row so a picker save, an ACCB add or a copy cannot write a line
+        # between the checks below and the delete.
+        boq = BOQ.objects.select_for_update().get(pk=boq.pk)
+        accb_count = boq.accb_configs.count()
+        line_count = boq.items.count() - accb_count
+        if line_count + accb_count == 0:
+            messages.info(request, 'This BOQ has no lines to clear.')
+            return back
+        # C5: a line SCM has ordered against stays. An order line would lose its link to
+        # the BOQ (SET_NULL), and an ordered quantity is a purchase, not a draft.
+        if (boq.items.filter(ordered_quantity__isnull=False).exists()
+                or VendorOrderLine.objects.filter(boq_item__boq=boq).exists()):
+            messages.error(request, 'This BOQ has lines that have been ordered against, so '
+                                    'it cannot be cleared. Nothing was removed.')
+            return back
+        # Lines only — see the docstring. One statement: ACCB configurations and overrides
+        # go with their lines (CASCADE); corrections and recalculations keep their text.
+        boq.items.all().delete()
+
+    # After the delete commits — log_activity's own rule.
+    log_activity(project, profile, boq_clear_log_text(profile, project, line_count, accb_count),
+                 entity_type='BOQ', entity_id=boq.pk, action_code='boq_cleared')
+    messages.success(request, f'BOQ cleared: {line_count} lines and {accb_count} ACCBs '
+                              f'removed. Their numbers are not reused.')
+    return back
 
 
 # ---------------------------------------------------------------------------

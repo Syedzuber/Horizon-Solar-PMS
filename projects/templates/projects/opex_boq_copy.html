@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% comment %}
+B-4 — fill this site's EMPTY OPEX BOQ from another RESCO site's (views.opex_boq_copy).
+
+ITS OWN SCREEN, LIKE THE UPLOAD, for the upload's reasons: a refusal or a preview needs a
+render, and the picker is one big <form> that cannot hold another.
+
+STAGES, driven off `stage`:
+  locked     — a BOQ lock refuses the copy; no form at all
+  not_empty  — ruling 32: the BOQ must be cleared first
+  choose     — the site-code box (and a refusal, when there is one)
+  preview    — what the copy will do, and a Copy control
+  result     — what it did
+
+ONE SUMMARY BLOCK FOR PREVIEW AND RESULT. Both read `copy_summary`, built by
+_boq_copy_summary() from the same plan, so what the designer is promised and what they are
+told happened are the same fields (tests_boq_duplicate pins them equal).
+{% endcomment %}
+{% block title %}Copy BOQ — {{ project.project_id }} — SolarPMS{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-start mb-3">
+  <div>
+    <h5 class="mb-0">Copy a BOQ into {{ project.project_id }}</h5>
+    <div class="text-muted small">
+      {{ project.customer_name }}{% if project.city %} · {{ project.city }}{% endif %}
+      {% if project.program %} · {{ project.program.name }}
+        ({{ project.program.short_tender_code }}){% endif %}
+    </div>
+  </div>
+  <div class="d-flex gap-2">
+    <a href="{% url 'opex_boq_entry' project.project_id %}"
+       class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-arrow-left me-1"></i>BOQ screen
+    </a>
+  </div>
+</div>
+
+{% if source_error %}
+  <div class="alert alert-danger" id="boqCopyError">{{ source_error }}</div>
+{% endif %}
+
+{# =================== STAGE: LOCKED / NOT EMPTY =================== #}
+{% if stage == 'locked' or stage == 'not_empty' %}
+  <div class="alert alert-warning" id="boqCopyRefused">{{ lock_reason }}</div>
+{% endif %}
+
+{# =================== STAGE: CHOOSE =================== #}
+{% if stage == 'choose' %}
+  <div class="card mb-3">
+    <div class="card-body">
+      <h6 class="card-title">Which site's BOQ?</h6>
+      <p class="text-muted small mb-3">
+        Enter the code of a RESCO site whose BOQ you can open. Its lines are copied with
+        today's catalogue wording; that site is not changed. Nothing is copied until you
+        have seen the preview and confirmed it.
+      </p>
+      <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="phase" value="preview">
+        <div class="d-flex align-items-center gap-2">
+          <input type="text" name="source_code" value="{{ source_code }}" required
+                 autocomplete="off" placeholder="Site code"
+                 class="form-control form-control-sm" style="max-width:240px;">
+          <button type="submit" class="btn btn-sm text-white"
+                  style="background-color:#1a7a4a;">Preview</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endif %}
+
+{# =================== SUMMARY (preview and result) =================== #}
+{% comment %}Also drawn under a "nothing can be copied" refusal, so the designer sees why.{% endcomment %}
+{% if copy_summary %}
+  {% with s=copy_summary %}
+  <div class="alert {% if stage == 'result' %}alert-success{% else %}alert-light border{% endif %}" id="boqCopyTotals">
+    <div class="fw-semibold mb-1">
+      {% if stage == 'result' %}Copied from {{ source.project_id }}.{% else %}Copying from {{ source.project_id }}{% endif %}
+    </div>
+    {{ s.lines }} line{{ s.lines|pluralize }} and {{ s.accbs|length }} ACCB{{ s.accbs|length|pluralize }}
+    {% if stage == 'result' %}copied{% else %}will be copied{% endif %}{% if s.null_quantity %},
+    {{ s.null_quantity }} of the lines with a blank quantity, as on {{ source.project_id }}{% endif %}.
+    {% if s.skipped %}{{ s.skipped|length }} skipped.{% endif %}
+  </div>
+
+  {% if s.skipped %}
+    <div class="alert alert-warning small" id="boqCopySkipped">
+      <div class="fw-semibold mb-1">Not copied</div>
+      {% for code, description, reason in s.skipped %}
+        <div>{% if code %}<code>{{ code }}</code> {% endif %}{{ description }} — {{ reason }}</div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% if s.calculated %}
+    <div class="alert alert-info small" id="boqCopyCalculated">
+      <div class="fw-semibold mb-1">Calculated on this site</div>
+      {% for code in s.calculated %}<code>{{ code }}</code>{% if not forloop.last %}, {% endif %}{% endfor %}
+      — not copied: these are worked out from this site's own lines.
+      {% for r in s.replaced %}
+        <div><code>{{ r.code }}</code> {{ source.project_id }} had {{ r.file }}; calculated here: {{ r.calculated }}</div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% if s.overridden %}
+    <div class="alert alert-info small" id="boqCopyOverridden">
+      <div class="fw-semibold mb-1">Overrides not carried</div>
+      {% for code, description, note in s.overridden %}
+        <div><code>{{ code }}</code> {{ description }} — the note on {{ source.project_id }}: “{{ note }}”</div>
+      {% endfor %}
+      An override explains a figure on that site. Set it again here if it still applies.
+    </div>
+  {% endif %}
+
+  {% if s.removed %}
+    <div class="alert alert-info small">
+      <div class="fw-semibold mb-1">Calculated lines that work out to 0</div>
+      {% for code in s.removed %}<div><code>{{ code }}</code></div>{% endfor %}
+    </div>
+  {% endif %}
+
+  {% if s.readded %}
+    <div class="alert alert-info small">
+      <div class="fw-semibold mb-1">Put back blank</div>
+      {% for code in s.readded %}<code>{{ code }}</code>{% if not forloop.last %}, {% endif %}{% endfor %}
+      — marked mandatory in the catalogue. Enter a quantity before marking the BOQ complete.
+    </div>
+  {% endif %}
+
+  {% if s.accbs %}
+    <div class="card mb-3" id="boqCopyAccbs">
+      <div class="card-header py-2 small fw-semibold">ACCBs</div>
+      <div class="card-body p-0">
+        <table class="table table-sm mb-0">
+          <tbody>
+            {% for source_number, number, description in s.accbs %}
+              <tr>
+                <td class="small text-nowrap">ACCB {{ source_number }} → <strong>ACCB {{ number }}</strong></td>
+                <td class="small">{{ description }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  {% endif %}
+
+  {% if s.added or s.off_catalogue %}
+    <div class="small text-muted mb-3" id="boqCopyLines">
+      Lines: {% for code in s.added %}<code>{{ code }}</code>{% if not forloop.last or s.off_catalogue %}, {% endif %}{% endfor %}{% for description in s.off_catalogue %}{{ description }} (no catalogue item){% if not forloop.last %}, {% endif %}{% endfor %}
+    </div>
+  {% endif %}
+  {% endwith %}
+{% endif %}
+
+{# =================== STAGE: PREVIEW — confirm =================== #}
+{% if stage == 'preview' %}
+  <form method="post">
+    {% csrf_token %}
+    <input type="hidden" name="phase" value="commit">
+    <input type="hidden" name="source_code" value="{{ source.project_id }}">
+    <div class="d-flex align-items-center gap-2">
+      <button type="submit" class="btn btn-sm text-white" style="background-color:#1a7a4a;">
+        Copy into {{ project.project_id }}
+      </button>
+      <a href="{% url 'opex_boq_copy' project.project_id %}"
+         class="btn btn-sm btn-outline-secondary">Cancel</a>
+    </div>
+  </form>
+{% endif %}
+
+{# =================== STAGE: RESULT =================== #}
+{% if stage == 'result' %}
+  <a href="{% url 'opex_boq_entry' project.project_id %}" class="btn btn-sm text-white"
+     style="background-color:#1a7a4a;">Back to the BOQ</a>
+{% endif %}
+
+{% endblock %}

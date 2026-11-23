@@ -1766,12 +1766,14 @@ FORMULA_SOURCE_UPLOAD           = 'upload'
 FORMULA_SOURCE_CORRECTION       = 'correction'
 FORMULA_SOURCE_OVERRIDE_SET     = 'override_set'
 FORMULA_SOURCE_OVERRIDE_CLEARED = 'override_cleared'
+FORMULA_SOURCE_COPY             = 'copy'  # B-4: a BOQ filled from another site's (views.opex_boq_copy)
 FORMULA_SOURCE_CHOICES = [
     (FORMULA_SOURCE_PICKER,           'BOQ picker save'),
     (FORMULA_SOURCE_UPLOAD,           'BOQ spreadsheet upload'),
     (FORMULA_SOURCE_CORRECTION,       'Reviewer correction'),
     (FORMULA_SOURCE_OVERRIDE_SET,     'Override set'),
     (FORMULA_SOURCE_OVERRIDE_CLEARED, 'Override cleared'),
+    (FORMULA_SOURCE_COPY,             'BOQ copied from another site'),
 ]
 
 

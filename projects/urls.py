@@ -363,6 +363,12 @@ urlpatterns = [
     # B-2b — opex_boq_override: set or clear the designer's override on one calculated
     # line. The site's assigned designer only, inside the picker's edit window.
     path('projects/<str:project_id>/boq/override/',          views.opex_boq_override,    name='opex_boq_override'),
+    # B-4 — opex_boq_copy: fill an empty BOQ from another RESCO site the designer can open
+    # (choose, preview, copy). The site's assigned designer only, neither BOQ lock on.
+    path('projects/<str:project_id>/boq/copy/',              views.opex_boq_copy,        name='opex_boq_copy'),
+    # B-4 — opex_boq_clear: remove every line from an unsubmitted BOQ, confirmed by typing
+    # the site code. The site's assigned designer only, neither lock on. POST only.
+    path('projects/<str:project_id>/boq/clear/',             views.opex_boq_clear,       name='opex_boq_clear'),
     # SESSION B — the REVIEWER's correction screen, and the only BOQ write path that is
     # exempt from the design lock. It takes permissions.user_can_correct_boq() — verdict
     # authority at either design gate, which structurally excludes the site's own designer
