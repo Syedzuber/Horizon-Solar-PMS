@@ -38,6 +38,7 @@ import io
 import json
 import re
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -577,6 +578,13 @@ class PhoneTestCommandTests(SnapshotWhatsAppBase):
                          ('sent', 'daily_snapshot_pm',
                           f'[TEST] header: image {self.TEST_PATH} | body: '
                           '14 Nov 2026, 8:00 PM IST'))
-        self.assertTrue(A.whatsapp_tested(event))
-        A.set_state(EVENT, 'whatsapp', True, self.admin, 'phone test passed on Zuber phone')
-        self.assertTrue(N.channel_is_active(event, 'whatsapp'))
+        # The phone test above wrote its row at NOW (9 Nov 2026); the 14-day gate in
+        # whatsapp_tested() and set_state() must be read at that same moment, not the
+        # real clock, or this test fails from about 23 Nov 2026.
+        with mock.patch('django.utils.timezone.now', return_value=NOW):
+            self.assertTrue(A.whatsapp_tested(event))
+            A.set_state(EVENT, 'whatsapp', True, self.admin, 'phone test passed on Zuber phone')
+            self.assertTrue(N.channel_is_active(event, 'whatsapp'))
+        # The same row read 30 days after NOW is outside the window: this test depends on
+        # the fixed time above, not on the date it happens to run.
+        self.assertFalse(A.whatsapp_tested(event, now=NOW + timedelta(days=30)))
