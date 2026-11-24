@@ -69,7 +69,8 @@ def rules_data():
 
 
 def all_on(data):
-    """`data` with every rule active (R24/R25 ship switched off)."""
+    """`data` with every rule active. The real file has every rule on since Q3 (R24/R25
+    switched on); kept so these tests do not depend on the file's active flags."""
     for rule in data['rules']:
         rule['active'] = True
     return data
@@ -127,7 +128,7 @@ class RulesFileMixin:
         return out.getvalue()
 
     def load_all_on(self, *args):
-        """--apply (by default) the real file with R24/R25 switched on."""
+        """--apply (by default) the real file with every rule switched on."""
         return self.load(*(args or ('--apply',)),
                          path=self.write_rules(all_on(rules_data()), 'all_on.json'))
 
@@ -302,8 +303,15 @@ class LoaderTests(B2cBase):
     def test_the_dry_run_writes_nothing(self):
         out = self.load()
         self.assertIn('DRY RUN', out)
-        self.assertIn('Summary: rules create 37, off 2; groups create 5', out)
+        self.assertIn('Summary: rules create 39; groups create 5', out)
         self.assertEqual(_rows(), ([], [], [], []))
+
+    def test_every_rule_in_the_file_is_active_including_r24_and_r25(self):
+        # Q3 (Zuber, 24 Nov): R24/R25 switched on; B-2c first shipped them off.
+        rules = {r['key']: r['active'] for r in rules_data()['rules']}
+        self.assertEqual(len(rules), 39)
+        self.assertTrue(all(rules.values()))
+        self.assertTrue(rules['R24'] and rules['R25'])
 
     def test_apply_writes_every_rule_in_the_file(self):
         out = self.load('--apply')
@@ -324,7 +332,7 @@ class LoaderTests(B2cBase):
                     self.assertEqual(_db_definition(rule), _file_definition(entry))
                 else:
                     self.assertIsNone(rule)
-        self.assertIn('Written: 5 group create, 37 create', out)
+        self.assertIn('Written: 5 group create, 39 create', out)
         self.assertEqual(ActivityLog.objects.filter(
             action_code='boq_formula_rules_loaded').count(), 1)
 
@@ -337,7 +345,7 @@ class LoaderTests(B2cBase):
                   if q['sql'].lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))]
         self.assertEqual(writes, [])
         self.assertEqual((_rows(), ActivityLog.objects.count()), (before, logs))
-        self.assertIn('Summary: rules same 37, off 2; groups same 5', out)
+        self.assertIn('Summary: rules same 39; groups same 5', out)
         self.assertIn('Written: nothing (the database already matches the file)', out)
 
     def _refused(self, data=None, contains=''):
@@ -413,10 +421,12 @@ class LoaderTests(B2cBase):
         self.assertEqual(new.multiplier, D('2'))
 
     def test_active_false_in_the_file_switches_a_rule_off(self):
-        self.load_all_on()
+        self.load('--apply')
         self.assertTrue(BOQFormulaRule.objects.filter(target__code='OPX-204',
                                                       is_active=True).exists())
-        out = self.load('--apply')
+        data = rules_data()
+        next(r for r in data['rules'] if r['key'] == 'R24')['active'] = False
+        out = self.load('--apply', path=self.write_rules(data, 'r24_off.json'))
         self.assertIn('switch off R24', out)
         self.assertFalse(BOQFormulaRule.objects.filter(target__code='OPX-204',
                                                        is_active=True).exists())
@@ -706,7 +716,7 @@ class AllRulesScreenQueryTests(RulesFileMixin, DisplayBase):
                          {k: v + WITH_RULES_EXTRA for k, v in SCREEN_BASELINE.items()})
 
 
-#: B-2c, measured with the file's 37 active rules on this fixture, a save in which no
+#: B-2c, measured with the file's 39 active rules on this fixture, a save in which no
 #: calculated line changes (the measured call is the second, identical one). Each POST adds
 #: the exists() gate, the BOQ lock, load_rules()'s three and apply_formulas()'s read of the
 #: sheet; a landing page adds the screens' five. Fixed whatever the number of rules or

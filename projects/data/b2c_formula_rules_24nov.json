@@ -1,5 +1,5 @@
 {
-  "about": "B-2c (24 Nov 2026): Praveen's Master BOQ Excel formulas (Master_BOQ.xlsx, Sheet1, column E) as BOQ formula rules, with only his ruled corrections: the 10 kW inverter counts in every per-inverter rule (F4-14); R20 counts DCDBs and every ACDB (F4-15); the 100 mm fittings come from the 100 mm pipe (G2); packs, pieces and metres round up (F4-17); at least 1 only when the drivers are above 0 (G3). THIS FILE IS THE SOURCE OF TRUTH: load_formula_rules --apply makes the active rules match it, including switching back on a rule switched off with --deactivate. R24 and R25 are loaded switched off (active false) until the Tin Shade and Ballast lines are re-counted in Nos (fix_tin_shade_ballast --apply-counts); set them to true and --apply again then.",
+  "about": "B-2c (24 Nov 2026): Praveen's Master BOQ Excel formulas (Master_BOQ.xlsx, Sheet1, column E) as BOQ formula rules, with only his ruled corrections: the 10 kW inverter counts in every per-inverter rule (F4-14); R20 counts DCDBs and every ACDB (F4-15); the 100 mm fittings come from the 100 mm pipe (G2); packs, pieces and metres round up (F4-17); at least 1 only when the drivers are above 0 (G3). THIS FILE IS THE SOURCE OF TRUTH: load_formula_rules --apply makes the active rules match it, including switching back on a rule switched off with --deactivate. R24 and R25 are active (Zuber, Q3, 24 Nov): INC work Tin Shade / Ballast follows the Tin Shade and Ballast counts in Nos, which fix_tin_shade_ballast --apply-counts writes.",
   "groups": [
     {"name": "all inverters", "label": "inverters",
      "members": ["OPX-008", "OPX-009", "OPX-010", "OPX-011", "OPX-012", "OPX-013", "OPX-014",
@@ -264,13 +264,13 @@
      "summary": "INC work Tin Shade: 0.64 kWp per Tin Shade structure",
      "drivers": [{"item": "OPX-038", "unit": "Nos", "label": "Tin Shade structures"}],
      "multiplier": "0.64", "divisor": "1", "constant": "0", "rounding": "none",
-     "floor_one_when_driven": false, "active": false,
+     "floor_one_when_driven": false, "active": true,
      "excel": {"row": 239, "formula": "=E59*0.64"}},
     {"key": "R25", "target": "OPX-205", "unit": "KWp",
      "summary": "INC work Ballast: 0.62 kWp per Ballast structure",
      "drivers": [{"item": "OPX-037", "unit": "Nos", "label": "Ballast structures"}],
      "multiplier": "0.62", "divisor": "1", "constant": "0", "rounding": "none",
-     "floor_one_when_driven": false, "active": false,
+     "floor_one_when_driven": false, "active": true,
      "excel": {"row": 240, "formula": "=E58*0.62"}}
   ]
 }
