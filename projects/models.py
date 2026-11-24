@@ -1954,6 +1954,225 @@ class PaymentMilestone(models.Model):
     def __str__(self):
         return f"{self.project.project_id} — {self.milestone_name}"
 
+
+class PaymentReceipt(models.Model):
+    """ONE RECORD PER CLIENT PAYMENT RECEIVED AGAINST A MILESTONE (FIN-M-B5-2, FR1-FR3).
+
+    BD (M1 only) or the PM side records a receipt; another Finance user confirms it against
+    the bank (FR2, FR11). Only confirmed money counts; recorded-but-unconfirmed is shown
+    apart. projects/receipts.py is the ONLY code that creates or changes a row — no save()
+    override, no signal — and every status move writes one StatusTransition
+    (subject_type 'payment_receipt') and one ActivityLog line there.
+
+    NOTHING IS EDITED AFTER IT IS WRITTEN (D3). The figures are fixed at recording; a wrong
+    one is rejected by Finance and a corrected receipt is a NEW row (FR19). The one
+    exception is a legacy "amount needed" row, whose figures Finance types once from the
+    bank statement (D2) — that is filling a blank, not changing a figure.
+
+    NOT A WRITER OF PaymentMilestone (D11). Until FIN-M-B5-5 joins the two money paths, a
+    receipt never moves the milestone's status, amount_received or received_date.
+
+    The proof file is NOT a FileField: private files live in the Supabase delivery bucket
+    and the row records bucket and path (the TenderDocument precedent), written only from
+    receipt_storage.store_receipt_proof()'s return.
+    """
+
+    RECORDED      = 'recorded'
+    QUERIED       = 'queried'
+    CONFIRMED     = 'confirmed'
+    REJECTED      = 'rejected'
+    # FR16: an old receipt with no amount, created only by FIN-M-B5-7's migration command.
+    # The one status in which amount, date and mode may be blank (database rule below).
+    AMOUNT_NEEDED = 'amount_needed'
+    STATUS_CHOICES = [
+        (RECORDED,      'Recorded'),
+        (QUERIED,       'Queried'),
+        (CONFIRMED,     'Confirmed'),
+        (REJECTED,      'Rejected'),
+        (AMOUNT_NEEDED, 'Amount needed'),
+    ]
+
+    CASH          = 'cash'
+    UPI           = 'upi'
+    BANK_TRANSFER = 'bank_transfer'
+    CHEQUE        = 'cheque'
+    OTHER         = 'other'
+    MODE_CHOICES = [
+        (CASH,          'Cash'),
+        (UPI,           'UPI'),
+        (BANK_TRANSFER, 'NEFT/RTGS/IMPS'),
+        (CHEQUE,        'Cheque'),
+        (OTHER,         'Other'),
+    ]
+
+    ENTERED  = 'entered'
+    MIGRATED = 'migrated'
+    SOURCE_CHOICES = [(ENTERED, 'Entered'), (MIGRATED, 'Migrated')]
+
+    milestone = models.ForeignKey(
+        PaymentMilestone, on_delete=models.PROTECT, related_name='receipts',
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, db_index=True)
+    # Same precision as PaymentMilestone.amount, so totals compare without rounding.
+    amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)  # blank only while amount_needed
+    date_received = models.DateField(null=True, blank=True)  # the typed day the money arrived (FR13); blank only while amount_needed
+    mode = models.CharField(max_length=20, choices=MODE_CHOICES, blank=True, default='')  # '' only while amount_needed
+    reference = models.CharField(max_length=100, blank=True, default='')  # UTR / cheque number; optional for every mode (D9)
+    note = models.TextField(blank=True, default='')  # required when mode is Other (D9), checked by the writer
+
+    # Proof file (FR17), optional. Bucket and path, never a URL; '' when no proof.
+    proof_bucket       = models.CharField(max_length=100, blank=True, default='')  # bucket at upload time; links are signed here, never in today's setting
+    proof_path         = models.CharField(max_length=500, blank=True, default='')  # receipt_proofs/<project pk>/<uuid>.<ext>; unique when set (constraint below)
+    proof_name         = models.CharField(max_length=255, blank=True, default='')  # as uploaded; never used in the path and never written to a log line
+    proof_content_type = models.CharField(max_length=100, blank=True, default='')
+    proof_size         = models.PositiveIntegerField(null=True, blank=True)  # bytes
+
+    source = models.CharField(max_length=10, choices=SOURCE_CHOICES, default=ENTERED)  # 'migrated' only from FIN-M-B5-7's command (FR16)
+
+    # Empty only on a migrated row whose original recorder cannot be recovered (Q8); the
+    # database rule payment_receipt_recorder_unless_migrated enforces it.
+    recorded_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='payment_receipts_recorded',
+    )
+    # default=, not auto_now_add=: FIN-M-B5-7 must be able to carry an old receipt's
+    # original time, and auto_now_add cannot be set explicitly (the StatusTransition
+    # occurred_at precedent).
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    # D2: the Finance user who typed a legacy row's figures. FR11 — they may not confirm it.
+    completed_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='payment_receipts_completed',
+    )
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    # Empty on a confirmed MIGRATED row: shown as "migrated — entered by Finance before
+    # 17 Nov", never as a person (FR16).
+    confirmed_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='payment_receipts_confirmed',
+    )
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    overpayment_note = models.TextField(blank=True, default='')  # FR20: why Finance confirmed beyond the agreed amount
+
+    rejected_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='payment_receipts_rejected',
+    )
+    rejected_at = models.DateTimeField(null=True, blank=True)
+    reject_reason = models.TextField(blank=True, default='')
+
+    class Meta:
+        ordering = ['-recorded_at']
+        constraints = [
+            # A receipt of zero or less is not money received.
+            models.CheckConstraint(
+                condition=models.Q(amount__isnull=True) | models.Q(amount__gt=0),
+                name='payment_receipt_amount_positive',
+            ),
+            # FR3: no receipt without amount, date and mode — except a legacy row that is
+            # waiting for Finance to type them (D1).
+            models.CheckConstraint(
+                condition=(models.Q(status='amount_needed')
+                           | (models.Q(amount__isnull=False)
+                              & models.Q(date_received__isnull=False)
+                              & ~models.Q(mode=''))),
+                name='payment_receipt_figures_unless_amount_needed',
+            ),
+            # A confirmation is stamped; its confirmer is a person unless the row was
+            # migrated (FR16).
+            models.CheckConstraint(
+                condition=(~models.Q(status='confirmed')
+                           | (models.Q(confirmed_at__isnull=False)
+                              & (models.Q(confirmed_by__isnull=False)
+                                 | models.Q(source='migrated')))),
+                name='payment_receipt_confirmed_stamped',
+            ),
+            # FR19: a rejection says why, and who.
+            models.CheckConstraint(
+                condition=(~models.Q(status='rejected')
+                           | (models.Q(rejected_at__isnull=False)
+                              & models.Q(rejected_by__isnull=False)
+                              & ~models.Q(reject_reason=''))),
+                name='payment_receipt_rejected_has_reason',
+            ),
+            # Q8: every entered receipt names its recorder.
+            models.CheckConstraint(
+                condition=models.Q(recorded_by__isnull=False) | models.Q(source='migrated'),
+                name='payment_receipt_recorder_unless_migrated',
+            ),
+            # Partial: a plain unique on a blank-allowed column would refuse the second
+            # receipt that has no proof.
+            models.UniqueConstraint(
+                fields=['proof_path'], condition=~models.Q(proof_path=''),
+                name='payment_receipt_proof_path_unique',
+            ),
+        ]
+
+    def __str__(self):
+        return f"Receipt {self.pk} ({self.status}) on milestone {self.milestone_id}"
+
+
+class PaymentReceiptQuery(models.Model):
+    """FINANCE ASKS, THE RECORDER ANSWERS (FR19) — PaymentRequestHold's shape.
+
+    One row per query, never edited after it is written: `reason` and `raised_by` at
+    creation; `answer`, `answered_by` and `answered_at` once, together. A receipt may be
+    queried more than once; each query is a new row, so the whole exchange stays readable.
+
+    A REJECTION LEAVES AN OPEN QUERY OPEN (ruling Q5, the hold precedent): it was
+    overruled, not answered, and marking it answered would put words in the recorder's
+    mouth. So "open" means answered_at IS NULL *and* the receipt is still `queried` —
+    receipts.open_receipt_queries() is the one reader, and any later counter must use it.
+
+    Not a StatusTransition subject: the receipt's own move (recorded -> queried -> recorded)
+    is recorded against the receipt, and recording the query too would count one event twice.
+    """
+
+    receipt = models.ForeignKey(
+        PaymentReceipt, on_delete=models.PROTECT, related_name='queries',
+    )
+    reason = models.TextField()  # required (constraint below): a query with no reason gives the recorder nothing to answer
+    raised_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='payment_receipt_queries_raised',
+    )
+    raised_at = models.DateTimeField(default=timezone.now)
+
+    answer = models.TextField(blank=True, default='')  # text only (D3): never changes the figures
+    answered_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='payment_receipt_queries_answered',
+    )
+    answered_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-raised_at']
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(reason=''),
+                name='payment_receipt_query_needs_reason',
+            ),
+            # An answer is a whole event or none of it: all three set, or all three blank.
+            models.CheckConstraint(
+                condition=((models.Q(answer='') & models.Q(answered_by__isnull=True)
+                            & models.Q(answered_at__isnull=True))
+                           | (~models.Q(answer='') & models.Q(answered_by__isnull=False)
+                              & models.Q(answered_at__isnull=False))),
+                name='payment_receipt_answer_needs_answerer',
+            ),
+            # At most one unanswered query per receipt (the hold's partial index shape).
+            models.UniqueConstraint(
+                fields=['receipt'], condition=models.Q(answered_at__isnull=True),
+                name='uniq_open_query_per_payment_receipt',
+            ),
+        ]
+
+    def __str__(self):
+        state = 'answered' if self.answered_at else 'unanswered'
+        return f"Query ({state}) on receipt {self.receipt_id}"
+
+
 class TaskAttachment(models.Model):
     """File (document or photo) attached to a specific task. Stored in Supabase; soft-deleted here."""
 
@@ -3055,6 +3274,10 @@ SUBJECT_PAYMENT_REQUEST   = 'payment_request'
 # every request status move writes one row there. ApprovalStep is NOT a subject: a step's
 # timestamps live on its own row and are never cleared, so its history needs no ledger.
 SUBJECT_APPROVAL_REQUEST  = 'approval_request'
+# The tenth, added by FIN-M-B5-2 (migration 0159). receipts.py is its only writer; every
+# PaymentReceipt status move writes one row there. PaymentReceiptQuery is NOT a subject,
+# for the reason PaymentRequestHold is not: its move is recorded against the receipt.
+SUBJECT_PAYMENT_RECEIPT   = 'payment_receipt'
 
 SUBJECT_TYPE_CHOICES = [
     (SUBJECT_PROJECT,           'Project'),
@@ -3066,6 +3289,7 @@ SUBJECT_TYPE_CHOICES = [
     (SUBJECT_DESIGN_ASSIGNMENT, 'Design Assignment'),
     (SUBJECT_PAYMENT_REQUEST,   'Payment Request'),
     (SUBJECT_APPROVAL_REQUEST,  'Approval Request'),
+    (SUBJECT_PAYMENT_RECEIPT,   'Payment Receipt'),
 ]
 
 # Reason vocabulary — module-level constants per R-10, NOT a lookup table and

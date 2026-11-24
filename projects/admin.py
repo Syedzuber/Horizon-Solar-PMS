@@ -25,6 +25,7 @@ from .models import (
     ScheduleBlock, ScheduleBlockTask, log_activity,
     BOQItemGroup, BOQItemGroupMember, BOQFormulaRule, BOQFormulaDriver,
     BOQLineOverride, BOQRecalculation,
+    PaymentReceipt, PaymentReceiptQuery,
 )
 from .forms import check_typed_date
 from .attendance import VOID_NOTE_REQUIRED, AttendanceRefused, void_attendance
@@ -1343,3 +1344,23 @@ class BOQRecalculationAdmin(_ApprovalRecordAdmin):
     search_fields = ['item_code', 'boq__project__project_id']
     # Joined so the changelist does not query once per row for the BOQ and the person.
     list_select_related = ['boq__project', 'actor__user']
+
+
+# FIN-M-B5-2 (D12) — client payment receipts and their queries. View-only: no add, change
+# or delete, so nothing bypasses projects/receipts.py, the only writer. `status` is among
+# the read-only fields, as tests_status_transition requires of every ledger subject.
+@admin.register(PaymentReceipt)
+class PaymentReceiptAdmin(_ApprovalRecordAdmin):
+    list_display = ['pk', 'milestone', 'status', 'amount', 'date_received', 'mode',
+                    'source', 'recorded_by', 'recorded_at', 'confirmed_by']
+    list_filter  = ['status', 'mode', 'source']
+    search_fields = ['milestone__project__project_id', 'reference']
+    # Joined so the changelist does not query once per row for the site and the people.
+    list_select_related = ['milestone__project', 'recorded_by__user', 'confirmed_by__user']
+
+
+@admin.register(PaymentReceiptQuery)
+class PaymentReceiptQueryAdmin(_ApprovalRecordAdmin):
+    list_display = ['pk', 'receipt', 'raised_by', 'raised_at', 'answered_by', 'answered_at']
+    # Joined so the changelist does not query once per row for the receipt and the people.
+    list_select_related = ['receipt', 'raised_by__user', 'answered_by__user']

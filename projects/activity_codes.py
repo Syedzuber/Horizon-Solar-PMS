@@ -28,6 +28,13 @@ MONEY_ACTIVITY_CODES = frozenset({
     'milestone_amount_received',  # views: amount received / variance reason (FIN-M-L)
     'milestone_invoice_amount',   # views: the invoice amount Finance records (FIN-M-B3)
     'milestone_amounts_imported', # milestone_amount_import: Finance's one-time sheet (FIN-M-AB)
+    # FIN-M-B5-2: every receipt line names its amount (receipts.py, the only writer).
+    'receipt_recorded',           # record_receipt: BD / PM side / Finance records money received
+    'receipt_queried',            # query_receipt: Finance queries it
+    'receipt_query_answered',     # answer_receipt_query: the recorder answers
+    'receipt_confirmed',          # confirm_receipt: Finance confirms it against the bank
+    'receipt_rejected',           # reject_receipt: Finance rejects it
+    'receipt_amount_completed',   # complete_receipt_amount: Finance types a legacy row's figures
 })
 # FIN-M-L's plain milestone code, 'milestone_updated' (description, dates, status,
 # creation), is deliberately NOT here: those lines carry no amount and every viewer of
@@ -63,6 +70,14 @@ NON_ACTIVITY_CODES = frozenset({
     # FIN-M-AB: the one-time amount backfill from Finance's sheet. A data fill on ~37
     # sites at once; counted, it would show every one of them "Active today".
     'milestone_amounts_imported',       # import_milestone_amounts
+    # FIN-M-B5-2 (ruling Q7): Finance's checking of a receipt is office work about money,
+    # not work on the site. The recorder's two codes — 'receipt_recorded' and
+    # 'receipt_query_answered' — are deliberately NOT here: a BD or PM taking or explaining
+    # the client's money is a person's act on the site and counts as its latest activity.
+    'receipt_queried',                  # receipts.query_receipt
+    'receipt_confirmed',                # receipts.confirm_receipt
+    'receipt_rejected',                 # receipts.reject_receipt
+    'receipt_amount_completed',         # receipts.complete_receipt_amount
 })
 # 'milestone_amounts_imported' is deliberately NOT 'milestone_amounts_set': the Finance
 # Head check "Amount changed after Received" reads only the latter, so Finance's first

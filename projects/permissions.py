@@ -4876,3 +4876,202 @@ def user_can_import_milestone_amounts(user):
     """
     profile = _user_and_profile_active(user)
     return profile is not None and profile.role in MILESTONE_AMOUNT_IMPORT_ROLES
+
+
+# ---------------------------------------------------------------------------
+# FIN-M-B5-2 — client payment receipts (PaymentReceipt). Who may record, query, answer,
+# confirm, reject, or complete a legacy amount. projects/receipts.py asks these before
+# every write and AGAIN under the row lock; no screen uses them yet (B5-3/B5-4).
+#
+# EVERY HELPER refuses anonymous users and anyone whose profile or login is inactive
+# (_user_and_profile_active), so a person who has left can never move client money.
+# ---------------------------------------------------------------------------
+
+#: The role that checks receipts against the bank (FR2) and may record on any milestone
+#: (FR11). The same role as MONEY_RECORDER_ROLES, named apart because the two answer
+#: different questions and may diverge.
+RECEIPT_FINANCE_ROLES = frozenset({'Finance'})
+
+#: Administrators who never record a receipt (D6), even if some site lists them as its PM
+#: or a coordinator: they do not take client money.
+RECEIPT_NON_RECORDER_ROLES = frozenset({'CEO', 'Admin', 'System Admin'})
+
+#: The milestone the site's BD may record on (FR1/FR12). BD does not record M2/M3.
+#: Spelt as the string because this module imports no models; a test pins it equal to
+#: PaymentMilestone.M1.
+RECEIPT_BD_MILESTONES = frozenset({'M1'})
+
+#: R2: receipts exist on Residential sites only.
+RECEIPT_PROJECT_TYPE = 'Residential'
+
+#: D6: no receipt is recorded on a Cancelled site. Draft and On Hold sites are allowed —
+#: M1 is taken at Draft (R5), and money can arrive while a site is on hold.
+RECEIPT_CLOSED_SITE_STATUSES = frozenset({'Cancelled'})
+
+
+def receipt_site_open_for_recording(project):
+    """True when a receipt may be RECORDED on `project` (D6): not soft-deleted (R3),
+    Residential (R2), and not Cancelled. Test sites are allowed — other pages already
+    leave them out of totals. No query: reads loaded fields only."""
+    return (not project.is_deleted
+            and project.project_type == RECEIPT_PROJECT_TYPE
+            and project.status not in RECEIPT_CLOSED_SITE_STATUSES)
+
+
+def _receipt_finance_profile(user):
+    """The active Finance profile of `user`, or None."""
+    profile = _user_and_profile_active(user)
+    if profile is None or profile.role not in RECEIPT_FINANCE_ROLES:
+        return None
+    return profile
+
+
+def _receipt_statuses():
+    """The PaymentReceipt class, read for its status constants."""
+    # import inside function to avoid circular import at module level: this module stays
+    # model-free (see the note at the top), the same precedent as _active_profiles().
+    from .models import PaymentReceipt
+    return PaymentReceipt
+
+
+def _receipt_project_live(receipt):
+    """R3: nothing is done to a receipt on a soft-deleted site. The site is reached
+    through the receipt's milestone."""
+    return not receipt.milestone.project.is_deleted
+
+
+def _is_receipt_recorder(profile, receipt):
+    """Q9: the person who recorded the receipt, or — on a legacy row — the Finance user
+    who typed its figures (completed_by), counts as its recorder."""
+    return profile.pk in (receipt.recorded_by_id, receipt.completed_by_id)
+
+
+def user_can_record_receipt(user, milestone):
+    """True when `user` may record a receipt on `milestone` (D6, FR1, FR8, FR11, FR12).
+
+    Allowed, on a live, non-Cancelled Residential site (Draft and test sites included):
+      * an active Finance user, on any milestone (FR11);
+      * the site's BD (Project.bd, still an active BD), on M1 only (FR12);
+      * the PM side — the assigned PM or a coordinator of the site — on any milestone (FR8).
+    Blocked, and why:
+      * CEO, Admin, System Admin — they do not take client money (D6);
+      * another BD, and the site's BD on M2/M3 — BD ownership is M1 on its own site only;
+      * an inactive coordinator, PM or BD, and anyone deactivated — a person who has left
+        must not record money (the active-profile check);
+      * everyone on a deleted, Cancelled or non-Residential site.
+    No "any active BD" fallback for a site with no BD set (ruling Q6): FR12 says the
+    site's BD.
+    """
+    profile = _user_and_profile_active(user)
+    if profile is None:
+        return False
+    project = milestone.project
+    # D6/R2/R3: the site decides first, whatever the role.
+    if not receipt_site_open_for_recording(project):
+        return False
+    # D6: administrators never record, even where a site lists them.
+    if profile.role in RECEIPT_NON_RECORDER_ROLES:
+        return False
+    # FR11: Finance records on any milestone.
+    if profile.role in RECEIPT_FINANCE_ROLES:
+        return True
+    # FR12: the site's own BD, M1 only.
+    if milestone.milestone_name in RECEIPT_BD_MILESTONES and user_is_site_bd(user, project):
+        return True
+    # FR8: the assigned PM or a coordinator. The actor-is-active check above is what makes
+    # this "assigned PM + ACTIVE coordinators" (project_managers()' rule) without building
+    # the list: an inactive coordinator never reaches this line.
+    return user_can_manage_project(user, project)
+
+
+def user_can_query_receipt(user, receipt):
+    """True when `user` may query `receipt` (D8, FR19).
+
+    Allowed: an active Finance user, while the receipt is `recorded`. Blocked: anyone
+    else; the receipt's recorder or legacy completer, even as Finance (FR11, Q9 — a query
+    is part of the check, and nobody checks their own record); any other status (a
+    queried receipt already has its open query); a receipt on a deleted site.
+    """
+    profile = _receipt_finance_profile(user)
+    if profile is None:
+        return False
+    if receipt.status != _receipt_statuses().RECORDED:
+        return False
+    if _is_receipt_recorder(profile, receipt):
+        return False
+    return _receipt_project_live(receipt)
+
+
+def user_can_answer_receipt_query(user, receipt, open_query=None):
+    """True when `user` may answer `receipt`'s open query (D7, Q9).
+
+    Allowed, while the receipt is `queried`: its recorder (or legacy completer), or anyone
+    who may record on its milestone NOW — which covers a recorder who has since left.
+    Blocked: the person who raised the open query (applied when `open_query` is passed;
+    the writer always passes it) — a Finance user may record on any milestone, so without
+    this they could answer their own query; anyone deactivated; a deleted site.
+    """
+    profile = _user_and_profile_active(user)
+    if profile is None:
+        return False
+    if receipt.status != _receipt_statuses().QUERIED:
+        return False
+    if not _receipt_project_live(receipt):
+        return False
+    # The asker does not answer their own question.
+    if open_query is not None and open_query.raised_by_id == profile.pk:
+        return False
+    if _is_receipt_recorder(profile, receipt):
+        return True
+    return user_can_record_receipt(user, receipt.milestone)
+
+
+def user_can_confirm_receipt(user, receipt):
+    """True when `user` may confirm `receipt` against the bank (D4, D8, FR2, FR11).
+
+    Allowed: an active Finance user, while the receipt is `recorded`. Blocked: the
+    receipt's recorder and its legacy completer, even as Finance — nobody confirms their
+    own record (FR11, D2); a `queried` receipt, which must be answered first so the trail
+    shows the answer (D4); a confirmed, rejected or amount-needed receipt; a deleted site.
+    """
+    profile = _receipt_finance_profile(user)
+    if profile is None:
+        return False
+    if receipt.status != _receipt_statuses().RECORDED:
+        return False
+    if _is_receipt_recorder(profile, receipt):
+        return False
+    return _receipt_project_live(receipt)
+
+
+def user_can_reject_receipt(user, receipt):
+    """True when `user` may reject `receipt` (D8, FR19).
+
+    Allowed: any active Finance user — the recorder included, since rejecting a wrong
+    unconfirmed record is how it is withdrawn (D5) — while the receipt is `recorded` or
+    `queried`. Blocked: anyone else; a confirmed receipt (no un-confirm, D5/Q11) and a
+    rejected one (final); an amount-needed row (it is completed, not rejected); a deleted
+    site. The reason is required by the writer.
+    """
+    profile = _receipt_finance_profile(user)
+    if profile is None:
+        return False
+    statuses = _receipt_statuses()
+    if receipt.status not in (statuses.RECORDED, statuses.QUERIED):
+        return False
+    return _receipt_project_live(receipt)
+
+
+def user_can_complete_receipt_amount(user, receipt):
+    """True when `user` may type a legacy receipt's figures from the bank statement (D2).
+
+    Allowed: an active Finance user, while the receipt is `amount_needed`. Blocked: anyone
+    else; any other status; a deleted site. Whoever completes it is stored and may not
+    confirm it (FR11).
+    """
+    profile = _receipt_finance_profile(user)
+    if profile is None:
+        return False
+    if receipt.status != _receipt_statuses().AMOUNT_NEEDED:
+        return False
+    return _receipt_project_live(receipt)

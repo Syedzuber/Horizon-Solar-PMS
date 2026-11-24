@@ -545,6 +545,8 @@ _SUBJECT_PROJECT_RESOLVERS = {
     # Contractor bills 4a-1 (D-A32): a bill's rows carry its one site; every material
     # approval's rows keep project=None, because its scope is record-only (D-A2).
     'ApprovalRequest':  lambda s: _approval_request_project(s),
+    # FIN-M-B5-2: a receipt reaches its site through its milestone.
+    'PaymentReceipt':   lambda s: s.milestone.project,
 }
 
 
@@ -569,11 +571,11 @@ def _subject_type_registry():
     if _SUBJECT_TYPE_REGISTRY is None:
         from .models import (
             Project, Task, BOQ, DeliveryChallan, Issue, PaymentMilestone,
-            DesignAssignment, PaymentRequest, ApprovalRequest,
+            DesignAssignment, PaymentRequest, ApprovalRequest, PaymentReceipt,
             SUBJECT_PROJECT, SUBJECT_TASK, SUBJECT_BOQ,
             SUBJECT_DELIVERY_CHALLAN, SUBJECT_ISSUE, SUBJECT_PAYMENT_MILESTONE,
             SUBJECT_DESIGN_ASSIGNMENT, SUBJECT_PAYMENT_REQUEST,
-            SUBJECT_APPROVAL_REQUEST,
+            SUBJECT_APPROVAL_REQUEST, SUBJECT_PAYMENT_RECEIPT,
         )
         _SUBJECT_TYPE_REGISTRY = {
             Project:          SUBJECT_PROJECT,
@@ -588,6 +590,8 @@ def _subject_type_registry():
             # project, so a material request's rows carry project=None; a contractor
             # bill's carry its one site (4a-1, _approval_request_project).
             ApprovalRequest:  SUBJECT_APPROVAL_REQUEST,
+            # FIN-M-B5-2. receipts.py is the only writer; its query rows are not a subject.
+            PaymentReceipt:   SUBJECT_PAYMENT_RECEIPT,
         }
     return _SUBJECT_TYPE_REGISTRY
 
