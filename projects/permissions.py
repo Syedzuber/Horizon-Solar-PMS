@@ -5010,6 +5010,9 @@ def user_can_answer_receipt_query(user, receipt, open_query=None):
     Blocked: the person who raised the open query (applied when `open_query` is passed;
     the writer always passes it) — a Finance user may record on any milestone, so without
     this they could answer their own query; anyone deactivated; a deleted site.
+    A CANCELLED site does not stop the recorder answering (ruling Q2): only new recordings
+    are refused there, so on such a site the second route (may record now) is closed and
+    only the recorder or completer answers.
     """
     profile = _user_and_profile_active(user)
     if profile is None:

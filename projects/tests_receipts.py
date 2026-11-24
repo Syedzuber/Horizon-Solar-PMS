@@ -414,6 +414,54 @@ class QueryAnswerTests(ReceiptBase):
         self.assertEqual(r.queries.count(), 2)
 
 
+class CancelledAfterRecordingTests(ReceiptBase):
+    """Ruling Q2 (B5-2 follow-up): a Cancelled site refuses NEW recordings only. A receipt
+    recorded before the cancellation can still be queried, answered by its recorder,
+    confirmed and rejected. Deleted sites refuse everything."""
+
+    def cancel(self):
+        Project.objects.filter(pk=self.project.pk).update(status='Cancelled')
+
+    def test_recorder_answers_and_finance_confirms_on_a_cancelled_site(self):
+        r = self.receipt(self.bd, self.m1)
+        self.cancel()
+        query_receipt(self.fin_a.user, self.fresh(r), 'Still with the client?')
+        # The recorder's right to answer does not depend on the site being open for
+        # recording (user_can_record_receipt now refuses the BD here).
+        self.assertFalse(user_can_record_receipt(self.bd.user, self.fresh(r).milestone))
+        self.assertEqual(answer_receipt_query(self.bd.user, self.fresh(r), 'Yes, paid').receipt.status,
+                         PaymentReceipt.RECORDED)
+        self.assertEqual(confirm_receipt(self.fin_b.user, self.fresh(r)).receipt.status,
+                         PaymentReceipt.CONFIRMED)
+
+    def test_reject_works_and_new_recording_is_refused_on_a_cancelled_site(self):
+        r = self.receipt(self.pm, self.m2)
+        self.cancel()
+        self.assertRefusedNothingWritten(self.rec, self.pm, self.fresh(r).milestone)
+        self.assertEqual(reject_receipt(self.fin_a.user, self.fresh(r), 'Site cancelled').receipt.status,
+                         PaymentReceipt.REJECTED)
+
+    def test_non_recorder_pm_side_cannot_answer_on_a_cancelled_site(self):
+        # Answering by "anyone who may record now" (D7) follows the recording rule, so on a
+        # Cancelled site only the recorder (or legacy completer) answers.
+        r = self.receipt(self.coord, self.m1)
+        self.cancel()
+        query_receipt(self.fin_a.user, self.fresh(r), 'Which bank?')
+        self.assertRefusedNothingWritten(answer_receipt_query, self.pm.user, self.fresh(r), 'x')
+        self.assertEqual(answer_receipt_query(self.coord.user, self.fresh(r), 'SBI').receipt.status,
+                         PaymentReceipt.RECORDED)
+
+    def test_deleted_site_refuses_everything(self):
+        r = self.receipt(self.pm, self.m1)
+        queried = self.receipt(self.pm, self.m2)
+        query_receipt(self.fin_a.user, queried, 'Q')
+        Project.objects.filter(pk=self.project.pk).update(is_deleted=True)
+        self.assertRefusedNothingWritten(query_receipt, self.fin_a.user, self.fresh(r), 'x')
+        self.assertRefusedNothingWritten(confirm_receipt, self.fin_a.user, self.fresh(r))
+        self.assertRefusedNothingWritten(reject_receipt, self.fin_a.user, self.fresh(r), 'x')
+        self.assertRefusedNothingWritten(answer_receipt_query, self.pm.user, self.fresh(queried), 'x')
+
+
 # ===========================================================================
 # 6. Reject (FR19, D5, D8, Q5)
 # ===========================================================================
