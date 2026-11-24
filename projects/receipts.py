@@ -35,6 +35,7 @@ import datetime
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Count, Q, Sum
 from django.utils import timezone
@@ -105,8 +106,12 @@ class ReceiptTotals:
 # Validation (D9) — before any lock or upload
 # ---------------------------------------------------------------------------
 
-def _clean_amount(amount):
-    """The amount as a 2-place Decimal > 0 that fits the column, or ReceiptRefused (FR3)."""
+def clean_receipt_amount(amount):
+    """The amount as a 2-place Decimal > 0 that fits the column, or ReceiptRefused (FR3).
+
+    Public because the B5-3 form (forms_receipts.py) runs this same check for its early,
+    field-level message: one rule and one wording, whichever runs first. The writer
+    still runs it again, so the form is never the only check."""
     if amount is None or (isinstance(amount, str) and not amount.strip()):
         raise ReceiptRefused('Enter the amount received.')
     if isinstance(amount, float):
@@ -129,9 +134,10 @@ def _clean_amount(amount):
     return value.quantize(AMOUNT_PLACES)
 
 
-def _clean_date(date_received):
+def clean_receipt_date(date_received):
     """The date received, not after today in IST (D9, FR13), or ReceiptRefused (FR3).
-    There is no lower bound: an old receipt may be recorded late."""
+    There is no lower bound: an old receipt may be recorded late. Public for the B5-3
+    form, for the same reason as clean_receipt_amount()."""
     if date_received is None or date_received == '':
         raise ReceiptRefused('Enter the date the money was received.')
     if isinstance(date_received, datetime.datetime):
@@ -149,8 +155,8 @@ def _clean_date(date_received):
 
 def _clean_figures(amount, date_received, mode, reference, note):
     """Every D9 rule at once; returns ReceiptFigures or raises ReceiptRefused."""
-    clean_amount = _clean_amount(amount)
-    clean_date = _clean_date(date_received)
+    clean_amount = clean_receipt_amount(amount)
+    clean_date = clean_receipt_date(date_received)
     if mode not in dict(PaymentReceipt.MODE_CHOICES):
         raise ReceiptRefused('Choose how the money was paid.')
     reference = (reference or '').strip()
@@ -197,18 +203,26 @@ def _sum_amounts(milestone, statuses, exclude_pk=None):
     return receipts.aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
 
 
-def _overpayment_warnings(milestone, adding, exclude_pk=None):
+def overpayment_warnings(milestone, adding, exclude_pk=None):
     """FR20 / D10 on recording: a warning, never a refusal, when the milestone's live
     receipts (recorded, queried, confirmed — Q10) plus `adding` exceed its agreed amount.
-    None while the agreed amount is blank (FR24): there is nothing to exceed."""
+    Empty while the agreed amount is blank (FR24): there is nothing to exceed.
+
+    THE ONE PLACE THE RULE LIVES (B5-3, E5). The record page asks it BEFORE saving, to
+    decide whether the person must tick "Record anyway"; the writers ask it again under
+    the milestone lock and return what it says. No view re-implements the sum. Reads
+    only — one aggregate query, no lock, no write — so a page may call it freely. The
+    wording reads true both before and after the save ("with this receipt"), because the
+    same text is shown in both places."""
     if milestone.amount is None:
         return ()
     total = _sum_amounts(milestone, LIVE_STATUSES, exclude_pk=exclude_pk) + adding
     if total <= milestone.amount:
         return ()
-    return (f'Receipts recorded on {milestone.milestone_name} now total ₹{total}, more than '
-            f'its agreed amount of ₹{milestone.amount} (by ₹{total - milestone.amount}). '
-            f'Finance will need a note to confirm beyond the agreed amount.',)
+    return (f'With this receipt, receipts on {milestone.milestone_name} total ₹{total} — '
+            f'more than the agreed amount of ₹{milestone.amount}, by '
+            f'₹{total - milestone.amount}. Finance will need a note to confirm beyond the '
+            f'agreed amount.',)
 
 
 def _profile(actor):
@@ -265,7 +279,7 @@ def record_receipt(actor, milestone, amount, date_received, mode, reference='', 
             # place on it changed, since the first check.
             if not user_can_record_receipt(actor, locked):
                 raise ReceiptRefused(STALE)
-            warnings = _overpayment_warnings(locked, figures.amount)
+            warnings = overpayment_warnings(locked, figures.amount)
             receipt = PaymentReceipt.objects.create(
                 milestone=locked,
                 status=PaymentReceipt.RECORDED,
@@ -300,8 +314,8 @@ def record_receipt(actor, milestone, amount, date_received, mode, reference='', 
         raise
     # TODO: an OUTER transaction that rolls back after this returns (a caller's own
     # atomic block) leaves the uploaded proof orphaned — Django has no on-rollback hook.
-    # Deferred: no caller wraps this today (no screens); B5-3 must call it outside any
-    # outer atomic, or a periodic orphan sweep is needed.
+    # Deferred: B5-3's record page (views_receipts.receipt_record) calls this outside any
+    # atomic block (no ATOMIC_REQUESTS); an orphan sweep stays on the follow-up list.
     return ReceiptResult(receipt, warnings)
 
 
@@ -468,7 +482,7 @@ def complete_receipt_amount(actor, receipt, amount, date_received, mode, referen
         # Again under the locks: another Finance user may have completed it meanwhile.
         if not user_can_complete_receipt_amount(actor, locked):
             raise ReceiptRefused(STALE)
-        warnings = _overpayment_warnings(milestone, figures.amount, exclude_pk=locked.pk)
+        warnings = overpayment_warnings(milestone, figures.amount, exclude_pk=locked.pk)
         from_status = locked.status
         locked.amount = figures.amount
         locked.date_received = figures.date_received
@@ -499,8 +513,20 @@ def complete_receipt_amount(actor, receipt, amount, date_received, mode, referen
 
 
 # ---------------------------------------------------------------------------
-# Read helpers for later sessions (no page uses them yet)
+# Read helpers (the B5-3 record page uses receipts_live, receipt_totals,
+# possible_duplicates and overpayment_warnings)
 # ---------------------------------------------------------------------------
+
+def receipts_live():
+    """True when the receipt SCREENS are switched on (settings.CLIENT_RECEIPTS_LIVE, B5-3
+    E1). Read at call time so tests can switch it with override_settings.
+
+    Only the record page and the milestone card's button ask this. THE WRITERS DO NOT:
+    the switch hides screens until the B5 release (main may be pushed before B5-6/B5-8,
+    and money recorded then would be counted by no page); it is not a rule about money,
+    and a command or a later screen must not be blocked by a display setting."""
+    return bool(getattr(settings, 'CLIENT_RECEIPTS_LIVE', False))
+
 
 def receipt_totals(milestones):
     """{milestone pk: ReceiptTotals} for every milestone in `milestones` (instances or

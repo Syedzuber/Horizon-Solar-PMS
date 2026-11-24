@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+{% block title %}Record receipt — {{ project.project_id }} {{ milestone.milestone_name }}{% endblock %}
+
+{% block extra_head %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<style>
+  .rr-page { max-width: 640px; }
+  .rr-page .text-break { word-break: break-word; }
+  /* Five large mode choices: two per row on a phone, a thumb-sized target each. */
+  .rr-modes .btn { min-height: 44px; }
+  @media (max-width: 575.98px) {
+    /* .container gives 12px each side; 4px more makes the 16px phone gutter. */
+    .rr-page { padding-left: 4px; padding-right: 4px; }
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+{% comment %}FIN-M-B5-3 record-a-receipt page. Reached only by whoever user_can_record_receipt()
+   admits (views_receipts._receipt_milestone refuses everyone else, and the whole URL is a
+   404 while CLIENT_RECEIPTS_LIVE is off). Plain form POST, no XHR (E9). Alpine holds two
+   pieces of local state only: whether the note is marked required (mode Other — the start
+   value is decided by the view, never echoed from the request) and whether the form is
+   submitting. The server enforces every rule; this page only explains them.
+   No proof links on this page (B5-4).{% endcomment %}
+<div class="rr-page">
+  <div class="mb-3">
+    <a href="{% url 'project_overview' project.project_id %}#payment-milestones" class="text-decoration-none text-muted">&larr; Back to {{ project.project_id }}</a>
+  </div>
+
+  {# Header (E3): the site, the milestone, its agreed amount and what is on record. #}
+  <div class="card shadow-sm mb-3">
+    <div class="card-body">
+      <div class="small text-muted text-break">{{ project.project_id }} · {{ project.customer_name }}</div>
+      <h1 class="h5 mb-2">Record a receipt — {{ milestone.milestone_name }}</h1>
+      {% if agreed %}
+        <div>Agreed amount: <strong>{{ agreed }}</strong></div>
+      {% else %}
+        <div class="text-muted">No agreed amount yet. You can still record what was received.</div>
+      {% endif %}
+      <div class="d-flex flex-wrap gap-3 mt-2 small">
+        <div>Confirmed so far: <strong>{{ confirmed_total }}</strong></div>
+        <div>Not yet confirmed: <strong>{{ unconfirmed_total }}</strong></div>
+      </div>
+      {% if amount_needed_count %}
+        <div class="small text-muted mt-1">{{ amount_needed_count }} old receipt{{ amount_needed_count|pluralize }} on record without an amount yet — see the list below.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  {# The form (E3, E4, E7). #}
+  <div class="card shadow-sm mb-3" id="rr-form">
+    <div class="card-body">
+      {% if form.non_field_errors %}
+        <div class="alert alert-danger small" role="alert">{% for e in form.non_field_errors %}{{ e }} {% endfor %}</div>
+      {% endif %}
+      {% if reattach %}
+        <div class="alert alert-info small" role="status">Your proof file was not kept. If you want to attach it, choose it again below.</div>
+      {% endif %}
+      <form method="post" enctype="multipart/form-data" novalidate
+            action="{% url 'receipt_record' project.project_id milestone.pk %}"
+            x-data="{ other: {% if note_required %}true{% else %}false{% endif %}, submitting: false }"
+            x-on:submit="submitting = true"
+            x-on:pageshow.window="if ($event.persisted) submitting = false">
+        {% csrf_token %}
+
+        <div class="mb-3">
+          <label class="form-label fw-semibold" for="rr-amount">Amount received (₹)</label>
+          <input type="text" inputmode="decimal" autocomplete="off" name="amount" id="rr-amount"
+                 class="form-control form-control-lg{% if form.amount.errors %} is-invalid{% endif %}"
+                 value="{{ form.amount.value|default_if_none:'' }}" placeholder="e.g. 50000">
+          {% for e in form.amount.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label fw-semibold" for="rr-date">Date received</label>
+          {# No default (E3): the day the money arrived must be typed, never assumed. #}
+          <input type="date" name="date_received" id="rr-date" max="{{ today|date:'Y-m-d' }}"
+                 class="form-control form-control-lg{% if form.date_received.errors %} is-invalid{% endif %}"
+                 value="{{ form.date_received.value|default_if_none:'' }}">
+          {% for e in form.date_received.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+        </div>
+
+        <fieldset class="mb-3">
+          <legend class="form-label fs-6 fw-semibold">How was it paid?</legend>
+          <div class="row g-2 rr-modes">
+            {% for value, label in modes %}
+              <div class="col-6 col-sm-4">
+                <input type="radio" class="btn-check" name="mode" id="rr-mode-{{ value }}" value="{{ value }}" autocomplete="off"
+                       {% if mode_value == value %}checked{% endif %}
+                       x-on:change="other = {% if value == other_mode %}true{% else %}false{% endif %}">
+                <label class="btn btn-outline-secondary w-100" for="rr-mode-{{ value }}">{{ label }}</label>
+              </div>
+            {% endfor %}
+          </div>
+          {% for e in form.mode.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </fieldset>
+
+        <div class="mb-3">
+          <label class="form-label" for="rr-reference">Reference <span class="text-muted small">(optional — UTR, cheque number)</span></label>
+          <input type="text" name="reference" id="rr-reference" maxlength="100" autocomplete="off"
+                 class="form-control{% if form.reference.errors %} is-invalid{% endif %}"
+                 value="{{ form.reference.value|default_if_none:'' }}">
+          {% for e in form.reference.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label" for="rr-note">
+            Note
+            <span class="text-danger small" x-show="other"{% if not note_required %} style="display:none"{% endif %}>(required for Other — say how it was paid)</span>
+            <span class="text-muted small" x-show="!other"{% if note_required %} style="display:none"{% endif %}>(optional)</span>
+          </label>
+          <textarea name="note" id="rr-note" rows="2"
+                    class="form-control{% if form.note.errors %} is-invalid{% endif %}">{{ form.note.value|default_if_none:'' }}</textarea>
+          {% for e in form.note.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label" for="rr-proof">Proof <span class="text-muted small">(optional)</span></label>
+          {% comment %}No `capture` attribute: it would force the camera and hide PDFs and the
+             gallery. With this `accept`, phones offer camera, gallery and files (the challan
+             documents' input).{% endcomment %}
+          <input type="file" name="proof" id="rr-proof"
+                 accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+                 class="form-control{% if form.proof.errors %} is-invalid{% endif %}">
+          <div class="form-text">Bank screenshot, deposit slip or cheque photo: PDF, JPG or PNG, at most 20 MB.</div>
+          {% for e in form.proof.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+        </div>
+
+        {% if duplicates or over %}
+          {# E4: the warnings, in plain words, and the second tap. #}
+          <div class="alert alert-warning" role="alert" id="rr-warnings">
+            {% if duplicates %}
+              <div class="fw-semibold">This may already be on record.</div>
+              <ul class="small mb-2 ps-3">
+                {% for d in duplicates %}<li class="text-break">{{ d }}</li>{% endfor %}
+              </ul>
+            {% endif %}
+            {% for w in over %}<div class="small mb-2">{{ w }}</div>{% endfor %}
+            <input type="hidden" name="warning_key" value="{{ warning_key }}">
+            <div class="form-check">
+              <input class="form-check-input" type="checkbox" name="record_anyway" id="rr-anyway" value="on">
+              <label class="form-check-label" for="rr-anyway">Record anyway — this is a separate payment and the figures are right.</label>
+            </div>
+          </div>
+        {% endif %}
+
+        <button type="submit" class="btn btn-brand btn-lg w-100" x-bind:disabled="submitting">
+          <span x-show="!submitting">Record receipt</span><span x-show="submitting" style="display:none">Saving…</span>
+        </button>
+      </form>
+    </div>
+  </div>
+
+  {# This milestone's receipts, newest first (E3). No proof links (B5-4). #}
+  <div class="card shadow-sm mb-4" id="rr-list">
+    <div class="card-header"><h2 class="h6 mb-0">Receipts on {{ milestone.milestone_name }}</h2></div>
+    {% if rows %}
+      <ul class="list-group list-group-flush">
+        {% for r in rows %}
+          <li class="list-group-item small" id="rr-row-{{ r.pk }}">
+            <div class="d-flex justify-content-between gap-2">
+              <div class="text-break" style="min-width:0;">
+                {% if r.amount %}
+                  <strong>{{ r.amount }}</strong>
+                  <span class="text-muted">· {{ r.date_received|date:"d M Y" }} · {{ r.mode }}{% if r.reference %} · {{ r.reference }}{% endif %}</span>
+                {% else %}
+                  <strong>Amount not entered yet</strong>
+                {% endif %}
+                <div class="text-muted">Recorded by {{ r.recorded_by }}</div>
+              </div>
+              <span class="badge align-self-start flex-shrink-0 text-wrap {{ r.badge }}">{{ r.status_words }}</span>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <div class="card-body small text-muted">No receipts recorded on {{ milestone.milestone_name }} yet.</div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

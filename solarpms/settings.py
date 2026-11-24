@@ -41,6 +41,13 @@ SUPABASE_BILLS_BUCKET = config('SUPABASE_BILLS_BUCKET', default='')
 # call time.
 SUPABASE_DELIVERY_BUCKET = config('SUPABASE_DELIVERY_BUCKET', default='')
 
+# FIN-M-B5-3 — the client receipt screens' off-switch (E1). OFF BY DEFAULT: while False
+# the milestone card shows no "Record receipt" button and the record page answers 404 for
+# everyone. Turned on at the B5 release (B5-2 to B5-6 and B5-8 together), because main
+# may be pushed before the pages that count receipts exist. Read by
+# projects/receipts.receipts_live(); the receipt writers do not read it.
+CLIENT_RECEIPTS_LIVE = config('CLIENT_RECEIPTS_LIVE', default=False, cast=bool)
+
 # GRN-V0 — THROWAWAY unboxing-video prototype (projects/video_proto.py), for a one-week
 # field test on SE phones. Delete these three lines with the prototype.
 #   VIDEO_PROTO_ENABLED  off by default; off means every prototype URL answers 404.

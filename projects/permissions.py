@@ -4946,8 +4946,14 @@ def _is_receipt_recorder(profile, receipt):
     return profile.pk in (receipt.recorded_by_id, receipt.completed_by_id)
 
 
-def user_can_record_receipt(user, milestone):
+def user_can_record_receipt(user, milestone, can_manage=None):
     """True when `user` may record a receipt on `milestone` (D6, FR1, FR8, FR11, FR12).
+
+    `can_manage` is user_can_manage_project(user, milestone.project) when the caller
+    already has it (project_overview does, for the card's "Record receipt" button — B5-3),
+    so asking about three milestones costs no query. Left None, it is asked here, which
+    costs the coordinator lookup for anyone but the assigned PM. The writers in
+    receipts.py never pass it: they ask afresh, and again under the row lock.
 
     Allowed, on a live, non-Cancelled Residential site (Draft and test sites included):
       * an active Finance user, on any milestone (FR11);
@@ -4981,7 +4987,9 @@ def user_can_record_receipt(user, milestone):
     # FR8: the assigned PM or a coordinator. The actor-is-active check above is what makes
     # this "assigned PM + ACTIVE coordinators" (project_managers()' rule) without building
     # the list: an inactive coordinator never reaches this line.
-    return user_can_manage_project(user, project)
+    if can_manage is None:
+        can_manage = user_can_manage_project(user, project)
+    return bool(can_manage)
 
 
 def user_can_query_receipt(user, receipt):

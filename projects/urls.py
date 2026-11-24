@@ -18,6 +18,7 @@ from . import views_site_dashboard  # DASH-B2 Site Dashboard page — separate m
 from . import views_tenders_gantt  # DASH-B3 Tenders Gantt page — separate module, same pattern
 from . import views_finance_work  # FIN-M-B8a Finance work page — separate module, same pattern
 from . import views_finance_head  # FIN-H-B3 Finance Head page — separate module, same pattern
+from . import views_receipts  # FIN-M-B5-3 record a client receipt — separate module, same pattern
 from . import video_proto  # GRN-V0 throwaway video prototype — delete with the prototype
 
 urlpatterns = [
@@ -416,6 +417,7 @@ urlpatterns = [
     path('projects/<str:project_id>/milestone/<int:milestone_pk>/receive/', views.milestone_receive,     name='milestone_receive'),     # Finance only
     path('projects/<str:project_id>/milestones/create/',                    views.milestone_create,      name='milestone_create'),      # PM only
     path('projects/<str:project_id>/milestones/set-amounts/',               views.set_milestone_amounts, name='set_milestone_amounts'), # BD + PM
+    path('projects/<str:project_id>/milestone/<int:milestone_pk>/receipt/new/', views_receipts.receipt_record, name='receipt_record'),  # FIN-M-B5-3: site BD (M1), PM side, Finance; 404 while CLIENT_RECEIPTS_LIVE is off
 
     # ---------------------------------------------------------------------------
     # Project overview — all roles with access to the project

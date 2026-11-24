@@ -424,6 +424,16 @@
                 {% endif %}
               </div>
             </div>
+            {% comment %}FIN-M-B5-3 (E2): the one way into the record-a-receipt page. `can_record_receipt`
+               is set by project_overview only while CLIENT_RECEIPTS_LIVE is on and only for
+               whoever user_can_record_receipt() admits; the page checks again on every request.
+               A plain link (no XHR), full width so it is an easy thumb target on a phone.{% endcomment %}
+            {% if m.can_record_receipt %}
+              <a href="{% url 'receipt_record' project.project_id m.pk %}"
+                 class="btn btn-outline-success btn-sm w-100 mt-2">
+                <i class="bi bi-cash-coin me-1"></i>Record receipt
+              </a>
+            {% endif %}
             {% comment %}FIN-M-B3 (R7): Finance's invoice form — "Mark invoiced" on a Pending M2/M3,
                "Correct invoice" on an Invoiced one. Plain POST to milestone_invoice, which
                re-checks every rule; `invoiceable` is only set for user_can_invoice_milestone()

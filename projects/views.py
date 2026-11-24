@@ -152,6 +152,8 @@ from .site_pm import (
 )
 # FIN-M-B5-1: the one writer of Project.bd, behind the overview's BD modal.
 from .site_bd import SiteBdChangeRefused, bd_scope_projects, set_site_bd, site_in_bd_scope
+# FIN-M-B5-3: the receipt screens' off-switch, read for the card's "Record receipt" button.
+from .receipts import receipts_live
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, SiteBdForm, TaskAddForm, VendorForm, ProgramForm, SNAPSHOT_SWITCH_ROLES, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date, TYPED_DATE_FLOOR
 from .forms import catalogue_snapshot, log_catalogue_change  # B-0: catalogue before/after log
 from .notify_registry import NOTIFICATION_EVENTS  # T2: the send-records Event filter's choices
@@ -166,6 +168,8 @@ from .permissions import (
     user_can_set_site_bd, profile_is_active_bd,
     # FIN-M-B3: who records an invoice on an M2/M3 milestone (Finance only, ruling (a)).
     user_can_invoice_milestone,
+    # FIN-M-B5-3: who may record a client receipt — the card's "Record receipt" button.
+    user_can_record_receipt,
     user_can_open_dc_document, user_can_manage_dc_documents,
     # NTF-DCG 5a: the role half of the challan read audience (Finance read-only).
     user_has_dc_read_role,
@@ -14333,7 +14337,18 @@ def project_overview(request, project_id):
     # amount to pre-fill. Only Pending milestones: once Invoiced or Received the task
     # completes without a form, so the script must not intercept it.
     invoice_task_prefill = {}
+    # FIN-M-B5-3 (E1, E2): the "Record receipt" button, per milestone — only while the
+    # receipt screens are switched on, only where the card is drawn, and only for whoever
+    # user_can_record_receipt() admits (site BD on M1; PM side and Finance on M1-M3; never
+    # CEO/Admin/System Admin; nobody on a Cancelled site). `is_assigned_pm` is passed as
+    # can_manage so the coordinator lookup is not repeated per milestone: the button costs
+    # no query. `milestones` came from project.milestones.all(), so m.project is this
+    # already-loaded project, not a fresh fetch.
+    record_receipts_on = show_milestone_card and receipts_live()
     for m in milestones:
+        m.can_record_receipt = (record_receipts_on
+                                and user_can_record_receipt(request.user, m,
+                                                            can_manage=is_assigned_pm))
         m.invoiceable = (can_invoice_milestones
                          and m.milestone_name in _MILESTONE_TO_INVOICE_TASK
                          and m.status in (PaymentMilestone.PENDING,
