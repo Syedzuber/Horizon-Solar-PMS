@@ -563,7 +563,7 @@ class ReviewerScreenTests(DisplayBase):
         panel = self._lines('FX-PANEL', self.review)[0]
         self.assertContains(response, 'boq-formula-marker')
         self.assertContains(response, '>Calculated</span>')
-        self.assertContains(response, 'Overridden: mast-mounted ESE')
+        self.assertContains(response, 'Overridden by the designer (Fxdes): mast-mounted ESE')
         self.assertNotContains(response, f'name="item_id" value="{self.earth.pk}"')
         self.assertContains(response, f'name="item_id" value="{panel.pk}"')
 
@@ -579,7 +579,7 @@ class ReviewerScreenTests(DisplayBase):
         response = self.client.get(reverse('design_qc_review', kwargs={
             'project_id': self.review.project_id}))
         self.assertContains(response, 'boq-formula-marker')
-        self.assertContains(response, 'Overridden: mast-mounted ESE')
+        self.assertContains(response, 'Overridden by the designer (Fxdes): mast-mounted ESE')
         self._login(self.head)
         response = self.client.get(reverse('design_qc_review', kwargs={
             'project_id': self.review.project_id}))

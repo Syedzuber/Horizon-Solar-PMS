@@ -118,11 +118,15 @@ from .boq_formulas import (
     ACTION_REMOVE, ACTION_SKIP_MULTIPLE, FORMULA_REVIEWER_MESSAGE, FormulaError, SheetLine,
     apply_formulas, formula_summary_messages, formula_view, multiple_lines_message,
     prepare_formula_save, read_formula_rules, read_sheet, work_out_formulas,
+    # B-2e - the line's joined override, read by the shared override helper.
+    _override_of,
 )
 from .models import (
     BOQLineOverride, BOQRecalculation, FORMULA_SOURCE_CORRECTION,
     FORMULA_SOURCE_OVERRIDE_CLEARED, FORMULA_SOURCE_OVERRIDE_SET, FORMULA_SOURCE_PICKER,
     FORMULA_SOURCE_UPLOAD,
+    # B-2e - in which capacity an override was set (designer, QC or the Head).
+    OVERRIDE_SET_AS_DESIGNER, OVERRIDE_SET_AS_HEAD, OVERRIDE_SET_AS_QC,
 )
 # B-4 - copy a BOQ from another site, and Clear BOQ.
 from .models import FORMULA_SOURCE_COPY, VendorOrderLine
@@ -186,6 +190,9 @@ from .permissions import (
     user_has_boq_correction_authority, boq_correction_closed_reason,
     BOQ_CORRECTION_CLOSED_PAST_REVIEW, BOQ_CORRECTION_CLOSED_NOT_SUBMITTED,
     BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW, BOQ_CORRECTION_CLOSED_CHANGE_REQUEST,
+    # B-2e - a reviewer's override of a calculated figure: the review statuses only (Q3),
+    # and Head authority (Head or deputy) decides whether it is stamped as the Head's.
+    boq_formula_override_window_open, user_has_design_head_authority,
     # Part 12 — the narrow helper, deputy excluded. Used on the design dashboard only, to
     # decide whether the OPEX catalogue link renders. No gate in this module reads it.
     user_is_design_head,
@@ -10161,6 +10168,10 @@ def opex_boq_entry(request, project_id):
             entry.update({'calc': True, 'line': row.pk, 'expl': info.explanation,
                           'ovr': info.is_overridden, 'note': info.note,
                           'stale': info.stale_text})
+            if info.is_overridden:
+                # B-2e Q6: who set it ("Overridden by QC (name)"), the designer's own
+                # included. Only on an overridden row, so every other row is as before.
+                entry['by'] = info.override_by
         return entry
 
     # Escaped like Django's json_script: an override note is typed by a designer and this
@@ -10174,19 +10185,7 @@ def opex_boq_entry(request, project_id):
 
     # A1 (Zuber, B-2b.1): calculated items with no line, each with why it is not on the
     # sheet ("0 because…") and, for the designer, an override that puts it on.
-    calculated_absent = []
-    for item_id, result in formulas.absent():
-        master = catalogue_by_id.get(item_id)
-        if master is None:
-            continue
-        stale = ''
-        if result is not None and result.computed > 0:
-            # Q2 for a missing line: rules loaded since the last save give it a figure.
-            stale = (f'Added at {result.computed.normalize():f} on the next save.')
-        calculated_absent.append({
-            'master_id': item_id, 'code': master.code, 'description': master.description,
-            'unit': master.unit, 'explanation': result.explanation if result else '',
-            'stale': stale})
+    calculated_absent = _calculated_absent_rows(formulas, catalogue_by_id)
 
     # Which categories the designer has never put anything in (settled decision 7). The
     # picker shows this per category so "I have not looked at Earthing yet" is visible at
@@ -10542,71 +10541,103 @@ def opex_boq_accb(request, project_id):
 #: (255) with the designer's name (_ACCB_LOG_NAME_MAX), a code, a site code and two numbers.
 _OVERRIDE_LOG_NOTE_MAX = 80
 
+#: B-2e (Zuber Q5): the capacity shown after a name in an override log line. The designer's
+#: own entries carry no tag, exactly as before B-2e; a reviewer's read "Name (QC) overrode".
+_OVERRIDE_LOG_TAG = {
+    OVERRIDE_SET_AS_DESIGNER: '',
+    OVERRIDE_SET_AS_QC:       ' (QC)',
+    OVERRIDE_SET_AS_HEAD:     ' (Head)',
+}
+#: ...and the capacity of the person whose override is REPLACED, which is always named.
+_OVERRIDE_LOG_REPLACED_TAG = {
+    OVERRIDE_SET_AS_DESIGNER: ' (designer)',
+    OVERRIDE_SET_AS_QC:       ' (QC)',
+    OVERRIDE_SET_AS_HEAD:     ' (Head)',
+}
+_ACTIVITY_ACTION_MAX = 255
 
-def _override_note_for_log(note):
-    return note if len(note) <= _OVERRIDE_LOG_NOTE_MAX else note[:_OVERRIDE_LOG_NOTE_MAX - 1] + '…'
+
+def _override_note_for_log(note, cap=_OVERRIDE_LOG_NOTE_MAX):
+    return note if len(note) <= cap else note[:cap - 1] + '…'
 
 
-@login_required
-@require_POST
-def opex_boq_override(request, project_id):
-    """Set or clear the designer's override on one calculated line of an OPEX BOQ (B-2b).
+def boq_override_set_log_text(name, set_as, code, site_code, was, now, note, replaced=None):
+    """The activity line for an override set (B-2b; B-2e Q5).
 
-    Access: the site's assigned designer only (user_can_edit_project_boq, the picker's
-    W-narrow rule, Zuber B-2b), and only while neither the procurement group lock nor the
-    design lock is on: the upload/edit window (ruling 5). A reviewer never overrides (D2);
-    they correct what the line is calculated from, or fail the BOQ.
+        Fxdes overrode FX-LOG on FX-A: 2 → 4 (two roofs)
+        Asha (QC) overrode FX-LOG on FX-A: 4 → 5 (survey) ; replaced Fxdes (designer)'s 4 (two roofs)
 
-    Actions, one line per POST (`item_id` names the BOQ line):
-        set   — `quantity` and a non-blank `note` are both required. The line takes the
-                quantity and stops recalculating; later rules read it.
-        clear — the override row is deleted and the line recalculates in this request
-                (it is removed if it now works out to 0, D1).
-    Only a CALCULATED line (an active rule targets its item) can be overridden, and not one
-    whose item is on the BOQ more than once (Q9: those lines are ordinary lines).
-
-    A1 (Zuber, B-2b.1): `set` with `master_id` instead of `item_id` names a calculated item
-    that has NO line (its rule gives 0). The line is created, at the override quantity,
-    under the same lock and in the same transaction. Clearing it later recalculates it like
-    any other line, so at 0 it is removed again (D1).
-
-    Q3: a set that changes the line's figure (or creates the line) writes one
-    BOQRecalculation, source override_set, like every other change to a computed quantity.
-
-    A4: a rule that cannot produce its figure (a downstream line too large for the column)
-    refuses the whole POST with the reason; nothing is saved.
+    `replaced` is (name, set_as, note) of the override this one replaces, or None. Its
+    quantity is `was`: an overridden line carries its override's figure. The notes are cut
+    (80 characters, then 40, then 20) until the line fits ActivityLog.action; with no
+    replacement the first try always fits, so a designer's entry is exactly as before B-2e.
+    Module-level so the test can build the longest case and prove it fits.
     """
-    project = _active_project(project_id)
+    text = ''
+    for cap in (_OVERRIDE_LOG_NOTE_MAX, 40, 20):
+        text = (f'{name}{_OVERRIDE_LOG_TAG.get(set_as, "")} overrode {code} on {site_code}: '
+                f'{was} → {now} ({_override_note_for_log(note, cap)})')
+        if replaced is not None:
+            old_name, old_set_as, old_note = replaced
+            text += (f'; replaced {old_name}{_OVERRIDE_LOG_REPLACED_TAG.get(old_set_as, "")}'
+                     f"'s {was} ({_override_note_for_log(old_note, cap)})")
+        if len(text) <= _ACTIVITY_ACTION_MAX:
+            return text
+    return text[:_ACTIVITY_ACTION_MAX - 1] + '…'
 
-    if project.project_type != 'OPEX':
-        raise Http404('Calculated BOQ lines exist on RESCO BOQs only.')
 
-    # The picker's write rule: only the site's assigned designer. QC, the Head, PM, SCM and
-    # Admin never set an override; a reviewer's lever is the driver or a failed BOQ (D2).
-    if not user_can_edit_project_boq(request.user, project):
-        return HttpResponseForbidden()
+def _calculated_absent_rows(formulas, catalogue_by_id):
+    """A1 (B-2b.1): calculated items with no line, for the "Calculated items not on this
+    BOQ" block — the picker's and, from B-2e, the correction screen's (E5).
 
-    back = redirect('opex_boq_entry', project_id=project_id)
+    Each says why it is not on the sheet and carries what an override form needs. No query:
+    `formulas` (formula_view) and the catalogue are already loaded.
+    """
+    rows = []
+    for item_id, result in formulas.absent():
+        master = catalogue_by_id.get(item_id)
+        if master is None:
+            continue
+        stale = ''
+        if result is not None and result.computed > 0:
+            # Q2 for a missing line: rules loaded since the last save give it a figure.
+            stale = (f'Added at {result.computed.normalize():f} on the next save.')
+        rows.append({
+            'master_id': item_id, 'code': master.code, 'description': master.description,
+            'unit': master.unit, 'explanation': result.explanation if result else '',
+            'stale': stale})
+    return rows
 
-    # The two locks, most final first, in the picker's words.
-    if project_boq_is_group_locked(project):
-        messages.error(request, 'This site is in a locked procurement group — its BOQ '
-                                'quantities are final and can no longer be changed. A '
-                                'correction now needs a variance against the order.')
-        return back
-    if project_boq_is_design_locked(project):
-        messages.error(request, 'This BOQ has been marked complete and is with design '
-                                'review — it cannot be changed until a reviewer sends '
-                                'it back or a change request opens a new attempt.')
-        return back
 
-    action = request.POST.get('action', '')
-    if action not in ('set', 'clear'):
-        messages.error(request, 'That is not an override action.')
-        return back
+def _boq_line_override(request, project, *, action, raw_item, raw_master, set_as,
+                       remove_zero):
+    """Set or clear the override on one calculated line of `project`'s BOQ (B-2b; B-2e).
 
-    raw = request.POST.get('item_id', '')
-    raw_master = request.POST.get('master_id', '')
+    THE ONE OVERRIDE IMPLEMENTATION (B-2e E2). Two endpoints call it, each after its OWN
+    gate, and differ only in what they pass:
+
+        opex_boq_override  the designer, in the upload/edit window   set_as designer,
+                                                                     remove_zero True
+        boq_correct        QC or the Head, in the review statuses    set_as qc / head,
+                                                                     remove_zero False
+
+    The caller does the access check and the redirect; this does everything between: the
+    input checks, the lock, the write, the records, the messages and the activity entry.
+    It never checks WHO may act — that is the caller's gate — and it never writes a
+    BOQCorrection: an override is not a correction of the designer's figure, the rule
+    wrote that figure (Z2), so a reviewer's override is not counted against the designer.
+
+    `action` is 'set' or 'clear'. `raw_item` names the BOQ line; on 'set', `raw_master`
+    instead names a calculated item that has NO line (A1), which is then created.
+
+    `remove_zero` is passed to apply_formulas(). On the reviewer path it is False (Q4,
+    B-2e Q2): the correction screen never deletes a line, so a line that works out to 0
+    is set to 0 and the designer's next save removes it (D1).
+
+    Returns nothing; the caller redirects. Refusals are messages, except a line id that
+    is not on this BOQ, which is a 404 as before.
+    """
+    raw = raw_item
     # A1: a calculated item with no line is named by its catalogue item, on `set` only.
     creating = action == 'set' and not raw and raw_master.isdigit()
     try:
@@ -10617,7 +10648,7 @@ def opex_boq_override(request, project_id):
         # Q8: the BOQ row is created by the designer's first save, never by an override.
         messages.error(request, 'Save the BOQ first. An override can be set once the BOQ '
                                 'has been saved.')
-        return back
+        return
     if boq is None or not (creating or raw.isdigit()):
         raise Http404('No such line on this BOQ.')
 
@@ -10642,17 +10673,19 @@ def opex_boq_override(request, project_id):
             for error in errors:
                 messages.error(request, error)
             messages.error(request, 'Nothing was saved.')
-            return back
+            return
 
     profile = request.user.profile
     log_line = None
     name = _accb_actor_name(profile)
+    tag = _OVERRIDE_LOG_TAG.get(set_as, '')
     try:
         with transaction.atomic():
             # The rules and the BOQ row lock before the line is read (one exists() query
             # when no rule exists, and then nothing is calculated, so nothing to override).
             formulas = prepare_formula_save(boq, project.project_type)
 
+            previous = None      # B-2e Q5: the override a `set` replaces, for the log
             if creating:
                 # A1. Read under the lock: the item must be calculated and still have no
                 # line. If one has appeared since the page was drawn, the designer
@@ -10661,13 +10694,13 @@ def opex_boq_override(request, project_id):
                 if master_id not in formulas.targets:
                     messages.error(request, 'That item is not calculated, so there is '
                                             'nothing to override. Add it on the BOQ.')
-                    return back
+                    return
                 master = get_object_or_404(BOQItemMaster, pk=master_id)
                 code = master.code
                 if boq.items.filter(item_master_id=master_id).exists():
                     messages.error(request, f'{code} is already on this BOQ. Reload the '
                                             f'page and override its line.')
-                    return back
+                    return
                 # THE PICKER'S CREATE, FIELD FOR FIELD (Z1): the catalogue's current wording.
                 line = BOQItem.objects.create(
                     boq=boq, item_master=master, serial_no=master.sort_order,
@@ -10676,33 +10709,57 @@ def opex_boq_override(request, project_id):
                 before = None
             else:
                 # Object consistency: the line must be on THIS site's BOQ; read under the
-                # lock.
-                line = get_object_or_404(BOQItem.objects.select_related('item_master'),
-                                         pk=int(raw), boq=boq)
+                # lock. In the same query (B-2e, P7): its current override and who set it
+                # (for the "replaced" log text and the update below), and how many lines
+                # carry its item (Q9).
+                same_item = (BOQItem.objects
+                             .filter(boq_id=OuterRef('boq_id'),
+                                     item_master_id=OuterRef('item_master_id'))
+                             .order_by().values('item_master_id')
+                             .annotate(n=Count('pk')).values('n'))
+                line = get_object_or_404(
+                    BOQItem.objects.select_related('item_master',
+                                                   'formula_override__set_by__user')
+                                   .annotate(same_item_lines=Subquery(same_item)),
+                    pk=int(raw), boq=boq)
                 code = line.item_master.code if line.item_master_id else ''
                 if line.item_master_id not in formulas.targets:
                     messages.error(request, f'{code or "That line"} is not a calculated '
                                             f'line, so there is nothing to override. Change '
                                             f'its quantity on the BOQ.')
-                    return back
+                    return
                 # Q9: an item on 2+ lines is not calculated, so an override would be inert.
                 # Only on set: clearing a leftover override is harmless.
-                if (action == 'set' and boq.items.filter(
-                        item_master_id=line.item_master_id).count() > 1):
+                if action == 'set' and (line.same_item_lines or 0) > 1:
                     messages.error(request, multiple_lines_message(code))
-                    return back
+                    return
                 before = line.boq_quantity
+                previous = _override_of(line)
 
             if action == 'set':
                 if not creating:
                     line.boq_quantity = quantity
                     line.save(update_fields=['boq_quantity'])
-                BOQLineOverride.objects.update_or_create(
-                    line=line, defaults={'note': note, 'set_by': profile})
+                # set_by and set_as always name the LATEST person: a reviewer replacing the
+                # designer's override (or the designer, after a fail-back, replacing a
+                # reviewer's) takes it over (B-2e E4).
+                if previous is not None:
+                    # Race: none. `previous` was read under the BOQ row lock taken by
+                    # prepare_formula_save(), and every other writer that can touch it (this
+                    # helper, Clear BOQ, the picker's line removal) takes that lock first —
+                    # the picker whenever rules exist, which is the only time this line is
+                    # reached — so the row cannot have changed or gone since. One UPDATE rather than
+                    # update_or_create()'s savepoints and re-read (P7). set_at is auto_now,
+                    # which .update() skips, so it is set here.
+                    BOQLineOverride.objects.filter(pk=previous.pk).update(
+                        note=note, set_by=profile, set_as=set_as, set_at=timezone.now())
+                else:
+                    BOQLineOverride.objects.create(line=line, note=note, set_by=profile,
+                                                   set_as=set_as)
                 # Later rules read the overridden value, so the lines that follow it move
                 # now.
                 summary = apply_formulas(boq, formulas, source=FORMULA_SOURCE_OVERRIDE_SET,
-                                         actor=profile)
+                                         actor=profile, remove_zero=remove_zero)
                 # Q3: one record for the overridden line itself, when its figure changed
                 # (or it was created), like every other change to a computed quantity.
                 # Written after apply_formulas() so its explanation is the engine's
@@ -10719,9 +10776,15 @@ def opex_boq_override(request, project_id):
                     was = 'not on the BOQ'
                 else:
                     was = 'blank' if before is None else f'{before.normalize():f}'
+                replaced = None
+                if previous is not None:
+                    replaced = ((_accb_actor_name(previous.set_by)
+                                 if previous.set_by is not None else 'someone not recorded'),
+                                previous.set_as, previous.note)
                 log_line = ('boq_formula_override_set',
-                            f'{name} overrode {code} on {project.project_id}: {was} → '
-                            f'{quantity.normalize():f} ({_override_note_for_log(note)})')
+                            boq_override_set_log_text(name, set_as, code, project.project_id,
+                                                      was, f'{quantity.normalize():f}', note,
+                                                      replaced))
                 if creating:
                     messages.success(request, f'{code} added at {quantity.normalize():f} by '
                                               f'hand. It will not recalculate until the '
@@ -10734,18 +10797,25 @@ def opex_boq_override(request, project_id):
                 deleted, _detail = BOQLineOverride.objects.filter(line=line).delete()
                 if not deleted:
                     messages.info(request, f'{code} has no override — nothing changed.')
-                    return back
+                    return
                 summary = apply_formulas(boq, formulas,
-                                         source=FORMULA_SOURCE_OVERRIDE_CLEARED, actor=profile)
+                                         source=FORMULA_SOURCE_OVERRIDE_CLEARED, actor=profile,
+                                         remove_zero=remove_zero)
                 result = summary.results.get(line.item_master_id)
                 now = '—' if result is None else f'{result.quantity.normalize():f}'
                 log_line = ('boq_formula_override_cleared',
-                            f'{name} cleared the override on {code} on {project.project_id} '
-                            f'(calculated: {now})')
+                            f'{name}{tag} cleared the override on {code} on '
+                            f'{project.project_id} (calculated: {now})')
                 if code in [change.code for change in summary.removed]:
                     # D1, the A1 line's way back off the sheet: the rule gives 0 again.
                     messages.success(request, f'Override on {code} cleared. It works out to '
                                               f'0, so the line was removed.')
+                elif not remove_zero and code in [c.code for c in summary.kept_at_zero]:
+                    # B-2e Q2: the reviewer path never deletes a line. It stays at 0 and the
+                    # designer's next save removes it (D1).
+                    messages.success(request, f'Override on {code} cleared. It works out to '
+                                              f'0, so the line is set to 0; the designer\'s '
+                                              f'next save removes it.')
                 else:
                     messages.success(request, f'Override on {code} cleared; it is '
                                               f'calculated again ({now}).')
@@ -10754,12 +10824,79 @@ def opex_boq_override(request, project_id):
         for error in exc.messages:
             messages.error(request, error)
         messages.error(request, 'Nothing was saved.')
-        return back
+        return
 
     _formula_messages(request, summary)
     # After the write commits, never inside it — log_activity's own rule.
     log_activity(project, profile, log_line[1], entity_type='BOQItem', entity_id=line.pk,
                  action_code=log_line[0])
+
+
+@login_required
+@require_POST
+def opex_boq_override(request, project_id):
+    """Set or clear the designer's override on one calculated line of an OPEX BOQ (B-2b).
+
+    Access: the site's assigned designer only (user_can_edit_project_boq, the picker's
+    W-narrow rule, Zuber B-2b), and only while neither the procurement group lock nor the
+    design lock is on: the upload/edit window (ruling 5). QC and the Head override from the
+    correction screen instead (boq_correct, B-2e), through the same helper.
+
+    Actions, one line per POST (`item_id` names the BOQ line):
+        set   — `quantity` and a non-blank `note` are both required. The line takes the
+                quantity and stops recalculating; later rules read it.
+        clear — the override row is deleted and the line recalculates in this request
+                (it is removed if it now works out to 0, D1).
+    Only a CALCULATED line (an active rule targets its item) can be overridden, and not one
+    whose item is on the BOQ more than once (Q9: those lines are ordinary lines).
+
+    A1 (Zuber, B-2b.1): `set` with `master_id` instead of `item_id` names a calculated item
+    that has NO line (its rule gives 0). The line is created, at the override quantity,
+    under the same lock and in the same transaction. Clearing it later recalculates it like
+    any other line, so at 0 it is removed again (D1).
+
+    Q3: a set that changes the line's figure (or creates the line) writes one
+    BOQRecalculation, source override_set, like every other change to a computed quantity.
+
+    A4: a rule that cannot produce its figure (a downstream line too large for the column)
+    refuses the whole POST with the reason; nothing is saved.
+
+    B-2e E4: the designer may replace or clear an override QC or the Head set while the BOQ
+    was with them; who set it is not part of this gate.
+    """
+    project = _active_project(project_id)
+
+    if project.project_type != 'OPEX':
+        raise Http404('Calculated BOQ lines exist on RESCO BOQs only.')
+
+    # The picker's write rule: only the site's assigned designer. QC and the Head override
+    # from boq_correct (B-2e), under their own gate; PM, SCM and Admin never do.
+    if not user_can_edit_project_boq(request.user, project):
+        return HttpResponseForbidden()
+
+    back = redirect('opex_boq_entry', project_id=project_id)
+
+    # The two locks, most final first, in the picker's words.
+    if project_boq_is_group_locked(project):
+        messages.error(request, 'This site is in a locked procurement group — its BOQ '
+                                'quantities are final and can no longer be changed. A '
+                                'correction now needs a variance against the order.')
+        return back
+    if project_boq_is_design_locked(project):
+        messages.error(request, 'This BOQ has been marked complete and is with design '
+                                'review — it cannot be changed until a reviewer sends '
+                                'it back or a change request opens a new attempt.')
+        return back
+
+    action = request.POST.get('action', '')
+    if action not in ('set', 'clear'):
+        messages.error(request, 'That is not an override action.')
+        return back
+
+    _boq_line_override(request, project, action=action,
+                       raw_item=request.POST.get('item_id', ''),
+                       raw_master=request.POST.get('master_id', ''),
+                       set_as=OVERRIDE_SET_AS_DESIGNER, remove_zero=True)
     return back
 
 
@@ -12284,6 +12421,69 @@ BOQ_CORRECTION_CLOSED_MESSAGES = {
         'is decided.',
 }
 
+#: The correction screen's two POST refusals, shared by its own actions and (B-2e) the
+#: override actions in _boq_correct_override(). The wording is unchanged from Session B.
+BOQ_CORRECTION_GROUP_LOCKED_MESSAGE = (
+    'This site is in a locked procurement group — its BOQ quantities are final and can no '
+    'longer be changed, by a reviewer either. A correction now needs a variance against '
+    'the order, raised with SCM.')
+BOQ_CORRECTION_NO_BOQ_MESSAGE = (
+    'This site has no BOQ yet, so there is nothing to correct. The designer creates it by '
+    'entering one.')
+
+#: B-2e Q3 — a reviewer override outside the review statuses (in practice: the Head under
+#: a pending change request on a released site). The correction itself may still be open.
+REVIEWER_OVERRIDE_CLOSED_MESSAGE = (
+    'A calculated figure can be overridden only while the design is in review (handed in, '
+    'with QC, or with the Head). Under a change request, correct the item it is '
+    'calculated from instead. Nothing was saved.')
+
+
+def _boq_correct_override(request, project, group_locked):
+    """boq_correct's `override_set` / `override_clear` POST (B-2e): QC or the Head
+    overrides a CALCULATED figure (E1), or clears an override. Returns the redirect.
+
+    Access: reached only from boq_correct() AFTER its gate — user_can_correct_boq(), the
+    same people who may correct this BOQ (QC or Head verdict authority, never the site's
+    designer). Narrower in time than correction (Q3): only while the design is in review.
+    Under a change request (branch 2 of the window, any status, `released` included) the
+    Head corrects what the line is calculated from instead, which is the evidence a
+    `corrected` verdict needs; an override writes no BOQCorrection.
+
+    The refusals before the helper are the correction screen's own, in its words and
+    order: the procurement lock, then no BOQ.
+    """
+    back = redirect('boq_correct', project_id=project.project_id)
+    # The procurement lock is final for a reviewer too (Part 6), as for every correction.
+    if group_locked:
+        messages.error(request, BOQ_CORRECTION_GROUP_LOCKED_MESSAGE)
+        return back
+    try:
+        project.boq
+    except BOQ.DoesNotExist:
+        messages.error(request, BOQ_CORRECTION_NO_BOQ_MESSAGE)
+        return back
+    # Q3: the review statuses only; see boq_formula_override_window_open().
+    if not boq_formula_override_window_open(project):
+        messages.error(request, REVIEWER_OVERRIDE_CLOSED_MESSAGE)
+        return back
+
+    action = 'set' if request.POST.get('action') == 'override_set' else 'clear'
+    # Q1: the capacity is stamped now, from authority at this moment: Head authority (the
+    # Head or his named deputy) is the Head's, anyone else here is QC. A set records it on
+    # the override; a clear needs it for its activity entry ("Name (Head) cleared", Q5).
+    set_as = (OVERRIDE_SET_AS_HEAD if user_has_design_head_authority(request.user)
+              else OVERRIDE_SET_AS_QC)
+    # E2: THE DESIGNER'S OVERRIDE LOGIC, not a second copy. `line_id`, not `item_id`, names
+    # the line, so a calculated row never carries set_quantity's field (E6: the plain
+    # quantity box stays refused for it). Q2: remove_zero False — this screen never deletes
+    # a line.
+    _boq_line_override(request, project, action=action,
+                       raw_item=request.POST.get('line_id', ''),
+                       raw_master=request.POST.get('master_id', ''),
+                       set_as=set_as, remove_zero=False)
+    return back
+
 
 @login_required
 def boq_correct(request, project_id):
@@ -12298,6 +12498,18 @@ def boq_correct(request, project_id):
 
         add_line      — put a catalogue item on the sheet, optionally with a quantity
         set_quantity  — change one existing row's quantity to a stated number
+
+    B-2e adds two more, for CALCULATED lines only (which the two above refuse, D2), and only
+    while the design is in review (artifacts_uploaded / in_qc / awaiting_head_qc, Q3):
+
+        override_set   — hand-set a calculated line's quantity with a mandatory note
+                         (`line_id`), or create a calculated item's missing line at that
+                         quantity (`master_id`, E5)
+        override_clear — remove the override; the line recalculates in the same request
+
+    Both run the designer's override logic (_boq_line_override, E2). They write NO
+    BOQCorrection, so they never count against the designer (E3), and they never delete a
+    line: one that works out to 0 is set to 0 (Q2).
 
     ONE ROW PER POST, NOT A SHEET SAVE, and that is the design rather than an omission. A
     whole-sheet POST is what makes absence meaningful, and absence meaning "delete" is the
@@ -12344,6 +12556,12 @@ def boq_correct(request, project_id):
     profile      = request.user.profile
     group_locked = project_boq_is_group_locked(project)
 
+    # B-2e — the two override actions are answered here, before the catalogue is loaded:
+    # they never read it, and their query budget is set_quantity's (P7).
+    if (request.method == 'POST'
+            and request.POST.get('action', '') in ('override_set', 'override_clear')):
+        return _boq_correct_override(request, project, group_locked)
+
     catalogue       = get_opex_boq_catalogue()
     catalogue_by_id = {m.pk: m for m in catalogue}
     category_order  = opex_catalogue_category_order()
@@ -12356,15 +12574,11 @@ def boq_correct(request, project_id):
     if request.method == 'POST':
         # The procurement lock is final and is answered before anything else is read.
         if group_locked:
-            messages.error(request, 'This site is in a locked procurement group — its BOQ '
-                                    'quantities are final and can no longer be changed, by '
-                                    'a reviewer either. A correction now needs a variance '
-                                    'against the order, raised with SCM.')
+            messages.error(request, BOQ_CORRECTION_GROUP_LOCKED_MESSAGE)
             return redirect('boq_correct', project_id=project_id)
 
         if boq is None:
-            messages.error(request, 'This site has no BOQ yet, so there is nothing to '
-                                    'correct. The designer creates it by entering one.')
+            messages.error(request, BOQ_CORRECTION_NO_BOQ_MESSAGE)
             return redirect('boq_correct', project_id=project_id)
 
         action = request.POST.get('action', '')
@@ -12568,6 +12782,12 @@ def boq_correct(request, project_id):
         'accb_reviewer_message': ACCB_REVIEWER_MESSAGE,
         'formula_error':   formulas.error,
         'formula_reviewer_message': FORMULA_REVIEWER_MESSAGE,
+        # B-2e — the override form on calculated rows, and the calculated items with no
+        # line (E5). Offered only where the POST would accept it: a BOQ, no procurement
+        # lock, the review statuses (Q3). No query: the assignment is already loaded.
+        'can_override':    (boq is not None and not group_locked
+                            and boq_formula_override_window_open(project)),
+        'calculated_absent': _calculated_absent_rows(formulas, catalogue_by_id),
     })
 
 

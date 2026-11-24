@@ -643,26 +643,51 @@ class SheetLine:
     boq_quantity: Decimal | None
     overridden: bool = False
     override_note: str = ''
+    override_label: str = ''              # B-2e: "Overridden by QC (name)", for the screens
     ordered_quantity: Decimal | None = None
     line: object = None                   # The BOQItem, for a stored line
 
 
+def override_label(override):
+    """B-2e (Zuber Q6): what every override marker says about who set it.
+
+        "Overridden by QC (Asha Rao)", "... by the Head (...)", "... by the designer (...)",
+        or "Overridden (name not recorded)" when the profile has gone (set_by is SET_NULL).
+
+    `set_as` is the capacity stamped at save time, never worked out from today's flags. The
+    override's set_by and user must already be joined in, so this costs no query."""
+    # Lazy import: models.py imports this module, so importing models at the top would be
+    # circular.
+    from .models import OVERRIDE_SET_AS_CHOICES, OVERRIDE_SET_AS_DESIGNER
+    if override.set_by is None:
+        return 'Overridden (name not recorded)'
+    user = override.set_by.user
+    who = dict(OVERRIDE_SET_AS_CHOICES).get(override.set_as or OVERRIDE_SET_AS_DESIGNER,
+                                            'the designer')
+    return f'Overridden by {who} ({user.get_full_name() or user.username})'
+
+
 def sheet_line(line):
-    """A stored BOQItem as a SheetLine. Its override must already be joined in
-    (select_related('formula_override')), so this costs no query."""
+    """A stored BOQItem as a SheetLine. Its override, with who set it, must already be
+    joined in (read_sheet()'s select_related), so this costs no query."""
     override = _override_of(line)
     return SheetLine(pk=line.pk, item_master_id=line.item_master_id,
                      boq_quantity=line.boq_quantity, overridden=override is not None,
                      override_note=override.note if override is not None else '',
+                     override_label=override_label(override) if override is not None else '',
                      ordered_quantity=line.ordered_quantity, line=line)
 
 
 def read_sheet(boq):
-    """Every line on `boq` as SheetLines, overrides joined in. One query; none for no BOQ."""
+    """Every line on `boq` as SheetLines, overrides joined in. One query; none for no BOQ.
+
+    B-2e: who set each override (set_by and its user) is joined in the same query, so the
+    three screens can name them (override_label) for no extra query."""
     if boq is None:
         return []
     return [sheet_line(line)
-            for line in boq.items.select_related('formula_override').order_by('pk')]
+            for line in boq.items.select_related('formula_override__set_by__user')
+                                 .order_by('pk')]
 
 
 def sheet_inputs(sheet, targets):
@@ -916,6 +941,7 @@ class LineFormula:
     computed: Decimal | None = None  # The rule's figure; None when it could not be worked out
     stale: bool = False             # The stored figure is not what the next save writes (Q2)
     note: str = ''                  # The override's note
+    override_by: str = ''           # B-2e: "Overridden by QC (name)" (override_label())
 
     @property
     def is_calculated(self):
@@ -981,7 +1007,8 @@ class FormulaView:
         computed = result.computed if result else None
         if stored is not None and stored.overridden:
             return LineFormula(kind=LINE_OVERRIDDEN, explanation=explanation,
-                               computed=computed, note=stored.override_note)
+                               computed=computed, note=stored.override_note,
+                               override_by=stored.override_label)
         return LineFormula(kind=LINE_CALCULATED, explanation=explanation, computed=computed,
                            stale=(computed is not None and line.boq_quantity != computed))
 

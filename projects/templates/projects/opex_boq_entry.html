@@ -909,7 +909,9 @@ with unsaved edits, so nothing typed is lost without a warning.
       ' <span class="boq-chip boq-chip-calc">Calculated</span>' +
       (calc.ovr ? ' <span class="boq-chip boq-chip-ovr">Overridden</span>' : '') +
       (calc.expl ? '<div class="boq-muted">' + esc(calc.expl) + '</div>' : '') +
-      (calc.ovr ? '<div class="boq-muted">Note: ' + esc(calc.note) + '</div>' : '') +
+      // B-2e Q6: who set it, the designer's own override named the same way.
+      (calc.ovr ? '<div class="boq-muted boq-override-by">' + esc(calc.by || 'Overridden') +
+                  ': ' + esc(calc.note) + '</div>' : '') +
       (calc.stale ? '<div class="boq-muted text-warning-emphasis">' + esc(calc.stale) +
                     '</div>' : '') +
       '</td><td class="boq-muted" style="width:60px">' + esc(item.unit) + '</td>' +

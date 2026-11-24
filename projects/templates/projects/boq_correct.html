@@ -5,7 +5,8 @@ Reviewer BOQ correction (Session B) — change a quantity, or add a line the des
 WHAT IS NOT ON THIS SCREEN, AND WHY IT IS SAID HERE RATHER THAN LEFT TO BE NOTICED:
 there is NO REMOVE CONTROL on any row, on-catalogue or off. Removing a line is not a
 reviewer capability — it is deferred whole, not half-built — and the server agrees: the
-only two actions boq_correct() answers are `add_line` and `set_quantity`, and any other
+only actions boq_correct() answers are `add_line`, `set_quantity` and (B-2e, calculated
+lines only) `override_set` / `override_clear`, none of which deletes a line, and any other
 action on that endpoint is refused with a message. A hidden button is not a permission and
 an absent one is not either; the refusal is server-side and this template is the view of
 it, not the enforcement of it.
@@ -153,7 +154,7 @@ their name.
                         <span class="badge rounded-pill text-bg-info ms-1 boq-formula-marker">Calculated</span>
                         {% if f.is_overridden %}
                           <span class="badge rounded-pill text-bg-warning ms-1">Overridden</span>
-                          <div style="font-size:.75rem">Overridden: {{ f.note }}</div>
+                          <div style="font-size:.75rem" class="boq-override-by">{{ f.override_by }}: {{ f.note }}</div>
                         {% endif %}
                         {% if f.explanation %}<div class="text-muted" style="font-size:.75rem">{{ f.explanation }}</div>{% endif %}
                         {% if f.stale_text %}<div class="text-warning-emphasis" style="font-size:.75rem">{{ f.stale_text }}</div>{% endif %}
@@ -168,7 +169,39 @@ their name.
                   line gets none: the reviewer corrects what it is calculated from, or fails
                   the BOQ. boq_correct() refuses a crafted set_quantity on one as well.
                   {% endcomment %}
-                  {% if row.formula_info %}
+                  {% comment %}
+                  B-2e — A CALCULATED LINE GETS AN OVERRIDE FORM INSTEAD (E1): quantity plus a
+                  mandatory note, and Clear once it is overridden. It posts `line_id`, never
+                  set_quantity's `item_id`, so the plain quantity box stays refused (E6).
+                  Offered only in the review statuses (Q3), and never on an item that is on
+                  the BOQ more than once (Q9: those lines are not calculated).
+                  {% endcomment %}
+                  {% if row.formula_info and can_override and not row.formula_info.is_multiple %}
+                    <form method="post" class="boq-override-form">
+                      {% csrf_token %}
+                      <input type="hidden" name="action" value="override_set">
+                      <input type="hidden" name="line_id" value="{{ row.pk }}">
+                      <div class="d-flex gap-1 justify-content-end">
+                        <input type="text" inputmode="decimal" name="quantity" required
+                               class="form-control form-control-sm text-end" style="max-width:110px"
+                               value="{{ row.boq_quantity|default_if_none:'' }}"
+                               aria-label="Override quantity for {{ row.description }}">
+                        <button type="submit" class="btn btn-sm btn-outline-secondary">{% if row.formula_info.is_overridden %}Change{% else %}Override{% endif %}</button>
+                      </div>
+                      <input type="text" name="note" required
+                             class="form-control form-control-sm mt-1"
+                             placeholder="Why the calculated figure is wrong (required)"
+                             aria-label="Override note for {{ row.description }}">
+                    </form>
+                    {% if row.formula_info.is_overridden %}
+                      <form method="post" class="text-end mt-1 boq-override-clear">
+                        {% csrf_token %}
+                        <input type="hidden" name="action" value="override_clear">
+                        <input type="hidden" name="line_id" value="{{ row.pk }}">
+                        <button type="submit" class="btn btn-sm btn-outline-danger">Clear override</button>
+                      </form>
+                    {% endif %}
+                  {% elif row.formula_info %}
                     <div class="text-end" title="{{ formula_reviewer_message }}">{{ row.boq_quantity|default_if_none:"—" }}</div>
                   {% elif group_locked %}
                     <div class="text-end">{{ row.boq_quantity|default_if_none:"—" }}</div>
@@ -253,6 +286,56 @@ their name.
         This BOQ has no rows yet. Add the lines the site needs above, or send the attempt
         back so the designer enters the sheet.
       </div>
+    {% endif %}
+
+    {% if calculated_absent %}
+      {% comment %}
+      B-2e E5 — calculated items whose rule gives 0, so they have no line (the picker's A1
+      block). Each says why it is 0; in the review statuses a reviewer may put one on with an
+      override (quantity and a note), which creates the line under the BOQ lock.
+      {% endcomment %}
+      <details class="border-top px-2 py-2" id="boqCalcAbsent">
+        <summary class="small fw-semibold">
+          Calculated items not on this BOQ ({{ calculated_absent|length }})
+        </summary>
+        <table class="table table-sm mb-0 mt-1">
+          <tbody>
+            {% for item in calculated_absent %}
+              <tr class="small">
+                <td class="text-muted" style="width:90px">{{ item.code }}</td>
+                <td style="line-height:1.3">
+                  {{ item.description }}
+                  <span class="badge rounded-pill text-bg-info ms-1 boq-formula-marker">Calculated</span>
+                  {% if item.explanation %}<div class="text-muted" style="font-size:.75rem">{{ item.explanation }}</div>{% endif %}
+                  {% if item.stale %}<div class="text-warning-emphasis" style="font-size:.75rem">{{ item.stale }}</div>{% endif %}
+                </td>
+                <td class="text-muted" style="width:70px">{{ item.unit }}</td>
+                <td style="width:230px">
+                  {% if can_override %}
+                    <form method="post" class="boq-override-form">
+                      {% csrf_token %}
+                      <input type="hidden" name="action" value="override_set">
+                      <input type="hidden" name="master_id" value="{{ item.master_id }}">
+                      <div class="d-flex gap-1 justify-content-end">
+                        <input type="text" inputmode="decimal" name="quantity" required
+                               class="form-control form-control-sm text-end" style="max-width:110px"
+                               aria-label="Override quantity for {{ item.description }}">
+                        <button type="submit" class="btn btn-sm btn-outline-secondary">Override</button>
+                      </div>
+                      <input type="text" name="note" required
+                             class="form-control form-control-sm mt-1"
+                             placeholder="Why the calculated figure is wrong (required)"
+                             aria-label="Override note for {{ item.description }}">
+                    </form>
+                  {% else %}
+                    <div class="text-end text-muted">—</div>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </details>
     {% endif %}
   </div>
 </div>

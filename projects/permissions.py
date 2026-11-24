@@ -1087,6 +1087,33 @@ def boq_correction_closed_reason(user, project):
     return None
 
 
+def boq_formula_override_window_open(project):
+    """Return True if a reviewer may override a CALCULATED BOQ figure on `project` now
+    (B-2e, Zuber Q3) — NARROWER than the correction window, and only ever asked AFTER
+    user_can_correct_boq() has said yes.
+
+        the design is in artifacts_uploaded, in_qc or awaiting_head_qc
+
+    That is branch (1) of boq_correction_closed_reason(), the review itself. Branch (2) —
+    the Head while a change request is pending, at ANY status, `released` included — is
+    NOT an override window: under a change request the Head corrects what the line is
+    calculated from (which is the evidence a `corrected` verdict needs; an override writes
+    no BOQCorrection), or decides the request.
+
+    STATUS ONLY, NO ATTEMPT READ. user_can_correct_boq() has already required either the
+    stamp on the current attempt (branch 1) or a pending request (branch 2); within these
+    three statuses the stamp holds too, because nothing reaches them without it
+    (design_views._maybe_advance_to_artifacts_uploaded). Reading the attempt again here
+    would add a query to every correction-screen GET for no case it could catch.
+
+    Queries: none once project.design_assignment is loaded (user_can_correct_boq loads it).
+    """
+    assignment = getattr(project, 'design_assignment', None) if project is not None else None
+    if assignment is None:
+        return False
+    return assignment.status in BOQ_CORRECTION_WINDOW_STATUSES
+
+
 def user_can_view_design_qc_dashboard(user):
     """Return True if `user` may open the Design QC dashboard (Part 9 §6).
 

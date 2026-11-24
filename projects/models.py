@@ -1781,9 +1781,26 @@ FORMULA_SOURCE_CHOICES = [
     (FORMULA_SOURCE_COPY,             'BOQ copied from another site'),
 ]
 
+#: BOQLineOverride.set_as — in which capacity the person set the override (B-2e, Zuber Q1).
+#: Stamped when the override is saved, because it cannot be worked out afterwards: QC and
+#: the Head may both correct a BOQ in every review status, and a person's flags can change.
+OVERRIDE_SET_AS_DESIGNER = 'designer'
+OVERRIDE_SET_AS_QC       = 'qc'
+OVERRIDE_SET_AS_HEAD     = 'head'
+OVERRIDE_SET_AS_CHOICES = [
+    (OVERRIDE_SET_AS_DESIGNER, 'the designer'),
+    (OVERRIDE_SET_AS_QC,       'QC'),
+    (OVERRIDE_SET_AS_HEAD,     'the Head'),
+]
+
 
 class BOQLineOverride(models.Model):
-    """A designer's hand-set quantity on a COMPUTED BOQ line, with the reason.
+    """A hand-set quantity on a COMPUTED BOQ line, with the reason.
+
+    B-2e: set by the site's designer (picker) or by QC or the Head (the correction screen),
+    through one helper (views._boq_line_override). Either side may replace or clear the
+    other's; `set_by` and `set_as` always name the latest. A reviewer's override is not a
+    BOQCorrection and does not count against the designer (Z2).
 
     A ONE-TO-ONE BESIDE THE LINE, NOT A FIELD ON IT (B-2b, agreed): BOQItem gains nothing.
     The quantity itself stays on BOQItem.boq_quantity, the one number every reader already
@@ -1805,6 +1822,8 @@ class BOQLineOverride(models.Model):
     set_by = models.ForeignKey('UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
                                related_name='boq_line_overrides')  # SET_NULL: profiles are deactivated, not deleted
     set_at = models.DateTimeField(auto_now=True)  # Moves when the override is changed, not only when first set
+    set_as = models.CharField(max_length=10, choices=OVERRIDE_SET_AS_CHOICES,
+                              default=OVERRIDE_SET_AS_DESIGNER)  # B-2e: capacity at save time; rows before 0157 were all designers'
 
     class Meta:
         constraints = [

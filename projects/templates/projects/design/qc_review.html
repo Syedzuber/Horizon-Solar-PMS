@@ -288,7 +288,7 @@ reviewer and the designer are looking at the same document in the same sequence.
                         <span class="badge rounded-pill text-bg-info ms-1 boq-formula-marker">Calculated</span>
                         {% if f.is_overridden %}
                           <span class="badge rounded-pill text-bg-warning ms-1">Overridden</span>
-                          <div class="small" style="font-size:.75rem">Overridden: {{ f.note }}</div>
+                          <div class="small boq-override-by" style="font-size:.75rem">{{ f.override_by }}: {{ f.note }}</div>
                         {% endif %}
                         {% if f.explanation %}<div class="text-muted" style="font-size:.75rem">{{ f.explanation }}</div>{% endif %}
                         {% if f.stale_text %}<div class="text-warning-emphasis" style="font-size:.75rem">{{ f.stale_text }}</div>{% endif %}
