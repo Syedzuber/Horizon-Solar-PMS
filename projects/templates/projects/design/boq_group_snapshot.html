@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% comment %}
+B-5b — one design BOQ group snapshot, read-only, from its STORED copy only (S1, S5).
+
+Nothing on this page is live: the header, the sites with their status at the time, and
+the consolidated BOQ all come from hydrate(snapshot.data). The BOQ body is the same
+include the live tab uses, so a snapshot taken now reads exactly like the live tab.
+
+WHO SEES THIS PAGE. A design user who can open every site the snapshot stores (S4), or
+the Head/QC when a stored site no longer exists (Zuber A7); the view refuses anyone else.
+That is why each site is shown as text, not linked: a stored site may have left the group.
+
+No form, no script, no prices.
+{% endcomment %}
+
+{% block title %}Snapshot of {{ view.group_name }} — SolarPMS{% endblock %}
+
+{% block extra_head %}
+{% include "projects/design/_design_chips.html" %}
+<style>
+  .bg-split-row { cursor: pointer; }
+  .bg-split-row:hover td { background: #f8f9fa; }
+  .bg-num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+  <div>
+    <h5 class="mb-0">Snapshot of {{ snapshot.taken_at|date:"d M Y H:i" }} IST</h5>
+    <div class="text-muted small">
+      {{ view.group_name }} · taken by {{ snapshot.taken_by_name }} ·
+      {{ snapshot.sites_counted }} site{{ snapshot.sites_counted|pluralize }} counted{% if snapshot.sites_not_counted %}, {{ snapshot.sites_not_counted }} not counted{% endif %}
+    </div>
+    {% if snapshot.note %}<div class="small mt-1">Note: {{ snapshot.note }}</div>{% endif %}
+  </div>
+  <div class="d-flex flex-wrap gap-2">
+    <a href="{% url 'design_boq_group_snapshot_excel' pk=group_pk snapshot_pk=snapshot.pk %}" class="btn btn-sm btn-outline-secondary">Excel (this snapshot)</a>
+    <a href="{% url 'design_boq_group_detail' pk=group_pk %}?tab=snapshots" class="btn btn-sm btn-outline-secondary">← Back to the group</a>
+  </div>
+</div>
+
+<div class="alert alert-secondary small py-2" id="boqSnapshotFrozen">
+  A frozen copy: these are the figures at {{ snapshot.taken_at|date:"d M Y H:i" }} IST, not live ones. Later BOQ changes don't touch them.
+</div>
+
+<h6>Sites at the time</h6>
+<div class="card shadow-sm border-0 mb-3">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0" id="boqSnapshotSites">
+      <thead class="table-light"><tr><th>Site</th><th>Tender</th><th>Designer</th><th>Design status</th><th>In totals</th></tr></thead>
+      <tbody>
+        {% for site in view.sites %}
+        <tr>
+          <td class="fw-semibold">{{ site.code }}<div class="small text-muted fw-normal">{{ site.name }}</div></td>
+          <td class="small">{{ site.tender }}</td>
+          <td class="small">{{ site.designer|default:"—" }}</td>
+          <td class="small">{{ site.status }}</td>
+          <td>{% if site.counted %}<span class="chip chip-green">Yes</span>{% else %}<span class="chip chip-amber">Not counted</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<h6>Consolidated BOQ at the time</h6>
+{% include "projects/design/_boq_group_consolidated.html" %}
+
+{% endblock %}

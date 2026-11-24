@@ -1,0 +1,87 @@
+{% comment %}
+B-5b — the consolidated BOQ body: warnings, catalogue lines (click a row for its per-site
+split), ACCBs one row per configuration, and lines with no catalogue item.
+
+ONE TEMPLATE FOR LIVE AND SNAPSHOT. The group screen's Consolidated BOQ tab and the
+snapshot page both include this, fed `boq` and `warnings` from a hydrate()d view
+(design_boq_group_views.hydrate), so a snapshot taken now renders exactly like the live
+tab. It reads nothing else and makes no query.
+
+No prices anywhere.
+{% endcomment %}
+{% for line in warnings %}
+  <div class="alert alert-warning py-2 small mb-2">{{ line }}</div>
+{% endfor %}
+
+<div class="card shadow-sm border-0 mb-3">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0" id="boqGroupLines">
+      <thead class="table-light">
+        <tr><th>Code</th><th>Description</th><th>Unit</th><th class="bg-num">Sites</th><th class="bg-num">Total</th></tr>
+      </thead>
+      <tbody>
+        {% for line in boq.lines %}
+        <tr class="bg-split-row" data-bs-toggle="collapse" data-bs-target="#split{{ forloop.counter }}">
+          <td>{{ line.item_master__code }}</td>
+          <td>{{ line.item_master__description }}{% if line.retired %} <span class="chip chip-grey">Retired</span>{% endif %}</td>
+          <td>{{ line.item_master__unit }}</td>
+          <td class="bg-num">{{ line.site_count }}</td>
+          <td class="bg-num fw-semibold">{{ line.total_quantity|floatformat:"-2" }}</td>
+        </tr>
+        <tr class="collapse" id="split{{ forloop.counter }}">
+          <td></td>
+          <td colspan="4" class="small text-muted">
+            {% for site, qty in line.per_site_list %}{{ site }}: {{ qty|floatformat:"-2" }}{% if not forloop.last %} · {% endif %}{% endfor %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5" class="small text-muted">No counted quantities yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<h6 class="mt-3">ACCBs, one row per configuration</h6>
+{% if boq.accb_lines %}
+<div class="card shadow-sm border-0 mb-3">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0" id="boqGroupAccbs">
+      <thead class="table-light"><tr><th>Description</th><th>Sites</th><th class="bg-num">{{ boq.accb_lines.0.unit }}</th></tr></thead>
+      <tbody>
+        {% for accb in boq.accb_lines %}
+        <tr>
+          <td class="small">{{ accb.description }}{% if accb.retired %} <span class="chip chip-grey">Retired</span>{% endif %}</td>
+          <td class="small">{% for site, qty in accb.per_site_list %}{{ site }}{% if qty != 1 %} ×{{ qty|floatformat:"-2" }}{% endif %}{% if not forloop.last %}, {% endif %}{% endfor %}</td>
+          <td class="bg-num fw-semibold">{{ accb.total_quantity|floatformat:"-2" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<p class="small text-muted">No ACCBs on counted sites.</p>
+{% endif %}
+
+{% if boq.unlinked %}
+<h6 class="mt-3">Lines with no catalogue item</h6>
+<p class="small text-muted mb-1">Not summed across sites: with no catalogue item there is nothing to add them up by.</p>
+<div class="card shadow-sm border-0 mb-3">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0" id="boqGroupUnlinked">
+      <thead class="table-light"><tr><th>Site</th><th>Description</th><th>Unit</th><th class="bg-num">Quantity</th></tr></thead>
+      <tbody>
+        {% for item in boq.unlinked %}
+        <tr>
+          <td>{{ item.site }}</td>
+          <td class="small">{{ item.description }}</td>
+          <td>{{ item.unit }}</td>
+          <td class="bg-num">{{ item.quantity|floatformat:"-2" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}

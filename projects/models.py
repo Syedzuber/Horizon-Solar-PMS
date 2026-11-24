@@ -7373,6 +7373,82 @@ class DesignBOQGroupMembership(models.Model):
 
 
 # ---------------------------------------------------------------------------
+# B-5b — design BOQ group snapshots (Zuber Q3, Q4, Q7 and the B-5b answers, 24 Nov 2026)
+#
+# A snapshot is a dated, IMMUTABLE copy of a group's consolidated BOQ: every counted line,
+# ACCB row, line with no catalogue item, warning fact and member site status, as plain
+# data in `data`. It is built by design_boq_group_views.group_boq_data(), the same function
+# the live screen renders through, so a snapshot taken now reads exactly like the live view.
+# No dependency on BOQRevision (Q3). No prices: the stored keys are a fixed list.
+# ---------------------------------------------------------------------------
+
+class SnapshotImmutableError(Exception):
+    """Raised on any attempt to change or delete a DesignBOQGroupSnapshot (Zuber Q4/S2)."""
+
+
+class DesignBOQGroupSnapshotQuerySet(models.QuerySet):
+    """Refuses the bulk writes that would bypass the model's save() and delete() (S2).
+
+    THE ONE UPDATE ALLOWED is `taken_by=None`, and only because Django's delete collector
+    applies the SET_NULL on `taken_by` through QuerySet.update() (django/db/models/
+    deletion.py, Collector.delete) when the user who took a snapshot is deleted (Zuber A4).
+    `taken_by_name` keeps who it was, so the record survives that one change.
+    """
+
+    def update(self, **kwargs):
+        if kwargs == {'taken_by': None}:
+            return super().update(**kwargs)
+        raise SnapshotImmutableError('Design BOQ group snapshots are never changed.')
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise SnapshotImmutableError('Design BOQ group snapshots are never changed.')
+
+    def delete(self):
+        raise SnapshotImmutableError('Design BOQ group snapshots are never deleted.')
+
+
+class DesignBOQGroupSnapshot(models.Model):
+    """One frozen copy of a design BOQ group's consolidated BOQ. Never edited or deleted."""
+
+    group = models.ForeignKey(
+        DesignBOQGroup, on_delete=models.PROTECT, related_name='snapshots',
+    )  # PROTECT: a group with snapshots can't be deleted (Zuber Q4/S7), by Django and the FK
+    taken_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='design_boq_group_snapshots',
+    )  # SET_NULL (Zuber A4): a departed user does not take the record with them
+    taken_by_name = models.CharField(max_length=150)  # Display name at the time; survives taken_by going NULL
+    taken_at = models.DateTimeField(auto_now_add=True)
+    note = models.CharField(max_length=200, blank=True)  # Optional, typed by the taker (Zuber A5)
+    data = models.JSONField()  # group_boq_data() output: fixed keys, quantities as canonical strings
+    fingerprint = models.CharField(max_length=64)  # sha256 of snapshot_fingerprint(data), kept for the record
+    site_ids = models.JSONField()  # Every stored site's pk: the S4 access check reads this without loading `data`
+    sites_counted = models.PositiveIntegerField()  # For the list, without loading `data`
+    sites_not_counted = models.PositiveIntegerField()  # For the list, without loading `data`
+
+    objects = DesignBOQGroupSnapshotQuerySet.as_manager()
+
+    class Meta:
+        ordering = ['-taken_at', '-pk']
+        indexes = [
+            # The group screen reads a group's snapshots newest first, every time it opens.
+            models.Index(fields=['group', '-taken_at'], name='design_boq_snap_group_taken'),
+        ]
+
+    def save(self, *args, **kwargs):
+        # Insert only (S2). Any save of an existing row is an edit, and snapshots are never edited.
+        if not self._state.adding:
+            raise SnapshotImmutableError('Design BOQ group snapshots are never changed.')
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise SnapshotImmutableError('Design BOQ group snapshots are never deleted.')
+
+    def __str__(self):
+        return f"Snapshot {self.pk} of design group {self.group_id}"
+
+
+# ---------------------------------------------------------------------------
 # Part 10 — the Design Head's quality analytics selection
 #
 # THE ONLY THING THIS SESSION WRITES. Every number on the analytics screen is

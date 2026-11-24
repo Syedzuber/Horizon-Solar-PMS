@@ -7,6 +7,8 @@ A group holding a site this user can't open is LISTED BUT NOT LINKED (Zuber Q-B)
 group screen and its Excel would refuse them, so a link would be a door that says no.
 `group.can_open` is computed in the view from the batched BOQ read gate.
 
+B-5b: the Snapshots column is `group.snapshot_count` (a subquery in the same query).
+
 Bootstrap only; no script on this page.
 {% endcomment %}
 
@@ -46,6 +48,7 @@ Bootstrap only; no script on this page.
           <th>Group</th>
           <th class="text-end">Sites</th>
           <th class="text-end">Counted</th>
+          <th class="text-end">Snapshots</th>
           <th>Created by</th>
           <th>Created</th>
         </tr>
@@ -63,6 +66,7 @@ Bootstrap only; no script on this page.
           </td>
           <td class="text-end">{{ group.site_count }}</td>
           <td class="text-end">{{ group.counted_count }}</td>
+          <td class="text-end">{{ group.snapshot_count }}</td>
           <td>{{ group.created_by_name|default:"—" }}</td>
           <td class="small text-muted">{{ group.created_at|date:"d M Y" }}</td>
         </tr>

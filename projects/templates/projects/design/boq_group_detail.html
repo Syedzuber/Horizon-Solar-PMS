@@ -1,9 +1,15 @@
 {% extends "base.html" %}
 {% comment %}
 B-5a — one design BOQ group: its sites (with the add-sites picker) and its live
-consolidated BOQ. Layout follows the approved prototype (23 Nov): two tabs, the picker
-opening inside the Sites tab, remove confirmed in the row, click a BOQ row for its
-per-site split. Snapshots are B-5b and are not here.
+consolidated BOQ. Layout follows the approved prototype (23 Nov): the picker opening
+inside the Sites tab, remove confirmed in the row, click a BOQ row for its per-site split.
+
+B-5b — a third tab, Snapshots: the note + "Save snapshot now" form and the list, newest
+first, each with View and Excel (a separate read-only page, never mixed with live
+figures). The Consolidated BOQ tab says when the live figures differ from the newest
+snapshot and lists what changed. Delete sits in the header only while the group has no
+snapshots, confirmed in-page by typing the name (never a browser dialog). The BOQ body is
+_boq_group_consolidated.html, shared with the snapshot page. ?tab= picks the open tab.
 
 WHO SEES THIS PAGE. A design user who can open EVERY site in the group (Zuber Q-B); the
 view refuses anyone else. That is why each site links to its own BOQ unconditionally: the
@@ -62,25 +68,46 @@ No prices anywhere.
       </form>
     </div>
   </div>
-  <div class="d-flex flex-wrap gap-2">
+  <div class="d-flex flex-wrap gap-2 align-items-start">
     <a href="{% url 'design_boq_group_excel' pk=group.pk %}" class="btn btn-sm btn-outline-secondary">Excel (live)</a>
     <a href="{% url 'design_boq_group_list' %}" class="btn btn-sm btn-outline-secondary">← All groups</a>
+    {% if not snapshots %}
+    {# B-5b S7: only a group with no snapshots can be deleted; the view re-checks both rules. #}
+    {{ group.name|json_script:"boqGroupName" }}
+    <div x-data="{ ask: false, typed: '', name: JSON.parse(document.getElementById('boqGroupName').textContent) }">
+      <button type="button" class="btn btn-sm btn-outline-danger" x-show="!ask" @click="ask = true">Delete group</button>
+      <template x-if="ask">
+        <form method="post" action="{% url 'design_boq_group_delete' pk=group.pk %}"
+              class="small border border-danger rounded p-2" style="max-width:24rem;" id="boqGroupDelete">
+          {% csrf_token %}
+          <p class="mb-1">Delete <strong>{{ group.name }}</strong>? Its list of sites goes with it; the sites' BOQs are unchanged. Type the group's name to confirm.</p>
+          <input type="text" name="confirm_name" x-model="typed" autocomplete="off"
+                 class="form-control form-control-sm mb-2" aria-label="Type the group's name to confirm">
+          <button type="submit" class="btn btn-sm btn-danger" :disabled="typed.trim() !== name">Delete for good</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary" @click="ask = false; typed = ''">Cancel</button>
+        </form>
+      </template>
+    </div>
+    {% endif %}
   </div>
 </div>
 
 <ul class="nav nav-tabs mb-3" role="tablist">
   <li class="nav-item" role="presentation">
-    <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tabSites" type="button" role="tab">Sites</button>
+    <button class="nav-link{% if active_tab == 'sites' %} active{% endif %}" data-bs-toggle="tab" data-bs-target="#tabSites" type="button" role="tab">Sites</button>
   </li>
   <li class="nav-item" role="presentation">
-    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tabBoq" type="button" role="tab">Consolidated BOQ</button>
+    <button class="nav-link{% if active_tab == 'boq' %} active{% endif %}" data-bs-toggle="tab" data-bs-target="#tabBoq" type="button" role="tab">Consolidated BOQ</button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link{% if active_tab == 'snapshots' %} active{% endif %}" data-bs-toggle="tab" data-bs-target="#tabSnapshots" type="button" role="tab">Snapshots ({{ snapshots|length }})</button>
   </li>
 </ul>
 
 <div class="tab-content">
 
 {# ══ Sites ═════════════════════════════════════════════════════════════════ #}
-<div class="tab-pane fade show active" id="tabSites" role="tabpanel">
+<div class="tab-pane fade{% if active_tab == 'sites' %} show active{% endif %}" id="tabSites" role="tabpanel">
 
 {{ picker_rows|json_script:"boqGroupPickerRows" }}
 <script>
@@ -299,58 +326,65 @@ function boqGroupPicker(startOpen) {
 </div>
 
 {# ══ Consolidated BOQ ═════════════════════════════════════════════════════ #}
-<div class="tab-pane fade" id="tabBoq" role="tabpanel">
+<div class="tab-pane fade{% if active_tab == 'boq' %} show active{% endif %}" id="tabBoq" role="tabpanel">
+
+{% if changes %}
+{# B-5b S3: shown only when the live fingerprint differs from the newest snapshot's. #}
+<div class="alert alert-warning small mb-3" id="boqGroupDiffers">
+  <div class="fw-semibold">Live totals differ from the last snapshot ({{ newest.taken_at|date:"d M Y H:i" }} IST).</div>
+  <ul class="mb-0 mt-1">
+    {% if changes.sites_added %}<li>Added to the totals: {{ changes.sites_added|join:", " }}</li>{% endif %}
+    {% if changes.sites_dropped %}<li>Dropped from the totals: {{ changes.sites_dropped|join:", " }}</li>{% endif %}
+    {% for t in changes.totals %}<li>{{ t.label }}: {{ t.old|default:"—" }} → {{ t.new|default:"—" }}</li>{% endfor %}
+    {% for u in changes.units %}<li>{{ u.label }}: {{ u.old }} → {{ u.new }}</li>{% endfor %}
+    {% if changes.split %}<li>Split between sites changed (totals unchanged): {{ changes.split|join:", " }}</li>{% endif %}
+  </ul>
+</div>
+{% elif newest and not newest.can_open %}
+<p class="small text-muted" id="boqGroupNotCompared">The last snapshot includes a site you can't open, so it isn't compared here.</p>
+{% endif %}
 
 <p class="small text-muted">
   Live: recalculated each time the page opens, from {{ boq.counted_codes|length }} counted
   site{{ boq.counted_codes|length|pluralize }}. Click a row for the per-site split.
 </p>
 
-{% for line in warnings %}
-  <div class="alert alert-warning py-2 small mb-2">{{ line }}</div>
-{% endfor %}
+{% include "projects/design/_boq_group_consolidated.html" %}
 
-<div class="card shadow-sm border-0 mb-3">
-  <div class="table-responsive">
-    <table class="table table-sm align-middle mb-0" id="boqGroupLines">
-      <thead class="table-light">
-        <tr><th>Code</th><th>Description</th><th>Unit</th><th class="bg-num">Sites</th><th class="bg-num">Total</th></tr>
-      </thead>
-      <tbody>
-        {% for line in boq.lines %}
-        <tr class="bg-split-row" data-bs-toggle="collapse" data-bs-target="#split{{ forloop.counter }}">
-          <td>{{ line.item_master__code }}</td>
-          <td>{{ line.item_master__description }}{% if line.retired %} <span class="chip chip-grey">Retired</span>{% endif %}</td>
-          <td>{{ line.item_master__unit }}</td>
-          <td class="bg-num">{{ line.site_count }}</td>
-          <td class="bg-num fw-semibold">{{ line.total_quantity|floatformat:"-2" }}</td>
-        </tr>
-        <tr class="collapse" id="split{{ forloop.counter }}">
-          <td></td>
-          <td colspan="4" class="small text-muted">
-            {% for site, qty in line.per_site_list %}{{ site }}: {{ qty|floatformat:"-2" }}{% if not forloop.last %} · {% endif %}{% endfor %}
-          </td>
-        </tr>
-        {% empty %}
-        <tr><td colspan="5" class="small text-muted">No counted quantities yet.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
 </div>
 
-<h6 class="mt-3">ACCBs, one row per configuration</h6>
-{% if boq.accb_lines %}
-<div class="card shadow-sm border-0 mb-3">
+{# ══ Snapshots (B-5b) ═════════════════════════════════════════════════════ #}
+<div class="tab-pane fade{% if active_tab == 'snapshots' %} show active{% endif %}" id="tabSnapshots" role="tabpanel">
+
+<form method="post" action="{% url 'design_boq_group_snapshot_take' pk=group.pk %}"
+      class="d-flex flex-wrap gap-2 align-items-center mb-2">
+  {% csrf_token %}
+  <input type="text" name="note" maxlength="{{ note_max }}" class="form-control form-control-sm"
+         style="flex:1 1 280px;" placeholder="Note (optional), e.g. sent for vendor RFQ" aria-label="Snapshot note">
+  <button type="submit" class="btn btn-sm btn-brand">Save snapshot now</button>
+</form>
+<p class="small text-muted">A snapshot keeps its own copy of every counted line, ACCB and site status at that moment, who took it and when. It can't be edited or deleted, and later BOQ changes don't touch it.</p>
+
+{% if snapshots %}
+<div class="card shadow-sm border-0">
   <div class="table-responsive">
-    <table class="table table-sm align-middle mb-0" id="boqGroupAccbs">
-      <thead class="table-light"><tr><th>Description</th><th>Sites</th><th class="bg-num">{{ boq.accb_lines.0.unit }}</th></tr></thead>
+    <table class="table table-sm align-middle mb-0" id="boqGroupSnapshots">
+      <thead class="table-light"><tr><th>Taken</th><th>By</th><th>Sites</th><th>Note</th><th></th></tr></thead>
       <tbody>
-        {% for accb in boq.accb_lines %}
+        {% for snap in snapshots %}
         <tr>
-          <td class="small">{{ accb.description }}{% if accb.retired %} <span class="chip chip-grey">Retired</span>{% endif %}</td>
-          <td class="small">{% for site, qty in accb.per_site_list %}{{ site }}{% if qty != 1 %} ×{{ qty|floatformat:"-2" }}{% endif %}{% if not forloop.last %}, {% endif %}{% endfor %}</td>
-          <td class="bg-num fw-semibold">{{ accb.total_quantity|floatformat:"-2" }}</td>
+          <td class="text-nowrap">{{ snap.taken_at|date:"d M Y H:i" }} IST</td>
+          <td class="small">{{ snap.taken_by_name }}</td>
+          <td class="small">{{ snap.sites_counted }} counted{% if snap.sites_not_counted %}, {{ snap.sites_not_counted }} not counted{% endif %}</td>
+          <td class="small">{{ snap.note|default:"—" }}</td>
+          <td class="text-end text-nowrap">
+            {% if snap.can_open %}
+              <a href="{% url 'design_boq_group_snapshot_detail' pk=group.pk snapshot_pk=snap.pk %}" class="btn btn-sm btn-outline-secondary">View</a>
+              <a href="{% url 'design_boq_group_snapshot_excel' pk=group.pk snapshot_pk=snap.pk %}" class="btn btn-sm btn-outline-secondary">Excel</a>
+            {% else %}
+              <span class="small text-muted">{{ snapshot_not_open }}</span>
+            {% endif %}
+          </td>
         </tr>
         {% endfor %}
       </tbody>
@@ -358,30 +392,9 @@ function boqGroupPicker(startOpen) {
   </div>
 </div>
 {% else %}
-<p class="small text-muted">No ACCBs on counted sites.</p>
+<p class="small text-muted">No snapshots yet.</p>
 {% endif %}
 
-{% if boq.unlinked %}
-<h6 class="mt-3">Lines with no catalogue item</h6>
-<p class="small text-muted mb-1">Not summed across sites: with no catalogue item there is nothing to add them up by.</p>
-<div class="card shadow-sm border-0 mb-3">
-  <div class="table-responsive">
-    <table class="table table-sm align-middle mb-0" id="boqGroupUnlinked">
-      <thead class="table-light"><tr><th>Site</th><th>Description</th><th>Unit</th><th class="bg-num">Quantity</th></tr></thead>
-      <tbody>
-        {% for item in boq.unlinked %}
-        <tr>
-          <td>{{ item.boq.project.project_id }}</td>
-          <td class="small">{{ item.description }}</td>
-          <td>{{ item.uom }}</td>
-          <td class="bg-num">{{ item.boq_quantity|floatformat:"-2" }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</div>
-{% endif %}
 
 </div>
 </div>

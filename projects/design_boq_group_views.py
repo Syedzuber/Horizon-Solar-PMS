@@ -24,17 +24,28 @@ quantities — is fetched by one more query and reported, never summed silently 
 
 NO PRICES anywhere: nothing on these pages, in their context or in the Excel reads a rate,
 amount or value.
+
+B-5b — SNAPSHOTS (Zuber Q3/Q4/Q7, S1-S8 and the pre-flight answers A1-A9, 24 Nov 2026).
+A snapshot is the group's consolidated BOQ frozen as plain data (group_boq_data()), never
+edited or deleted. ONE SHAPE FOR EVERYTHING: the live screen and the live Excel also render
+from hydrate(group_boq_data(...)), so the only difference between live and a snapshot is
+where the plain data came from — computed now, or read from the snapshot row. consolidate()
+itself is unchanged. A snapshot is opened only by someone who can open every site it STORES
+(S4), and a group with snapshots can't be deleted (S7).
 """
+import hashlib
+import json
 import re
 from decimal import Decimal
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.db import IntegrityError, transaction
-from django.db.models import Count, F, Q
-from django.db.models.functions import Lower
+from django.db.models import Count, F, IntegerField, OuterRef, ProtectedError, Q, Subquery
+from django.db.models.functions import Coalesce, Lower
 from django.http import HttpResponse, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
@@ -42,8 +53,8 @@ from openpyxl.styles import Alignment, Font
 from .accb import ACCB_CONFIGURED_CODE
 from .design_views import aggregate_group_boq
 from .models import (
-    BOQItem, DesignAssignment, DesignBOQGroup, DesignBOQGroupMembership, Project,
-    DESIGN_BOQ_COUNTED_STATUSES, log_activity,
+    BOQItem, DesignAssignment, DesignBOQGroup, DesignBOQGroupMembership,
+    DesignBOQGroupSnapshot, Project, DESIGN_BOQ_COUNTED_STATUSES, log_activity,
 )
 from .permissions import (
     boq_readable_project_ids, boq_readable_projects_q, user_can_use_design_boq_groups,
@@ -68,6 +79,24 @@ WHOLE_NUMBER_CODES = ('OPX-037', 'OPX-038')
 LOG_SITES_SHOWN = 5
 
 GROUP_NAME_MAX = DesignBOQGroup._meta.get_field('name').max_length
+
+#: B-5b S6: a snapshot of a group with no counted site would be an empty record.
+NOTHING_TO_SNAPSHOT = ('Nothing to snapshot: no site in this group has a submitted or '
+                       'released BOQ.')
+
+#: B-5b S4: a snapshot is refused whole when it stores any site the user can't open.
+SNAPSHOT_NOT_OPEN = "This snapshot includes sites you can't open."
+
+#: B-5b S7: a group with snapshots is kept, because its snapshots point at it.
+GROUP_HAS_SNAPSHOTS = "This group has snapshots, so it can't be deleted."
+
+#: B-5b S7 / Zuber A6: the typed name must match exactly (case too) after trimming.
+DELETE_NAME_MISMATCH = "Type the group's name exactly as shown to delete it."
+
+NOTE_MAX = DesignBOQGroupSnapshot._meta.get_field('note').max_length
+
+#: The group screen's tabs; ?tab= picks one (the snapshot POST returns to its own tab).
+TABS = ('sites', 'boq', 'snapshots')
 
 XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
@@ -293,6 +322,395 @@ def consolidate(member_rows):
     }
 
 
+# ---------------------------------------------------------------------------
+# B-5b — plain data: the one shape the live view, the live Excel and every snapshot use
+# ---------------------------------------------------------------------------
+
+#: Bump when group_boq_data()'s shape changes; hydrate() refuses any other (Zuber A1), so an
+#: old snapshot can never be silently misread by newer code.
+GROUP_BOQ_DATA_VERSION = 1
+
+#: Every key group_boq_data() writes, per level. NO PRICES (S1): a snapshot stores these and
+#: nothing else. tests_design_boq_group_snapshots pins this list by hand.
+GROUP_BOQ_DATA_KEYS = {
+    'top':          ('version', 'group_name', 'sites', 'lines', 'accb_lines', 'unlinked',
+                     'blanks', 'unit_warnings'),
+    'site':         ('id', 'code', 'name', 'tender', 'designer', 'status', 'counted'),
+    'line':         ('code', 'description', 'unit', 'site_count', 'total', 'retired', 'per_site'),
+    'accb':         ('config_key', 'description', 'unit', 'site_count', 'total', 'retired',
+                     'per_site'),
+    'unlinked':     ('site', 'description', 'unit', 'quantity'),
+    'blank':        ('site', 'code', 'description'),
+    'unit_warning': ('site', 'code', 'quantity', 'line_unit', 'catalogue_unit', 'reasons'),
+}
+
+#: What group_boq_data() reads from consolidate() and _member_rows(), per level. With
+#: GROUP_BOQ_KEYS_IGNORED it must cover every key they return (the key-coverage test, Zuber
+#: A1): a key added to consolidate() later fails that test until someone decides on it.
+#: consolidate()'s `unlinked` holds BOQItem objects, not dicts; their four fields are read
+#: in group_boq_data() and pinned by the round-trip test instead.
+GROUP_BOQ_KEYS_READ = {
+    'boq':          {'lines', 'accb_lines', 'unlinked', 'blanks', 'unit_warnings'},
+    'line':         {'item_master__code', 'item_master__description', 'item_master__unit',
+                     'site_count', 'total_quantity', 'retired', 'per_site_list'},
+    'accb':         {'config_key', 'description', 'unit', 'site_count', 'total_quantity',
+                     'retired', 'per_site_list'},
+    'blank':        {'site', 'code', 'description'},
+    'unit_warning': {'site', 'code', 'quantity', 'line_unit', 'catalogue_unit', 'reasons'},
+    'member_row':   {'project', 'code', 'tender', 'designer', 'status', 'counted'},
+}
+
+#: What consolidate() and _member_rows() return that is deliberately NOT stored, and why.
+GROUP_BOQ_KEYS_IGNORED = {
+    'boq':        {'counted_codes': 'rebuilt from sites[].counted by hydrate()',
+                   'not_counted':   'rebuilt from sites[].counted by hydrate()'},
+    'line':       {'item_master':             'a database id; the code names the item',
+                   'item_master__sort_order': 'the lines are stored already in this order',
+                   'contributions':           'per BOQ line; per_site_list is the per-site sum',
+                   'per_site':                'the dict form of per_site_list, rebuilt'},
+    'accb':       {'contributions': 'the same pairs as per_site_list',
+                   'per_site':      'the dict form of per_site_list, rebuilt',
+                   'code':          'always ACCB_CONFIGURED_CODE, put back by hydrate()'},
+    'blank':        {},
+    'unit_warning': {},
+    'member_row': {'membership': 'live only: the Sites tab Remove button'},
+}
+
+
+def _canon(value):
+    """A quantity as a canonical string, or None for a blank.
+
+    2340, 2340.00 and 2.34E+3 all give '2340'; 38.40 gives '38.4'; 0 and -0 give '0'.
+    Equal quantities therefore always give equal strings (Postgres sums numeric(10,2) to
+    2340.00 where SQLite may give 2340), so the fingerprint can't see a difference that is
+    only formatting. Strings, not JSON numbers: a JSON number comes back as a float.
+    """
+    if value is None:
+        return None
+    value = value if isinstance(value, Decimal) else Decimal(str(value))
+    if value == 0:
+        return '0'
+    return format(value.normalize(), 'f')
+
+
+def _dec(text):
+    """The Decimal of a _canon() string, or None for a blank."""
+    return None if text is None else Decimal(text)
+
+
+def _per_site_data(pairs):
+    return [[site, _canon(qty)] for site, qty in pairs]
+
+
+def group_boq_data(group_name, member_rows, boq):
+    """The consolidated BOQ as plain, JSON-ready data: exactly what a snapshot stores (S1),
+    and what the live screen and live Excel render from (through hydrate()).
+
+    Reads only `consolidate()`'s output and the member rows; no query. The keys written are
+    GROUP_BOQ_DATA_KEYS and nothing else, so no price can ride along.
+    """
+    return {
+        'version':    GROUP_BOQ_DATA_VERSION,
+        'group_name': group_name,
+        'sites': [{
+            'id':       r['project'].pk,
+            'code':     r['code'],
+            'name':     r['project'].site_name or '',
+            'tender':   r['tender'],
+            'designer': r['designer'],
+            'status':   r['status'],          # the status as shown, at this moment (S5)
+            'counted':  r['counted'],
+        } for r in member_rows],
+        'lines': [{
+            'code':        line['item_master__code'],
+            'description': line['item_master__description'],
+            'unit':        line['item_master__unit'],
+            'site_count':  line['site_count'],
+            'total':       _canon(line['total_quantity']),
+            'retired':     line['retired'],
+            'per_site':    _per_site_data(line['per_site_list']),
+        } for line in boq['lines']],
+        'accb_lines': [{
+            'config_key':  accb['config_key'],
+            'description': accb['description'],
+            'unit':        accb['unit'],
+            'site_count':  accb['site_count'],
+            'total':       _canon(accb['total_quantity']),
+            'retired':     accb['retired'],
+            'per_site':    _per_site_data(accb['per_site_list']),
+        } for accb in boq['accb_lines']],
+        'unlinked': [{
+            'site':        item.boq.project.project_id,
+            'description': item.description,
+            'unit':        item.uom,
+            'quantity':    _canon(item.boq_quantity),
+        } for item in boq['unlinked']],
+        'blanks': [{
+            'site': b['site'], 'code': b['code'], 'description': b['description'],
+        } for b in boq['blanks']],
+        'unit_warnings': [{
+            'site':           w['site'],
+            'code':           w['code'],
+            'quantity':       _canon(w['quantity']),
+            'line_unit':      w['line_unit'],
+            'catalogue_unit': w['catalogue_unit'],
+            'reasons':        list(w['reasons']),
+        } for w in boq['unit_warnings']],
+    }
+
+
+def _require_version(data):
+    """Refuse data in a shape this code doesn't know (Zuber A1). Never guess at old data."""
+    version = data.get('version') if isinstance(data, dict) else None
+    if version != GROUP_BOQ_DATA_VERSION:
+        raise ValueError(f'Design BOQ group data version {version!r} is not one this code '
+                         f'can read (it reads version {GROUP_BOQ_DATA_VERSION}).')
+
+
+def _per_site_view(pairs):
+    pairs = [(site, Decimal(qty)) for site, qty in pairs]
+    return pairs, dict(pairs)
+
+
+def hydrate(data):
+    """Plain data (live, or a snapshot's stored copy) back into the shape the template and
+    build_group_workbook() read: {'group_name', 'sites', 'boq'}.
+
+    `boq` carries consolidate()'s key names for every line and ACCB row, with Decimals and
+    (site, qty) tuples, so a page or sheet reads the same either way. The one change of
+    shape: `unlinked` rows are plain dicts (site, description, unit, quantity) instead of
+    BOQItem objects. No query.
+    """
+    _require_version(data)
+    sites = [dict(s) for s in data['sites']]
+    lines = []
+    for line in data['lines']:
+        pairs, per_site = _per_site_view(line['per_site'])
+        lines.append({
+            'item_master__code':        line['code'],
+            'item_master__description': line['description'],
+            'item_master__unit':        line['unit'],
+            'site_count':               line['site_count'],
+            'total_quantity':           Decimal(line['total']),
+            'retired':                  line['retired'],
+            'per_site_list':            pairs,
+            'per_site':                 per_site,
+        })
+    accb_lines = []
+    for accb in data['accb_lines']:
+        pairs, per_site = _per_site_view(accb['per_site'])
+        accb_lines.append({
+            'config_key':     accb['config_key'],
+            'description':    accb['description'],
+            'unit':           accb['unit'],
+            'site_count':     accb['site_count'],
+            'total_quantity': Decimal(accb['total']),
+            'retired':        accb['retired'],
+            'per_site_list':  pairs,
+            'per_site':       per_site,
+            'code':           ACCB_CONFIGURED_CODE,
+        })
+    return {
+        'group_name': data['group_name'],
+        'sites': sites,
+        'boq': {
+            'lines':         lines,
+            'accb_lines':    accb_lines,
+            'unlinked':      [dict(u, quantity=_dec(u['quantity'])) for u in data['unlinked']],
+            'counted_codes': [s['code'] for s in sites if s['counted']],
+            'not_counted':   [s for s in sites if not s['counted']],
+            'blanks':        [dict(b) for b in data['blanks']],
+            'unit_warnings': [dict(w, quantity=_dec(w['quantity']), reasons=list(w['reasons']))
+                              for w in data['unit_warnings']],
+        },
+    }
+
+
+def _comparable(data):
+    """THE projection "does the live BOQ still match a snapshot" is judged on (Zuber A2).
+
+    The counted site set (by pk), each catalogue line's [code, unit, total, per-site
+    split], each ACCB row's [config key, total, per-site split], and the lines with no
+    catalogue item summed per (site, description, unit). Description, the retired flag and
+    every status stay OUT: rewording, retiring or a counted-to-counted status move is not a
+    change to what was counted. Both snapshot_fingerprint() and snapshot_changes() read
+    this one projection, so the change list is empty exactly when the fingerprints match.
+    """
+    _require_version(data)
+    unlinked = {}
+    for u in data['unlinked']:
+        key = (u['site'], u['description'], u['unit'] or '')
+        unlinked[key] = unlinked.get(key, Decimal('0')) + (_dec(u['quantity']) or Decimal('0'))
+    return {
+        'counted':  sorted(s['id'] for s in data['sites'] if s['counted']),
+        # Each code and config key is one row, so sorting never compares past the first item.
+        'lines':    sorted([l['code'], l['unit'] or '', l['total'], sorted(l['per_site'])]
+                           for l in data['lines']),
+        'accb':     sorted([a['config_key'], a['total'], sorted(a['per_site'])]
+                           for a in data['accb_lines']),
+        'unlinked': sorted([site, description, unit, _canon(qty)]
+                           for (site, description, unit), qty in unlinked.items()),
+    }
+
+
+def snapshot_fingerprint(data):
+    """sha256 of the canonical JSON of _comparable(data)."""
+    canonical = json.dumps(_comparable(data), sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _fmt(text):
+    """A _canon() quantity for the change list: '2,340', '38.4'; None stays None ('—')."""
+    return None if text is None else format(Decimal(text), ',f')
+
+
+def snapshot_changes(old, new):
+    """The short list of what differs between a snapshot's stored data (`old`) and the live
+    data (`new`), S3 + Zuber A2. Nothing more: no full diff.
+
+      sites_added / sites_dropped — site codes that joined or left the totals;
+      totals — {'label', 'old', 'new'} for a catalogue line, ACCB row (full text) or line
+               with no catalogue item whose total changed, appeared (old None) or went
+               (new None);
+      units  — {'label', 'old', 'new'} for a catalogue line whose unit changed, each side
+               '<total> <unit>' ("OPX-038: 40 KWp → 40 Nos");
+      split  — labels whose per-site split changed while the total and unit did not.
+
+    Every difference in _comparable() lands in exactly one of these, so `any` is False
+    exactly when snapshot_fingerprint(old) == snapshot_fingerprint(new).
+    """
+    a, b = _comparable(old), _comparable(new)
+    old_codes = {s['id']: s['code'] for s in old['sites']}
+    new_codes = {s['id']: s['code'] for s in new['sites']}
+    changes = {
+        'sites_added':   sorted(new_codes[i] for i in set(b['counted']) - set(a['counted'])),
+        'sites_dropped': sorted(old_codes[i] for i in set(a['counted']) - set(b['counted'])),
+        'totals': [], 'units': [], 'split': [],
+    }
+
+    # Catalogue lines by code: [unit, total, split].
+    before_lines = {row[0]: row[1:] for row in a['lines']}
+    after_lines = {row[0]: row[1:] for row in b['lines']}
+    for code in sorted(set(before_lines) | set(after_lines)):
+        before, after = before_lines.get(code), after_lines.get(code)
+        if before == after:
+            continue
+        if before is None or after is None:
+            changes['totals'].append({'label': code, 'old': before and _fmt(before[1]),
+                                      'new': after and _fmt(after[1])})
+        elif before[0] != after[0]:
+            changes['units'].append({'label': code,
+                                     'old': f'{_fmt(before[1])} {before[0]}'.strip(),
+                                     'new': f'{_fmt(after[1])} {after[0]}'.strip()})
+        elif before[1] != after[1]:
+            changes['totals'].append({'label': code, 'old': _fmt(before[1]),
+                                      'new': _fmt(after[1])})
+        else:
+            changes['split'].append(code)
+
+    # ACCB rows by configuration: [total, split], labelled by their full text (Zuber A2).
+    text = {x['config_key']: x['description'] for x in old['accb_lines']}
+    text.update({x['config_key']: x['description'] for x in new['accb_lines']})
+    before_accb = {row[0]: row[1:] for row in a['accb']}
+    after_accb = {row[0]: row[1:] for row in b['accb']}
+    for key in sorted(set(before_accb) | set(after_accb)):
+        before, after = before_accb.get(key), after_accb.get(key)
+        if before == after:
+            continue
+        if before is None or after is None or before[0] != after[0]:
+            changes['totals'].append({'label': text[key], 'old': before and _fmt(before[0]),
+                                      'new': after and _fmt(after[0])})
+        else:
+            changes['split'].append(text[key])
+
+    # Lines with no catalogue item, by (site, description, unit).
+    before_unl = {tuple(row[:3]): row[3] for row in a['unlinked']}
+    after_unl = {tuple(row[:3]): row[3] for row in b['unlinked']}
+    for key in sorted(set(before_unl) | set(after_unl)):
+        if before_unl.get(key) != after_unl.get(key):
+            site, description, _unit = key
+            changes['totals'].append({'label': f'{site} {description} (no catalogue item)',
+                                      'old': _fmt(before_unl.get(key)),
+                                      'new': _fmt(after_unl.get(key))})
+
+    changes['any'] = any(changes[k] for k in
+                         ('sites_added', 'sites_dropped', 'totals', 'units', 'split'))
+    return changes
+
+
+def _reads_every_site(request):
+    """True if this user's BOQ read gate is every project — the Design Head, his deputy and
+    Design QC among design users. boq_readable_projects_q() returns the empty Q() for
+    exactly those portfolio readers, and an empty Q is falsy."""
+    return not _readable_q(request)
+
+
+def _snapshot_sites_open(request, site_ids, readable):
+    """S4 + Zuber A7: may this user open a snapshot storing `site_ids`?
+
+    Every stored site must be readable now — its OWN stored sites, not the group's current
+    members, so a site that has since left the group still guards it, and a soft-deleted
+    one too (Project has no soft-delete manager and the read gate ignores is_deleted).
+    A stored site that is not in `readable` is either one the user may not open, or one
+    whose row no longer exists. Only a user who reads every site passes the second (they
+    could open it if it existed); everyone else is refused. Nothing widens.
+    """
+    if set(site_ids) <= readable:
+        return True
+    return _reads_every_site(request)
+
+
+def _snapshot_or_refuse(request, pk, snapshot_pk):
+    """(snapshot, None) for a design user who can open every site the snapshot stores,
+    else (None, a 403). Scoped to the group in the URL: another group's snapshot is a 404.
+    2 queries (3 for a plain designer: the deputy lookup)."""
+    # Design users only (ruling 33, Zuber Q-A), as for every design BOQ group page.
+    if not user_can_use_design_boq_groups(request.user):
+        return None, HttpResponseForbidden(NOT_A_DESIGN_USER)
+    snapshot = get_object_or_404(DesignBOQGroupSnapshot, pk=snapshot_pk, group_id=pk)
+    readable = _readable_ids(request, Project.objects.filter(pk__in=snapshot.site_ids))
+    # S4: the snapshot's own stored sites decide, whatever the group holds today.
+    if not _snapshot_sites_open(request, snapshot.site_ids, readable):
+        return None, HttpResponseForbidden(SNAPSHOT_NOT_OPEN)
+    return snapshot, None
+
+
+def _snapshot_panel(request, group, live_data):
+    """The Snapshots tab and the "differs" banner: (snapshots, newest, changes).
+
+    Fixed cost whatever the number of snapshots: the list without `data` (1 query); when
+    there is any, the readable subset of every site they store (1); and the newest one's
+    `data` (1) when this user may open it. `changes` is None when there is no snapshot,
+    the newest matches the live data, or the user can't open the newest — comparing it
+    would show figures of a site they can't read (Zuber Q-B: nothing widens).
+    """
+    # Newest first (Meta.ordering). `data` is left behind: up to ~60 KB a row, and only the
+    # newest one's is ever needed, fetched below.
+    snapshots = list(DesignBOQGroupSnapshot.objects.filter(group=group).defer('data'))
+    if not snapshots:
+        return [], None, None
+    every_site = set().union(*(s.site_ids for s in snapshots))
+    readable = _readable_ids(request, Project.objects.filter(pk__in=every_site))
+    for snapshot in snapshots:
+        snapshot.can_open = _snapshot_sites_open(request, snapshot.site_ids, readable)
+    newest = snapshots[0]
+    changes = None
+    if newest.can_open:
+        stored = (DesignBOQGroupSnapshot.objects.filter(pk=newest.pk)
+                  .values_list('data', flat=True).get())
+        if snapshot_fingerprint(stored) != snapshot_fingerprint(live_data):
+            changes = snapshot_changes(stored, live_data)
+    return snapshots, newest, changes
+
+
+def _live_view(group, members):
+    """(member_rows, live_data, view) for a group's live consolidated BOQ — the screen and the
+    live Excel both start here, so both render from the plain data a snapshot would store."""
+    member_rows = _member_rows(members)
+    live_data = group_boq_data(group.name, member_rows, consolidate(member_rows))
+    return member_rows, live_data, hydrate(live_data)
+
+
 def _picker_rows(request, group):
     """Every OPEX site with a design assignment that the user can open, as JSON-ready dicts
     for the add-sites picker (Zuber Q-B: the picker lists only sites the user can open).
@@ -345,13 +763,18 @@ def design_boq_group_list(request):
     # Counts run over the same membership join; the joins to the site and its (one-to-one)
     # design assignment cannot multiply rows.
     live = Q(memberships__project__is_deleted=False)
+    # B-5b: each group's snapshot count as a correlated subquery, NOT a third Count — a join
+    # to snapshots would multiply the membership rows the two Counts above run over.
+    snapshot_count = (DesignBOQGroupSnapshot.objects.filter(group=OuterRef('pk'))
+                      .order_by().values('group').annotate(n=Count('pk')).values('n'))
     groups = list(
         DesignBOQGroup.objects
         .select_related('created_by__user')
         .annotate(site_count=Count('memberships', filter=live),
                   counted_count=Count('memberships', filter=live & Q(
                       memberships__project__design_assignment__status__in=(
-                          DESIGN_BOQ_COUNTED_STATUSES))))
+                          DESIGN_BOQ_COUNTED_STATUSES))),
+                  snapshot_count=Coalesce(Subquery(snapshot_count, output_field=IntegerField()), 0))
         .order_by(Lower('name')))
 
     # Which groups this user may open: every live member must be readable (Zuber Q-B).
@@ -440,26 +863,36 @@ def design_boq_group_rename(request, pk):
 
 @login_required
 def design_boq_group_detail(request, pk):
-    """One design BOQ group: its sites (with the add-sites picker) and its live
-    consolidated BOQ. Access: design users who can open every site in the group."""
+    """One design BOQ group: its sites (with the add-sites picker), its live consolidated
+    BOQ (with the "differs from the last snapshot" banner, B-5b) and its snapshots.
+    Access: design users who can open every site in the group; each snapshot's View and
+    Excel also need every site that snapshot stores (S4)."""
     group, members, refusal = _open_group_or_refuse(request, pk)
     if refusal:
         return refusal
 
-    member_rows = _member_rows(members)
-    boq = consolidate(member_rows)
+    # B-5b: the live BOQ is rendered from the same plain data a snapshot stores.
+    member_rows, live_data, live = _live_view(group, members)
+    snapshots, newest, changes = _snapshot_panel(request, group, live_data)
     picker = _picker_rows(request, group)
+    tab = request.GET.get('tab')
     return render(request, 'projects/design/boq_group_detail.html', {
         'group':        group,
         'member_rows':  member_rows,
-        'boq':          boq,
+        'boq':          live['boq'],
         # The same sentences the Summary sheet carries (warning_lines is shared).
-        'warnings':     warning_lines(member_rows, boq),
+        'warnings':     warning_lines(live['boq']),
         'picker_rows':  picker,
         'tenders':      sorted({row['tender'] for row in picker if row['tender']}),
         # Q2: a new, empty group opens straight into the picker.
         'open_picker':  not member_rows,
         'name_max':     GROUP_NAME_MAX,
+        'active_tab':   tab if tab in TABS else 'sites',
+        'snapshots':    snapshots,
+        'newest':       newest,
+        'changes':      changes,
+        'note_max':     NOTE_MAX,
+        'snapshot_not_open': SNAPSHOT_NOT_OPEN,
     })
 
 
@@ -593,18 +1026,189 @@ def design_boq_group_excel(request, pk):
     if refusal:
         return refusal
 
-    member_rows = _member_rows(members)
-    boq = consolidate(member_rows)
-    workbook = build_group_workbook(group, member_rows, boq, timezone.localtime())
+    # B-5b: from the same plain data a snapshot stores, through the same builder.
+    _rows, _data, live = _live_view(group, members)
+    now = timezone.localtime()
+    workbook = build_group_workbook(
+        f'{group.name} — live consolidated BOQ',
+        [f'Generated {now:%d %b %Y %H:%M} IST from {_counted_phrase(live)}. '
+         f'Quantities only, no prices.'],
+        live['sites'], live['boq'])
+    # The date is the IST date (TIME_ZONE is Asia/Kolkata).
+    return _xlsx_response(workbook, f'{_safe_name(group.name)}_live_{timezone.localdate():%Y-%m-%d}.xlsx')
 
-    # The group name is typed by a user; it goes into a header, so it is sanitised rather
-    # than trusted. The date is the IST date (TIME_ZONE is Asia/Kolkata).
-    safe = re.sub(r'[^A-Za-z0-9._ -]', '_', group.name).strip() or 'group'
+
+def _safe_name(name):
+    """A user-typed group name made safe for a Content-Disposition header."""
+    return re.sub(r'[^A-Za-z0-9._ -]', '_', name).strip() or 'group'
+
+
+def _xlsx_response(workbook, filename):
     response = HttpResponse(content_type=XLSX_TYPE)
-    response['Content-Disposition'] = (
-        f'attachment; filename="{safe}_live_{timezone.localdate():%Y-%m-%d}.xlsx"')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
     workbook.save(response)
     return response
+
+
+def _counted_phrase(view):
+    """'3 counted sites of 5' for a hydrate()d view — the Excel's intro line, both kinds."""
+    counted = len(view['boq']['counted_codes'])
+    return (f'{counted} counted site{"" if counted == 1 else "s"} of {len(view["sites"])}')
+
+
+# ---------------------------------------------------------------------------
+# B-5b — snapshots and group delete
+# ---------------------------------------------------------------------------
+
+@login_required
+def design_boq_group_snapshot_take(request, pk):
+    """Freeze the group's consolidated BOQ as a dated, immutable snapshot, with an optional
+    note (S1, S6, S8). Access: design users who can open every site in the group — the
+    group screen's rule. POST only; a GET goes back to the Snapshots tab."""
+    group, members, refusal = _open_group_or_refuse(request, pk)
+    if refusal:
+        return refusal
+    back = redirect(f"{_detail_url(group.pk)}?tab=snapshots")
+    if request.method != 'POST':
+        return back
+
+    note = (request.POST.get('note') or '').strip()
+    if len(note) > NOTE_MAX:
+        messages.error(request, f'Keep the note to {NOTE_MAX} characters.')
+        return back
+
+    # Built by the SAME function as the live screen, from the members the access check just
+    # passed — so a snapshot never stores a site this user wasn't checked against.
+    _rows, data, _view = _live_view(group, members)
+    counted = sum(1 for s in data['sites'] if s['counted'])
+    # S6: a snapshot of nothing counted would be an empty record.
+    if not counted:
+        messages.error(request, NOTHING_TO_SNAPSHOT)
+        return back
+
+    profile = request.user.profile
+    name = _person(profile)
+    try:
+        with transaction.atomic():
+            # RACE: lock the group row, the same lock design_boq_group_delete takes, so a
+            # snapshot and a delete of one group serialise (Zuber). If the delete won, the
+            # row is gone and there is nothing to snapshot; if this won, the delete sees the
+            # snapshot once it gets the lock and refuses.
+            if not list(DesignBOQGroup.objects.select_for_update()
+                        .filter(pk=group.pk).values_list('pk', flat=True)):
+                messages.error(request, 'This group was deleted a moment ago.')
+                return redirect('design_boq_group_list')
+            DesignBOQGroupSnapshot.objects.create(
+                group=group, taken_by=profile, taken_by_name=name, note=note, data=data,
+                fingerprint=snapshot_fingerprint(data),
+                site_ids=[s['id'] for s in data['sites']],
+                sites_counted=counted, sites_not_counted=len(data['sites']) - counted)
+            log_activity(None, profile,
+                         f'{name} took a snapshot of design BOQ group "{group.name}": '
+                         f'{counted} site{"" if counted == 1 else "s"} counted',
+                         entity_type='DesignBOQGroup', entity_id=group.pk,
+                         action_code='design_boq_group_snapshot_taken')
+    except IntegrityError:
+        # The group's row went between the lock and the insert's FK check — only possible
+        # if the lock was not honoured (e.g. SQLite, which ignores FOR UPDATE).
+        messages.error(request, 'This group was deleted a moment ago.')
+        return redirect('design_boq_group_list')
+    messages.success(request, f'Snapshot saved: {counted} site{"" if counted == 1 else "s"} '
+                              f'counted.')
+    return back
+
+
+def _detail_url(pk):
+    return reverse('design_boq_group_detail', kwargs={'pk': pk})
+
+
+@login_required
+def design_boq_group_snapshot_detail(request, pk, snapshot_pk):
+    """One snapshot, read-only, from its stored copy only — never from live data.
+    Access: design users who can open every site the snapshot STORES (S4), whatever the
+    group holds today; Head and QC also when a stored site no longer exists (Zuber A7)."""
+    snapshot, refusal = _snapshot_or_refuse(request, pk, snapshot_pk)
+    if refusal:
+        return refusal
+    view = hydrate(snapshot.data)
+    return render(request, 'projects/design/boq_group_snapshot.html', {
+        'snapshot':  snapshot,
+        'group_pk':  pk,
+        'view':      view,
+        'boq':       view['boq'],
+        'warnings':  warning_lines(view['boq']),
+    })
+
+
+@login_required
+def design_boq_group_snapshot_excel(request, pk, snapshot_pk):
+    """One snapshot as the three-sheet .xlsx, from its stored copy only (S5). Access: as
+    the snapshot page. File name <group>_snapshot_<YYYY-MM-DD_HHMM>.xlsx, IST."""
+    snapshot, refusal = _snapshot_or_refuse(request, pk, snapshot_pk)
+    if refusal:
+        return refusal
+    view = hydrate(snapshot.data)
+    taken = timezone.localtime(snapshot.taken_at)
+    intro = [f'Snapshot taken {taken:%d %b %Y %H:%M} IST by {snapshot.taken_by_name} from '
+             f'{_counted_phrase(view)}. Quantities only, no prices.']
+    if snapshot.note:
+        intro.append(f'Note: {snapshot.note}')
+    workbook = build_group_workbook(
+        f'{view["group_name"]} — snapshot of {taken:%d %b %Y %H:%M} IST',
+        intro, view['sites'], view['boq'])
+    # Zuber A3: the group's name as stored at the time, in the title and the file name.
+    return _xlsx_response(workbook,
+                          f'{_safe_name(view["group_name"])}_snapshot_{taken:%Y-%m-%d_%H%M}.xlsx')
+
+
+@login_required
+def design_boq_group_delete(request, pk):
+    """Delete a design BOQ group and its memberships; the sites' BOQs are untouched (S7).
+    Only a group with no snapshots, and only after its name is typed exactly. Access:
+    design users who can open every site in the group. POST only."""
+    group, members, refusal = _open_group_or_refuse(request, pk)
+    if refusal:
+        return refusal
+    if request.method != 'POST':
+        return redirect('design_boq_group_detail', pk=group.pk)
+
+    # Zuber A6: exact, case-sensitive, after trimming both ends — a deliberate act.
+    if (request.POST.get('confirm_name') or '').strip() != group.name:
+        messages.error(request, DELETE_NAME_MISMATCH)
+        return redirect('design_boq_group_detail', pk=group.pk)
+
+    profile = request.user.profile
+    name = group.name
+    with transaction.atomic():
+        # RACE: the same row lock design_boq_group_snapshot_take takes, so a snapshot taken
+        # at this moment either lands first (and is seen just below) or waits and then finds
+        # the group gone.
+        locked = DesignBOQGroup.objects.select_for_update().filter(pk=group.pk).first()
+        if locked is None:
+            messages.info(request, f'"{name}" was already deleted.')
+            return redirect('design_boq_group_list')
+        # S7: snapshots point at their group (PROTECT), so the group stays. The database
+        # would refuse anyway; this says why first.
+        if DesignBOQGroupSnapshot.objects.filter(group=locked).exists():
+            messages.error(request, GROUP_HAS_SNAPSHOTS)
+            return redirect('design_boq_group_detail', pk=group.pk)
+        # Every membership, soft-deleted sites included: the log names what was in it.
+        codes = list(locked.memberships.order_by('project__project_id')
+                     .values_list('project__project_id', flat=True))
+        try:
+            locked.delete()             # memberships go with it (CASCADE)
+        except ProtectedError:
+            # A snapshot slipped in despite the lock (SQLite ignores FOR UPDATE).
+            messages.error(request, GROUP_HAS_SNAPSHOTS)
+            return redirect('design_boq_group_detail', pk=group.pk)
+        sites = (f'{len(codes)} site{"" if len(codes) == 1 else "s"}: {_short_list(codes)}'
+                 if codes else 'no sites')
+        log_activity(None, profile,
+                     f'{_person(profile)} deleted design BOQ group "{name}" with {sites}',
+                     entity_type='DesignBOQGroup', entity_id=pk,
+                     action_code='design_boq_group_deleted')
+    messages.success(request, f'Deleted "{name}". The sites\' BOQs are unchanged.')
+    return redirect('design_boq_group_list')
 
 
 # ---------------------------------------------------------------------------
@@ -620,9 +1224,12 @@ UNLINKED_HEADERS = ['Site', 'Description', 'Unit', 'Quantity']
 SITES_HEADERS = ['Site', 'Site name', 'Tender', 'Designer', 'Design status', 'Counted']
 
 
-def warning_lines(member_rows, boq):
+def warning_lines(boq):
     """The warnings shown above the table and on the Summary sheet, as plain sentences.
-    One list for both, so the screen and the file cannot say different things."""
+    One list for both, so the screen and the file cannot say different things.
+
+    B-5b: `boq` is a hydrate()d BOQ, live or a snapshot's. A snapshot stores the warning
+    FACTS, and they are worded here when shown (Zuber A9)."""
     lines = []
     if boq['not_counted']:
         lines.append('Not counted yet: ' + ', '.join(
@@ -651,12 +1258,14 @@ def _bold_row(ws, row_number):
         cell.font = Font(bold=True)
 
 
-def build_group_workbook(group, member_rows, boq, generated_at):
-    """The three-sheet workbook. Pure: reads only what consolidate() returned.
+def build_group_workbook(title, intro_lines, sites, boq):
+    """The three-sheet workbook. Pure: reads only a hydrate()d view (B-5b), so the live
+    Excel and a snapshot's Excel are the same code fed different plain data.
 
-    Quantities are written as numbers (Decimal → float would lose nothing at 2 places, but
-    openpyxl writes Decimal natively). ACCB descriptions are written whole: a cell holds up
-    to 32,767 characters, and B-3c's text runs past 255.
+    `title` is the bold first line; `intro_lines` follow it (when it was generated or
+    taken, by whom, the note). Quantities are written as numbers (openpyxl writes Decimal
+    natively). ACCB descriptions are written whole: a cell holds up to 32,767 characters,
+    and B-3c's text runs past 255.
     """
     wb = Workbook()
     wrap = Alignment(wrap_text=True, vertical='top')
@@ -665,12 +1274,11 @@ def build_group_workbook(group, member_rows, boq, generated_at):
     # ---- Summary -----------------------------------------------------------------
     ws = wb.active
     ws.title = SUMMARY_SHEET
-    ws.append([f'{group.name} — live consolidated BOQ'])
+    ws.append([title])
     ws['A1'].font = Font(bold=True, size=13)
-    ws.append([f'Generated {generated_at:%d %b %Y %H:%M} IST from {len(counted)} counted '
-               f'site{"" if len(counted) == 1 else "s"} of {len(member_rows)}. '
-               f'Quantities only, no prices.'])
-    warnings = warning_lines(member_rows, boq)
+    for line in intro_lines:
+        ws.append([line])
+    warnings = warning_lines(boq)
     if warnings:
         ws.append([])
         ws.append(['Warnings'])
@@ -697,8 +1305,7 @@ def build_group_workbook(group, member_rows, boq, generated_at):
         ws.append(UNLINKED_HEADERS)
         _bold_row(ws, ws.max_row)
         for item in boq['unlinked']:
-            ws.append([item.boq.project.project_id, item.description, item.uom,
-                       item.boq_quantity])
+            ws.append([item['site'], item['description'], item['unit'], item['quantity']])
     for letter, width in (('A', 14), ('B', 80), ('C', 9), ('D', 8), ('E', 12), ('F', 10)):
         ws.column_dimensions[letter].width = width
 
@@ -724,9 +1331,10 @@ def build_group_workbook(group, member_rows, boq, generated_at):
     st = wb.create_sheet(SITES_SHEET)
     st.append(SITES_HEADERS)
     _bold_row(st, 1)
-    for r in member_rows:
-        st.append([r['code'], r['project'].site_name or '', r['tender'], r['designer'],
-                   r['status'], 'Yes' if r['counted'] else 'No'])
+    # Each site's status as stored: now for the live file, at the time for a snapshot (S5).
+    for s in sites:
+        st.append([s['code'], s['name'], s['tender'], s['designer'],
+                   s['status'], 'Yes' if s['counted'] else 'No'])
     for letter, width in (('A', 14), ('B', 30), ('C', 28), ('D', 22), ('E', 30), ('F', 9)):
         st.column_dimensions[letter].width = width
     return wb

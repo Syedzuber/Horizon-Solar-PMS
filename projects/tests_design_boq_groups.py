@@ -713,7 +713,7 @@ class ExcelTests(DesignGroupFixture):
 #: their read gate needs the deputy lookup (once per request, design_boq_group_views.
 #: _readable_q) and base.html adds its own. Each is the same at 5 and at 20 sites. Counts
 #: include the session, user and profile loads; the add POST includes its savepoints.
-DETAIL_QUERIES = 16
+DETAIL_QUERIES = 17     # B-5b: +1 for the Snapshots tab's list (Zuber, 24 Nov)
 EXCEL_QUERIES = 11
 LIST_QUERIES = 9
 ADD_QUERIES = 15

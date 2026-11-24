@@ -243,6 +243,14 @@ urlpatterns = [
     path('design/boq-groups/<int:pk>/remove-site/',  design_boq_group_views.design_boq_group_remove_site, name='design_boq_group_remove_site'),
     # Live consolidated BOQ as .xlsx — same access as the group screen
     path('design/boq-groups/<int:pk>/excel/',        design_boq_group_views.design_boq_group_excel,       name='design_boq_group_excel'),
+    # B-5b: delete a group with no snapshots, after typing its name (POST) — same access as the group screen
+    path('design/boq-groups/<int:pk>/delete/',       design_boq_group_views.design_boq_group_delete,      name='design_boq_group_delete'),
+    # B-5b: take a snapshot (POST) — same access as the group screen
+    path('design/boq-groups/<int:pk>/snapshots/take/', design_boq_group_views.design_boq_group_snapshot_take, name='design_boq_group_snapshot_take'),
+    # B-5b: one snapshot, read-only — design users who can open every site the snapshot STORES (S4)
+    path('design/boq-groups/<int:pk>/snapshots/<int:snapshot_pk>/', design_boq_group_views.design_boq_group_snapshot_detail, name='design_boq_group_snapshot_detail'),
+    # B-5b: one snapshot as .xlsx, from its stored copy — same access as the snapshot page
+    path('design/boq-groups/<int:pk>/snapshots/<int:snapshot_pk>/excel/', design_boq_group_views.design_boq_group_snapshot_excel, name='design_boq_group_snapshot_excel'),
 
     # ---------------------------------------------------------------------------
     # Projects — PM (own projects only), Admin, CEO
