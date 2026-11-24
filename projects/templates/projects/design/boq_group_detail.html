@@ -1,0 +1,389 @@
+{% extends "base.html" %}
+{% comment %}
+B-5a — one design BOQ group: its sites (with the add-sites picker) and its live
+consolidated BOQ. Layout follows the approved prototype (23 Nov): two tabs, the picker
+opening inside the Sites tab, remove confirmed in the row, click a BOQ row for its
+per-site split. Snapshots are B-5b and are not here.
+
+WHO SEES THIS PAGE. A design user who can open EVERY site in the group (Zuber Q-B); the
+view refuses anyone else. That is why each site links to its own BOQ unconditionally: the
+gate that let the user in is the same BOQ read gate the link's target applies.
+
+THE PICKER (Alpine). `picker_rows` is every OPEX site with a design assignment that this
+user can open — one server-rendered list, filtered in the browser. Sites already in
+another group are greyed with the group's name and can never be ticked; sites already
+here are left out of the list. The add POST re-checks everything server-side and refuses
+the whole request if any site fails, so nothing here is trusted.
+
+ALPINE RULE: no `x-show` on an element carrying a Bootstrap `d-*` class (they are
+`!important`, so x-show could never hide it). Every x-show below sits on a plain element.
+No test runs this JavaScript; the browser check is its only defence.
+
+No prices anywhere.
+{% endcomment %}
+
+{% block title %}{{ group.name }} — BOQ group — SolarPMS{% endblock %}
+
+{% block extra_head %}
+{% include "projects/design/_design_chips.html" %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<style>
+  [x-cloak] { display: none !important; }
+  .bg-pick-row { cursor: pointer; }
+  .bg-pick-row:hover td { background: #f3f6f4; }
+  .bg-pick-row.bg-picked td { background: #e3f4e9; }
+  .bg-pick-dis td { color: #8a8f98; }
+  .bg-pick-list { max-height: 380px; overflow: auto; }
+  .bg-pick-list thead th { position: sticky; top: 0; background: #fff; z-index: 1; }
+  .bg-split-row { cursor: pointer; }
+  .bg-split-row:hover td { background: #f8f9fa; }
+  .bg-num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+{# ── Header ─────────────────────────────────────────────────────────────── #}
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+  <div>
+    <h5 class="mb-0">{{ group.name }}</h5>
+    <div class="text-muted small">
+      Design BOQ group · created by {{ group.created_by.user.get_full_name|default:group.created_by.user.username|default:"—" }}
+      on {{ group.created_at|date:"d M Y" }} · {{ member_rows|length }} site{{ member_rows|length|pluralize }},
+      {{ boq.counted_codes|length }} counted
+      · <a href="#" data-bs-toggle="collapse" data-bs-target="#renameGroup" class="small">Rename</a>
+    </div>
+    <div class="collapse mt-2" id="renameGroup">
+      <form method="post" action="{% url 'design_boq_group_rename' pk=group.pk %}" class="d-flex flex-wrap gap-2">
+        {% csrf_token %}
+        <input type="text" name="name" value="{{ group.name }}" maxlength="{{ name_max }}" required
+               class="form-control form-control-sm" style="max-width:22rem;" aria-label="Group name">
+        <button type="submit" class="btn btn-sm btn-brand">Save name</button>
+      </form>
+    </div>
+  </div>
+  <div class="d-flex flex-wrap gap-2">
+    <a href="{% url 'design_boq_group_excel' pk=group.pk %}" class="btn btn-sm btn-outline-secondary">Excel (live)</a>
+    <a href="{% url 'design_boq_group_list' %}" class="btn btn-sm btn-outline-secondary">← All groups</a>
+  </div>
+</div>
+
+<ul class="nav nav-tabs mb-3" role="tablist">
+  <li class="nav-item" role="presentation">
+    <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tabSites" type="button" role="tab">Sites</button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tabBoq" type="button" role="tab">Consolidated BOQ</button>
+  </li>
+</ul>
+
+<div class="tab-content">
+
+{# ══ Sites ═════════════════════════════════════════════════════════════════ #}
+<div class="tab-pane fade show active" id="tabSites" role="tabpanel">
+
+{{ picker_rows|json_script:"boqGroupPickerRows" }}
+<script>
+// The add-sites picker. Defined inline, before Alpine (loaded with `defer`) starts.
+// Selection is an object keyed by site pk, so it survives every filter change.
+function boqGroupPicker(startOpen) {
+  return {
+    open: startOpen,
+    rows: JSON.parse(document.getElementById('boqGroupPickerRows').textContent),
+    q: '', tender: '', stat: 'all', hideOthers: true,
+    selected: {},
+    pasteText: '', pasteMsgs: [],
+    selectable(r) { return !r.here && !r.group; },
+    visible() {
+      const q = this.q.trim().toLowerCase();
+      return this.rows.filter(r => {
+        if (r.here) return false;
+        if (this.hideOthers && r.group) return false;
+        if (this.tender && r.tender !== this.tender) return false;
+        if (this.stat === 'yes' && !r.counted) return false;
+        if (this.stat === 'no' && r.counted) return false;
+        return !q || (r.code + ' ' + r.name + ' ' + r.designer + ' ' + r.tender).toLowerCase().includes(q);
+      });
+    },
+    toggle(r) {
+      if (!this.selectable(r)) return;
+      if (this.selected[r.id]) { delete this.selected[r.id]; } else { this.selected[r.id] = true; }
+    },
+    shownSelectable() { return this.visible().filter(r => this.selectable(r)); },
+    allShownSelected() {
+      const s = this.shownSelectable();
+      return s.length > 0 && s.every(r => this.selected[r.id]);
+    },
+    toggleAll(on) {
+      this.shownSelectable().forEach(r => { if (on) { this.selected[r.id] = true; } else { delete this.selected[r.id]; } });
+    },
+    selectedRows() { return this.rows.filter(r => this.selected[r.id]); },
+    clear() { this.selected = {}; },
+    footer() {
+      const s = this.selectedRows();
+      if (!s.length) return this.shownSelectable().length + ' available · tick sites or click a row';
+      const shown = new Set(this.visible().map(r => r.id));
+      const hidden = s.filter(r => !shown.has(r.id)).length;
+      const yes = s.filter(r => r.counted).length;
+      let text = s.length + ' selected';
+      if (hidden) text += ' (' + hidden + ' not in this view)';
+      text += ' · ' + yes + ' will count now';
+      if (s.length - yes) text += ', ' + (s.length - yes) + ' not counted yet';
+      return text;
+    },
+    paste() {
+      const byCode = {};
+      this.rows.forEach(r => { byCode[r.code.toUpperCase()] = r; });
+      const tokens = [...new Set(this.pasteText.toUpperCase().split(/[\s,;]+/).filter(Boolean))];
+      const ok = [], here = [], other = [], none = [];
+      tokens.forEach(t => {
+        const r = byCode[t];
+        if (!r) { none.push(t); }
+        else if (r.here) { here.push(r.code); }
+        else if (r.group) { other.push(r.code + ' (in ' + r.group + ')'); }
+        else { this.selected[r.id] = true; ok.push(r.code); }
+      });
+      const msgs = [];
+      if (ok.length) msgs.push({cls: 'alert-success', text: 'Selected ' + ok.length + ': ' + ok.join(', ') + '.'});
+      if (here.length) msgs.push({cls: 'alert-warning', text: 'Already in this group: ' + here.join(', ') + '.'});
+      if (other.length) msgs.push({cls: 'alert-danger', text: 'In another group, not selected: ' + other.join(', ') + '.'});
+      if (none.length) msgs.push({cls: 'alert-danger', text: 'Not found: ' + none.join(', ') + '.'});
+      this.pasteMsgs = msgs;
+    },
+  };
+}
+</script>
+
+<div x-data="boqGroupPicker({{ open_picker|yesno:'true,false' }})">
+
+  <div x-show="!open">
+    <button type="button" class="btn btn-sm btn-brand mb-3" @click="open = true">+ Add sites</button>
+  </div>
+
+  <div x-show="open" x-cloak>
+    <div class="card border-success mb-3">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+          <span class="fw-semibold">Add sites to {{ group.name }}</span>
+          <button type="button" class="btn btn-sm btn-outline-secondary" @click="open = false; clear()">Close</button>
+        </div>
+
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+          <input type="search" x-model="q" class="form-control form-control-sm" style="flex:2 1 220px;"
+                 placeholder="Search site ID, designer or tender" aria-label="Search sites">
+          <select x-model="tender" class="form-select form-select-sm" style="flex:1 1 160px;" aria-label="Tender">
+            <option value="">All tenders</option>
+            {% for tender in tenders %}<option value="{{ tender }}">{{ tender }}</option>{% endfor %}
+          </select>
+          <select x-model="stat" class="form-select form-select-sm" style="flex:1 1 160px;" aria-label="Counted">
+            <option value="all">Counted or not</option>
+            <option value="yes">Counted now</option>
+            <option value="no">Not counted yet</option>
+          </select>
+          <label class="small">
+            <input type="checkbox" x-model="hideOthers" class="form-check-input me-1">Hide sites in other groups
+          </label>
+        </div>
+
+        <details class="mt-2">
+          <summary class="small fw-semibold" style="color:#1a7a4a; cursor:pointer;">Paste a list of site IDs instead</summary>
+          <textarea x-model="pasteText" rows="3" class="form-control form-control-sm my-2"
+                    placeholder="Site IDs separated by commas, spaces or new lines" aria-label="Site IDs"></textarea>
+          <button type="button" class="btn btn-sm btn-outline-secondary" @click="paste()">Select these</button>
+          <template x-for="(m, i) in pasteMsgs" :key="i">
+            <div class="alert py-1 px-2 small mt-2 mb-0" :class="m.cls" x-text="m.text"></div>
+          </template>
+        </details>
+
+        <div class="bg-pick-list border rounded mt-2">
+          <table class="table table-sm align-middle mb-0">
+            <thead>
+              <tr>
+                <th style="width:2rem;">
+                  <input type="checkbox" class="form-check-input" aria-label="Select all shown"
+                         :checked="allShownSelected()" :disabled="!shownSelectable().length"
+                         @change="toggleAll($event.target.checked)">
+                </th>
+                <th>Site</th><th>Tender</th><th>Designer</th><th>Design status</th><th>Group</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="r in visible()" :key="r.id">
+                <tr :class="selectable(r) ? ('bg-pick-row' + (selected[r.id] ? ' bg-picked' : '')) : 'bg-pick-dis'"
+                    @click="toggle(r)">
+                  <td>
+                    <input type="checkbox" class="form-check-input" :aria-label="'Select ' + r.code"
+                           :checked="!!selected[r.id]" :disabled="!selectable(r)"
+                           @click.stop @change="toggle(r)">
+                  </td>
+                  <td><span class="fw-semibold" x-text="r.code"></span>
+                      <div class="small text-muted" x-text="r.name"></div></td>
+                  <td class="small" x-text="r.tender"></td>
+                  <td class="small" x-text="r.designer"></td>
+                  <td class="small">
+                    <span x-text="r.status"></span>
+                    <template x-if="!r.counted"><span class="chip chip-amber ms-1">Not counted yet</span></template>
+                  </td>
+                  <td class="small" x-text="r.group ? 'In ' + r.group : 'None'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          <template x-if="!visible().length">
+            <p class="small text-muted p-2 mb-0">No sites match.
+              <span x-text="hideOthers ? 'Sites already in another group are hidden; untick the box to see them.' : ''"></span></p>
+          </template>
+        </div>
+
+        <form method="post" action="{% url 'design_boq_group_add_sites' pk=group.pk %}"
+              class="d-flex flex-wrap justify-content-between align-items-center gap-2 pt-3">
+          {% csrf_token %}
+          <template x-for="r in selectedRows()" :key="r.id">
+            <input type="hidden" name="project_ids" :value="r.id">
+          </template>
+          <span class="small">
+            <span x-text="footer()"></span>
+            <template x-if="selectedRows().length">
+              <span> · <button type="button" class="btn btn-link btn-sm p-0 align-baseline" @click="clear()">Clear</button></span>
+            </template>
+          </span>
+          <button type="submit" class="btn btn-sm btn-brand" :disabled="!selectedRows().length"
+                  x-text="'Add ' + (selectedRows().length ? selectedRows().length + ' ' : '') + 'site' + (selectedRows().length === 1 ? '' : 's')">Add sites</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% if member_rows %}
+<div class="card shadow-sm border-0">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0" id="boqGroupSites">
+      <thead class="table-light">
+        <tr><th>Site</th><th>Designer</th><th>Design status</th><th>In totals</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for row in member_rows %}
+        <tr>
+          <td>
+            <a href="{% url 'boq_detail' project_id=row.code %}" class="fw-semibold">{{ row.code }}</a>
+            <div class="small text-muted">{{ row.tender }}</div>
+          </td>
+          <td class="small">{{ row.designer|default:"—" }}</td>
+          <td class="small">{{ row.status }}</td>
+          <td>
+            {% if row.counted %}<span class="chip chip-green">Yes</span>
+            {% else %}<span class="chip chip-amber">Not counted yet</span>{% endif %}
+          </td>
+          <td class="text-end" x-data="{ ask: false }">
+            <button type="button" class="btn btn-sm btn-outline-danger" x-show="!ask" @click="ask = true">Remove</button>
+            <template x-if="ask">
+              <form method="post" action="{% url 'design_boq_group_remove_site' pk=group.pk %}" class="small">
+                {% csrf_token %}
+                <input type="hidden" name="membership_id" value="{{ row.membership.pk }}">
+                Remove {{ row.code }} from this group? Its BOQ isn't changed.
+                <button type="submit" class="btn btn-sm btn-danger ms-1">Yes, remove</button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" @click="ask = false">Cancel</button>
+              </form>
+            </template>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+<p class="small text-muted mt-2">A site belongs to one design group only. Being in an SCM procurement group doesn't matter either way: no lock is shared.</p>
+
+</div>
+
+{# ══ Consolidated BOQ ═════════════════════════════════════════════════════ #}
+<div class="tab-pane fade" id="tabBoq" role="tabpanel">
+
+<p class="small text-muted">
+  Live: recalculated each time the page opens, from {{ boq.counted_codes|length }} counted
+  site{{ boq.counted_codes|length|pluralize }}. Click a row for the per-site split.
+</p>
+
+{% for line in warnings %}
+  <div class="alert alert-warning py-2 small mb-2">{{ line }}</div>
+{% endfor %}
+
+<div class="card shadow-sm border-0 mb-3">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0" id="boqGroupLines">
+      <thead class="table-light">
+        <tr><th>Code</th><th>Description</th><th>Unit</th><th class="bg-num">Sites</th><th class="bg-num">Total</th></tr>
+      </thead>
+      <tbody>
+        {% for line in boq.lines %}
+        <tr class="bg-split-row" data-bs-toggle="collapse" data-bs-target="#split{{ forloop.counter }}">
+          <td>{{ line.item_master__code }}</td>
+          <td>{{ line.item_master__description }}{% if line.retired %} <span class="chip chip-grey">Retired</span>{% endif %}</td>
+          <td>{{ line.item_master__unit }}</td>
+          <td class="bg-num">{{ line.site_count }}</td>
+          <td class="bg-num fw-semibold">{{ line.total_quantity|floatformat:"-2" }}</td>
+        </tr>
+        <tr class="collapse" id="split{{ forloop.counter }}">
+          <td></td>
+          <td colspan="4" class="small text-muted">
+            {% for site, qty in line.per_site_list %}{{ site }}: {{ qty|floatformat:"-2" }}{% if not forloop.last %} · {% endif %}{% endfor %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5" class="small text-muted">No counted quantities yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<h6 class="mt-3">ACCBs, one row per configuration</h6>
+{% if boq.accb_lines %}
+<div class="card shadow-sm border-0 mb-3">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0" id="boqGroupAccbs">
+      <thead class="table-light"><tr><th>Description</th><th>Sites</th><th class="bg-num">{{ boq.accb_lines.0.unit }}</th></tr></thead>
+      <tbody>
+        {% for accb in boq.accb_lines %}
+        <tr>
+          <td class="small">{{ accb.description }}{% if accb.retired %} <span class="chip chip-grey">Retired</span>{% endif %}</td>
+          <td class="small">{% for site, qty in accb.per_site_list %}{{ site }}{% if qty != 1 %} ×{{ qty|floatformat:"-2" }}{% endif %}{% if not forloop.last %}, {% endif %}{% endfor %}</td>
+          <td class="bg-num fw-semibold">{{ accb.total_quantity|floatformat:"-2" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<p class="small text-muted">No ACCBs on counted sites.</p>
+{% endif %}
+
+{% if boq.unlinked %}
+<h6 class="mt-3">Lines with no catalogue item</h6>
+<p class="small text-muted mb-1">Not summed across sites: with no catalogue item there is nothing to add them up by.</p>
+<div class="card shadow-sm border-0 mb-3">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0" id="boqGroupUnlinked">
+      <thead class="table-light"><tr><th>Site</th><th>Description</th><th>Unit</th><th class="bg-num">Quantity</th></tr></thead>
+      <tbody>
+        {% for item in boq.unlinked %}
+        <tr>
+          <td>{{ item.boq.project.project_id }}</td>
+          <td class="small">{{ item.description }}</td>
+          <td>{{ item.uom }}</td>
+          <td class="bg-num">{{ item.boq_quantity|floatformat:"-2" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+</div>
+</div>
+
+{% endblock %}

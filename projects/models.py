@@ -5710,6 +5710,20 @@ DESIGN_NOT_WITH_DESIGNER_STATUSES = frozenset(DESIGN_CLOCK_STOPPED_STATUSES | {
     DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC,
 })
 
+# B-5a (Zuber Q1, 23 Nov 2026) — a site's BOQ COUNTS in a design BOQ group's totals from
+# the moment the designer hands the package in until it is released. BOQ.status cannot
+# decide this (it is 'Draft' on every OPEX BOQ), so the design status does.
+#
+# Every other status is "Not counted yet", and that is what makes a failed-back BOQ drop
+# out by itself: a QC fail, a Head fail and an accepted change request all reopen the
+# site through _open_next_attempt() at `in_design` or `arka_submitted`, and a PM
+# rejection parks it at `pm_rejected` (kept out deliberately, Zuber Q-C). Read through
+# design_boq_group_views.design_boq_counts(), never by a second copy of this set.
+DESIGN_BOQ_COUNTED_STATUSES = frozenset({
+    DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC,
+    DESIGN_AWAITING_PM_APPROVAL, DESIGN_RELEASED,
+})
+
 # DesignAttempt.opened_reason. The two rework loops are counted SEPARATELY and
 # deliberately not collapsed into one field: a QC failure is the design failing
 # review, a PM change request is the requirement changing underneath it. Rework
@@ -7286,6 +7300,76 @@ class SiteGroupMembership(models.Model):
     def __str__(self):
         state = 'removed' if self.removed_at else 'active'
         return f"{self.project.project_id} in {self.group_id} ({state})"
+
+
+# ---------------------------------------------------------------------------
+# B-5a — design BOQ groups (rulings 33-35, 23 Nov 2026)
+#
+# Design users group sites to read one accumulated BOQ across them, the way SCM does for
+# procurement. DELIBERATELY NOT A THIRD SiteGroup TYPE: a SiteGroup belongs to one tender
+# (required `program`), carries SCM's lock, and SCM's screens list `program.site_groups`
+# without filtering by type. A design group spans tenders, has no lock, and SCM never
+# reads it — so it has tables of its own and shares nothing with SCM's.
+#
+# NOTHING IS STORED BUT MEMBERSHIP. The totals are computed at read time by
+# design_boq_group_views (through design_views.aggregate_group_boq), for the same reason
+# SCM's aggregate is: a stored roll-up drifts from the per-site BOQs underneath it.
+# ---------------------------------------------------------------------------
+
+class DesignBOQGroup(models.Model):
+    """A named set of sites whose BOQs a design user reads as one consolidated total."""
+
+    name = models.CharField(max_length=120)   # Unique ignoring case (constraint below)
+    created_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='created_design_boq_groups',   # SET_NULL: a departed user does not take the group with them
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['name']
+        constraints = [
+            # "Jhansi Lot 2" and "jhansi lot 2" are one name to the people reading the
+            # list. The view pre-checks for a readable message; this is what makes it
+            # true under two concurrent creates or renames.
+            models.UniqueConstraint(Lower('name'), name='uniq_design_boq_group_name_ci'),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
+class DesignBOQGroupMembership(models.Model):
+    """One site's place in one design BOQ group.
+
+    REMOVAL DELETES THE ROW (Zuber Q-D). The activity log keeps who added and removed
+    which site; there is no soft-removed state, so the unique constraint below can be a
+    plain one.
+    """
+
+    group = models.ForeignKey(
+        DesignBOQGroup, on_delete=models.CASCADE, related_name='memberships',
+    )
+    project = models.ForeignKey(
+        Project, on_delete=models.CASCADE, related_name='design_boq_group_memberships',
+    )
+    added_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='added_design_boq_group_memberships',
+    )
+    added_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['added_at']
+        constraints = [
+            # Ruling 35: a site is in ONE design group, across every group in the system.
+            # The add view pre-checks for a per-site message; this is the real enforcement
+            # and loses to nothing, including two designers adding the same site at once.
+            models.UniqueConstraint(fields=['project'], name='uniq_design_boq_group_site'),
+        ]
+
+    def __str__(self):
+        return f"{self.project.project_id} in design group {self.group_id}"
 
 
 # ---------------------------------------------------------------------------

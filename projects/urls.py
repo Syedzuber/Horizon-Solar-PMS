@@ -10,6 +10,7 @@ from . import approval_views  # Approvals S2a material approval screens — sepa
 from . import qaqc_views     # Closeout step 3 site QA/QC engineer screen — separate module, same pattern
 from . import cod_views      # Closeout step 4 COD record screens — separate module, same pattern
 from . import site_drawings_views  # DR-2 site drawings card and drawing open — separate module, same pattern
+from . import design_boq_group_views  # B-5a design BOQ groups — separate module, same pattern
 from . import notify_views   # T2 notification template Admin screens — separate module, same pattern
 from . import attendance_views  # ATT-B1 contractor attendance screens — separate module, same pattern
 from . import views_tender_documents  # TD-B2 tender documents manage page — separate module, same pattern
@@ -222,6 +223,26 @@ urlpatterns = [
     path('site-groups/<int:pk>/add-sites/',       design_views.site_group_add_sites,   name='site_group_add_sites'),
     path('site-groups/<int:pk>/remove-site/',     design_views.site_group_remove_site, name='site_group_remove_site'),
     path('site-groups/<int:pk>/lock/',            design_views.site_group_lock,        name='site_group_lock'),
+
+    # ---------------------------------------------------------------------------
+    # B-5a design BOQ groups — design users (role Design or Design Head authority,
+    # permissions.user_can_use_design_boq_groups). Every per-group route also requires that
+    # the user can open every site in the group (Zuber Q-B). No SCM lock is read or taken.
+    # ---------------------------------------------------------------------------
+    # Group list and create form — design users
+    path('design/boq-groups/',                       design_boq_group_views.design_boq_group_list,        name='design_boq_group_list'),
+    # Create a group (POST) — design users
+    path('design/boq-groups/create/',                design_boq_group_views.design_boq_group_create,      name='design_boq_group_create'),
+    # Group screen: sites, picker, consolidated BOQ — design users who can open every site
+    path('design/boq-groups/<int:pk>/',              design_boq_group_views.design_boq_group_detail,      name='design_boq_group_detail'),
+    # Rename (POST) — same access as the group screen
+    path('design/boq-groups/<int:pk>/rename/',       design_boq_group_views.design_boq_group_rename,      name='design_boq_group_rename'),
+    # Add picked sites, all or none (POST) — same access, and every site must be openable
+    path('design/boq-groups/<int:pk>/add-sites/',    design_boq_group_views.design_boq_group_add_sites,   name='design_boq_group_add_sites'),
+    # Remove one site (POST) — same access as the group screen
+    path('design/boq-groups/<int:pk>/remove-site/',  design_boq_group_views.design_boq_group_remove_site, name='design_boq_group_remove_site'),
+    # Live consolidated BOQ as .xlsx — same access as the group screen
+    path('design/boq-groups/<int:pk>/excel/',        design_boq_group_views.design_boq_group_excel,       name='design_boq_group_excel'),
 
     # ---------------------------------------------------------------------------
     # Projects — PM (own projects only), Admin, CEO

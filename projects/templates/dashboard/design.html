@@ -52,6 +52,12 @@
 
 {# ── Greeting ─────────────────────────────────────────────────────────────── #}
 <div class="mb-3">
+  {% comment %}
+  B-5a — the BOQ groups link, UNCONDITIONAL ON PURPOSE. This dashboard is
+  @role_required(['Design']), and every role='Design' user passes
+  permissions.user_can_use_design_boq_groups(), so there is no viewer to hide it from.
+  {% endcomment %}
+  <a href="{% url 'design_boq_group_list' %}" class="btn btn-sm btn-outline-secondary float-end">BOQ groups</a>
   <h5 class="mb-0 fw-semibold">
     {% if design_first_name %}Welcome, {{ design_first_name }}!{% else %}Design Dashboard{% endif %}
   </h5>

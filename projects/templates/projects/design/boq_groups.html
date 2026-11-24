@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% comment %}
+B-5a — the design BOQ groups list, with the create form. Design users only (the view
+refuses everyone else).
+
+A group holding a site this user can't open is LISTED BUT NOT LINKED (Zuber Q-B): the
+group screen and its Excel would refuse them, so a link would be a door that says no.
+`group.can_open` is computed in the view from the batched BOQ read gate.
+
+Bootstrap only; no script on this page.
+{% endcomment %}
+
+{% block title %}BOQ groups — SolarPMS{% endblock %}
+
+{% block content %}
+
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+  <div>
+    <h5 class="mb-0">Design BOQ groups</h5>
+    <div class="text-muted small">
+      Group sites to read one live consolidated BOQ across them. A site is in one design
+      group only. Separate from SCM's procurement groups.
+    </div>
+  </div>
+  <a href="{% url 'dashboard_design' %}" class="btn btn-sm btn-outline-secondary">← Design dashboard</a>
+</div>
+
+<div class="card shadow-sm border-0 mb-3">
+  <div class="card-body py-3">
+    <form method="post" action="{% url 'design_boq_group_create' %}" class="d-flex flex-wrap gap-2 align-items-center">
+      {% csrf_token %}
+      <label for="newGroupName" class="small fw-semibold">New group</label>
+      <input type="text" id="newGroupName" name="name" maxlength="{{ name_max }}" required
+             class="form-control form-control-sm" style="max-width:22rem;" placeholder="e.g. Jhansi RESCO Lot 2">
+      <button type="submit" class="btn btn-sm btn-brand">Create</button>
+    </form>
+  </div>
+</div>
+
+{% if groups %}
+<div class="card shadow-sm border-0">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0" id="designBoqGroups">
+      <thead class="table-light">
+        <tr>
+          <th>Group</th>
+          <th class="text-end">Sites</th>
+          <th class="text-end">Counted</th>
+          <th>Created by</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for group in groups %}
+        <tr>
+          <td>
+            {% if group.can_open %}
+              <a href="{% url 'design_boq_group_detail' pk=group.pk %}" class="fw-semibold">{{ group.name }}</a>
+            {% else %}
+              <span class="fw-semibold">{{ group.name }}</span>
+              <div class="small text-muted">{{ group_not_open }}</div>
+            {% endif %}
+          </td>
+          <td class="text-end">{{ group.site_count }}</td>
+          <td class="text-end">{{ group.counted_count }}</td>
+          <td>{{ group.created_by_name|default:"—" }}</td>
+          <td class="small text-muted">{{ group.created_at|date:"d M Y" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<p class="text-muted small">No design BOQ groups yet. Create one above.</p>
+{% endif %}
+
+{% endblock %}

@@ -490,6 +490,56 @@ def user_can_view_project_boq(user, project):
     return False
 
 
+def boq_readable_projects_q(user, prefix=''):
+    """The QUERYSET form of user_can_view_project_boq(): a Q() selecting the projects whose
+    BOQ `user` may read. B-5a (Zuber Q-B, 23 Nov 2026).
+
+    WHY THIS EXISTS. A design BOQ group screen must know, for every site in the group,
+    whether the user can open it, and the per-object predicate costs several queries per
+    site for a plain designer. This answers the same question for a whole queryset in one.
+
+    INVARIANT: this must select precisely the projects user_can_view_project_boq() returns
+    True for, branch for branch. tests_design_boq_groups pins the two equal for every user
+    and site in its fixture; if one changes, change the other in the same edit.
+
+    `prefix` is the ORM path to Project, with its trailing '__' (as manageable_projects_q).
+    CALLERS MUST .distinct(): the coordinators and task legs traverse to-many relations.
+    Returns Q() — every project — for the portfolio-wide readers.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return Q(**{f'{prefix}pk__in': []})
+    # Portfolio-wide readers, in the same order as the predicate: SCM/Admin/CEO by remit,
+    # the Design Head (flag or legacy role string), his deputy, and Design QC.
+    if (profile.role in BOQ_PORTFOLIO_READ_ROLES
+            or getattr(profile, 'is_design_head', False) or profile.role == 'Design Head'
+            or user_is_design_head_deputy(user)
+            or user_is_design_qc(user)):
+        return Q()
+    # Per-site readers: the PM or a coordinator (the canonical manage Q), and the gate-1
+    # reviewer named on the site's design assignment — any role, as in the predicate.
+    q = (manageable_projects_q(profile, prefix)
+         | Q(**{f'{prefix}design_assignment__qc_assigned_to': profile}))
+    # The Design branch: the site's designer, or a designer holding a task on it.
+    if profile.role == 'Design':
+        q |= (Q(**{f'{prefix}assigned_design': profile})
+              | Q(**{f'{prefix}phases__tasks__assigned_to': profile}))
+    return q
+
+
+def boq_readable_project_ids(user, projects, readable_q=None):
+    """The pks among `projects` (a Project queryset) whose BOQ `user` may read — the
+    batched user_can_view_project_boq(). One query whatever the number of sites.
+
+    `readable_q` is boq_readable_projects_q(user), precomputed by a caller that asks more
+    than once in a request (building it can cost the deputy lookup). Compared with `is
+    None`, not truthiness: an empty Q() — every project — is falsy.
+    """
+    if readable_q is None:
+        readable_q = boq_readable_projects_q(user)
+    return set(projects.filter(readable_q).values_list('pk', flat=True).distinct())
+
+
 def user_can_edit_project_boq(user, project):
     """
     Return True if `user` may WRITE `project`'s BOQ — quantities, make preference, ad-hoc
@@ -1270,6 +1320,24 @@ def user_can_view_site_groups(user):
     if profile.role == 'Admin':
         return True
     return user_has_design_head_authority(user)
+
+
+def user_can_use_design_boq_groups(user):
+    """Return True if `user` may use design BOQ groups at all (B-5a, ruling 33, Zuber Q-A).
+
+    Design users: role 'Design' — designers, and Design QC, who are role 'Design' with a
+    flag — plus Design Head authority, so a deputy is admitted whatever their role.
+    SCM, PMs and everyone else are refused: SCM has its own procurement groups, and a
+    design group is the design department's working total.
+
+    NECESSARY, NOT SUFFICIENT. Which sites the user may pick, and which groups they may
+    open, is still the BOQ read gate per site (boq_readable_projects_q) — this widens no
+    read (Zuber Q-B).
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return profile.role == 'Design' or user_has_design_head_authority(user)
 
 
 def project_boq_is_group_locked(project):
