@@ -8,7 +8,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.utils.functional import cached_property
 from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory, Program, BOQItemMaster, StockLocation, VENDOR_KIND_SUPPLIER
-from .models import ActivityLog, BOQItem, log_activity
+from .models import ActivityLog, BOQFormulaRule, BOQItem, log_activity
 # B-3a: the configured-ACCB catalogue code is locked on every catalogue form.
 from .accb import ACCB_CONFIGURED_CODE, ACCB_CATALOGUE_LOCKED_MESSAGE
 from .units import UNIT_CHOICES, canonical_unit
@@ -1007,6 +1007,20 @@ class BOQItemMasterForm(forms.ModelForm):
             raise forms.ValidationError(ACCB_CATALOGUE_LOCKED_MESSAGE)
         if not cleaned.get('is_mandatory'):
             return cleaned
+        # B-2c (C2): a CALCULATED item cannot be mandatory. Anyone who may edit the catalogue
+        # is refused, because the two flags contradict each other: mandatory puts the item
+        # on every new RESCO BOQ for the designer to fill in by hand, while an active formula
+        # rule writes its quantity and removes its line at 0. The loader refuses the other
+        # direction (a rule on a mandatory item). Only an existing item can be a target.
+        if self.instance.pk:
+            rule = (BOQFormulaRule.objects
+                    .filter(target_id=self.instance.pk, is_active=True).first())
+            if rule is not None:
+                raise forms.ValidationError({
+                    'is_mandatory': f'This item is calculated by a formula rule '
+                                    f'("{rule.summary}"), so it cannot be mandatory. Switch '
+                                    f'the rule off first (load_formula_rules --deactivate).',
+                })
         # ACTIVE-NESS IS TESTED FIRST, AND ABOVE THE `project_type` EARLY RETURN BELOW.
         # The Design Head's catalogue screens delete `project_type` from the form but keep
         # `is_active`; placing this after that return would leave the combination reachable

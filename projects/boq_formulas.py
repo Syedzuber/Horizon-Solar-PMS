@@ -498,8 +498,8 @@ def validate_formula_rules():
 # B-2b — applying the rules to one BOQ, inside a write path's own transaction
 #
 # THE HOOKED PATHS (Zuber, 22 Nov): the picker save, the spreadsheet upload, and the
-# reviewer's add_line and set_quantity. NOT the ACCB endpoint and NOT
-# fix_tin_shade_ballast --apply-counts (that hook is B-2c's). Each path calls
+# reviewer's add_line and set_quantity; since B-2c also fix_tin_shade_ballast
+# --apply-counts (source 'tin_shade_fix'). NOT the ACCB endpoint. Each path calls
 # prepare_formula_save() at the START of its transaction, before it reads or writes a line,
 # and apply_formulas() at the END, after its own writes.
 #

@@ -1772,6 +1772,7 @@ FORMULA_SOURCE_CORRECTION       = 'correction'
 FORMULA_SOURCE_OVERRIDE_SET     = 'override_set'
 FORMULA_SOURCE_OVERRIDE_CLEARED = 'override_cleared'
 FORMULA_SOURCE_COPY             = 'copy'  # B-4: a BOQ filled from another site's (views.opex_boq_copy)
+FORMULA_SOURCE_TIN_SHADE        = 'tin_shade_fix'  # B-2c: fix_tin_shade_ballast --apply-counts wrote a Tin Shade / Ballast count
 FORMULA_SOURCE_CHOICES = [
     (FORMULA_SOURCE_PICKER,           'BOQ picker save'),
     (FORMULA_SOURCE_UPLOAD,           'BOQ spreadsheet upload'),
@@ -1779,6 +1780,7 @@ FORMULA_SOURCE_CHOICES = [
     (FORMULA_SOURCE_OVERRIDE_SET,     'Override set'),
     (FORMULA_SOURCE_OVERRIDE_CLEARED, 'Override cleared'),
     (FORMULA_SOURCE_COPY,             'BOQ copied from another site'),
+    (FORMULA_SOURCE_TIN_SHADE,        'Tin Shade / Ballast count fix'),
 ]
 
 #: BOQLineOverride.set_as — in which capacity the person set the override (B-2e, Zuber Q1).

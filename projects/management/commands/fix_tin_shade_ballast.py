@@ -11,7 +11,8 @@ rulings F5 and G5, 22 Nov 2026).
         --allow-lines 691,765 --reason "SCM confirmed the order is for MMS 2P only"
 
 WHY: OPX-038 Tin Shade and OPX-037 Ballast Type Structure are MMS structure, and F5
-rules that structure is counted in Nos (INC work, OPX-203/OPX-204, stays in KWp). Their
+rules that structure is counted in Nos (INC work, OPX-204 Tin Shade and OPX-205 Ballast,
+stays in KWp). Their
 BOQ lines hold kWp figures (186.88 on one site) under an item that is a count, so every
 reader of those lines is wrong today. A person re-counts each line from the site's design
 or survey (G5); this command supplies the list and writes the counts back.
@@ -39,6 +40,16 @@ THREE STEPS, ONE PER RUN:
                  the lock/order refusal only; every other check still applies, and the
                  log entry records the reasons overridden and the stated reason.
 
+B-2c — THE BOQ IS RECALCULATED IN THE SAME TRANSACTION AS EACH COUNT. Writing a count is a
+BOQ save like any other, so every active formula rule runs on that site's BOQ (Zuber, B-2c
+Q2): INC work (R24/R25) follows the new count, and on a BOQ not saved since the rules were
+loaded, every other calculated line is brought up to date too. Each change is recorded
+(BOQRecalculation, source 'tin_shade_fix', no actor). A rule that cannot produce its figure
+refuses that row and rolls its count back. The dry run lists every calculated change per
+site; changes on sites applied through --allow-lines (locked or ordered) get a section of
+their own, with any calculated line that has an order marked (Q4). With no active rules
+none of this costs more than one query per row.
+
 Dry run unless --apply. Every write is logged in the activity log with before → after
 values and the system actor "fix_tin_shade_ballast (system)". No correction record is
 written (B-0b Q6): this is a data fix, and a BOQCorrection would be credited to the
@@ -56,8 +67,13 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from projects.boq_formulas import (
+    ACTION_ADD, ACTION_CHANGE, ACTION_REMOVE, ACTION_ZERO, FormulaError, _num, apply_formulas,
+    prepare_formula_save, read_formula_rules, read_sheet, work_out_formulas,
+)
 from projects.forms import catalogue_snapshot, log_catalogue_change
 from projects.models import (
+    FORMULA_SOURCE_TIN_SHADE,
     DESIGN_FILE_BOQ_EXCEL, DESIGN_FILE_BOQ_PDF, DESIGN_RELEASED, ApprovalRequest, BOQItem,
     BOQItemMaster, DesignAttempt, DesignFile, MaterialApprovalLine, VendorOrder,
     VendorOrderLine, log_activity,
@@ -66,7 +82,8 @@ from projects.number_input import decimal_field_max, parse_decimal_input
 from projects.permissions import project_boq_is_group_locked
 from projects.units import COUNT_UNITS
 
-#: The two structure items F5 moves to Nos. INC work (OPX-203, OPX-204) is not here.
+#: The two structure items F5 moves to Nos. INC work (OPX-204 Tin Shade, OPX-205 Ballast)
+#: is not here: since B-2c it follows these counts through formula rules R24/R25.
 ITEM_CODES = ('OPX-037', 'OPX-038')
 
 #: The shared list's code for a count of pieces (projects/units.py UNITS).
@@ -185,6 +202,35 @@ def _qty_text(value):
 
 def _yes(flag):
     return 'yes' if flag else 'no'
+
+
+def _calc_text(change, ordered=frozenset()):
+    """One calculated change for the console, ASCII only (see the note on "->" above):
+    'OPX-204 186.88 -> 7.68 KWp', 'OPX-186 added: 1 Set', 'OPX-174 3 -> removed'."""
+    code, before, after, unit = change
+
+    def qty(value):     # as the engine writes a figure: 1.00 -> 1, 7.68 -> 7.68
+        return 'blank' if value is None else _num(value)
+
+    if before is None and after is not None:
+        text = f'{code} added: {qty(after)} {unit}'
+    elif after is None:
+        text = f'{code} {qty(before)} -> removed'
+    else:
+        text = f'{code} {qty(before)} -> {qty(after)} {unit}'
+    if code in ordered:
+        text += ' [this line is ordered]'
+    return text.rstrip()
+
+
+def _ordered_codes(boq, codes):
+    """Of these item codes, the ones whose line on `boq` has an ordered quantity or an order
+    line (B-2c Q4: flagged in the locked-or-ordered section). One query, only for rows
+    applied through --allow-lines."""
+    return set(BOQItem.objects
+               .filter(boq=boq, item_master__code__in=codes)
+               .filter(Q(ordered_quantity__isnull=False) | Q(vendor_order_lines__isnull=False))
+               .values_list('item_master__code', flat=True))
 
 
 def _export_row(line):
@@ -466,7 +512,11 @@ class Command(BaseCommand):
         lines_by_id = {line.pk: line for line in _affected_lines()}
 
         buckets = {k: [] for k in ('applied', 'empty', 'bad', 'not_item', 'locked',
-                                   'stale', 'unchanged')}
+                                   'stale', 'unchanged', 'formula')}
+        # B-2c: the calculated lines each applied row changes (or would), per site. Rows
+        # applied through --allow-lines go in their own list, printed in their own section.
+        calculated = {'normal': [], 'locked': []}
+        preview_rules = {}      # project type -> the rules, read once per run (dry run)
         seen = {}
         for number, row in enumerate(rows, start=2):    # row 1 is the header
             raw_id, raw_count = row.get('line_id', ''), row.get('new_count', '')
@@ -533,16 +583,62 @@ class Command(BaseCommand):
                       f'uom {line.uom} -> {TARGET_UNIT}')
             if override:
                 change += f' [lock override: {override}]'
-            if apply and not self._write_count(line, expected, count, row.get('note', ''),
-                                               override, reason):
-                buckets['stale'].append(f'{label}: changed since export (during apply)')
+            site_label = f'{label} {line.boq.project.project_id}'
+            try:
+                if apply:
+                    changes = self._write_count(line, expected, count, row.get('note', ''),
+                                                override, reason)
+                    if changes is None:
+                        buckets['stale'].append(f'{label}: changed since export (during apply)')
+                        continue
+                else:
+                    changes = self._preview(line, count, preview_rules)
+            except (ValidationError, FormulaError) as exc:
+                # A rule could not produce its figure for this BOQ (too large for the
+                # column). On --apply the row's transaction rolled back: no count written.
+                messages = exc.messages if isinstance(exc, ValidationError) else [str(exc)]
+                buckets['formula'].append(f'{site_label}: {" ".join(messages)}')
                 continue
             buckets['applied'].append(change)
+            if changes:
+                ordered = _ordered_codes(line.boq, [c[0] for c in changes]) if override else set()
+                calculated['locked' if override else 'normal'].append(
+                    (site_label, [_calc_text(c, ordered) for c in changes]))
 
-        self._report(buckets, apply)
+        self._report(buckets, apply, calculated)
+
+    def _preview(self, line, count, cache):
+        """The calculated changes writing `count` on `line` would make: [(code, before,
+        after, unit)]. Reads only: the sheet as stored with this one line at its new count,
+        through the same work_out_formulas() the save uses (as the upload preview does)."""
+        project_type = line.boq.project.project_type
+        if project_type not in cache:
+            cache[project_type] = read_formula_rules(project_type)
+        prepared = cache[project_type]
+        if not prepared.active:
+            return []
+        sheet = read_sheet(line.boq)
+        for sheet_line in sheet:
+            if sheet_line.pk == line.pk:
+                sheet_line.boq_quantity = count
+        _results, actions = work_out_formulas(sheet, prepared)
+        codes, units = prepared.rules.codes, prepared.rules.units
+        out = []
+        for action in actions:
+            if action.kind not in (ACTION_ADD, ACTION_CHANGE, ACTION_REMOVE, ACTION_ZERO):
+                continue
+            item_id = action.result.item_id
+            before = action.line.boq_quantity if action.line is not None else None
+            after = None if action.kind == ACTION_REMOVE else action.result.computed
+            out.append((codes.get(item_id, ''), before, after, units.get(item_id, '')))
+        return out
 
     def _write_count(self, line, expected, count, note, override='', reason=''):
-        """Write one count and its log entries, in one transaction. True if written.
+        """Write one count, its log entries and the BOQ's recalculation, in one transaction.
+
+        Returns None if nothing was written (stale), else the calculated changes as
+        [(code, before, after, unit)] — empty with no active rules. Raises ValidationError
+        when a rule cannot produce its figure; the count is then rolled back with it.
 
         `override` is the lock/order reasons set aside by --allow-lines (blank when there
         was nothing to override); it is logged as "lock override: <reasons>; reason:
@@ -560,11 +656,16 @@ class Command(BaseCommand):
         old_uom = line.uom
         project = line.boq.project
         with transaction.atomic():
+            # B-2c: the rules are loaded and the BOQ row locked BEFORE the line is written,
+            # as prepare_formula_save() requires of every hooked path, so a designer saving
+            # this BOQ at the same moment cannot leave INC work sized from a stale count.
+            # One exists() query when no rule is active.
+            prepared = prepare_formula_save(line.boq, project.project_type)
             updated = (BOQItem.objects
                        .filter(held, pk=line.pk, item_master__code__in=ITEM_CODES)
                        .update(boq_quantity=count, uom=TARGET_UNIT))
             if not updated:
-                return False
+                return None
             parts = []
             if expected != count:
                 parts.append(f'quantity: {_qty_text(expected)} → {count}')
@@ -587,9 +688,13 @@ class Command(BaseCommand):
             for text in entries:
                 log_activity(project, None, text, entity_type='BOQItem',
                              entity_id=line.pk, action_code=LINE_ACTION_CODE)
-        return True
+            # Every active rule, as every other save does (Q2), after this command's own
+            # write. No actor: the record's source names the command.
+            summary = apply_formulas(line.boq, prepared, source=FORMULA_SOURCE_TIN_SHADE,
+                                     actor=None)
+        return [(c.code, c.before, c.after, c.unit) for c in summary.changes]
 
-    def _report(self, buckets, apply):
+    def _report(self, buckets, apply, calculated=None):
         titles = (
             ('applied',   'applied' if apply else 'would apply'),
             ('empty',     'skipped (empty new_count)'),
@@ -598,11 +703,31 @@ class Command(BaseCommand):
             ('locked',    'refused (locked or ordered)'),
             ('stale',     'skipped (changed since export)'),
             ('unchanged', 'skipped (already that count in Nos)'),
+            ('formula',   'refused (a formula rule cannot be worked out)'),
         )
         for key, title in titles:
             if buckets[key]:
                 self.stdout.write(f'{title}:')
                 for entry in buckets[key]:
                     self.stdout.write(f'  {entry}')
+        calculated = calculated or {'normal': [], 'locked': []}
+        verb = 'changed' if apply else 'would change'
+        sections = (
+            ('normal', f'calculated lines that {verb} (every active formula rule runs on '
+                       f'the BOQ, as on any save):'),
+            ('locked', f'calculated lines that {verb} on LOCKED OR ORDERED sites (applied '
+                       f'through --allow-lines):'),
+        )
+        for key, title in sections:
+            if calculated[key]:
+                self.stdout.write(title)
+                for site_label, changes in calculated[key]:
+                    self.stdout.write(f'  {site_label}:')
+                    for text in changes:
+                        self.stdout.write(f'    {text}')
         self.stdout.write('Summary: ' + ', '.join(
             f'{title} {len(buckets[key])}' for key, title in titles) + '.')
+        self.stdout.write('Calculated lines: ' + ', '.join(
+            f'{sum(len(c) for _s, c in calculated[key])} on {len(calculated[key])} '
+            f'{"locked or ordered " if key == "locked" else ""}site(s)'
+            for key, _title in sections) + '.')

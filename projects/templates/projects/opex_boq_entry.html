@@ -356,7 +356,9 @@ dashboards load. The picker above stays plain JS and does not depend on it.
           <a href="{% url 'opex_boq_upload' project.project_id %}">Upload quantities from a spreadsheet</a>
           <span class="text-muted">
             — download the sheet, fill in quantities offline, upload it back. Adds rows and
-            changes quantities; it never removes anything.
+            changes quantities; rows you delete in Excel are not removed. Calculated lines
+            take their figure from their rule, not the file, and one that now works out to 0
+            is removed.
           </span>
         </div>
         {% if copy_offered %}

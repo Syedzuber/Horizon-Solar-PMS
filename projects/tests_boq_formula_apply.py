@@ -24,8 +24,8 @@ WHAT THIS FILE PROVES
     see one row.
   * D3. An upload's figure for a computed item is replaced and listed; an override survives
     the upload; the activity text counts D1 removals.
-  * NOT HOOKED. The ACCB endpoint and fix_tin_shade_ballast --apply-counts write no record
-    and move no computed line.
+  * NOT HOOKED. The ACCB endpoint writes no record and moves no computed line.
+    fix_tin_shade_ballast --apply-counts was not hooked either until B-2c hooked it (C5).
   * PROJECT TYPE (Q3). A Residential rule never touches a RESCO BOQ.
   * THE LOCK (Q2). Taken with rules, not without; on Postgres the SQL carries FOR UPDATE.
   * CONSTRAINTS (0153). A duplicate (rule, item) or (rule, group) is refused by the
@@ -669,7 +669,7 @@ class UploadTests(FormulaBase):
 
 
 # ===========================================================================
-# Not hooked: the ACCB endpoint and fix_tin_shade_ballast
+# Not hooked: the ACCB endpoint. Hooked since B-2c: fix_tin_shade_ballast
 # ===========================================================================
 
 class NotHookedACCBTests(FormulaBase):
@@ -688,9 +688,12 @@ class NotHookedACCBTests(FormulaBase):
         self.assertFalse(BOQRecalculation.objects.exists())
 
 
-class NotHookedTinShadeTests(tsb.TsbBase):
+class HookedTinShadeTests(tsb.TsbBase):
+    """B-2c (C5) hooked fix_tin_shade_ballast --apply-counts, reversing what this class
+    pinned in B-2b ("not hooked; that hook is B-2c's"). The rest of the hook is pinned in
+    tests_b2c_rules.TinShadeHookTests."""
 
-    def test_apply_counts_writes_no_record_and_moves_no_computed_line(self):
+    def test_apply_counts_recalculates_the_computed_line_and_records_it(self):
         # INC work Tin shade computed from the Tin Shade count (R24's shape).
         BOQFormulaRule(target=self.inc, summary='0.64 kWp per tin shade', multiplier='0.64',
                        rounding='none').save()
@@ -700,8 +703,8 @@ class NotHookedTinShadeTests(tsb.TsbBase):
         self.line_a.refresh_from_db()
         self.line_inc.refresh_from_db()
         self.assertEqual((self.line_a.boq_quantity, self.line_inc.boq_quantity),
-                         (D('12'), D('186.88')))
-        self.assertFalse(BOQRecalculation.objects.exists())
+                         (D('12'), D('7.68')))
+        self.assertEqual(BOQRecalculation.objects.get().source, 'tin_shade_fix')
 
 
 # ===========================================================================
