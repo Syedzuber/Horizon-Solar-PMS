@@ -7,9 +7,14 @@ THE LIFE OF A RECEIPT
     record_receipt()           ''            -> recorded       (BD on M1 / PM side / Finance)
     query_receipt()            recorded      -> queried        (Finance, not the recorder)
     answer_receipt_query()     queried       -> recorded       (the recorder, or whoever may record now)
-    confirm_receipt()          recorded      -> confirmed      (Finance, not the recorder) — FINAL
+    confirm_receipt()          recorded      -> confirmed      (Finance, not the recorder)
+    unconfirm_receipt()        confirmed     -> recorded       (any Finance, note required — FR35)
     reject_receipt()           recorded|queried -> rejected    (Finance, reason required) — FINAL
     complete_receipt_amount()  amount_needed -> recorded       (Finance types a legacy row's figures)
+
+A confirmation can be UNDONE (FIN-M-B5-4a, ruling FR35, 25 Nov): any active Finance user,
+with a note, puts the receipt back to `recorded`; the confirmation stays in the history
+(its StatusTransition row is never touched). Only `rejected` is final.
 
 EVERY WRITER, THE SAME SHAPE: ask the permission helper (permissions.py) and validate the
 input BEFORE anything is locked or uploaded; then, inside one transaction.atomic(), lock
@@ -28,7 +33,8 @@ WHAT THIS MODULE NEVER DOES (D11): write PaymentMilestone (status, amount_receiv
 received_date), touch the milestone's tasks, or send a notification. The old and new
 money paths stay apart until FIN-M-B5-5.
 
-LOCK ORDER: milestone before receipt wherever both are locked (record, confirm, complete),
+LOCK ORDER: milestone before receipt wherever both are locked (record, confirm, unconfirm,
+complete),
 so two writers can never wait on each other in opposite orders.
 """
 import datetime
@@ -44,10 +50,11 @@ from .delivery_storage import DeliveryStorageError
 from .models import (
     REASON_CREATED, PaymentMilestone, PaymentReceipt, PaymentReceiptQuery, log_activity,
 )
+from .money_format import format_rupees
 from .permissions import (
     user_can_answer_receipt_query, user_can_complete_receipt_amount,
     user_can_confirm_receipt, user_can_query_receipt, user_can_record_receipt,
-    user_can_reject_receipt,
+    user_can_reject_receipt, user_can_unconfirm_receipt,
 )
 from .receipt_storage import discard_receipt_proof, store_receipt_proof
 from .site_bd import display_name
@@ -68,6 +75,10 @@ LIVE_STATUSES = (PaymentReceipt.RECORDED, PaymentReceipt.QUERIED, PaymentReceipt
 UNCONFIRMED_STATUSES = (PaymentReceipt.RECORDED, PaymentReceipt.QUERIED)
 
 NOT_ALLOWED = 'You are not allowed to do this on this receipt.'
+#: The two figure messages the B5-3 form also places beside their fields
+#: (forms_receipts.py imports these, so the form and the writer cannot drift apart).
+MODE_REQUIRED = 'Choose how the money was paid.'
+OTHER_NEEDS_NOTE = 'Add a note saying how the money was paid when the mode is Other.'
 STALE = ('This receipt changed while you were looking at it, or you may no longer act on '
          'it. Nothing was saved — reload and check its current state.')
 
@@ -158,15 +169,14 @@ def _clean_figures(amount, date_received, mode, reference, note):
     clean_amount = clean_receipt_amount(amount)
     clean_date = clean_receipt_date(date_received)
     if mode not in dict(PaymentReceipt.MODE_CHOICES):
-        raise ReceiptRefused('Choose how the money was paid.')
+        raise ReceiptRefused(MODE_REQUIRED)
     reference = (reference or '').strip()
     if len(reference) > REFERENCE_LIMIT:
         raise ReceiptRefused(f'The reference can be at most {REFERENCE_LIMIT} characters.')
     note = (note or '').strip()
     # D9/FR18: "Other" says nothing by itself; the note is what tells Finance what it was.
     if mode == PaymentReceipt.OTHER and not note:
-        raise ReceiptRefused('Add a note saying how the money was paid when the mode is '
-                             'Other.')
+        raise ReceiptRefused(OTHER_NEEDS_NOTE)
     return ReceiptFigures(clean_amount, clean_date, mode, reference, note)
 
 
@@ -219,10 +229,33 @@ def overpayment_warnings(milestone, adding, exclude_pk=None):
     total = _sum_amounts(milestone, LIVE_STATUSES, exclude_pk=exclude_pk) + adding
     if total <= milestone.amount:
         return ()
-    return (f'With this receipt, receipts on {milestone.milestone_name} total ₹{total} — '
-            f'more than the agreed amount of ₹{milestone.amount}, by '
-            f'₹{total - milestone.amount}. Finance will need a note to confirm beyond the '
-            f'agreed amount.',)
+    # FIN-M-B5-4a: amounts in Indian grouping (money_format, the one formatter).
+    return (f'With this receipt, receipts on {milestone.milestone_name} total '
+            f'{format_rupees(total)} — more than the agreed amount of '
+            f'{format_rupees(milestone.amount)}, by {format_rupees(total - milestone.amount)}. '
+            f'Finance will need a note to confirm beyond the agreed amount.',)
+
+
+def confirm_overpayment(milestone, receipt):
+    """FR20 / D10 on confirming: the refusal text when confirming `receipt` would bring
+    `milestone`'s CONFIRMED money above its agreed amount, or '' when it would not (or
+    the agreed amount is blank, FR24 — nothing to exceed).
+
+    THE ONE PLACE THE CONFIRM RULE LIVES (FIN-M-B5-4a). The receipt page asks it to decide
+    whether to draw the overpayment note box; confirm_receipt() asks it again under the
+    milestone lock, refuses with this text when no note was given, and drops a note given
+    when it is '' (ruling 3). Reads only — one aggregate query, none when the agreed
+    amount is blank. The receipt itself is never counted twice: only `recorded` receipts
+    are confirmed, so it is not among the confirmed ones summed here."""
+    if milestone.amount is None or receipt.amount is None:
+        return ''
+    after = _sum_amounts(milestone, (PaymentReceipt.CONFIRMED,)) + receipt.amount
+    if after <= milestone.amount:
+        return ''
+    return (f'Confirming this receipt would bring confirmed money on '
+            f'{milestone.milestone_name} to {format_rupees(after)}, more than its agreed '
+            f'amount of {format_rupees(milestone.amount)}. Add a note saying why to confirm '
+            f'it anyway.')
 
 
 def _profile(actor):
@@ -388,11 +421,13 @@ def answer_receipt_query(actor, receipt, answer):
 
 def confirm_receipt(actor, receipt, overpayment_note=''):
     """Finance confirms a recorded receipt against the bank: recorded -> confirmed (FR2,
-    D4, D8). FINAL — there is no un-confirm in this build (D5, Q11).
+    D4, D8). Undone only by unconfirm_receipt() (FR35), which keeps this in the history.
 
     FR20 / D10: refused when the milestone's CONFIRMED receipts plus this one would exceed
-    its agreed amount, unless `overpayment_note` says why; the note is stored on the
-    receipt. No check while the agreed amount is blank (FR24)."""
+    its agreed amount, unless `overpayment_note` says why; the note is then stored on the
+    receipt. No check while the agreed amount is blank (FR24). A note given when the
+    amount is NOT over is ignored (ruling 3, B5-4a): nothing is stored, and neither the
+    history nor the log says "over the agreed amount"."""
     note = (overpayment_note or '').strip()
     # D8/FR11: Finance only, never the recorder or the legacy completer; D4: not while
     # a query is open.
@@ -406,14 +441,15 @@ def confirm_receipt(actor, receipt, overpayment_note=''):
         # rejected it since the first check — a second confirmation is refused here.
         if not user_can_confirm_receipt(actor, locked):
             raise ReceiptRefused(STALE)
-        if milestone.amount is not None:
-            confirmed = _sum_amounts(milestone, (PaymentReceipt.CONFIRMED,))
-            if confirmed + locked.amount > milestone.amount and not note:
-                raise ReceiptRefused(
-                    f'Confirming this receipt would bring confirmed money on '
-                    f'{milestone.milestone_name} to ₹{confirmed + locked.amount}, more than '
-                    f'its agreed amount of ₹{milestone.amount}. Add a note saying why to '
-                    f'confirm it anyway.')
+        # FR20 under the milestone lock: no other confirmation on this milestone can
+        # land between this sum and the save.
+        over = confirm_overpayment(milestone, locked)
+        if over and not note:
+            raise ReceiptRefused(over)
+        if not over:
+            # Ruling 3: a note is only ever a reason for going over; one sent when the
+            # amount is not over (a stale page, a hand-made POST) is dropped, not stored.
+            note = ''
         from_status = locked.status
         locked.status = PaymentReceipt.CONFIRMED
         locked.confirmed_by = profile
@@ -462,6 +498,49 @@ def reject_receipt(actor, receipt, reason):
                      f'{display_name(profile)}: {reason}',
                      entity_type=RECEIPT_ENTITY, entity_id=locked.pk,
                      action_code='receipt_rejected')
+    return ReceiptResult(locked)
+
+
+def unconfirm_receipt(actor, receipt, note):
+    """Finance undoes a confirmation, with a note: confirmed -> recorded (FIN-M-B5-4a,
+    ruling FR35). Any active Finance user may, the original confirmer included.
+
+    The row's confirmed_by, confirmed_at and overpayment_note are cleared — the receipt is
+    unconfirmed again and its next confirmation stamps them afresh — while the history
+    keeps them: the confirmation's StatusTransition row (actor, time, the overpayment note
+    as its remark) and log line are never touched, and this move adds one of each, with
+    the note. Re-confirming then follows FR11 as before (never the recorder).
+
+    No milestone change (D11; B5-5). Raises ReceiptRefused when not allowed or the note is
+    blank; nothing is written then."""
+    note = _required_text(note, 'Undoing a confirmation must say why. Nothing was changed.')
+    # FR35: any active Finance user, on a confirmed receipt on a live site.
+    if not user_can_unconfirm_receipt(actor, receipt):
+        raise ReceiptRefused(NOT_ALLOWED)
+    profile = _profile(actor)
+    with transaction.atomic():
+        # Milestone first, as confirm_receipt locks it: a re-confirmation sums this
+        # milestone's confirmed money under that lock, so the two must queue in one order.
+        milestone = _lock_milestone(receipt.milestone_id)
+        locked = _lock_receipt(receipt.pk)
+        # Again under the locks: another Finance user may have undone it meanwhile.
+        if not user_can_unconfirm_receipt(actor, locked):
+            raise ReceiptRefused(STALE)
+        from_status = locked.status
+        locked.status = PaymentReceipt.RECORDED
+        locked.confirmed_by = None
+        locked.confirmed_at = None
+        locked.overpayment_note = ''
+        locked.save(update_fields=['status', 'confirmed_by', 'confirmed_at',
+                                   'overpayment_note'])
+        record_transition(locked, to_status=PaymentReceipt.RECORDED, from_status=from_status,
+                          actor=profile, remark=note, project=milestone.project)
+        log_activity(milestone.project, profile,
+                     f'Receipt confirmation undone on {milestone.milestone_name}: '
+                     f'₹{locked.amount} {_received_words(locked)} — undone by '
+                     f'{display_name(profile)}: {note}',
+                     entity_type=RECEIPT_ENTITY, entity_id=locked.pk,
+                     action_code='receipt_unconfirmed')
     return ReceiptResult(locked)
 
 

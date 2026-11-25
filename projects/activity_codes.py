@@ -35,6 +35,9 @@ MONEY_ACTIVITY_CODES = frozenset({
     'receipt_confirmed',          # confirm_receipt: Finance confirms it against the bank
     'receipt_rejected',           # reject_receipt: Finance rejects it
     'receipt_amount_completed',   # complete_receipt_amount: Finance types a legacy row's figures
+    # FIN-M-B5-4a: both lines name the receipt's amount.
+    'receipt_unconfirmed',        # unconfirm_receipt: Finance undoes a confirmation (FR35)
+    'receipt_proof_opened',       # views_receipts.receipt_proof_open: an access record
 })
 # FIN-M-L's plain milestone code, 'milestone_updated' (description, dates, status,
 # creation), is deliberately NOT here: those lines carry no amount and every viewer of
@@ -78,6 +81,10 @@ NON_ACTIVITY_CODES = frozenset({
     'receipt_confirmed',                # receipts.confirm_receipt
     'receipt_rejected',                 # receipts.reject_receipt
     'receipt_amount_completed',         # receipts.complete_receipt_amount
+    # FIN-M-B5-4a (ruling Q9): undoing a confirmation is Finance's office work, as
+    # confirming is. ('receipt_proof_opened' needs no entry: every *_opened code is
+    # already dropped by site_dashboard.is_human_activity().)
+    'receipt_unconfirmed',              # receipts.unconfirm_receipt
 })
 # 'milestone_amounts_imported' is deliberately NOT 'milestone_amounts_set': the Finance
 # Head check "Amount changed after Received" reads only the latter, so Finance's first

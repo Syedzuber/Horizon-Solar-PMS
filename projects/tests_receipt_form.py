@@ -430,7 +430,7 @@ class WarningTests(ReceiptFormBase):
         PaymentMilestone.objects.filter(pk=self.m1.pk).update(amount=Decimal('100000.00'))
         self.record(self.fin, self.m1, amount='60000', date=datetime.date(2026, 11, 1))
         response = self.first_tap(amount='50000')
-        self.assertContains(response, 'With this receipt, receipts on M1 total ₹110000.00')
+        self.assertContains(response, 'With this receipt, receipts on M1 total ₹1,10,000')
         self.assertEqual(PaymentReceipt.objects.count(), 1)
         data = self.data(amount='50000')
         data.update(record_anyway='on', warning_key=response.context['warning_key'])
@@ -477,7 +477,7 @@ class WarningTests(ReceiptFormBase):
         tags = [(m.level_tag, str(m)) for m in response.context['messages']]
         self.assertEqual(tags[0], ('success', SAVED))
         self.assertEqual(tags[1][0], 'warning')
-        self.assertIn('more than the agreed amount of ₹100.00', tags[1][1])
+        self.assertIn('more than the agreed amount of ₹100, by ₹400', tags[1][1])
 
     def test_reattach_notice_when_a_file_was_chosen(self):
         self.record(self.fin, self.m1, amount='50000')

@@ -418,6 +418,17 @@ urlpatterns = [
     path('projects/<str:project_id>/milestones/create/',                    views.milestone_create,      name='milestone_create'),      # PM only
     path('projects/<str:project_id>/milestones/set-amounts/',               views.set_milestone_amounts, name='set_milestone_amounts'), # BD + PM
     path('projects/<str:project_id>/milestone/<int:milestone_pk>/receipt/new/', views_receipts.receipt_record, name='receipt_record'),  # FIN-M-B5-3: site BD (M1), PM side, Finance; 404 while CLIENT_RECEIPTS_LIVE is off
+    # FIN-M-B5-4a receipt page — Finance, the recorder, whoever may record on its milestone now; 403 CEO/Admin/others on the site; 404 while CLIENT_RECEIPTS_LIVE is off
+    path('projects/<str:project_id>/receipt/<int:receipt_pk>/',             views_receipts.receipt_detail,     name='receipt_detail'),
+    # FIN-M-B5-4a confirm / query / reject / undo — active Finance (each writer's own rule); POST only
+    path('projects/<str:project_id>/receipt/<int:receipt_pk>/confirm/',     views_receipts.receipt_confirm,    name='receipt_confirm'),
+    path('projects/<str:project_id>/receipt/<int:receipt_pk>/query/',       views_receipts.receipt_query,      name='receipt_query'),
+    path('projects/<str:project_id>/receipt/<int:receipt_pk>/reject/',      views_receipts.receipt_reject,     name='receipt_reject'),
+    path('projects/<str:project_id>/receipt/<int:receipt_pk>/unconfirm/',   views_receipts.receipt_unconfirm,  name='receipt_unconfirm'),
+    # FIN-M-B5-4a answer a query — the recorder, or whoever may record on the milestone now, never the asker; POST only
+    path('projects/<str:project_id>/receipt/<int:receipt_pk>/answer/',      views_receipts.receipt_answer,     name='receipt_answer'),
+    # FIN-M-B5-4a open the proof — the receipt page's audience; a link signed per click, each open logged
+    path('projects/<str:project_id>/receipt/<int:receipt_pk>/proof/',       views_receipts.receipt_proof_open, name='receipt_proof_open'),
 
     # ---------------------------------------------------------------------------
     # Project overview — all roles with access to the project

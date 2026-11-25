@@ -19,15 +19,14 @@ from django import forms
 
 from .delivery_storage import DeliveryStorageError, validate_dc_document
 from .models import PaymentReceipt
+# MODE_REQUIRED and OTHER_NEEDS_NOTE are the writer's own constants (FIN-M-B5-4a): the
+# form places them beside their field, the writer (_clean_figures) stays the final check,
+# and one wording serves both. Re-exported under these names for the B5-3 tests.
 from .receipts import (
-    REFERENCE_LIMIT, ReceiptRefused, clean_receipt_amount, clean_receipt_date,
+    MODE_REQUIRED, OTHER_NEEDS_NOTE, REFERENCE_LIMIT, ReceiptRefused, clean_receipt_amount,
+    clean_receipt_date,
 )
 
-# The two messages below are the writer's (_clean_figures in receipts.py), repeated so
-# the form can place them beside their field. The writer keeps its own copy and remains
-# the final check; if one wording changes, change both.
-MODE_REQUIRED = 'Choose how the money was paid.'
-OTHER_NEEDS_NOTE = 'Add a note saying how the money was paid when the mode is Other.'
 REFERENCE_TOO_LONG = f'The reference can be at most {REFERENCE_LIMIT} characters.'
 
 

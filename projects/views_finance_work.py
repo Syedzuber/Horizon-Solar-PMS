@@ -29,6 +29,19 @@ SECTIONS, IN THE RULED ORDER (dashboard thread, 11-12 Nov)
     4. Goods received,         By receipt date, imported receipts left out, every project
        last 7 days             type with a type tag (ruling 7). Damaged first.
 
+FIN-M-B5-4a — two CLIENT-receipt sections (PaymentReceipt, money a client paid us; not the
+goods receipts of section 4), drawn only while CLIENT_RECEIPTS_LIVE is on AND only for
+active Finance users (ruling 4: CEO, Admin and System Admin read this page but never open
+a receipt). They sit after "Invoiced, awaiting payment", money in beside money owed:
+    Receipts to confirm        every `recorded` and `queried` receipt on a site that is
+                               not deleted (Cancelled and test sites stay listed, ruling 7),
+                               oldest recorded first; a tile counts them.
+    Confirmed receipts,        confirmed in the last 14 days (IST), newest first, collapsed
+    last 14 days               — so a mistaken confirmation can be found and undone (FR35).
+Both come from ONE query whatever the number of receipts (_client_receipt_rows), and the
+tile is counted from that list, so it costs nothing more. Each row links to the receipt
+page with this page's return marker, so an action there comes back here.
+
 "DUE" (R8) for M2/M3: the task before the send-invoice task is Done — "PO for B & C Class
 Items" for M2, "Customer Handover" for M3 (TRIGGER_TASKS). A site with no such task, or
 with it marked Not Applicable, counts as due and says so (ruling 4). Read with the
@@ -37,7 +50,8 @@ milestones in the same query, as correlated subqueries, so it is never a query p
 QUERIES. A fixed number whatever the number of sites, milestones, payment requests or
 receipts (tests_finance_work pins it): one for the milestones, four for the payment counts
 (three per-type payment_counts() and the queue's CAPEX test), one for the payment rows, two
-for the receipts and their lines. The lines are fetched by the same window filter rather
+for the receipts and their lines, and — for Finance with the switch on — one for the client
+receipts (FIN-M-B5-4a). The lines are fetched by the same window filter rather
 than prefetched, because Django skips a prefetch when there are no receipts and the count
 would then depend on the data.
 
@@ -48,7 +62,7 @@ AMOUNTS are whole rupees in Indian grouping (views._format_inr) everywhere on th
 blank amount reads "amount not set", never ₹0 (76 of 78 milestones have no agreed amount).
 """
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 from urllib.parse import urlencode
 
@@ -62,13 +76,17 @@ from django.views.decorators.http import require_safe
 
 from .decorators import _forbidden, login_required
 from .models import (DCLineDamagePhoto, DeliveryChallanAttachment, GoodsReceipt,
-                     GoodsReceiptLine, PaymentMilestone, PaymentRequest, Task, VendorOrder,
-                     GOODS_RECEIPT_CORRECTION, GOODS_RECEIPT_IMPORTED, GOODS_RECEIPT_RECEIPT)
+                     GoodsReceiptLine, PaymentMilestone, PaymentReceipt, PaymentRequest, Task,
+                     VendorOrder, GOODS_RECEIPT_CORRECTION, GOODS_RECEIPT_IMPORTED,
+                     GOODS_RECEIPT_RECEIPT)
 from .milestone_queries import annotate_trigger_done
+from .money_format import format_rupees
 from .payments import payment_counts, payment_type_q
 from .permissions import (milestone_card_mode, user_can_invoice_milestone,
                           user_can_see_contract_value, user_can_view_finance_work,
-                          user_has_dc_read_role)
+                          user_has_dc_read_role, user_is_receipt_finance)
+from .receipts import receipts_live
+from .site_bd import display_name
 from .utils import INVOICE_DUE_TRIGGERS
 # views.py imports this module only inside a function (FIN-M-B4's lazy import, at call
 # time, when both modules are loaded), so this top-level import is not circular
@@ -101,13 +119,29 @@ RECEIPT_DAYS = 7
 #: An invoice older than this many days counts in the tile's "30+ days" figure.
 INVOICE_OLD_DAYS = 30
 
-#: The sections, in the ruled order: focus key -> heading.
+#: FIN-M-B5-4a: how many days of confirmed client receipts the page lists, today included.
+CONFIRMED_RECEIPT_DAYS = 14
+
+#: The sections, in the ruled order: focus key -> heading. 'receipts' is GOODS receipts
+#: (B8a).
 SECTIONS = {
     'milestones': 'Milestones to act on',
     'invoiced': 'Invoiced, awaiting payment',
     'payments': 'Payment requests',
     'receipts': 'Goods received, last 7 days',
 }
+
+#: FIN-M-B5-4a: the two CLIENT-receipt sections, kept apart from SECTIONS so that for
+#: anyone who does not see them (switch off, or not Finance) the page — its section map
+#: included — is exactly what it was before. Drawn after "Invoiced, awaiting payment".
+CLIENT_RECEIPT_SECTIONS = {
+    'to_confirm': 'Receipts to confirm',
+    'confirmed_recent': f'Confirmed receipts, last {CONFIRMED_RECEIPT_DAYS} days',
+}
+
+#: FIN-M-B5-4a: where an action on a receipt page returns to on this page (ruling 1).
+RECEIPTS_TO_CONFIRM_ANCHOR = '#sec-to-confirm'
+
 
 SEARCH_MAX = 100
 
@@ -512,6 +546,71 @@ def _receipt_rows(today, dc_readable):
     return rows
 
 
+# ---------------------------------------------------------------------------
+# FIN-M-B5-4a — client receipts (PaymentReceipt)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ClientReceiptRow:
+    receipt: object
+    project: object
+    code: str
+    amount: str                # formatted, paise shown when not zero
+    recorder: str
+    waiting: int = 0           # days since it was recorded (IST days)
+    queried: bool = False      # "Queried — waiting for the recorder"
+    confirmed_by: str = ''
+    href: str = ''
+
+
+def _client_receipt_rows(today, params):
+    """(to confirm, confirmed in the last CONFIRMED_RECEIPT_DAYS days) — the two client-
+    receipt sections' rows. ONE query for any number of receipts.
+
+    The query fetches both sections at once: every `recorded` or `queried` receipt, plus
+    every `confirmed` one confirmed since 00:00 IST on the first day of the window, on a
+    site that is not deleted (R3; Cancelled and test sites stay, ruling 7 — FR28 lets
+    Finance act on them). Milestone, site, recorder and confirmer are joined for the row.
+    amount_needed rows (FR34: never created) and rejected ones are not fetched.
+    """
+    start = timezone.make_aware(datetime.combine(
+        today - timedelta(days=CONFIRMED_RECEIPT_DAYS - 1), time.min))
+    receipts = (PaymentReceipt.objects
+                .filter(milestone__project__is_deleted=False)
+                .filter(Q(status__in=(PaymentReceipt.RECORDED, PaymentReceipt.QUERIED))
+                        | Q(status=PaymentReceipt.CONFIRMED, confirmed_at__gte=start))
+                .select_related('milestone__project', 'recorded_by__user',
+                                'confirmed_by__user')
+                .order_by('recorded_at', 'pk'))
+    marker = return_query(return_marker(params))
+    to_confirm, confirmed = [], []
+    for r in receipts:
+        project = r.milestone.project
+        row = ClientReceiptRow(
+            receipt=r, project=project, code=_site_code(project),
+            amount=format_rupees(r.amount),
+            # A recorder can be blank only on a migrated row (FR16), which FR34 says is
+            # never created; say so rather than print "blank" if one ever appears.
+            recorder=display_name(r.recorded_by) if r.recorded_by_id else 'migrated',
+            waiting=(today - timezone.localtime(r.recorded_at).date()).days,
+            queried=r.status == PaymentReceipt.QUERIED,
+            confirmed_by=display_name(r.confirmed_by) if r.confirmed_by_id else '',
+            href=(reverse('receipt_detail', args=[project.project_id, r.pk])
+                  + (f'?{marker}' if marker else '')))
+        (confirmed if r.status == PaymentReceipt.CONFIRMED else to_confirm).append(row)
+    # To confirm: oldest recorded first (the query's order). Confirmed: newest first.
+    confirmed.sort(key=lambda row: (row.receipt.confirmed_at, row.receipt.pk), reverse=True)
+    return to_confirm, confirmed
+
+
+def _client_receipt_hit(row, q):
+    """Ruling 6: site code, customer, reference and recorder (and the site id and
+    milestone name, as the milestone rows match)."""
+    p, r = row.project, row.receipt
+    return _matches(q, row.code, p.project_id, p.customer_name, r.reference, row.recorder,
+                    r.milestone.milestone_name)
+
+
 def _qty(value):
     """150.00 -> '150', 2.50 -> '2.5'."""
     return f'{value.normalize():f}' if value is not None else '—'
@@ -530,7 +629,9 @@ def _clean_params(data):
     ptype = data.get('ptype', '')
     return {
         'q': data.get('q', '').strip()[:SEARCH_MAX],
-        'focus': focus if focus in SECTIONS else '',
+        # A client-receipt focus is accepted here and dropped in the view for a viewer
+        # who does not see those sections (FIN-M-B5-4a).
+        'focus': focus if focus in SECTIONS or focus in CLIENT_RECEIPT_SECTIONS else '',
         'ptype': ptype if ptype in TYPE_LABELS else '',
     }
 
@@ -620,6 +721,12 @@ def finance_work(request):
     today = timezone.localdate()
     params = _params(request)
     q = params['q'].lower()
+    # FIN-M-B5-4a, ruling 4: the client-receipt sections are Finance's alone, and only
+    # while the receipt screens are switched on. For anyone else they cost no query, and
+    # a focus on one of them is dropped so the page never shows an empty focus.
+    client_receipts_shown = receipts_live() and user_is_receipt_finance(request.user)
+    if not client_receipts_shown and params['focus'] in CLIENT_RECEIPT_SECTIONS:
+        params = {**params, 'focus': ''}
 
     to_act, invoiced, not_due = _milestone_rows(request.user, today, params)
     payments = _payment_section(params, today)
@@ -632,6 +739,11 @@ def finance_work(request):
     to_act = [r for r in to_act if _milestone_hit(r, q)]
     invoiced = [r for r in invoiced if _milestone_hit(r, q)]
     receipts = [r for r in receipts if _receipt_hit(r, q)]
+    to_confirm, confirmed_recent = [], []
+    if client_receipts_shown:
+        to_confirm, confirmed_recent = _client_receipt_rows(today, params)
+        to_confirm = [r for r in to_confirm if _client_receipt_hit(r, q)]
+        confirmed_recent = [r for r in confirmed_recent if _client_receipt_hit(r, q)]
 
     advances = sum(1 for r in to_act if r.kind == 'advance')
     to_invoice = sum(1 for r in to_act if r.kind == 'invoice')
@@ -659,6 +771,14 @@ def finance_work(request):
              f'{not_due} more not yet due', 'warn'),
         tile('invoiced', 'Invoiced, awaiting payment', len(invoiced), invoiced_detail,
              'crit' if old_invoices else ''),
+    ]
+    if client_receipts_shown:
+        # Ruling 5: counted from the rows already loaded — no query of its own.
+        queried = sum(1 for r in to_confirm if r.queried)
+        tiles.append(tile('to_confirm', 'Receipts to confirm', len(to_confirm),
+                          f'{queried} queried · {len(confirmed_recent)} confirmed, '
+                          f'last {CONFIRMED_RECEIPT_DAYS} days', 'warn'))
+    tiles += [
         # Both payment tiles count every project type (Zuber, B8a review), unlike the
         # section below, which shows one type; the second line says so first.
         tile('payments', 'Payments awaiting approval', totals['awaiting'],
@@ -670,11 +790,15 @@ def finance_work(request):
     ]
 
     focus = params['focus']
+    show = {key: not focus or focus == key for key in SECTIONS}
+    if client_receipts_shown:
+        show.update({key: not focus or focus == key for key in CLIENT_RECEIPT_SECTIONS})
     return render(request, 'projects/finance_work.html', {
         'params': params,
         'tiles': tiles,
-        'show': {key: not focus or focus == key for key in SECTIONS},
+        'show': show,
         'sections': SECTIONS,
+        'client_sections': CLIENT_RECEIPT_SECTIONS,
         'to_act': to_act,
         'not_due': not_due,
         'invoiced': invoiced,
@@ -684,6 +808,11 @@ def finance_work(request):
                                 if params['q'] else None),
         'receipts': receipts,
         'receipt_days': RECEIPT_DAYS,
+        'client_receipts_shown': client_receipts_shown,
+        'to_confirm': to_confirm,
+        'confirmed_recent': confirmed_recent,
+        # Collapsed by default (F7); open when it is the one section asked for.
+        'confirmed_open': params['focus'] == 'confirmed_recent',
         'clear_href': _query(params, q='', focus=''),
         'filtered': bool(params['q'] or focus),
         'today': today,

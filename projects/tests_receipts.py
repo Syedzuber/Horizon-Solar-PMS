@@ -268,7 +268,7 @@ class AgreedAmountTests(ReceiptBase):
         self.assertEqual(self.rec(self.pm, m1, amount='40000').warnings, ())   # exactly equal
         result = self.rec(self.pm, m1, amount='1')
         self.assertEqual(len(result.warnings), 1)
-        self.assertIn('₹100001.00', result.warnings[0])
+        self.assertIn('total ₹1,00,001', result.warnings[0])   # FIN-M-B5-4a: Indian grouping
         self.assertEqual(result.receipt.status, PaymentReceipt.RECORDED)   # warns, records
 
     def test_rejected_receipts_do_not_count_toward_the_warning(self):

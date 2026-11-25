@@ -4880,8 +4880,9 @@ def user_can_import_milestone_amounts(user):
 
 # ---------------------------------------------------------------------------
 # FIN-M-B5-2 — client payment receipts (PaymentReceipt). Who may record, query, answer,
-# confirm, reject, or complete a legacy amount. projects/receipts.py asks these before
-# every write and AGAIN under the row lock; no screen uses them yet (B5-3/B5-4).
+# confirm, reject, undo a confirmation, or complete a legacy amount, and who may open a
+# receipt's page (FIN-M-B5-4a). projects/receipts.py asks these before every write and
+# AGAIN under the row lock; the B5-3/B5-4a screens ask them to decide what to draw.
 #
 # EVERY HELPER refuses anonymous users and anyone whose profile or login is inactive
 # (_user_and_profile_active), so a person who has left can never move client money.
@@ -5010,8 +5011,13 @@ def user_can_query_receipt(user, receipt):
     return _receipt_project_live(receipt)
 
 
-def user_can_answer_receipt_query(user, receipt, open_query=None):
+def user_can_answer_receipt_query(user, receipt, open_query=None, can_record=None):
     """True when `user` may answer `receipt`'s open query (D7, Q9).
+
+    `can_record` is user_can_record_receipt(user, receipt.milestone) when the caller
+    already knows it (FIN-M-B5-4a: the record page's list, whose every viewer passed that
+    gate to see the page), so a list of queried receipts costs no coordinator lookup per
+    row. Left None, it is asked here. The writer never passes it.
 
     Allowed, while the receipt is `queried`: its recorder (or legacy completer), or anyone
     who may record on its milestone NOW — which covers a recorder who has since left.
@@ -5034,7 +5040,9 @@ def user_can_answer_receipt_query(user, receipt, open_query=None):
         return False
     if _is_receipt_recorder(profile, receipt):
         return True
-    return user_can_record_receipt(user, receipt.milestone)
+    if can_record is None:
+        can_record = user_can_record_receipt(user, receipt.milestone)
+    return bool(can_record)
 
 
 def user_can_confirm_receipt(user, receipt):
@@ -5060,7 +5068,8 @@ def user_can_reject_receipt(user, receipt):
 
     Allowed: any active Finance user — the recorder included, since rejecting a wrong
     unconfirmed record is how it is withdrawn (D5) — while the receipt is `recorded` or
-    `queried`. Blocked: anyone else; a confirmed receipt (no un-confirm, D5/Q11) and a
+    `queried`. Blocked: anyone else; a confirmed receipt (FR35: a confirmation is first
+    undone by user_can_unconfirm_receipt, which puts it back to `recorded`) and a
     rejected one (final); an amount-needed row (it is completed, not rejected); a deleted
     site. The reason is required by the writer.
     """
@@ -5071,6 +5080,68 @@ def user_can_reject_receipt(user, receipt):
     if receipt.status not in (statuses.RECORDED, statuses.QUERIED):
         return False
     return _receipt_project_live(receipt)
+
+
+def user_can_unconfirm_receipt(user, receipt):
+    """True when `user` may undo `receipt`'s confirmation (FIN-M-B5-4a, ruling FR35).
+
+    Allowed: any active Finance user — the original confirmer and the recorder included,
+    because undoing confirms nothing; FR11 is applied again when it is re-confirmed —
+    while the receipt is `confirmed`, on a live site, Cancelled included (ruling 7, as
+    confirm and reject under FR28). Blocked: anyone else; any other status (a rejected
+    receipt stays final); a deleted site. The note is required by the writer.
+    """
+    profile = _receipt_finance_profile(user)
+    if profile is None:
+        return False
+    if receipt.status != _receipt_statuses().CONFIRMED:
+        return False
+    return _receipt_project_live(receipt)
+
+
+def user_is_receipt_finance(user):
+    """True when `user` is an active Finance user — the people who check receipts against
+    the bank (FR2). The Finance work page asks this to decide whether to draw its two
+    client-receipt sections and their tile (FIN-M-B5-4a, ruling 4): CEO, Admin and System
+    Admin read that page but never open a receipt, so they do not see them. No query."""
+    return _receipt_finance_profile(user) is not None
+
+
+def user_can_view_receipt(user, receipt, can_manage=None):
+    """True when `user` may open `receipt`'s page and its proof (FIN-M-B5-4a, F5).
+
+    Allowed, on a site that is not deleted:
+      * any active Finance user — they check every receipt (FR2);
+      * the receipt's recorder, or a legacy row's completer (Q9), whatever has changed
+        since — they answer its queries, even on a site Cancelled later (FR28);
+      * anyone who may record on that milestone NOW (user_can_record_receipt): the PM
+        side on any milestone, the site's BD on M1 — the people who answer for it when
+        the recorder has left.
+    Blocked, and why:
+      * CEO, Admin and System Admin — they see totals on the Finance Head page (B5-8),
+        never single receipts, in this build (F5);
+      * everyone else who can see the site (another BD, the BD on M2/M3, SE, SCM …);
+      * anyone deactivated.
+    `can_manage` is passed through to user_can_record_receipt (see there). Finance and
+    the administrators are decided by role alone, so a Finance work list of any length
+    costs no query; the recorder branch compares loaded ids.
+    """
+    profile = _user_and_profile_active(user)
+    if profile is None:
+        return False
+    if not _receipt_project_live(receipt):
+        return False
+    # FR2: Finance opens every receipt.
+    if profile.role in RECEIPT_FINANCE_ROLES:
+        return True
+    # F5: administrators read totals, not receipts.
+    if profile.role in RECEIPT_NON_RECORDER_ROLES:
+        return False
+    # Q9: the recorder (or legacy completer) always reaches their own record.
+    if _is_receipt_recorder(profile, receipt):
+        return True
+    # FR28: whoever may record on the milestone now answers for it.
+    return user_can_record_receipt(user, receipt.milestone, can_manage=can_manage)
 
 
 def user_can_complete_receipt_amount(user, receipt):

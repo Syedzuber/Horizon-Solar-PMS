@@ -22,7 +22,8 @@
    pieces of local state only: whether the note is marked required (mode Other — the start
    value is decided by the view, never echoed from the request) and whether the form is
    submitting. The server enforces every rule; this page only explains them.
-   No proof links on this page (B5-4).{% endcomment %}
+   No proof links on this page; each listed receipt links to its own page (FIN-M-B5-4a),
+   where the proof, queries and Finance's actions are.{% endcomment %}
 <div class="rr-page">
   <div class="mb-3">
     <a href="{% url 'project_overview' project.project_id %}#payment-milestones" class="text-decoration-none text-muted">&larr; Back to {{ project.project_id }}</a>
@@ -152,7 +153,7 @@
     </div>
   </div>
 
-  {# This milestone's receipts, newest first (E3). No proof links (B5-4). #}
+  {# This milestone's receipts, newest first (E3), each linking to its receipt page. #}
   <div class="card shadow-sm mb-4" id="rr-list">
     <div class="card-header"><h2 class="h6 mb-0">Receipts on {{ milestone.milestone_name }}</h2></div>
     {% if rows %}
@@ -168,6 +169,12 @@
                   <strong>Amount not entered yet</strong>
                 {% endif %}
                 <div class="text-muted">Recorded by {{ r.recorded_by }}</div>
+                {# FIN-M-B5-4a (F6): every row opens its receipt page; a query this viewer may answer says so. #}
+                {% if r.can_answer %}
+                  <a href="{{ r.href }}#rd-queries" class="fw-semibold" data-answer-link>Queried by Finance — answer</a>
+                {% else %}
+                  <a href="{{ r.href }}" data-receipt-link>Open receipt</a>
+                {% endif %}
               </div>
               <span class="badge align-self-start flex-shrink-0 text-wrap {{ r.badge }}">{{ r.status_words }}</span>
             </div>

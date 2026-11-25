@@ -141,6 +141,70 @@
   </section>
   {% endif %}
 
+  {% comment %}FIN-M-B5-4a: client receipts (money a client paid), Finance only and only while
+     CLIENT_RECEIPTS_LIVE is on (client_receipts_shown, decided in the view). Not the goods
+     receipts further down. Each row links to its receipt page, carrying this page's return
+     marker, so an action there comes back to #sec-to-confirm.{% endcomment %}
+  {% if client_receipts_shown and show.to_confirm %}
+  <section class="qsec" id="sec-to-confirm" aria-labelledby="h-to-confirm">
+    <div class="qhead">
+      <h2 id="h-to-confirm">{{ client_sections.to_confirm }} <span class="qn num{% if not to_confirm %} z{% endif %}">{{ to_confirm|length }}</span></h2>
+      <span class="meta">Money recorded by BD, the PM side or Finance, waiting to be checked against the bank. Oldest first. Nobody confirms their own record.</span>
+    </div>
+    <div class="qcols" style="--cols: minmax(0,1.2fr) minmax(0,.9fr) minmax(0,1fr) minmax(0,1fr);" aria-hidden="true">
+      <div>Site · milestone</div><div>Amount</div><div>Received</div><div>Waiting</div>
+    </div>
+    <div class="qlist" id="to-confirm-rows">
+      {% for r in to_confirm %}
+      <div class="qitem{% if r.queried %} warn{% endif %}" x-data="{ open: false }" data-client-receipt="{{ r.receipt.pk }}"{% if r.queried %} data-queried{% endif %}>
+        <button type="button" class="qrow" style="--cols: minmax(0,1.2fr) minmax(0,.9fr) minmax(0,1fr) minmax(0,1fr);"
+                @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="false" aria-controls="cr-{{ r.receipt.pk }}">
+          <span><b>{{ r.code }}</b><span class="meta">{{ r.receipt.milestone.milestone_name }} · {{ r.project.customer_name }}</span></span>
+          <span><span class="amt">{{ r.amount }}</span></span>
+          <span>{{ r.receipt.date_received|date:"j M Y" }}<span class="meta">{{ r.receipt.get_mode_display }}{% if r.receipt.reference %} · {{ r.receipt.reference }}{% endif %}</span></span>
+          <span>{% if r.queried %}<span class="pill warn">Queried — waiting for the recorder</span>{% else %}<span class="pill mut">{{ r.waiting }}d waiting</span>{% endif %}</span>
+          <i data-lucide="chevron-down" class="chev" aria-hidden="true"></i>
+        </button>
+        <div class="qdet" id="cr-{{ r.receipt.pk }}" x-show="open" x-cloak>
+          <dl class="kv">
+            <dt>Recorded by</dt><dd>{{ r.recorder }}</dd>
+            <dt>Days waiting</dt><dd>{{ r.waiting }}</dd>
+            <dt>Reference</dt><dd>{{ r.receipt.reference|default:"none" }}</dd>
+          </dl>
+          <div class="wbtns"><a class="wbtn pri" href="{{ r.href }}" data-receipt-page>Open receipt</a></div>
+        </div>
+      </div>
+      {% empty %}
+      <div class="qempty">{% if params.q %}No receipt to confirm matches this search.{% else %}Nothing to confirm: every recorded receipt has been checked.{% endif %}</div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  {% if client_receipts_shown and show.confirmed_recent %}
+  <section class="qsec" id="sec-confirmed-recent" aria-labelledby="h-confirmed-recent" x-data="{ shown: {% if confirmed_open %}true{% else %}false{% endif %} }">
+    <div class="qhead">
+      <h2 id="h-confirmed-recent">{{ client_sections.confirmed_recent }} <span class="qn num{% if not confirmed_recent %} z{% endif %}">{{ confirmed_recent|length }}</span></h2>
+      <span class="meta">Newest first. Open one to undo a mistaken confirmation.</span>
+      <div class="right"><button type="button" class="wbtn" @click="shown = !shown" :aria-expanded="shown ? 'true' : 'false'" aria-controls="confirmed-recent-rows" data-confirmed-toggle><span x-show="!shown">Show</span><span x-show="shown" x-cloak>Hide</span></button></div>
+    </div>
+    <div class="qlist" id="confirmed-recent-rows" x-show="shown"{% if not confirmed_open %} x-cloak{% endif %}>
+      {% for r in confirmed_recent %}
+      <a class="qitem d-block text-reset text-decoration-none" href="{{ r.href }}" data-client-receipt="{{ r.receipt.pk }}" data-confirmed>
+        <div class="qrow" style="--cols: minmax(0,1.2fr) minmax(0,.9fr) minmax(0,1fr) minmax(0,1fr);">
+          <span><b>{{ r.code }}</b><span class="meta">{{ r.receipt.milestone.milestone_name }} · {{ r.project.customer_name }}</span></span>
+          <span><span class="amt">{{ r.amount }}</span></span>
+          <span>{{ r.receipt.date_received|date:"j M Y" }}<span class="meta">{{ r.receipt.get_mode_display }}{% if r.receipt.reference %} · {{ r.receipt.reference }}{% endif %}</span></span>
+          <span><span class="pill ok">Confirmed {{ r.receipt.confirmed_at|date:"j M" }}</span><span class="meta">by {{ r.confirmed_by }}</span></span>
+        </div>
+      </a>
+      {% empty %}
+      <div class="qempty">{% if params.q %}No confirmed receipt matches this search.{% else %}Nothing confirmed in the last 14 days.{% endif %}</div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
   {% if show.payments %}
   <section class="qsec" id="sec-payments" aria-labelledby="h-payments">
     <div class="qhead">

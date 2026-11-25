@@ -1,0 +1,228 @@
+{% extends "base.html" %}
+{% block title %}Receipt — {{ project.project_id }} {{ milestone.milestone_name }}{% endblock %}
+
+{% block extra_head %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<style>
+  .rd-page { max-width: 640px; }
+  .rd-page .text-break { word-break: break-word; }
+  .rd-page dl.rd-kv { display: grid; grid-template-columns: minmax(0, 8.5rem) minmax(0, 1fr); gap: 4px 12px; margin: 0; }
+  .rd-page dl.rd-kv dt { font-weight: 500; color: var(--bs-secondary-color); }
+  .rd-page dl.rd-kv dd { margin: 0; min-width: 0; word-break: break-word; }
+  .rd-page .btn { min-height: 44px; }
+  .rd-page .rd-remark { white-space: pre-line; }
+  @media (max-width: 575.98px) {
+    /* .container gives 12px each side; 4px more makes the 16px phone gutter. */
+    .rd-page { padding-left: 4px; padding-right: 4px; }
+    .rd-page dl.rd-kv { grid-template-columns: minmax(0, 1fr); gap: 0 0; }
+    .rd-page dl.rd-kv dd { margin-bottom: 6px; }
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+{% comment %}FIN-M-B5-4a receipt page. Reached only by whoever user_can_view_receipt() admits
+   (views_receipts._receipt_gate refuses everyone else; the URL is a 404 while
+   CLIENT_RECEIPTS_LIVE is off). Every action is a plain POST form to its own URL, drawn only
+   when the view's helper allows it; the writer checks again, so a hidden button is never the
+   control. No XHR. Alpine holds only "this form is submitting" (to stop a double tap). The
+   proof link points at receipt_proof_open, which signs a fresh link per click — no signed
+   URL is ever in this page. When the page was opened from Finance work, every form carries
+   that page's return marker (return + rq) so the action goes back there.{% endcomment %}
+<div class="rd-page">
+  <div class="mb-3 d-flex flex-wrap gap-3">
+    {% if finance_work_href %}
+      <a href="{{ finance_work_href }}" class="text-decoration-none text-muted">&larr; Back to Finance work</a>
+    {% endif %}
+    {% if record_href %}
+      <a href="{{ record_href }}" class="text-decoration-none text-muted">Receipts on {{ milestone.milestone_name }}</a>
+    {% endif %}
+    <a href="{% url 'project_overview' project.project_id %}#payment-milestones" class="text-decoration-none text-muted">{{ project.project_id }}</a>
+  </div>
+
+  {# The milestone: agreed amount and what is on record (F1). #}
+  <div class="card shadow-sm mb-3">
+    <div class="card-body">
+      <div class="small text-muted text-break">{{ project.site_code|default:project.project_id }} · {{ project.customer_name }}{% if project.status == 'Cancelled' %} · <span class="text-danger">Site cancelled</span>{% endif %}</div>
+      <h1 class="h5 mb-2">Receipt on {{ milestone.milestone_name }}</h1>
+      {% if agreed %}
+        <div>Agreed amount: <strong>{{ agreed }}</strong></div>
+      {% else %}
+        <div class="text-muted">No agreed amount yet.</div>
+      {% endif %}
+      <div class="d-flex flex-wrap gap-3 mt-2 small">
+        <div>Confirmed so far: <strong>{{ confirmed_total }}</strong></div>
+        <div>Not yet confirmed: <strong>{{ unconfirmed_total }}</strong></div>
+      </div>
+    </div>
+  </div>
+
+  {# The receipt itself. #}
+  <div class="card shadow-sm mb-3" id="rd-receipt">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
+        <div class="h4 mb-0">{% if amount %}{{ amount }}{% else %}Amount not entered yet{% endif %}</div>
+        <span class="badge text-wrap {{ badge }}" id="rd-status">{{ status_words }}</span>
+      </div>
+      <dl class="rd-kv small">
+        {% if receipt.date_received %}<dt>Received</dt><dd>{{ receipt.date_received|date:"d M Y" }}</dd>{% endif %}
+        {% if mode %}<dt>Mode</dt><dd>{{ mode }}</dd>{% endif %}
+        <dt>Reference</dt><dd>{{ receipt.reference|default:"none" }}</dd>
+        {% if receipt.note %}<dt>Note</dt><dd class="rd-remark">{{ receipt.note }}</dd>{% endif %}
+        <dt>Recorded by</dt><dd>{{ recorded_by }} · {{ receipt.recorded_at|date:"d M Y, H:i" }}</dd>
+        {% if completed_by %}<dt>Amount added by</dt><dd>{{ completed_by }} · {{ receipt.completed_at|date:"d M Y, H:i" }}</dd>{% endif %}
+        {% if receipt.confirmed_at %}
+          <dt>Confirmed by</dt><dd>{{ confirmed_by|default:"migrated" }} · {{ receipt.confirmed_at|date:"d M Y, H:i" }}</dd>
+          {% if receipt.overpayment_note %}<dt>Over the agreed amount</dt><dd class="rd-remark">{{ receipt.overpayment_note }}</dd>{% endif %}
+        {% endif %}
+        {% if receipt.rejected_at %}
+          <dt>Rejected by</dt><dd>{{ rejected_by }} · {{ receipt.rejected_at|date:"d M Y, H:i" }}</dd>
+          <dt>Reason</dt><dd class="rd-remark">{{ receipt.reject_reason }}</dd>
+        {% endif %}
+        <dt>Proof</dt>
+        <dd>
+          {% if has_proof %}
+            <a href="{% url 'receipt_proof_open' project.project_id receipt.pk %}" target="_blank" rel="noopener" id="rd-proof">Open proof</a>
+            <span class="text-muted">(opens are recorded)</span>
+          {% else %}
+            <span class="text-muted">none attached</span>
+          {% endif %}
+        </dd>
+      </dl>
+    </div>
+  </div>
+
+  {# Queries and answers (FR19), with the answer box for whoever may answer (F4). #}
+  {% if queries %}
+  <div class="card shadow-sm mb-3" id="rd-queries">
+    <div class="card-header"><h2 class="h6 mb-0">Questions from Finance</h2></div>
+    <ul class="list-group list-group-flush">
+      {% for q in queries %}
+        <li class="list-group-item small">
+          <div class="text-muted">Asked by {{ q.raised_by }} · {{ q.query.raised_at|date:"d M Y, H:i" }}</div>
+          <div class="rd-remark">{{ q.query.reason }}</div>
+          {% if q.query.answered_at %}
+            <div class="mt-2 ps-2 border-start">
+              <div class="text-muted">Answered by {{ q.answered_by }} · {{ q.query.answered_at|date:"d M Y, H:i" }}</div>
+              <div class="rd-remark">{{ q.query.answer }}</div>
+            </div>
+          {% elif q.overruled %}
+            <div class="mt-1 text-muted">Not answered — the receipt was rejected.</div>
+          {% elif q.open %}
+            {% if can_answer %}
+              <form method="post" action="{% url 'receipt_answer' project.project_id receipt.pk %}" class="mt-2"
+                    x-data="{ submitting: false }" x-on:submit="submitting = true"
+                    x-on:pageshow.window="if ($event.persisted) submitting = false" id="rd-answer-form">
+                {% csrf_token %}
+                {% if marker %}<input type="hidden" name="return" value="{{ marker.return }}">{% if marker.rq %}<input type="hidden" name="rq" value="{{ marker.rq }}">{% endif %}{% endif %}
+                <label class="form-label fw-semibold" for="rd-answer">Your answer</label>
+                <textarea name="answer" id="rd-answer" rows="3" class="form-control" required></textarea>
+                <div class="form-text">Text only. If a figure is wrong, say so — Finance will reject this receipt and it is recorded again.</div>
+                <button type="submit" class="btn btn-brand w-100 mt-2" x-bind:disabled="submitting">Send answer</button>
+              </form>
+            {% else %}
+              <div class="mt-1 text-muted">Waiting for the recorder to answer.</div>
+            {% endif %}
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {# Finance's actions (F2): each its own small form, each drawn only when allowed. #}
+  {% if can_confirm or can_query or can_reject or can_unconfirm %}
+  <div class="card shadow-sm mb-3" id="rd-actions">
+    <div class="card-header"><h2 class="h6 mb-0">Finance</h2></div>
+    <div class="card-body d-grid gap-3">
+      {% if can_confirm %}
+        <form method="post" action="{% url 'receipt_confirm' project.project_id receipt.pk %}" id="rd-confirm-form"
+              x-data="{ submitting: false }" x-on:submit="submitting = true"
+              x-on:pageshow.window="if ($event.persisted) submitting = false">
+          {% csrf_token %}
+          {% if marker %}<input type="hidden" name="return" value="{{ marker.return }}">{% if marker.rq %}<input type="hidden" name="rq" value="{{ marker.rq }}">{% endif %}{% endif %}
+          {% if over %}
+            <div class="alert alert-warning small mb-2" role="alert">{{ over }}</div>
+            <label class="form-label fw-semibold" for="rd-over-note">Why confirm beyond the agreed amount?</label>
+            <textarea name="overpayment_note" id="rd-over-note" rows="2" class="form-control mb-2" required></textarea>
+          {% endif %}
+          <button type="submit" class="btn btn-brand w-100" x-bind:disabled="submitting">Confirm — matches the bank</button>
+        </form>
+      {% endif %}
+
+      {% if can_query %}
+        <details id="rd-query">
+          <summary class="fw-semibold">Query this receipt</summary>
+          <form method="post" action="{% url 'receipt_query' project.project_id receipt.pk %}" class="mt-2"
+                x-data="{ submitting: false }" x-on:submit="submitting = true"
+                x-on:pageshow.window="if ($event.persisted) submitting = false">
+            {% csrf_token %}
+            {% if marker %}<input type="hidden" name="return" value="{{ marker.return }}">{% if marker.rq %}<input type="hidden" name="rq" value="{{ marker.rq }}">{% endif %}{% endif %}
+            <label class="form-label" for="rd-query-reason">What needs explaining?</label>
+            <textarea name="reason" id="rd-query-reason" rows="2" class="form-control" required></textarea>
+            <button type="submit" class="btn btn-outline-secondary w-100 mt-2" x-bind:disabled="submitting">Send query to {{ recorded_by }}</button>
+          </form>
+        </details>
+      {% endif %}
+
+      {% if can_reject %}
+        <details id="rd-reject">
+          <summary class="fw-semibold text-danger">Reject this receipt</summary>
+          <form method="post" action="{% url 'receipt_reject' project.project_id receipt.pk %}" class="mt-2"
+                x-data="{ submitting: false }" x-on:submit="submitting = true"
+                x-on:pageshow.window="if ($event.persisted) submitting = false">
+            {% csrf_token %}
+            {% if marker %}<input type="hidden" name="return" value="{{ marker.return }}">{% if marker.rq %}<input type="hidden" name="rq" value="{{ marker.rq }}">{% endif %}{% endif %}
+            <label class="form-label" for="rd-reject-reason">Why? (Final — a corrected receipt is recorded anew.)</label>
+            <textarea name="reason" id="rd-reject-reason" rows="2" class="form-control" required></textarea>
+            <button type="submit" class="btn btn-outline-danger w-100 mt-2" x-bind:disabled="submitting">Reject</button>
+          </form>
+        </details>
+      {% endif %}
+
+      {% if can_unconfirm %}
+        <details id="rd-unconfirm">
+          <summary class="fw-semibold">Undo the confirmation</summary>
+          <form method="post" action="{% url 'receipt_unconfirm' project.project_id receipt.pk %}" class="mt-2"
+                x-data="{ submitting: false }" x-on:submit="submitting = true"
+                x-on:pageshow.window="if ($event.persisted) submitting = false">
+            {% csrf_token %}
+            {% if marker %}<input type="hidden" name="return" value="{{ marker.return }}">{% if marker.rq %}<input type="hidden" name="rq" value="{{ marker.rq }}">{% endif %}{% endif %}
+            <label class="form-label" for="rd-unconfirm-note">Why? The receipt goes back to waiting for Finance; the confirmation stays in the history.</label>
+            <textarea name="note" id="rd-unconfirm-note" rows="2" class="form-control" required></textarea>
+            <button type="submit" class="btn btn-outline-secondary w-100 mt-2" x-bind:disabled="submitting">Undo confirmation</button>
+          </form>
+        </details>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
+  {# Likely duplicates on the same milestone (F1): this receipt and rejected ones left out. #}
+  {% if duplicates %}
+  <div class="card shadow-sm mb-3 border-warning" id="rd-duplicates">
+    <div class="card-header"><h2 class="h6 mb-0">May be the same money</h2></div>
+    <ul class="list-group list-group-flush">
+      {% for d in duplicates %}
+        <li class="list-group-item small text-break"><a href="{{ d.href }}">{{ d.words }}</a></li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {# Everything that happened to it, oldest first (F1). #}
+  <div class="card shadow-sm mb-4" id="rd-history">
+    <div class="card-header"><h2 class="h6 mb-0">History</h2></div>
+    <ul class="list-group list-group-flush">
+      {% for e in history %}
+        <li class="list-group-item small">
+          <div><strong>{{ e.what }}</strong> <span class="text-muted">· {{ e.actor }} · {{ e.at|date:"d M Y, H:i" }}</span></div>
+          {% if e.remark %}<div class="rd-remark"><span class="text-muted">{{ e.remark_label }}</span> {{ e.remark }}</div>{% endif %}
+        </li>
+      {% empty %}
+        <li class="list-group-item small text-muted">No history recorded.</li>
+      {% endfor %}
+    </ul>
+  </div>
+</div>
+{% endblock %}

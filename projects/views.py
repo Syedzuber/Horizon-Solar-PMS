@@ -5,7 +5,7 @@ import uuid as _uuid
 from collections import Counter
 from dataclasses import replace as dataclass_replace
 from datetime import date, timedelta, datetime
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation
 from urllib.parse import urlencode
 
 from django.conf import settings
@@ -152,6 +152,10 @@ from .site_pm import (
 )
 # FIN-M-B5-1: the one writer of Project.bd, behind the overview's BD modal.
 from .site_bd import SiteBdChangeRefused, bd_scope_projects, set_site_bd, site_in_bd_scope
+# FIN-M-B5-4a: the one rupee formatter. Imported under the names this module always
+# used, so views_finance_work, views_receipts, milestone_amount_import and the tests that
+# import them from here keep working unchanged.
+from .money_format import format_inr as _format_inr, format_rupees as _milestone_rupees
 # FIN-M-B5-3: the receipt screens' off-switch, read for the card's "Record receipt" button.
 from .receipts import receipts_live
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, SiteBdForm, TaskAddForm, VendorForm, ProgramForm, SNAPSHOT_SWITCH_ROLES, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date, TYPED_DATE_FLOOR
@@ -2533,47 +2537,16 @@ def _capex_hidden_count():
     ).count()
 
 
-def _format_inr(value):
-    """Whole rupees in Indian grouping: Decimal('200000.00') -> '2,00,000',
-    Decimal('12345678.50') -> '1,23,45,679'. Formatted here because Django's
-    intcomma groups in thousands (200,000), which a CEO reading lakhs would misread."""
-    digits = str(int((value or Decimal('0')).quantize(Decimal('1'), rounding=ROUND_HALF_UP)))
-    head, tail = digits[:-3], digits[-3:]
-    groups = []
-    while len(head) > 2:
-        groups.insert(0, head[-2:])
-        head = head[:-2]
-    if head:
-        groups.insert(0, head)
-    return ','.join(groups + [tail])
+# FIN-M-B5-4a: _format_inr moved to money_format.format_inr (imported at the top of
+# this module under its old name), so receipts.py can share it without a cycle.
 
 
 # ---------------------------------------------------------------------------
 # FIN-M-L — the milestone change log (ruling R15)
 # ---------------------------------------------------------------------------
 
-def _milestone_rupees(value):
-    """An amount for the milestone log: '₹1,35,000', '₹1,00,000.40', 'blank'.
-
-    Not _format_inr() alone, which rounds to whole rupees: in an audit line a 40-paise
-    correction would then read "₹1,00,000 → ₹1,00,000". Paise are shown only when they
-    are not zero. The sign is handled here because _format_inr() mis-groups a negative
-    ('-,50,000'), and milestone_receive still accepts one (a secondary finding)."""
-    if value is None:
-        return 'blank'
-    value = Decimal(value)
-    if not value.is_finite():
-        # NaN/Infinity cannot be grouped; say what was stored rather than raise inside
-        # a log call.
-        return str(value)
-    sign = '-' if value < 0 else ''
-    value = abs(value).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-    whole = Decimal(int(value))
-    text = _format_inr(whole)
-    paise = int((value - whole) * 100)
-    if paise:
-        text += f'.{paise:02d}'
-    return f'{sign}₹{text}'
+# FIN-M-B5-4a: _milestone_rupees moved to money_format.format_rupees (imported at the
+# top of this module under its old name).
 
 
 def _milestone_day(value):
@@ -14509,8 +14482,11 @@ def project_overview(request, project_id):
     # due_dates_forecast_shift (SCHED-2b): the daily scheduler writes one on a late site
     # every morning, which would push the people's lines out of these 8 slots. The site
     # timeline still shows them.
+    # FIN-M-B5-4a: receipt_proof_opened is an access record (Finance or the recorder
+    # opening a receipt's proof), not site news — hidden as dc_document_opened is.
     hidden_codes = {'task_unassigned', 'site_drawing_opened', 'dc_document_opened',
-                    'dc_damage_photo_opened', 'due_dates_forecast_shift'}
+                    'dc_damage_photo_opened', 'due_dates_forecast_shift',
+                    'receipt_proof_opened'}
     if not sees_money:
         hidden_codes |= MONEY_ACTIVITY_CODES
     recent_activity = list(
