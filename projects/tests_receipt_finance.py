@@ -14,7 +14,8 @@ left); reject (from recorded and queried, final, allowed on a Cancelled site); u
 one log line, FR11 again on re-confirm); likely duplicates; the proof (signed per click,
 each open logged, refused opens log nothing); the return to the receipt page or to
 Finance work (ruling 1); the Finance work lists, tile, search and fixed query count; the
-formatter; and F10 — no action touches the milestone, its tasks or notifications.
+formatter; and F10 — no action touches the milestone or its tasks (each action's own
+FR36 alert, FIN-M-B5-4b, is asserted in the F10 test, callbacks executed).
 
 Run with:
     python manage.py test projects.tests_receipt_finance --settings=solarpms.test_settings
@@ -32,7 +33,7 @@ from django.utils import timezone
 from . import views as views_module
 from . import views_finance_work
 from .models import (
-    ActivityLog, Notification, NotificationLog, PaymentMilestone, PaymentReceipt,
+    ActivityLog, NotificationLog, PaymentMilestone, PaymentReceipt,
     PaymentReceiptQuery, Project, StatusTransition, SUBJECT_PAYMENT_RECEIPT, Task,
 )
 from .money_format import format_inr, format_rupees
@@ -789,9 +790,13 @@ class NoSideEffectTests(FinanceReceiptBase):
                                        'received_date', 'invoice_amount'))
         tasks = list(Task.objects.filter(phase__project=self.project).order_by('pk')
                      .values_list('pk', 'status', 'assigned_to_id', 'due_date'))
-        return milestones, tasks, Notification.objects.count(), NotificationLog.objects.count()
+        return milestones, tasks
 
-    def test_every_action_leaves_milestone_tasks_and_notifications_alone(self):
+    def test_every_action_leaves_milestone_and_tasks_alone_and_sends_its_own_alert(self):
+        """F10: no action touches the milestone or its tasks. FIN-M-B5-4b (FR36): each
+        action sends its own receipt alert after commit, so callbacks are executed and
+        the event each step logs is asserted; answer and the proof open send nothing, and
+        nothing ever sends the old milestone "Payment received"."""
         PaymentMilestone.objects.filter(pk=self.m1.pk).update(amount=Decimal('100.00'))
         a = self.record(self.pm, self.m1, amount='500')
         b = self.record(self.pm, self.m1, amount='5')
@@ -800,19 +805,31 @@ class NoSideEffectTests(FinanceReceiptBase):
             PaymentReceipt.objects.filter(pk=a.pk).update(
                 proof_bucket='delivery-bkt', proof_path='receipt_proofs/1/x.pdf')
             steps = (
-                (self.fin, 'query', a, {'reason': 'Which bank?'}),
-                (self.pm, 'answer', a, {'answer': 'HDFC'}),
-                (self.fin, 'confirm', a, {'overpayment_note': 'Agreed'}),
-                (self.fin_b, 'unconfirm', a, {'note': 'Bank reversed'}),
-                (self.fin_b, 'confirm', a, {'overpayment_note': 'Again'}),
-                (self.fin, 'reject', b, {'reason': 'Wrong'}),
+                (self.fin, 'query', a, {'reason': 'Which bank?'}, {'receipt_queried'}),
+                (self.pm, 'answer', a, {'answer': 'HDFC'}, set()),
+                (self.fin, 'confirm', a, {'overpayment_note': 'Agreed'},
+                 {'receipt_payment_received'}),
+                (self.fin_b, 'unconfirm', a, {'note': 'Bank reversed'},
+                 {'receipt_confirmation_undone'}),
+                (self.fin_b, 'confirm', a, {'overpayment_note': 'Again'},
+                 {'receipt_payment_received'}),
+                (self.fin, 'reject', b, {'reason': 'Wrong'}, {'receipt_rejected'}),
             )
-            for who, name, receipt, data in steps:
-                response = self.act(who, name, receipt, **data)
+            for who, name, receipt, data, events in steps:
+                mark = NotificationLog.objects.count()
+                with self.captureOnCommitCallbacks(execute=True):
+                    response = self.act(who, name, receipt, **data)
                 self.assertEqual(response.status_code, 302, name)
                 self.assertEqual(self.snapshot(), before, name)
-            self.client_for(self.fin).get(self.action_url('proof_open', a))
+                self.assertEqual(set(NotificationLog.objects.order_by('pk')[mark:]
+                                     .values_list('event_code', flat=True)), events, name)
+            mark = NotificationLog.objects.count()
+            with self.captureOnCommitCallbacks(execute=True):
+                self.client_for(self.fin).get(self.action_url('proof_open', a))
+            self.assertEqual(NotificationLog.objects.count(), mark)
         self.assertEqual(self.snapshot(), before)
+        self.assertFalse(NotificationLog.objects.filter(
+            event_code='payment_milestone_reached').exists())
         self.assertEqual(self.fresh(a).status, PaymentReceipt.CONFIRMED)
         self.assertEqual(self.fresh(b).status, PaymentReceipt.REJECTED)
 

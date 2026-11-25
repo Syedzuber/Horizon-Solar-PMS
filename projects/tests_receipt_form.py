@@ -9,7 +9,8 @@ with values kept, nothing written and no file stored (IST edge included); FR24 (
 amount); the E4 duplicate and overpayment warnings and their "Record anyway" tick, which
 is never trusted alone; the proof file; the redirect and success message; the list; the
 fixed query counts (the button adds none to the overview); and E8 — no side effects on
-the milestone, its tasks or notifications.
+the milestone or its tasks (the save's one alert, "Receipt to confirm", is FIN-M-B5-4b's,
+asserted in the E8 test).
 
 Run with:
     python manage.py test projects.tests_receipt_form --settings=solarpms.test_settings
@@ -667,7 +668,10 @@ class QueryCountTests(ReceiptFormBase):
 @LIVE
 class NoSideEffectTests(ReceiptFormBase):
 
-    def test_save_touches_no_milestone_task_or_notification(self):
+    def test_save_touches_no_milestone_or_task_and_sends_only_receipt_to_confirm(self):
+        """E8: the save leaves the milestone and its tasks alone. Its one alert (FR36,
+        FIN-M-B5-4b) is "Receipt to confirm" to the other active Finance user, sent after
+        commit — so the callbacks are executed and the alert asserted, not assumed away."""
         def milestone_row():
             return PaymentMilestone.objects.filter(pk=self.m1.pk).values(
                 'status', 'amount', 'amount_received', 'received_date', 'invoice_amount')[0]
@@ -676,11 +680,15 @@ class NoSideEffectTests(ReceiptFormBase):
             return list(Task.objects.filter(phase__project=self.project)
                         .values_list('pk', 'status', 'assigned_to_id', 'due_date'))
 
-        before = (milestone_row(), tasks(), Notification.objects.count(),
-                  NotificationLog.objects.count())
-        response = self.client_for(self.fin).post(self.url(self.m1), self.data())
+        before = (milestone_row(), tasks())
+        client = self.client_for(self.fin)
+        with self.captureOnCommitCallbacks(execute=True):
+            response = client.post(self.url(self.m1), self.data())
         self.assertEqual(response.status_code, 302)
         self.assertEqual(PaymentReceipt.objects.count(), 1)
-        after = (milestone_row(), tasks(), Notification.objects.count(),
-                 NotificationLog.objects.count())
-        self.assertEqual(after, before)
+        self.assertEqual((milestone_row(), tasks()), before)
+        # rf_fin recorded, so only rf_fin_b (the other active Finance user) is told.
+        self.assertEqual(list(Notification.objects.values_list('recipient', flat=True)),
+                         [self.fin_b.pk])
+        self.assertEqual(set(NotificationLog.objects.values_list('event_code', flat=True)),
+                         {'receipt_to_confirm'})

@@ -8,7 +8,8 @@ warning on record, note required to confirm beyond the amount); FR11 (nobody con
 queries their own record, the legacy completer included); the query/answer exchange
 (D7, D4, D3); rejection (Q5: an unanswered query stays, but is not "open"); legacy
 completion (D2) and the database rules; one transition and one log line per write; D11
-isolation from PaymentMilestone, tasks and notifications; the stale-state refusal under
+isolation from PaymentMilestone and tasks, with each write sending only its own FR36
+receipt alert (FIN-M-B5-4b), never the old milestone one; the stale-state refusal under
 the lock; the proof upload and its clean-up on refusal and rollback; the read helpers and
 their fixed query counts.
 """
@@ -27,7 +28,7 @@ from . import receipts as receipts_module
 from .activity_codes import MONEY_ACTIVITY_CODES, NON_ACTIVITY_CODES
 from .delivery_storage import DeliveryStorageError
 from .models import (
-    ActivityLog, Notification, NotificationLog, PaymentMilestone, PaymentReceipt,
+    ActivityLog, NotificationLog, PaymentMilestone, PaymentReceipt,
     PaymentReceiptQuery, Project, ProjectPhase, StatusTransition, SUBJECT_PAYMENT_RECEIPT,
     SUBJECT_TYPE_CHOICES, Task,
 )
@@ -691,12 +692,16 @@ class LoggingTests(ReceiptBase):
 
 
 # ===========================================================================
-# 9. Isolation from the milestone, its tasks and notifications (D11)
+# 9. Isolation from the milestone and its tasks (D11); alerts are FR36's only (B5-4b)
 # ===========================================================================
 
 class IsolationTests(ReceiptBase):
 
-    def test_no_writer_touches_milestone_tasks_or_notifications(self):
+    def test_no_writer_touches_milestone_or_tasks_and_alerts_are_receipt_events_only(self):
+        """D11: no writer touches the milestone or its tasks. FIN-M-B5-4b (FR36) overrules
+        D11's "no notification": each write now sends its own receipt alert, after
+        commit, so the callbacks are executed here and every alert asserted — never the
+        old milestone "Payment received" (payment_milestone_reached)."""
         phase = ProjectPhase.objects.create(project=self.project, phase_name='Finance',
                                             phase_order=1)
         Task.objects.create(phase=phase, task_name='Advance Payment Confirmation',
@@ -708,28 +713,39 @@ class IsolationTests(ReceiptBase):
                                       'invoice_date', 'invoice_amount', 'due_date')),
                     list(Task.objects.filter(phase__project=self.project).order_by('pk')
                          .values_list('status', 'completed_at', 'assigned_to_id')),
-                    Notification.objects.count(), NotificationLog.objects.count(),
                     StatusTransition.objects.exclude(
                         subject_type=SUBJECT_PAYMENT_RECEIPT).count())
 
+        def alerts(fn, *args):
+            """Run one write with its after-commit sends executed; return the event codes
+            of the log rows it wrote, and its result."""
+            mark = NotificationLog.objects.count()
+            with self.captureOnCommitCallbacks(execute=True):
+                result = fn(*args)
+            codes = set(NotificationLog.objects.order_by('pk')[mark:]
+                        .values_list('event_code', flat=True))
+            return codes, result
+
         before = state()
-        r = self.receipt(self.bd)
-        self.assertEqual(state(), before)
-        query_receipt(self.fin_a.user, r, 'Q')
-        self.assertEqual(state(), before)
-        answer_receipt_query(self.bd.user, self.fresh(r), 'A')
-        self.assertEqual(state(), before)
-        confirm_receipt(self.fin_b.user, self.fresh(r))
-        self.assertEqual(state(), before)
-        other = self.receipt(self.pm, self.m2)
-        reject_receipt(self.fin_a.user, other, 'R')
-        self.assertEqual(state(), before)
+        codes, r = alerts(self.receipt, self.bd)
+        self.assertEqual((codes, state()), ({'receipt_to_confirm'}, before))
+        codes, _ = alerts(query_receipt, self.fin_a.user, r, 'Q')
+        self.assertEqual((codes, state()), ({'receipt_queried'}, before))
+        codes, _ = alerts(answer_receipt_query, self.bd.user, self.fresh(r), 'A')
+        self.assertEqual((codes, state()), (set(), before))
+        codes, _ = alerts(confirm_receipt, self.fin_b.user, self.fresh(r))
+        self.assertEqual((codes, state()), ({'receipt_payment_received'}, before))
+        _, other = alerts(self.receipt, self.pm, self.m2)
+        codes, _ = alerts(reject_receipt, self.fin_a.user, other, 'R')
+        self.assertEqual((codes, state()), ({'receipt_rejected'}, before))
         legacy = PaymentReceipt.objects.create(milestone=self.m3,
                                                status=PaymentReceipt.AMOUNT_NEEDED,
                                                source=PaymentReceipt.MIGRATED)
-        complete_receipt_amount(self.fin_a.user, legacy, '5', timezone.localdate(),
-                                PaymentReceipt.CASH)
-        self.assertEqual(state(), before)
+        codes, _ = alerts(complete_receipt_amount, self.fin_a.user, legacy, '5',
+                          timezone.localdate(), PaymentReceipt.CASH)
+        self.assertEqual((codes, state()), (set(), before))
+        self.assertFalse(NotificationLog.objects.filter(
+            event_code='payment_milestone_reached').exists())
 
 
 # ===========================================================================

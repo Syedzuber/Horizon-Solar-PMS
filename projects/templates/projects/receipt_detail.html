@@ -142,7 +142,8 @@
           {% csrf_token %}
           {% if marker %}<input type="hidden" name="return" value="{{ marker.return }}">{% if marker.rq %}<input type="hidden" name="rq" value="{{ marker.rq }}">{% endif %}{% endif %}
           {% if over %}
-            <div class="alert alert-warning small mb-2" role="alert">{{ over }}</div>
+            {# G9: shown once — not here when the refusal message above already says it. #}
+            {% if not over_in_messages %}<div class="alert alert-warning small mb-2" role="alert">{{ over }}</div>{% endif %}
             <label class="form-label fw-semibold" for="rd-over-note">Why confirm beyond the agreed amount?</label>
             <textarea name="overpayment_note" id="rd-over-note" rows="2" class="form-control mb-2" required></textarea>
           {% endif %}

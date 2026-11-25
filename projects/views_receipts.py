@@ -451,6 +451,13 @@ def receipt_detail(request, project_id, receipt_pk):
     # FR20: the note box only when confirming would go over the agreed amount — the
     # writer's own rule (receipts.confirm_overpayment), asked only when it could matter.
     over = confirm_overpayment(milestone, receipt) if can_confirm else ''
+    # G9 (FIN-M-B5-4b): a confirm refused for going over without a note comes back here
+    # with that same sentence as an error message, which base.html prints; the form then
+    # leaves out its own copy and keeps only the note box, so the sentence shows once.
+    # Reading the messages here does not consume them for this page: the storage keeps
+    # what it loaded, and base.html iterates the same list in this response.
+    over_in_messages = bool(over) and any(
+        str(m) == over for m in messages.get_messages(request))
     duplicates = []
     if receipt.amount is not None:
         # Other live receipts on this milestone that look like the same money (same
@@ -484,6 +491,7 @@ def receipt_detail(request, project_id, receipt_pk):
                        and user_can_answer_receipt_query(user, receipt, open_query)),
         'can_confirm': can_confirm,
         'over': over,
+        'over_in_messages': over_in_messages,
         'can_query': user_can_query_receipt(user, receipt),
         'can_reject': user_can_reject_receipt(user, receipt),
         'can_unconfirm': user_can_unconfirm_receipt(user, receipt),

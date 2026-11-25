@@ -735,6 +735,202 @@ NOTIFICATION_EVENTS = _build_registry([
         deferred=True,
     ),
 
+    # --- FIN-M-B5-4b: client receipt alerts (ruling FR36, 25 Nov) --------------------
+    # Fired only by projects/receipts.py (the receipt writer), through
+    # projects/receipt_alerts.py, which builds the recipients and values; notify() sends
+    # after commit. Email starts PAUSED for all five (Admin switches each on after a test
+    # send); in-app is never paused. Deferred, like every external send added since S2.
+    # No WhatsApp (FR36). Test sites send nothing; Cancelled sites send (FR28).
+    # Optional values (record_note_line, over_note_line, fallback_note) are '' when there
+    # is nothing to say, so their paragraph drops out of the email (T3c, Q3).
+    # NOT the old milestone "Payment received" (payment_milestone_reached), which keeps
+    # firing from the old money path until FIN-M-B5-5.
+    NotificationEvent(
+        code='receipt_to_confirm',
+        label='Receipt to confirm',
+        module='Payments',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('site_code', 'The site\'s project ID', 'HRP-RES-2026-037'),
+            Variable('milestone', 'The payment milestone: M1, M2 or M3', 'M1'),
+            Variable('amount', 'The amount received, in rupees', '₹50,000'),
+            Variable('date_received', 'The day the money arrived, e.g. "12 Nov 2026"',
+                     '12 Nov 2026'),
+            Variable('recorded_by_name', 'The person who recorded the receipt',
+                     'Ravi Verma'),
+            Variable('record_note_line', 'The recorder\'s note with its label, or blank',
+                     'Recorder\'s note: Paid by the client\'s son'),
+        ),
+        in_app_text=('Receipt to confirm: {{ amount }} on {{ site_code }} {{ milestone }}, '
+                     'received {{ date_received }}, recorded by {{ recorded_by_name }}.'),
+        default_subject='Receipt to confirm — {{ site_code }} {{ milestone }} ({{ amount }})',
+        default_body=(
+            'Hello {{ recipient_name }},\n\n'
+            '{{ recorded_by_name }} recorded a client payment of {{ amount }} on '
+            '{{ site_code }} {{ milestone }}, received on {{ date_received }}.\n\n'
+            '{{ record_note_line }}\n\n'
+            'Check it against the bank, then confirm, query or reject it on the receipt '
+            'page.'
+        ),
+        button_label='Open the receipt',
+        recipients_rule=('Every active Finance user, except the person who recorded the '
+                         'receipt. Sent each time a receipt is recorded. Not sent for a '
+                         'test site.'),
+        default_state='paused',
+        deferred=True,
+    ),
+    NotificationEvent(
+        code='receipt_queried',
+        label='Receipt queried',
+        module='Payments',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('site_code', 'The site\'s project ID', 'HRP-RES-2026-037'),
+            Variable('milestone', 'The payment milestone: M1, M2 or M3', 'M1'),
+            Variable('amount', 'The amount received, in rupees', '₹50,000'),
+            Variable('date_received', 'The day the money arrived, e.g. "12 Nov 2026"',
+                     '12 Nov 2026'),
+            Variable('queried_by_name', 'The Finance user who raised the query',
+                     'Priya Sharma'),
+            Variable('reason', 'What Finance asked', 'Which bank account was this paid into?'),
+            Variable('fallback_note', 'Why this person got it instead of the recorder, or '
+                     'blank', 'Sent to you because this receipt\'s recorder, Ravi Verma, '
+                     'is no longer active.'),
+        ),
+        in_app_text=('Receipt queried on {{ site_code }} {{ milestone }} ({{ amount }}, '
+                     'received {{ date_received }}) by {{ queried_by_name }}: {{ reason }} '
+                     '{{ fallback_note }}'),
+        default_subject='Receipt queried — {{ site_code }} {{ milestone }} ({{ amount }})',
+        default_body=(
+            'Hello {{ recipient_name }},\n\n'
+            '{{ queried_by_name }} has queried the client payment of {{ amount }} recorded '
+            'on {{ site_code }} {{ milestone }}, received on {{ date_received }}.\n\n'
+            '**Query:** {{ reason }}\n\n'
+            '{{ fallback_note }}\n\n'
+            'Answer the query on the receipt page. Once answered, the receipt goes back to '
+            'Finance to confirm.'
+        ),
+        button_label='Open the receipt',
+        recipients_rule=('The person who recorded the receipt. If they are no longer active '
+                         '(or a migrated receipt has no recorder): the person who completed '
+                         'its figures, else the site\'s PM, else its active coordinators, '
+                         'with a line saying why. Not sent for a test site.'),
+        default_state='paused',
+        deferred=True,
+    ),
+    NotificationEvent(
+        code='receipt_rejected',
+        label='Receipt rejected',
+        module='Payments',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('site_code', 'The site\'s project ID', 'HRP-RES-2026-037'),
+            Variable('milestone', 'The payment milestone: M1, M2 or M3', 'M1'),
+            Variable('amount', 'The amount received, in rupees', '₹50,000'),
+            Variable('date_received', 'The day the money arrived, e.g. "12 Nov 2026"',
+                     '12 Nov 2026'),
+            Variable('rejected_by_name', 'The Finance user who rejected it', 'Priya Sharma'),
+            Variable('reason', 'Why it was rejected', 'Not in the bank statement'),
+            Variable('fallback_note', 'Why this person got it instead of the recorder, or '
+                     'blank', 'Sent to you because this receipt\'s recorder, Ravi Verma, '
+                     'is no longer active.'),
+        ),
+        in_app_text=('Receipt rejected on {{ site_code }} {{ milestone }} ({{ amount }}, '
+                     'received {{ date_received }}) by {{ rejected_by_name }}: {{ reason }} '
+                     '{{ fallback_note }}'),
+        default_subject='Receipt rejected — {{ site_code }} {{ milestone }} ({{ amount }})',
+        default_body=(
+            'Hello {{ recipient_name }},\n\n'
+            '{{ rejected_by_name }} has rejected the client payment of {{ amount }} recorded '
+            'on {{ site_code }} {{ milestone }}, received on {{ date_received }}.\n\n'
+            '**Reason:** {{ reason }}\n\n'
+            '{{ fallback_note }}\n\n'
+            'A rejected receipt is final. If the money was received, record it again with '
+            'the correct details.'
+        ),
+        button_label='Open the receipt',
+        recipients_rule=('The person who recorded the receipt. If they are no longer active '
+                         '(or a migrated receipt has no recorder): the person who completed '
+                         'its figures, else the site\'s PM, else its active coordinators, '
+                         'with a line saying why. Not sent for a test site.'),
+        default_state='paused',
+        deferred=True,
+    ),
+    NotificationEvent(
+        code='receipt_payment_received',
+        label='Payment received (confirmed receipt)',
+        module='Payments',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('site_code', 'The site\'s project ID', 'HRP-RES-2026-037'),
+            Variable('milestone', 'The payment milestone: M1, M2 or M3', 'M1'),
+            Variable('amount', 'The amount received, in rupees', '₹50,000'),
+            Variable('date_received', 'The day the money arrived, e.g. "12 Nov 2026"',
+                     '12 Nov 2026'),
+            Variable('confirmed_by_name', 'The Finance user who confirmed it', 'Priya Sharma'),
+            Variable('over_note_line', 'Finance\'s note for going over the agreed amount, '
+                     'with its label, or blank',
+                     'Confirmed over the agreed amount: Client paid the GST as well'),
+        ),
+        in_app_text=('Payment received: {{ amount }} on {{ site_code }} {{ milestone }}, '
+                     'received {{ date_received }}, confirmed by {{ confirmed_by_name }}.'),
+        default_subject='Payment received — {{ site_code }} {{ milestone }} ({{ amount }})',
+        default_body=(
+            'Hello {{ recipient_name }},\n\n'
+            'Finance has confirmed a client payment of {{ amount }} on {{ site_code }} '
+            '{{ milestone }}, received on {{ date_received }}.\n\n'
+            '**Confirmed by:** {{ confirmed_by_name }}\n\n'
+            '{{ over_note_line }}'
+        ),
+        button_label='Open the milestone card',
+        recipients_rule=('The site\'s PM and active coordinators, the site\'s BD (if set and '
+                         'active) and every active CEO, except the person who confirmed it. '
+                         'Sent once per confirmed receipt. Not sent for a test site.'),
+        default_state='paused',
+        deferred=True,
+    ),
+    NotificationEvent(
+        code='receipt_confirmation_undone',
+        label='Receipt confirmation undone',
+        module='Payments',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('site_code', 'The site\'s project ID', 'HRP-RES-2026-037'),
+            Variable('milestone', 'The payment milestone: M1, M2 or M3', 'M1'),
+            Variable('amount', 'The amount received, in rupees', '₹50,000'),
+            Variable('date_received', 'The day the money arrived, e.g. "12 Nov 2026"',
+                     '12 Nov 2026'),
+            Variable('undone_by_name', 'The Finance user who undid the confirmation',
+                     'Priya Sharma'),
+            Variable('note', 'Why the confirmation was undone', 'The bank reversed the credit'),
+        ),
+        in_app_text=('Confirmation undone: {{ amount }} on {{ site_code }} {{ milestone }}, '
+                     'received {{ date_received }} — undone by {{ undone_by_name }}: '
+                     '{{ note }}'),
+        default_subject=('Receipt confirmation undone — {{ site_code }} {{ milestone }} '
+                         '({{ amount }})'),
+        default_body=(
+            'Hello {{ recipient_name }},\n\n'
+            '{{ undone_by_name }} has undone Finance\'s confirmation of the client payment '
+            'of {{ amount }} on {{ site_code }} {{ milestone }}, received on '
+            '{{ date_received }}.\n\n'
+            '**Why:** {{ note }}\n\n'
+            'The receipt is back with Finance, waiting to be confirmed again.'
+        ),
+        button_label='Open the milestone card',
+        recipients_rule=('The same people as "Payment received (confirmed receipt)" — the '
+                         'site\'s PM and active coordinators, its BD and every active CEO — '
+                         'plus the person who recorded the receipt, except the person who '
+                         'undid it. Not sent for a test site.'),
+        default_state='paused',
+        deferred=True,
+    ),
+
     # --- T3b: task assignment --------------------------------------------------------
     # Wording pinned by tests_notify_migration_b. utils._notify_assignment chooses between
     # the two per recipient and project inside one after-commit callback (the cooldown),

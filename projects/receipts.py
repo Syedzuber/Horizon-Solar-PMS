@@ -27,11 +27,19 @@ nothing. Every function returns a ReceiptResult: the receipt and any warnings.
 LOGGING INSIDE THE TRANSACTION. log_activity() runs its INSERT in its own savepoint
 (models.log_activity: `with transaction.atomic(): ActivityLog.objects.create(...)` inside
 try/except), so a failed log line cannot poison this transaction, and a move that rolls
-back leaves no log line behind. Hence no on_commit here.
+back leaves no log line behind. The log line needs no on_commit.
+
+ALERTS (FIN-M-B5-4b, ruling FR36 — overrules D11's "never sends a notification"). Each of
+record, query, reject, confirm and unconfirm calls one projects/receipt_alerts.py function
+INSIDE its transaction.atomic(), after the change. That function calls notify.notify(),
+which itself defers the send to after commit (transaction.on_commit), so a refused move
+or a rolled-back transaction — this one or a caller's outer one — sends nothing. No
+second on_commit here. answer_receipt_query() and complete_receipt_amount() send nothing.
 
 WHAT THIS MODULE NEVER DOES (D11): write PaymentMilestone (status, amount_received,
-received_date), touch the milestone's tasks, or send a notification. The old and new
-money paths stay apart until FIN-M-B5-5.
+received_date) or touch the milestone's tasks. The old and new money paths stay apart
+until FIN-M-B5-5; the old milestone "Payment received" (payment_milestone_reached) is
+never sent from here.
 
 LOCK ORDER: milestone before receipt wherever both are locked (record, confirm, unconfirm,
 complete),
@@ -56,6 +64,7 @@ from .permissions import (
     user_can_confirm_receipt, user_can_query_receipt, user_can_record_receipt,
     user_can_reject_receipt, user_can_unconfirm_receipt,
 )
+from . import receipt_alerts
 from .receipt_storage import discard_receipt_proof, store_receipt_proof
 from .site_bd import display_name
 from .utils import record_transition
@@ -337,6 +346,8 @@ def record_receipt(actor, milestone, amount, date_received, mode, reference='', 
                          f'{_received_words(receipt)} — recorded by {display_name(profile)}',
                          entity_type=RECEIPT_ENTITY, entity_id=receipt.pk,
                          action_code='receipt_recorded')
+            # FR36 item 1, sent after commit by notify() (module docstring, ALERTS).
+            receipt_alerts.receipt_recorded(receipt, locked.project, profile)
     except BaseException:
         # Refused under the lock, or the transaction rolled back for any other reason:
         # the row does not exist, so the file it would have pointed at goes too.
@@ -381,6 +392,8 @@ def query_receipt(actor, receipt, reason):
                      f'{display_name(profile)}: {reason}',
                      entity_type=RECEIPT_ENTITY, entity_id=locked.pk,
                      action_code='receipt_queried')
+        # FR36 item 2, sent after commit by notify() (module docstring, ALERTS).
+        receipt_alerts.receipt_queried(locked, locked.milestone.project, profile, reason)
     return ReceiptResult(locked)
 
 
@@ -465,6 +478,8 @@ def confirm_receipt(actor, receipt, overpayment_note=''):
                      + (f' (over the agreed amount: {note})' if note else ''),
                      entity_type=RECEIPT_ENTITY, entity_id=locked.pk,
                      action_code='receipt_confirmed')
+        # FR36 item 4, once per confirmed receipt, sent after commit by notify().
+        receipt_alerts.receipt_confirmed(locked, milestone.project, profile)
     return ReceiptResult(locked)
 
 
@@ -498,6 +513,8 @@ def reject_receipt(actor, receipt, reason):
                      f'{display_name(profile)}: {reason}',
                      entity_type=RECEIPT_ENTITY, entity_id=locked.pk,
                      action_code='receipt_rejected')
+        # FR36 item 3, sent after commit by notify() (module docstring, ALERTS).
+        receipt_alerts.receipt_rejected(locked, locked.milestone.project, profile, reason)
     return ReceiptResult(locked)
 
 
@@ -541,6 +558,8 @@ def unconfirm_receipt(actor, receipt, note):
                      f'{display_name(profile)}: {note}',
                      entity_type=RECEIPT_ENTITY, entity_id=locked.pk,
                      action_code='receipt_unconfirmed')
+        # FR36 item 5, sent after commit by notify() (module docstring, ALERTS).
+        receipt_alerts.receipt_unconfirmed(locked, milestone.project, profile, note)
     return ReceiptResult(locked)
 
 
