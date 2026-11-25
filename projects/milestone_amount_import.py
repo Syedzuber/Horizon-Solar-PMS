@@ -59,6 +59,8 @@ from projects.site_bd import BD_SCOPE_FILTER, CANCELLED, display_name, bd_scope_
 # edit's ("₹1,50,000", paise only when not zero). Imported at module level: views does not
 # import this module, so there is no cycle; only the two commands and the tests load it.
 from projects.views import _milestone_rupees
+# FIN-M-B5-5a (H5, FR24): setting an agreed amount recomputes the milestone's status.
+from projects.receipts import recompute_milestone_from_receipts
 
 DRAFT = 'Draft'
 MILESTONE_NAMES = (PaymentMilestone.M1, PaymentMilestone.M2, PaymentMilestone.M3)
@@ -498,5 +500,9 @@ def apply_plan(plans, actor):
             # activity (NON_ACTIVITY_CODES). Linked to the milestone like the PM edit's.
             log_activity(plan.project, actor, amount, entity_type=MILESTONE_ENTITY,
                          entity_id=milestone.pk, action_code='milestone_amounts_imported')
+            # FIN-M-B5-5a (H5): the amount is now set, so the status follows confirmed
+            # receipts — inside this transaction, on the row already locked above. A no-op
+            # while CLIENT_RECEIPTS_LIVE is off (FR38).
+            recompute_milestone_from_receipts(milestone, actor, 'agreed amount imported')
             written += 1
     return written

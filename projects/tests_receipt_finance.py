@@ -792,42 +792,50 @@ class NoSideEffectTests(FinanceReceiptBase):
                      .values_list('pk', 'status', 'assigned_to_id', 'due_date'))
         return milestones, tasks
 
-    def test_every_action_leaves_milestone_and_tasks_alone_and_sends_its_own_alert(self):
-        """F10: no action touches the milestone or its tasks. FIN-M-B5-4b (FR36): each
+    def test_every_action_leaves_tasks_alone_moves_milestone_only_by_confirmed_money(self):
+        """F10, as narrowed by FIN-M-B5-5a: no action touches the milestone's tasks (H8),
+        and the milestone moves only when confirmed money changes — confirm turns it
+        Received (₹500 against ₹100 agreed, H9), undo puts it back to Pending, query,
+        answer, reject and the proof open leave it as it was. FIN-M-B5-4b (FR36): each
         action sends its own receipt alert after commit, so callbacks are executed and
         the event each step logs is asserted; answer and the proof open send nothing, and
-        nothing ever sends the old milestone "Payment received"."""
+        nothing ever sends the old milestone "Payment received" (H7)."""
         PaymentMilestone.objects.filter(pk=self.m1.pk).update(amount=Decimal('100.00'))
         a = self.record(self.pm, self.m1, amount='500')
         b = self.record(self.pm, self.m1, amount='5')
-        before = self.snapshot()
+        before_milestones, before_tasks = self.snapshot()
+        today = timezone.localdate()
+        received = [(self.m1.pk, 'Received', Decimal('100.00'), Decimal('500.00'), today,
+                     None)] + before_milestones[1:]
         with mock.patch(SIGNER, return_value=SIGNED):
             PaymentReceipt.objects.filter(pk=a.pk).update(
                 proof_bucket='delivery-bkt', proof_path='receipt_proofs/1/x.pdf')
             steps = (
-                (self.fin, 'query', a, {'reason': 'Which bank?'}, {'receipt_queried'}),
-                (self.pm, 'answer', a, {'answer': 'HDFC'}, set()),
+                (self.fin, 'query', a, {'reason': 'Which bank?'}, {'receipt_queried'},
+                 before_milestones),
+                (self.pm, 'answer', a, {'answer': 'HDFC'}, set(), before_milestones),
                 (self.fin, 'confirm', a, {'overpayment_note': 'Agreed'},
-                 {'receipt_payment_received'}),
+                 {'receipt_payment_received'}, received),
                 (self.fin_b, 'unconfirm', a, {'note': 'Bank reversed'},
-                 {'receipt_confirmation_undone'}),
+                 {'receipt_confirmation_undone'}, before_milestones),
                 (self.fin_b, 'confirm', a, {'overpayment_note': 'Again'},
-                 {'receipt_payment_received'}),
-                (self.fin, 'reject', b, {'reason': 'Wrong'}, {'receipt_rejected'}),
+                 {'receipt_payment_received'}, received),
+                (self.fin, 'reject', b, {'reason': 'Wrong'}, {'receipt_rejected'},
+                 received),
             )
-            for who, name, receipt, data, events in steps:
+            for who, name, receipt, data, events, milestones in steps:
                 mark = NotificationLog.objects.count()
                 with self.captureOnCommitCallbacks(execute=True):
                     response = self.act(who, name, receipt, **data)
                 self.assertEqual(response.status_code, 302, name)
-                self.assertEqual(self.snapshot(), before, name)
+                self.assertEqual(self.snapshot(), (milestones, before_tasks), name)
                 self.assertEqual(set(NotificationLog.objects.order_by('pk')[mark:]
                                      .values_list('event_code', flat=True)), events, name)
             mark = NotificationLog.objects.count()
             with self.captureOnCommitCallbacks(execute=True):
                 self.client_for(self.fin).get(self.action_url('proof_open', a))
             self.assertEqual(NotificationLog.objects.count(), mark)
-        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.snapshot(), (received, before_tasks))
         self.assertFalse(NotificationLog.objects.filter(
             event_code='payment_milestone_reached').exists())
         self.assertEqual(self.fresh(a).status, PaymentReceipt.CONFIRMED)

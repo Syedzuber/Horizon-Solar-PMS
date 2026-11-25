@@ -157,7 +157,8 @@ from .site_bd import SiteBdChangeRefused, bd_scope_projects, set_site_bd, site_i
 # import them from here keep working unchanged.
 from .money_format import format_inr as _format_inr, format_rupees as _milestone_rupees
 # FIN-M-B5-3: the receipt screens' off-switch, read for the card's "Record receipt" button.
-from .receipts import receipts_live
+# FIN-M-B5-5a: the milestone recompute, called after each agreed-amount save (H5, FR24).
+from .receipts import receipts_live, recompute_milestone_from_receipts
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, SiteBdForm, TaskAddForm, VendorForm, ProgramForm, SNAPSHOT_SWITCH_ROLES, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date, TYPED_DATE_FLOOR
 from .forms import catalogue_snapshot, log_catalogue_change  # B-0: catalogue before/after log
 from .notify_registry import NOTIFICATION_EVENTS  # T2: the send-records Event filter's choices
@@ -13863,9 +13864,10 @@ def set_milestone_amounts(request, project_id):
             })
 
     try:
+        saved_rows = {}   # FIN-M-B5-5a: the saved rows, for the recompute below
         with transaction.atomic():
             for name, amount in amounts.items():
-                PaymentMilestone.objects.update_or_create(
+                saved_rows[name], _created = PaymentMilestone.objects.update_or_create(
                     project=project, milestone_name=name,
                     defaults={'amount': amount},
                 )
@@ -13886,6 +13888,13 @@ def set_milestone_amounts(request, project_id):
                 # migration 0121 stamped the rows written before it had one.
                 action_code='milestone_amounts_set',
             )
+        # FIN-M-B5-5a (H5, FR24): once the agreed amount is set the status is recomputed
+        # from confirmed receipts. After the amount line so the feed reads in order; each
+        # recompute locks its row in its own atomic block and re-reads the amount there.
+        # A no-op while CLIENT_RECEIPTS_LIVE is off (FR38).
+        for name, _amount in changed:
+            recompute_milestone_from_receipts(saved_rows[name], request.user.profile,
+                                              'agreed amount set')
     except Exception:
         # FIN-M-B3b: the raw database error text used to go back to the browser. It is
         # logged for Admin instead and BD sees a plain message. A failure inside the
@@ -14119,6 +14128,13 @@ def project_overview(request, project_id):
                         # writes no line.
                         _log_milestone_changes(project, request.user.profile, milestone,
                                                _ms_logged_before, _ms_fields)
+                        # FIN-M-B5-5a (H5, FR24): a new agreed amount recomputes the
+                        # status from confirmed receipts. Recompute opens its own atomic
+                        # block (this branch has none) and re-reads the row under lock.
+                        # A no-op while CLIENT_RECEIPTS_LIVE is off (FR38).
+                        if 'amount' in _ms_fields:
+                            recompute_milestone_from_receipts(
+                                milestone, request.user.profile, 'agreed amount set')
                     # FIN-M-RT (ruling): a save that recorded a receipt says so; any other
                     # save keeps "updated". Order: success, no-invoice warning, then the
                     # task sync's own messages. The amount-not-changed warning only arises

@@ -28,6 +28,7 @@ MONEY_ACTIVITY_CODES = frozenset({
     'milestone_amount_received',  # views: amount received / variance reason (FIN-M-L)
     'milestone_invoice_amount',   # views: the invoice amount Finance records (FIN-M-B3)
     'milestone_amounts_imported', # milestone_amount_import: Finance's one-time sheet (FIN-M-AB)
+    'milestone_legacy_marked',    # mark_legacy_received_milestones: names the old amount (FIN-M-B5-5a)
     # FIN-M-B5-2: every receipt line names its amount (receipts.py, the only writer).
     'receipt_recorded',           # record_receipt: BD / PM side / Finance records money received
     'receipt_queried',            # query_receipt: Finance queries it
@@ -85,6 +86,9 @@ NON_ACTIVITY_CODES = frozenset({
     # confirming is. ('receipt_proof_opened' needs no entry: every *_opened code is
     # already dropped by site_dashboard.is_human_activity().)
     'receipt_unconfirmed',              # receipts.unconfirm_receipt
+    # FIN-M-B5-5a (ruling Q6): the release-time marking of old Received milestones is a
+    # data step on ~51 sites at once, not work on any of them.
+    'milestone_legacy_marked',          # mark_legacy_received_milestones
 })
 # 'milestone_amounts_imported' is deliberately NOT 'milestone_amounts_set': the Finance
 # Head check "Amount changed after Received" reads only the latter, so Finance's first

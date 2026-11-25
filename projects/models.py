@@ -1948,6 +1948,14 @@ class PaymentMilestone(models.Model):
     status               = models.CharField(max_length=20, choices=STATUS_CHOICES, default=PENDING)
     created_by           = models.ForeignKey(UserProfile, null=True, blank=True, on_delete=models.SET_NULL)
 
+    # FIN-M-B5-5a (FR37 option b): a milestone that was Received before client receipts
+    # existed. Set only by mark_legacy_received_milestones, never cleared. Such a milestone
+    # stays Received; its money is the legacy figures below until a confirmed receipt exists.
+    received_before_receipts = models.BooleanField(default=False)
+    legacy_amount_received = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)  # amount_received as it stood when marked; may be blank
+    legacy_received_date   = models.DateField(null=True, blank=True)        # received_date as it stood when marked (the old save day)
+    legacy_marked_at       = models.DateTimeField(null=True, blank=True)    # when the command marked it
+
     class Meta:
         ordering = ['milestone_name']
 
@@ -1969,8 +1977,11 @@ class PaymentReceipt(models.Model):
     exception is a legacy "amount needed" row, whose figures Finance types once from the
     bank statement (D2) — that is filling a blank, not changing a figure.
 
-    NOT A WRITER OF PaymentMilestone (D11). Until FIN-M-B5-5 joins the two money paths, a
-    receipt never moves the milestone's status, amount_received or received_date.
+    THE MILESTONE FOLLOWS ITS CONFIRMED RECEIPTS (FIN-M-B5-5a, FR10/FR24). Confirming or
+    undoing a confirmation calls receipts.recompute_milestone_from_receipts(), which moves
+    the milestone's status, amount_received and received_date — only while
+    CLIENT_RECEIPTS_LIVE is on (FR38). The receipt row itself still never writes the
+    milestone; recompute is the one place that does it from receipts.
 
     The proof file is NOT a FileField: private files live in the Supabase delivery bucket
     and the row records bucket and path (the TenderDocument precedent), written only from
@@ -3300,7 +3311,8 @@ REASON_CREATED            = 'created'             # first state; there is no fro
 REASON_BLOCKED            = 'blocked'             # task blocked, blocking Issue raised alongside
 REASON_UNBLOCKED          = 'unblocked'
 REASON_MILESTONE_SYNC     = 'milestone_sync'      # task<->milestone auto-sync, not a direct act
-REASON_GRN_CONFIRMED      = 'grn_confirmed'
+REASON_RECEIPTS           = 'receipts_followed'   # FIN-M-B5-5a: milestone status moved by its confirmed receipts
+REASON_GRN_CONFIRMED     = 'grn_confirmed'
 REASON_GRN_OVERRIDDEN     = 'grn_overridden'
 REASON_DC_EDITED          = 'dc_edited'           # DC-B3: only when an edit's recalculation corrects a stale stored status
 REASON_REVISION_REQUESTED = 'revision_requested'

@@ -36,27 +36,34 @@ which itself defers the send to after commit (transaction.on_commit), so a refus
 or a rolled-back transaction — this one or a caller's outer one — sends nothing. No
 second on_commit here. answer_receipt_query() and complete_receipt_amount() send nothing.
 
-WHAT THIS MODULE NEVER DOES (D11): write PaymentMilestone (status, amount_received,
-received_date) or touch the milestone's tasks. The old and new money paths stay apart
-until FIN-M-B5-5; the old milestone "Payment received" (payment_milestone_reached) is
-never sent from here.
+THE MILESTONE FOLLOWS ITS CONFIRMED RECEIPTS (FIN-M-B5-5a, FR10/FR24/FR37). D11 is
+narrowed, not dropped: the writers above still never write PaymentMilestone themselves.
+recompute_milestone_from_receipts() is the ONE function here that does — status,
+amount_received and received_date only — called by confirm_receipt(), unconfirm_receipt()
+and the three agreed-amount writers. It does nothing while CLIENT_RECEIPTS_LIVE is off
+(FR38). It never touches the milestone's tasks (FIN-M-B5-5b) and never sends an alert:
+the old milestone "Payment received" (payment_milestone_reached) is fired only from the
+task-status chokepoint in views.py, which recompute never calls (H7).
 
 LOCK ORDER: milestone before receipt wherever both are locked (record, confirm, unconfirm,
 complete),
-so two writers can never wait on each other in opposite orders.
+so two writers can never wait on each other in opposite orders. Recompute locks only the
+milestone, which its callers either already hold or do not hold at all.
 """
 import datetime
+import logging
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, Max, Q, Sum
 from django.utils import timezone
 
 from .delivery_storage import DeliveryStorageError
 from .models import (
-    REASON_CREATED, PaymentMilestone, PaymentReceipt, PaymentReceiptQuery, log_activity,
+    REASON_CREATED, REASON_RECEIPTS, PaymentMilestone, PaymentReceipt, PaymentReceiptQuery,
+    log_activity,
 )
 from .money_format import format_rupees
 from .permissions import (
@@ -68,6 +75,8 @@ from . import receipt_alerts
 from .receipt_storage import discard_receipt_proof, store_receipt_proof
 from .site_bd import display_name
 from .utils import record_transition
+
+logger = logging.getLogger(__name__)
 
 #: ActivityLog.entity_type for every receipt line, so a reader can link it to the row.
 RECEIPT_ENTITY = 'PaymentReceipt'
@@ -480,6 +489,9 @@ def confirm_receipt(actor, receipt, overpayment_note=''):
                      action_code='receipt_confirmed')
         # FR36 item 4, once per confirmed receipt, sent after commit by notify().
         receipt_alerts.receipt_confirmed(locked, milestone.project, profile)
+        # FIN-M-B5-5a (H5): the milestone follows, in this transaction and under the
+        # milestone lock already held, so the sum includes the receipt just confirmed.
+        recompute_milestone_from_receipts(milestone, profile, 'receipt confirmed')
     return ReceiptResult(locked)
 
 
@@ -528,7 +540,8 @@ def unconfirm_receipt(actor, receipt, note):
     as its remark) and log line are never touched, and this move adds one of each, with
     the note. Re-confirming then follows FR11 as before (never the recorder).
 
-    No milestone change (D11; B5-5). Raises ReceiptRefused when not allowed or the note is
+    The milestone follows through recompute_milestone_from_receipts() (FIN-M-B5-5a; a
+    no-op while the switch is off). Raises ReceiptRefused when not allowed or the note is
     blank; nothing is written then."""
     note = _required_text(note, 'Undoing a confirmation must say why. Nothing was changed.')
     # FR35: any active Finance user, on a confirmed receipt on a live site.
@@ -560,6 +573,9 @@ def unconfirm_receipt(actor, receipt, note):
                      action_code='receipt_unconfirmed')
         # FR36 item 5, sent after commit by notify() (module docstring, ALERTS).
         receipt_alerts.receipt_unconfirmed(locked, milestone.project, profile, note)
+        # FIN-M-B5-5a (H5, FR35): the milestone follows — back to Invoiced/Pending when
+        # this undo takes confirmed money below the agreed amount.
+        recompute_milestone_from_receipts(milestone, profile, 'receipt confirmation undone')
     return ReceiptResult(locked)
 
 
@@ -603,6 +619,134 @@ def complete_receipt_amount(actor, receipt, amount, date_received, mode, referen
     return ReceiptResult(locked, warnings)
 
 
+# ---------------------------------------------------------------------------
+# The milestone follows its confirmed receipts (FIN-M-B5-5a)
+# ---------------------------------------------------------------------------
+
+#: R15 plain-line suffix on every milestone change recompute makes (ruling Q6).
+RECOMPUTE_SUFFIX = ' (from confirmed receipts)'
+
+
+def recompute_milestone_from_receipts(milestone, actor, reason=''):
+    """Bring `milestone`'s status, amount_received and received_date in step with its
+    CONFIRMED receipts (H1, H4). `milestone` is an instance or a pk; `actor` the
+    UserProfile whose act caused it (the confirmer, the undoer, or whoever set the agreed
+    amount); `reason` a few words kept as the StatusTransition remark. Returns the locked,
+    saved milestone, or None while the switch is off.
+
+    THE SWITCH (FR38). While CLIENT_RECEIPTS_LIVE is off this returns before opening a
+    transaction or running a query, so every caller behaves exactly as before B5-5a.
+
+    THE RULE, read under the milestone's row lock:
+      - Left alone (ruling Q1): Received, NOT marked received_before_receipts, and no
+        receipt row of any status. It was received through an old path after the marking
+        command ran; mark_legacy_received_milestones picks it up on its next run. Any
+        receipt row at all means the rules below apply.
+      - Legacy (received_before_receipts, FR37): stays Received. Money = the confirmed
+        receipts when any exist, else the legacy amount and date the command copied.
+      - Otherwise: Received when an agreed amount is set and confirmed money reaches it
+        (FR10; over it still counts, H9). Else Invoiced when an invoice was recorded
+        (invoice_date — the invoice writer always sets it), or Pending; amount_received
+        = confirmed money so far (blank when none, today's convention) and received_date
+        blank. No agreed amount can never turn Received (FR24).
+      - received_date when Received = the LATEST date_received among confirmed receipts
+        (ruling Q3: by the day the money arrived, FR13 — not the order of confirmation).
+
+    variance_reason is never touched (ruling Q4). Writes only when a value changes; then
+    one StatusTransition when the status moved (reason REASON_RECEIPTS) and the R15
+    old -> new lines through views._log_milestone_changes, suffixed RECOMPUTE_SUFFIX. No
+    alert (H7) and no task change (H8): neither is called from here.
+
+    OWN ATOMIC BLOCK, LOCK FIRST. It opens transaction.atomic() before select_for_update,
+    so the PM edit path, which has no transaction, gets one; inside a caller's
+    transaction (confirm, undo, BD, import) it is a savepoint and the lock is the one the
+    caller already holds or the first lock taken on that row. Recompute takes no other
+    lock, so it adds no new lock order (milestone before receipt is kept)."""
+    if not receipts_live():
+        return None
+    # Imported here, not at the top: views.py imports this module when it loads, so a
+    # module-level import of views from here would be circular.
+    from .views import _log_milestone_changes, _milestone_values
+    with transaction.atomic():
+        locked = _lock_milestone(getattr(milestone, 'pk', milestone))
+        # One aggregate: every receipt row (for the Q1 test), and the confirmed sum and
+        # latest day received. Rejected, recorded, queried and amount_needed rows never
+        # count as money (FR2).
+        confirmed = Q(status=PaymentReceipt.CONFIRMED)
+        figures = PaymentReceipt.objects.filter(milestone=locked).aggregate(
+            rows=Count('pk'),
+            total=Sum('amount', filter=confirmed),
+            latest=Max('date_received', filter=confirmed))
+        if (locked.status == PaymentMilestone.RECEIVED
+                and not locked.received_before_receipts and not figures['rows']):
+            return locked
+
+        total = figures['total']            # None when nothing is confirmed
+        if locked.received_before_receipts:
+            status = PaymentMilestone.RECEIVED
+            if total is not None:
+                received, received_on = total, figures['latest']
+            else:
+                received, received_on = locked.legacy_amount_received, locked.legacy_received_date
+        elif locked.amount is not None and total is not None and total >= locked.amount:
+            status, received, received_on = PaymentMilestone.RECEIVED, total, figures['latest']
+        else:
+            status = (PaymentMilestone.INVOICED if locked.invoice_date is not None
+                      else PaymentMilestone.PENDING)
+            received, received_on = total, None
+
+        new = {'status': status, 'amount_received': received, 'received_date': received_on}
+        changed = [field for field, value in new.items() if getattr(locked, field) != value]
+        if not changed:
+            return locked
+        before = _milestone_values(locked)
+        from_status = locked.status
+        for field in changed:
+            setattr(locked, field, new[field])
+        locked.save(update_fields=changed)
+        if 'status' in changed:
+            # R-2: the status write and its ledger row in the same transaction.
+            record_transition(locked, to_status=status, from_status=from_status,
+                              actor=actor, reason_code=REASON_RECEIPTS, remark=reason)
+        try:
+            _log_milestone_changes(locked.project, actor, locked, before, changed,
+                                   plain_suffix=RECOMPUTE_SUFFIX)
+        except Exception:
+            # As the invoice writer (B9a ruling 7): a change-log failure is logged for
+            # Admin only; the milestone change it describes stands.
+            logger.exception('FIN-M-B5-5a: change-log line not written for the recompute '
+                             'of milestone %s', locked.pk)
+    return locked
+
+
+def milestone_receipt_label(milestone, totals):
+    """The words a page shows for `milestone`'s money state (H6), from its stored status
+    and `totals` (its ReceiptTotals from receipt_totals()). No stored status is added:
+    "Part received" and "Amount needed" are display only. Built for FIN-M-B5-6; no page
+    uses it yet.
+
+      Received                      status Received (and money confirmed, or not legacy)
+      Received before receipts      legacy (FR37) Received, no confirmed money yet
+      Amount needed                 not Received, no agreed amount (FR24), nothing confirmed
+      Amount needed — ₹x confirmed  not Received, no agreed amount, some money confirmed
+      Part received ₹x of ₹y        not Received, some confirmed money below the amount
+      Invoiced / Pending            otherwise, by status
+    """
+    confirmed = totals.confirmed if totals is not None else Decimal('0.00')
+    if milestone.status == PaymentMilestone.RECEIVED:
+        if milestone.received_before_receipts and not confirmed:
+            return 'Received before receipts'
+        return 'Received'
+    if milestone.amount is None:
+        # Ruling 25 Nov: "— ₹0 confirmed" says nothing, so the figure shows only when > 0.
+        if not confirmed:
+            return 'Amount needed'
+        return f'Amount needed — {format_rupees(confirmed)} confirmed'
+    if confirmed:
+        return f'Part received {format_rupees(confirmed)} of {format_rupees(milestone.amount)}'
+    return milestone.status
+
+
 # FIN-M-B5-7 — MIGRATED RECORD CREATOR GOES HERE. Not written in this session (FR16): the
 # migration command will add one function that creates, per old receipt, either a
 # `confirmed` row (amount known; source='migrated', confirmed_by=None, shown as "migrated —
@@ -619,10 +763,14 @@ def receipts_live():
     """True when the receipt SCREENS are switched on (settings.CLIENT_RECEIPTS_LIVE, B5-3
     E1). Read at call time so tests can switch it with override_settings.
 
-    Only the record page and the milestone card's button ask this. THE WRITERS DO NOT:
+    The record page and the milestone card's button ask this. THE RECEIPT WRITERS DO NOT:
     the switch hides screens until the B5 release (main may be pushed before B5-6/B5-8,
-    and money recorded then would be counted by no page); it is not a rule about money,
-    and a command or a later screen must not be blocked by a display setting."""
+    and money recorded then would be counted by no page), and a command or a later screen
+    must not be blocked by a display setting.
+
+    ONE EXCEPTION, BY RULING FR38 (FIN-M-B5-5a): recompute_milestone_from_receipts() asks
+    it and does nothing while it is off, so an early push of main moves no milestone. The
+    switch is therefore also "receipts drive milestones" from B5-5a on."""
     return bool(getattr(settings, 'CLIENT_RECEIPTS_LIVE', False))
 
 
