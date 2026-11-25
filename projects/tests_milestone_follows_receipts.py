@@ -546,15 +546,28 @@ class LoggingAlertTaskTests(FollowBase):
         self.assertFalse(NotificationLog.objects.filter(
             event_code='payment_milestone_reached').exists())
 
-    def test_the_confirmation_task_is_never_touched(self):
+    # CHANGED AT FIN-M-B5-5b (ruling Q8): H8 "the task is never touched" split in two.
+    # Switch off the task is still never touched; switch on it follows (K1), which
+    # tests_tasks_follow_receipts covers in full.
+    def test_switch_off_the_confirmation_task_is_never_touched(self):
         before = self.task_state()
+        self.set_amount(self.m1, '50000')
+        with OFF:
+            r = self.confirmed(self.m1, '50000')
+            self.undo(r)
+            self.pm_set(self.m1, '40000')
+        self.assertEqual(self.row(self.m1)[0], 'Pending')
+        self.assertEqual(self.task_state(), before)
+
+    def test_switch_on_the_confirmation_task_follows(self):
         self.set_amount(self.m1, '50000')
         r = self.confirmed(self.m1, '50000')
         self.assertEqual(self.row(self.m1)[0], 'Received')
-        self.assertEqual(self.task_state(), before)
+        self.assertEqual(self.task_state()[0], Task.DONE)
         self.undo(r)
-        self.pm_set(self.m1, '40000')
-        self.assertEqual(self.task_state(), before)
+        self.assertEqual(self.row(self.m1)[0], 'Pending')
+        status, completed_at, _ = self.task_state()
+        self.assertEqual((status, completed_at), (Task.NOT_STARTED, None))
 
 
 # ===========================================================================

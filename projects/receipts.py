@@ -41,14 +41,25 @@ narrowed, not dropped: the writers above still never write PaymentMilestone them
 recompute_milestone_from_receipts() is the ONE function here that does — status,
 amount_received and received_date only — called by confirm_receipt(), unconfirm_receipt()
 and the three agreed-amount writers. It does nothing while CLIENT_RECEIPTS_LIVE is off
-(FR38). It never touches the milestone's tasks (FIN-M-B5-5b) and never sends an alert:
-the old milestone "Payment received" (payment_milestone_reached) is fired only from the
-task-status chokepoint in views.py, which recompute never calls (H7).
+(FR38). It never sends an alert (H7): the old milestone "Payment received"
+(payment_milestone_reached) is fired only from the task-status chokepoint in views.py,
+which recompute never calls, and since FIN-M-B5-5b not at all while the switch is on.
+
+THE CONFIRMATION TASK FOLLOWS THE MILESTONE (FIN-M-B5-5b, FR14). When recompute changes a
+milestone's status into or out of Received, follow_confirmation_task() moves that
+milestone's Finance confirmation task to Done or back to Not Started. It is the ONE writer
+of those tasks' status while the switch is on — a dedicated door like the mirror writer
+(design_views.apply_mirror_status), not the human chokepoint, which refuses every person
+on these tasks then ("This task follows Finance-confirmed receipts.").
 
 LOCK ORDER: milestone before receipt wherever both are locked (record, confirm, unconfirm,
 complete),
-so two writers can never wait on each other in opposite orders. Recompute locks only the
-milestone, which its callers either already hold or do not hold at all.
+so two writers can never wait on each other in opposite orders. Recompute locks the
+milestone, which its callers either already hold or do not hold at all, and then — only
+through follow_confirmation_task() — the milestone's confirmation task: milestone before
+task. No path locks a confirmation task and then its milestone (the human task path
+commits the task before it touches a milestone, and is refused on these tasks while the
+switch is on).
 """
 import datetime
 import logging
@@ -63,7 +74,7 @@ from django.utils import timezone
 from .delivery_storage import DeliveryStorageError
 from .models import (
     REASON_CREATED, REASON_RECEIPTS, PaymentMilestone, PaymentReceipt, PaymentReceiptQuery,
-    log_activity,
+    Task, log_activity,
 )
 from .money_format import format_rupees
 from .permissions import (
@@ -73,6 +84,7 @@ from .permissions import (
 )
 from . import receipt_alerts
 from .receipt_storage import discard_receipt_proof, store_receipt_proof
+from .scheduling import schedule_site_safely, status_change_reschedules
 from .site_bd import display_name
 from .utils import record_transition
 
@@ -99,6 +111,10 @@ MODE_REQUIRED = 'Choose how the money was paid.'
 OTHER_NEEDS_NOTE = 'Add a note saying how the money was paid when the mode is Other.'
 STALE = ('This receipt changed while you were looking at it, or you may no longer act on '
          'it. Nothing was saved — reload and check its current state.')
+#: FIN-M-B5-5b (ruling Q1): the milestone's confirmation task could not follow, so the
+#: whole action was undone rather than leaving money and task disagreeing.
+FOLLOW_FAILED = ("The milestone's Finance confirmation task could not be updated, so "
+                 "nothing was saved. Try again; if it happens again, tell Admin.")
 
 
 class ReceiptRefused(Exception):
@@ -655,7 +671,10 @@ def recompute_milestone_from_receipts(milestone, actor, reason=''):
     variance_reason is never touched (ruling Q4). Writes only when a value changes; then
     one StatusTransition when the status moved (reason REASON_RECEIPTS) and the R15
     old -> new lines through views._log_milestone_changes, suffixed RECOMPUTE_SUFFIX. No
-    alert (H7) and no task change (H8): neither is called from here.
+    alert (H7). When the STATUS moved, the milestone's confirmation task follows
+    (FIN-M-B5-5b, K1) through follow_confirmation_task(), inside this transaction and
+    with `actor`; an amount-only change, a no-change recompute and a legacy milestone
+    (whose status never changes, FR37) leave the task alone.
 
     OWN ATOMIC BLOCK, LOCK FIRST. It opens transaction.atomic() before select_for_update,
     so the PM edit path, which has no transaction, gets one; inside a caller's
@@ -716,7 +735,126 @@ def recompute_milestone_from_receipts(milestone, actor, reason=''):
             # Admin only; the milestone change it describes stands.
             logger.exception('FIN-M-B5-5a: change-log line not written for the recompute '
                              'of milestone %s', locked.pk)
+        # FIN-M-B5-5b (K1/K2): the task follows a STATUS change only. Legacy milestones
+        # never reach here with a status change (they stay Received), and the guard says
+        # so rather than relying on it. A failure is NEVER swallowed (ruling Q1, B5-5b
+        # report): the task and the milestone commit together or not at all, so money
+        # and task can never disagree. It is logged for Admin and re-raised as
+        # ReceiptRefused, which unwinds this block and the caller's (confirm, undo) and
+        # which their views already show Finance as an error message — the receipt stays
+        # as it was, nothing is half-saved. B9a's "the money stands, warn" rule was for a
+        # person completing a task, not for Finance confirming money.
+        if 'status' in changed and not locked.received_before_receipts:
+            try:
+                follow_confirmation_task(locked, from_status, actor, reason)
+            except Exception:
+                logger.exception('FIN-M-B5-5b: confirmation task of milestone %s could not '
+                                 'follow its status; nothing was saved', locked.pk)
+                raise ReceiptRefused(FOLLOW_FAILED)
     return locked
+
+
+def follow_confirmation_task(milestone, from_status, actor, reason=''):
+    """Move `milestone`'s Finance confirmation task after its status changed from
+    `from_status` (FIN-M-B5-5b, K1). Called only by recompute_milestone_from_receipts(),
+    inside its transaction with the milestone already locked; never while the switch is
+    off (recompute returns before reaching it). `reason` is recompute's own (e.g. "receipt
+    confirmed", "agreed amount set") and becomes the task's ledger remark too (ruling Q2),
+    so both rows of one event say why.
+
+      * milestone became Received          -> task Done
+      * milestone left Received            -> task Not Started (Q3, mirror precedent)
+      * any other move (Pending <-> Invoiced) -> nothing
+
+    The task is found by the existing lookup — the name map plus the project, never the
+    is_payment_milestone flag (Q1). A task the PM marked Not Applicable is left as it is
+    and a warning is logged (Q5, B9a ruling b precedent). A Blocked task is moved anyway
+    (Q5): with the switch on it has no human meaning, and K4 stops new Blocks."""
+    if milestone.status == PaymentMilestone.RECEIVED:
+        target = Task.DONE
+    elif from_status == PaymentMilestone.RECEIVED:
+        target = Task.NOT_STARTED
+    else:
+        return
+    # Imported here, not at the top: views.py imports this module when it loads.
+    from .views import _MILESTONE_TO_FINANCE_TASK
+    task_name = _MILESTONE_TO_FINANCE_TASK.get(milestone.milestone_name)
+    if not task_name:
+        return
+    # The milestone's confirmation task(s) on its project — exactly one on every live
+    # Residential site (B5-5b pre-flight), but every match follows, as B9a's sync did.
+    # Locked here, after the milestone recompute holds: milestone -> task. of=('self',)
+    # so the phase row the filter joins through is read, not locked.
+    tasks = list(Task.objects.select_for_update(of=('self',))
+                 .filter(phase__project_id=milestone.project_id, task_name=task_name)
+                 .select_related('phase').order_by('pk'))
+    for task in tasks:
+        if task.is_not_applicable:
+            logger.warning(
+                'FIN-M-B5-5b: milestone %s (%s) on project %s moved to %s; its task %s '
+                "('%s') is marked Not Applicable and was left as it is",
+                milestone.pk, milestone.milestone_name, milestone.project_id,
+                milestone.status, task.pk, task.task_name)
+            continue
+        apply_confirmation_task_status(task, milestone, target, actor, remark=reason)
+
+
+def apply_confirmation_task_status(task, milestone, new_status, actor, remark=''):
+    """THE ONE PLACE A FINANCE CONFIRMATION TASK'S STATUS IS WRITTEN while the receipt
+    switch is on (FIN-M-B5-5b, ruling Q2). Caller owns the atomic block and has locked
+    the milestone and `task`.
+
+    The confirmation-task counterpart of design_views.apply_mirror_status(): it refuses
+    (ValueError) any task that is not `milestone`'s confirmation task by the name map and
+    the project, exactly as the human chokepoint refuses every person on these tasks. It
+    never calls _apply_task_status_change(), the task -> milestone money sync or the old
+    "Payment received" alert; it needs no request, so the spreadsheet import command
+    reaches it too.
+
+    Writes, only when the status differs (otherwise nothing at all):
+      * status; completed_at set on Done, cleared on reopen (mirror precedent — a reopened
+        task with a completed_at would still read as finished to completion metrics);
+        blocked_since cleared when it leaves Blocked, as the chokepoint does;
+      * one StatusTransition, reason REASON_RECEIPTS, actor = recompute's actor, remark =
+        `remark` (the milestone row's remark, ruling Q2);
+      * the activity line in the human wording plus RECOMPUTE_SUFFIX;
+      * the site reschedule after commit, under the chokepoint's own test (no
+        confirmation task is a schedule-block task today, so it never fires).
+    Returns True if the row was written."""
+    # Imported here, not at the top: views.py imports this module when it loads, so a
+    # module-level import of views from here would be circular.
+    from .views import _MILESTONE_TO_FINANCE_TASK
+    expected = _MILESTONE_TO_FINANCE_TASK.get(milestone.milestone_name)
+    if not expected or task.task_name != expected:
+        raise ValueError(
+            f'apply_confirmation_task_status(): task {task.pk} ({task.task_name!r}) is not '
+            f"{milestone.milestone_name}'s confirmation task.")
+    if task.phase.project_id != milestone.project_id:
+        raise ValueError(
+            f'apply_confirmation_task_status(): task {task.pk} is on another project than '
+            f'milestone {milestone.pk}.')
+    old_status = task.status
+    if old_status == new_status:
+        return False
+    task.status = new_status
+    task.completed_at = timezone.now() if new_status == Task.DONE else None
+    fields = ['status', 'completed_at']
+    if old_status == Task.BLOCKED:
+        task.blocked_since = None
+        fields.append('blocked_since')
+    # The row is locked by the caller (follow_confirmation_task), so no other writer can
+    # land between the read of old_status above and this save.
+    task.save(update_fields=fields)
+    record_transition(task, to_status=new_status, from_status=old_status, actor=actor,
+                      reason_code=REASON_RECEIPTS, remark=remark)
+    project = milestone.project
+    log_activity(project, actor,
+                 f'Changed task status to {new_status}: {task.task_name}{RECOMPUTE_SUFFIX}',
+                 entity_type='Task', entity_id=task.pk,
+                 action_code=f"task_status_{new_status.lower().replace(' ', '_')}")
+    if status_change_reschedules(task, old_status, new_status):
+        transaction.on_commit(lambda: schedule_site_safely(project, actor))
+    return True
 
 
 def milestone_receipt_label(milestone, totals):

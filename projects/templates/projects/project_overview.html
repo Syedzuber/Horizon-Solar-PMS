@@ -480,6 +480,10 @@
                 <input type="text" name="milestone_description" class="form-control form-control-sm mb-2"
                        value="{{ m.milestone_description }}" placeholder="Description / Note">
                 {% if milestone_card_mode == 'finance' %}
+                {% comment %}FIN-M-B5-5b (K6): no amount box while CLIENT_RECEIPTS_LIVE is on — money
+                   comes only from confirmed receipts ("Record receipt"), and the server ignores
+                   amount_received from this form then anyway. Finance keeps the description.{% endcomment %}
+                {% if not receipts_on %}
                 <div class="mb-2">
                   <input type="number" name="amount_received" step="0.01" min="0"
                          class="form-control form-control-sm"
@@ -487,6 +491,7 @@
                          value="{% if m.amount_received %}{{ m.amount_received }}{% endif %}">
                   <div class="text-muted mt-1" style="font-size:.7rem;">Saving an amount marks this milestone as Received</div>
                 </div>
+                {% endif %}
                 {% else %}
                 <div class="row g-2 mb-2">
                   <div class="col">
@@ -1352,6 +1357,11 @@ label (get_status_display) — never a two-state branch.
 {# ── Modals ────────────────────────────────────────────────────────────────── #}
 
 {% if role == 'Finance' %}
+{% comment %}FIN-M-B5-5b (K5, Q7): the "Mark as Received" pop-up (posts to milestone_receive, which
+   refuses while CLIENT_RECEIPTS_LIVE is on) and the task-row payment-capture pop-up below (a
+   hand Done on a confirmation task, refused then too) are not rendered while the switch is
+   on. The invoice pop-up further down is not money received and stays.{% endcomment %}
+{% if not receipts_on %}
 <div class="modal fade" id="receiveModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog">
     <div class="modal-content">
@@ -1413,6 +1423,7 @@ label (get_status_display) — never a two-state branch.
     </div>
   </div>
 </div>
+{% endif %}{# FIN-M-B5-5b: end of "not receipts_on" #}
 
 {% comment %}FIN-M-B3 (R7): invoice modal. Opened by handleTaskStatusChange() when Finance picks
    Done on an M2/M3 "Send Invoice" task whose milestone is still Pending (the keys of
@@ -1773,7 +1784,8 @@ at the top of this page unmodified, exactly as it does on task_detail.
   var _milestonePendingSelect = null;
   var bsPhaseRuleModal        = null;
   var _phaseRulePendingSelect = null;
-  var _FINANCE_CONF_TASKS     = ['Advance Payment Confirmation', 'Pre Dispatch Payment Confirmation', '100% Payment Confirmation'];
+  {# FIN-M-B5-5b (Q7): empty while CLIENT_RECEIPTS_LIVE is on — confirmation tasks follow receipts and the capture pop-up is not rendered. #}
+  var _FINANCE_CONF_TASKS     = {% if receipts_on %}[]{% else %}['Advance Payment Confirmation', 'Pre Dispatch Payment Confirmation', '100% Payment Confirmation']{% endif %};
   var bsInvoiceTaskModal      = null;
   /* FIN-M-B3: {task name: {milestone, amount}} for M2/M3 "Send Invoice" tasks whose
      milestone is Pending. Rendered for Finance only; empty object for everyone else. */

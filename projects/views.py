@@ -720,6 +720,24 @@ _MILESTONE_TO_FINANCE_TASK = {
     for task_name, milestone in _FINANCE_TASK_TO_MILESTONE.items()
 }
 
+# FIN-M-B5-5b (K4, FR14): with CLIENT_RECEIPTS_LIVE on, a confirmation task follows its
+# milestone's Finance-confirmed receipts (receipts.follow_confirmation_task) and nobody
+# changes it by hand. One wording for every refusal site: both task screens, the
+# chokepoint and task_set_not_applicable.
+FOLLOWS_RECEIPTS_REFUSAL = 'This task follows Finance-confirmed receipts.'
+
+
+def _task_follows_receipts(task, project):
+    """True when `task` is a Finance confirmation task that follows receipts NOW: the
+    switch is on, the site is Residential (the only type with M1-M3, R2) and the task's
+    name is in the confirmation map — the same name-plus-project lookup the milestone uses
+    to find its task (ruling Q1; the is_payment_milestone flag is not read). Costs no
+    query: one settings read, and `project` is already in the caller's hands. Every role,
+    Admin included, is refused on such a task (K4): the receipts are the record, so a hand
+    move could only make the task disagree with them."""
+    return (receipts_live() and project.project_type == 'Residential'
+            and task.task_name in _FINANCE_TASK_TO_MILESTONE)
+
 # --- "Send Invoice" task <-> PaymentMilestone mapping (FIN-M-B3, R7) -----------
 # Completing one of these tasks while its milestone is Pending records the invoice
 # (number, date, amount) and marks the milestone Invoiced; invoicing from the card
@@ -7131,6 +7149,22 @@ def _apply_task_status_change(task, new_status, profile, request, project, *,
         )
         return _TASK_STATUS_REFUSED
 
+    # RUNG 0a — A CONFIRMATION TASK FOLLOWS RECEIPTS (FIN-M-B5-5b, K4, FR14). Who is
+    # blocked: every person, Admin included, while CLIENT_RECEIPTS_LIVE is on, on the
+    # three Finance confirmation tasks of a Residential site. Why: the milestone's
+    # Finance-confirmed receipts are the record and the task follows them through its own
+    # writer (receipts.apply_confirmation_task_status), which never comes through here; a
+    # hand move — Done, Blocked, a start — could only disagree with the money. Like rung
+    # 0 a question about the TASK, so it sits above the transition table and every write.
+    # Above rung 0b so an N/A confirmation task gets this answer: un-marking it is refused
+    # too. Both task screens also ask it before their unassigned check (ruling Q4); this
+    # rung is the backstop for every other caller. It also stands in front of the
+    # FIN-M-B3b amount read and the money sync below, which therefore cannot be reached by
+    # a confirmation task while the switch is on. Switch off: one settings read, no query.
+    if _task_follows_receipts(task, project):
+        messages.error(request, FOLLOWS_RECEIPTS_REFUSAL)
+        return _TASK_STATUS_REFUSED
+
     # RUNG 0b — A NOT APPLICABLE TASK DOES NOT MOVE (FIN-M-RN2). Who is blocked: everyone,
     # on every path that reaches here — both status screens, approve and
     # self-certification, reject's move back to In Progress, and the milestone syncs
@@ -7473,8 +7507,13 @@ def _apply_task_status_change(task, new_status, profile, request, project, *,
     # Skipped when the milestone is what moved this task (from_milestone, FIN-M-B9a):
     # that milestone is already Received, and re-running would also re-read the
     # receipt form's amount_received as if it came with the task.
+    # FIN-M-B5-5b (K3, FR2): OFF for every caller while CLIENT_RECEIPTS_LIVE is on — only
+    # Finance-confirmed receipts mark money received then (recompute). Rung 0a already
+    # refuses these task names first; this check keeps the money sync unreachable even
+    # if a future caller got past it.
     if (not from_milestone and new_status == Task.DONE
-            and task.task_name in _FINANCE_TASK_TO_MILESTONE):
+            and task.task_name in _FINANCE_TASK_TO_MILESTONE
+            and not receipts_live()):
         _ms_label  = _FINANCE_TASK_TO_MILESTONE[task.task_name]
         _ms_update = {'status': 'Received', 'received_date': date.today()}
         # Read and checked by the FIN-M-B3b rung above, before the task was written; a
@@ -7622,7 +7661,10 @@ def _apply_task_status_change(task, new_status, profile, request, project, *,
 
     # Payment milestone notification: task.is_payment_milestone is read from the pre-update
     # object — the flag never changes during a status update, so this is safe.
-    if new_status == Task.DONE and task.is_payment_milestone:
+    # FIN-M-B5-5b (K3, FR36(4), FR40(10)): the old milestone-based alert is RETIRED while
+    # CLIENT_RECEIPTS_LIVE is on, for every caller — the per-receipt "Payment received"
+    # (receipt_alerts, FIN-M-B5-4b) replaces it. This is the only place it is sent.
+    if new_status == Task.DONE and task.is_payment_milestone and not receipts_live():
         # FIN-M-R9: "Payment received" goes to the project's managers, BD and CEO.
         # Finance is told only when someone who is NOT Finance recorded the payment (a PM
         # or Coordinator completing the confirmation task), because then Finance did not
@@ -7713,6 +7755,17 @@ def task_status_update(request, project_id, task_id):
 
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
 
+    # FIN-M-B5-5b (K4, ruling Q4): a confirmation task follows Finance-confirmed receipts
+    # while CLIENT_RECEIPTS_LIVE is on, and nobody — Admin included — moves it by hand.
+    # Asked BEFORE the unassigned and role checks so every person gets the real reason
+    # (several confirmation tasks are unassigned and would otherwise read "unassigned").
+    # Rung 0a of _apply_task_status_change() asks the same question as the backstop.
+    if _task_follows_receipts(task, project):
+        messages.error(request, FOLLOWS_RECEIPTS_REFUSAL)
+        if _is_hx(request):
+            return _render_task_row_hx(request, project, task)
+        return redirect('project_overview', project_id=project.project_id)
+
     if task.assigned_to is None:
         # HTMX: revert the (disabled-select edge) change and surface the error inline
         # instead of rendering raw JSON into the row target.
@@ -7799,6 +7852,14 @@ def task_detail_status_update(request, project_id, task_id):
         profile = request.user.profile
     except Exception:
         return HttpResponseForbidden()
+
+    # FIN-M-B5-5b (K4, ruling Q4): refused for everyone while CLIENT_RECEIPTS_LIVE is on,
+    # before the assignee check, as on the overview row — see task_status_update.
+    if _task_follows_receipts(task, project):
+        messages.error(request, FOLLOWS_RECEIPTS_REFUSAL)
+        if _is_hx(request):
+            return _render_task_status_hx(request, project, task)
+        return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
 
     # User-level check: only the specific assigned user, evaluated fresh per request
     if task.assigned_to is None or task.assigned_to != profile:
@@ -8591,10 +8652,19 @@ def task_set_not_applicable(request, project_id, task_id):
     except Exception:
         return HttpResponseForbidden()
 
+    back = redirect('task_detail', project_id=project.project_id, task_id=task.pk)
+
+    # FIN-M-B5-5b (K4, ruling Q4): while CLIENT_RECEIPTS_LIVE is on a confirmation task is
+    # neither marked nor un-marked Not Applicable — by anyone, Admin and the PM included.
+    # N/A would take the task out of the follower's reach (follow_confirmation_task skips
+    # N/A tasks), so the task would stop reporting the money. Asked before the PM-only
+    # gate so every person gets the same answer as on the status screens.
+    if _task_follows_receipts(task, project):
+        messages.error(request, FOLLOWS_RECEIPTS_REFUSAL)
+        return back
+
     if not user_can_mark_task_not_applicable(request.user, task, project):
         return HttpResponseForbidden()
-
-    back = redirect('task_detail', project_id=project.project_id, task_id=task.pk)
 
     # The direction is the caller's, not inferred from the current flag: a
     # double-submitted form would otherwise toggle twice and land back where it
@@ -13466,6 +13536,14 @@ def milestone_receive(request, project_id, milestone_pk):
         # as milestone_invoice does.
         messages.error(request, 'This site has been deleted. No receipt was recorded.')
         return redirect(get_user_dashboard(request.user))
+    # FIN-M-B5-5b (K5, FR2): OFF while CLIENT_RECEIPTS_LIVE is on — only Finance-confirmed
+    # receipts mark a milestone Received then. Refused for every caller before anything
+    # is read from the POST: nothing is written and the task does not move. The pop-up
+    # that posts here is not rendered then either (project_overview.html).
+    if receipts_live():
+        messages.error(request, 'Payments are now recorded with "Record receipt" on the '
+                                'milestone card. No change was made.')
+        return _milestone_refused_redirect(request, project)
     # FIN-M-RT: every refusal below stays on the project page (ruling 3), keeping the
     # Finance work marker when one came with the form (ruling 6). No screen sends the
     # marker here today (the "Mark as Received" pop-up has no live button); the handler
@@ -14017,6 +14095,12 @@ def project_overview(request, project_id):
                             milestone.milestone_description = _ms_desc
                             _save_fields.append('milestone_description')
                         _ms_prev_status = milestone.status
+                        # FIN-M-B5-5b (K6, FR2): while CLIENT_RECEIPTS_LIVE is on the money
+                        # box is gone from the card and NOTHING money-related is read from
+                        # this POST — not amount_received, status or received date — so a
+                        # stale page still posting the old box saves its description and
+                        # changes no money. Confirmed receipts are the only writer then.
+                        _money_box_off = receipts_live()
                         # FIN-M-B3b: read only while the milestone is not Received
                         # (ruling). The box is pre-filled with the stored amount, so on a
                         # Received row it comes back on every description edit and is
@@ -14024,7 +14108,11 @@ def project_overview(request, project_id):
                         # edits. Otherwise a refused amount refuses the whole save and
                         # writes no change-log line; it used to be dropped silently, and
                         # negatives, NaN and over-long numbers got through or 500'd.
-                        if milestone.status != 'Received':
+                        if _money_box_off:
+                            # K6: neither branch below runs, so amount_received is never
+                            # read and _save_fields holds the description at most.
+                            pass
+                        elif milestone.status != 'Received':
                             try:
                                 _ms_received = _read_amount_received(
                                     request.POST.get('amount_received', ''))
@@ -14333,7 +14421,12 @@ def project_overview(request, project_id):
     # can_manage so the coordinator lookup is not repeated per milestone: the button costs
     # no query. `milestones` came from project.milestones.all(), so m.project is this
     # already-loaded project, not a fresh fetch.
-    record_receipts_on = show_milestone_card and receipts_live()
+    # FIN-M-B5-5b (K5-K7, ruling Q7): the switch, read ONCE per page (a settings read, no
+    # query). Besides the button above it removes the old money inputs from the page:
+    # the card's Finance amount box, the "Mark as Received" pop-up and the task-row
+    # payment-capture pop-up, and leaves the confirmation names out of the page's JS list.
+    receipts_on = receipts_live()
+    record_receipts_on = show_milestone_card and receipts_on
     for m in milestones:
         m.can_record_receipt = (record_receipts_on
                                 and user_can_record_receipt(request.user, m,
@@ -14747,6 +14840,8 @@ def project_overview(request, project_id):
         'contract_footer':             contract_footer,
         # FIN-M-C: None / 'read' / 'manager' / 'finance' / 'bd'; see where it is built.
         'milestone_card_mode':         milestone_card_mode,
+        # FIN-M-B5-5b: CLIENT_RECEIPTS_LIVE, read once above; hides the old money inputs.
+        'receipts_on':                 receipts_on,
         # FIN-M-RT: {'return', 'rq'} or None; hidden fields on the card's forms.
         'finance_return':              finance_return,
         # FIN-M-B3: Finance's invoice form on the card and the "Send Invoice" task modal.
