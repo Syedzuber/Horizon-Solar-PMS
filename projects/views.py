@@ -159,6 +159,10 @@ from .money_format import format_inr as _format_inr, format_rupees as _milestone
 # FIN-M-B5-3: the receipt screens' off-switch, read for the card's "Record receipt" button.
 # FIN-M-B5-5a: the milestone recompute, called after each agreed-amount save (H5, FR24).
 from .receipts import receipts_live, recompute_milestone_from_receipts
+# FIN-M-B5-6: the client-money read module (J2) for the milestone card, the BD dashboard
+# and the CEO figure, read only while the switch is on. Not circular: client_money
+# imports models, money_format and receipts, none of which imports this module at load.
+from .client_money import client_payment_owed, milestone_money
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, SiteBdForm, TaskAddForm, VendorForm, ProgramForm, SNAPSHOT_SWITCH_ROLES, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date, TYPED_DATE_FLOOR
 from .forms import catalogue_snapshot, log_catalogue_change  # B-0: catalogue before/after log
 from .notify_registry import NOTIFICATION_EVENTS  # T2: the send-records Event filter's choices
@@ -3273,19 +3277,30 @@ def _get_ceo_dashboard_context(context=None):
     # status='Invoiced' → all of amount is owed; status='Received' with partial → amount-amount_received.
     # Overpaid/exact rows excluded at DB level (amount_received__gte=amount).
     _DECIMAL_ZERO = Value(Decimal('0'), output_field=DecimalField())
-    fin_client_payment_pending = (
-        PaymentMilestone.objects.filter(
-            project__is_deleted=False,
-            project__status__in=['Active', 'In Progress'],
-            status__in=['Invoiced', 'Received'],
-            amount__isnull=False,
-            **_ceo_context_filter(context, 'project__'),
-        ).filter(
-            Q(amount_received__isnull=True) | Q(amount_received__lt=F('amount'))
-        ).aggregate(
-            s=Sum(F('amount') - Coalesce(F('amount_received'), _DECIMAL_ZERO))
-        )['s'] or 0
+    # FIN-M-B5-6 (ruling Q2): with CLIENT_RECEIPTS_LIVE on, the same milestones and the same
+    # rule, read through client_money (J2) — the one change is that a legacy milestone with
+    # no old amount and no confirmed receipt leaves the sum and is counted beside it ("plus
+    # n older milestones with no amount recorded"), from the same single query. Part-paid
+    # Pending milestones stay out (J3). Switch off: the query below, unchanged (J1).
+    fin_client_payment_older = 0
+    _client_owed_scope = PaymentMilestone.objects.filter(
+        project__is_deleted=False,
+        project__status__in=['Active', 'In Progress'],
+        status__in=['Invoiced', 'Received'],
+        amount__isnull=False,
+        **_ceo_context_filter(context, 'project__'),
     )
+    if receipts_live():
+        fin_client_payment_pending, fin_client_payment_older = client_payment_owed(
+            _client_owed_scope)
+    else:
+        fin_client_payment_pending = (
+            _client_owed_scope.filter(
+                Q(amount_received__isnull=True) | Q(amount_received__lt=F('amount'))
+            ).aggregate(
+                s=Sum(F('amount') - Coalesce(F('amount_received'), _DECIMAL_ZERO))
+            )['s'] or 0
+        )
 
     # -- QUERY 5: Top People / OPEN — open tasks per user --
     # Open = Not Started / In Progress / Blocked (Blocked counts as still on the plate).
@@ -3434,6 +3449,7 @@ def _get_ceo_dashboard_context(context=None):
         'fin_vendor_payments_requested':   fin_vendor_payments_requested,
         'fin_client_contract_value':       fin_client_contract_value,
         'fin_client_payment_pending':      fin_client_payment_pending,
+        'fin_client_payment_older':        fin_client_payment_older,   # FIN-M-B5-6 Q2; 0 while the switch is off
     }
     ctx.update(task_agg)
     ctx.update(issue_agg)
@@ -13727,6 +13743,18 @@ def dashboard_bd(request):
         ).values_list('phase__project_id', flat=True).distinct()
     )
 
+    # FIN-M-B5-6 (J6, ruling Q8): with CLIENT_RECEIPTS_LIVE on, each milestone badge shows
+    # the receipt label (receipts.milestone_receipt_label through client_money, J2) —
+    # "Part received ₹x of ₹y", "Amount needed", "Received before receipts". The projects
+    # are evaluated first so that ONE receipt query covers every milestone on the page;
+    # the badge colour, the "x/y milestones" chip and the "awaiting payment" count stay
+    # status-based (J3). Switch off: no list, no query, the page exactly as before (J1).
+    bd_money = {}
+    if receipts_live():
+        projects_qs = list(projects_qs)
+        bd_money = milestone_money(
+            [m for project in projects_qs for m in project.milestones.all()])
+
     project_rows = []
     for project in projects_qs:
         # is_delayed: same view-computed logic as PM/SE/Finance/Design dashboards
@@ -13776,6 +13804,8 @@ def dashboard_bd(request):
                 'status':               m.status,
                 'variance':             _var,
                 'variance_abs':         _var_abs,
+                # FIN-M-B5-6: '' while the switch is off, so the badge keeps its status word.
+                'label':                bd_money[m.pk].label if m.pk in bd_money else '',
             })
 
         # Trigger 6: annotated open_issue_count = Open or In Progress — same as PM/SE dashboards
@@ -14446,6 +14476,15 @@ def project_overview(request, project_id):
         if m.invoiceable and m.status == PaymentMilestone.PENDING:
             invoice_task_prefill[_MILESTONE_TO_INVOICE_TASK[m.milestone_name]] = {
                 'milestone': m.milestone_name, 'amount': m.invoice_amount_prefill}
+    # FIN-M-B5-6 (J4): with the switch on, the card shows each milestone's money from its
+    # receipts — the label, every confirmed receipt with its date received, money waiting
+    # for Finance, and an old record's old amount — through client_money, the one read
+    # module (J2). ONE query for the whole card, and only where the card is drawn; none
+    # while the switch is off (J1), so the page is then exactly as before.
+    if show_milestone_card and receipts_on:
+        card_money = milestone_money(milestones)
+        for m in milestones:
+            m.money = card_money[m.pk]
 
     # Phases + task completion percentages (empty for Draft projects)
     phases = []

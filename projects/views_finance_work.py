@@ -80,6 +80,7 @@ from .models import (DCLineDamagePhoto, DeliveryChallanAttachment, GoodsReceipt,
                      VendorOrder, GOODS_RECEIPT_CORRECTION, GOODS_RECEIPT_IMPORTED,
                      GOODS_RECEIPT_RECEIPT)
 from .milestone_queries import annotate_trigger_done
+from .client_money import owed, unreceived_money  # FIN-M-B5-6 (J2), switch on only
 from .money_format import format_rupees
 from .payments import payment_counts, payment_type_q
 from .permissions import (milestone_card_mode, user_can_invoice_milestone,
@@ -215,6 +216,11 @@ class MilestoneRow:
     contract_shown: bool = False
     action: str = ''          # the link's words for this viewer
     href: str = ''
+    # FIN-M-B5-6 (ruling Q9), set only while CLIENT_RECEIPTS_LIVE is on; '' otherwise, so
+    # the switch-off page draws exactly what it drew before.
+    confirmed_so_far: str = ''  # "₹x" Finance-confirmed on a part-paid row
+    label: str = ''             # M1 with confirmed money and no agreed amount: the receipt label, in the pill's place
+    over_invoice: str = ''      # Invoiced: confirmed money beyond the invoice amount
 
 
 def _milestone_queryset():
@@ -248,7 +254,7 @@ def _site_code(project):
     return project.site_code or project.project_id
 
 
-def _milestone_rows(user, today, params):
+def _milestone_rows(user, today, params, receipts_on=False):
     """(to_act, invoiced, not_due) from the one milestone query.
 
     to_act    M1 Pending (kind 'advance', waiting since the site's activation) and M2/M3
@@ -258,6 +264,15 @@ def _milestone_rows(user, today, params):
 
     `params` are this page's filters; every row's link carries them in the FIN-M-RT
     return marker ("Open site" rows too, by ruling), so a save on the card returns here.
+
+    FIN-M-B5-6 (ruling Q9): `receipts_on` (CLIENT_RECEIPTS_LIVE, read once by the view)
+    adds the confirmed money through client_money (J2) — NO query: every row here is
+    Pending or Invoiced, whose cached amount_received recompute keeps equal to the
+    confirmed receipts (client_money.unreceived_money says why). A part-paid row says
+    "₹x confirmed so far"; an M1 with confirmed money and no agreed amount shows "Amount
+    needed — ₹x confirmed" in place of its "Xd unconfirmed" pill; an Invoiced row's due
+    is the invoice amount less the confirmed money, never below ₹0, with "₹x over
+    invoice" when the money passed it. Off: none of this, and no extra query (J1).
     """
     # The marker is the same for every row; built once, not once per site.
     back = '?' + return_query(return_marker(params))
@@ -278,15 +293,31 @@ def _milestone_rows(user, today, params):
             agreed=rupees(m.amount),
             contract=rupees(project.contract_value) if contract_shown else None,
             contract_shown=contract_shown, href=site_page[project.project_id])
+        # FIN-M-B5-6 (Q9): None while the switch is off, so every line below behaves as
+        # before. Rows here are Pending or Invoiced only, never legacy (those are Received).
+        item = unreceived_money(m) if receipts_on else None
+        if item is not None and item.confirmed:
+            # Ruling 25 Nov: this page's own whole-rupee style (rupees), not format_rupees.
+            row.confirmed_so_far = rupees(item.confirmed)
 
         if m.status == PaymentMilestone.INVOICED:
             row.kind = 'invoiced'
             row.since = m.invoice_date
             row.invoiced = rupees(m.invoice_amount)
-            row.received = rupees(m.amount_received)
+            if item is not None:
+                # Switch on: what has been received is the confirmed money (FR2), and what
+                # is due never goes below ₹0 (J2), with the excess said separately.
+                row.received = rupees(item.confirmed) if item.confirmed else None
+                if m.invoice_amount is not None:
+                    row.due_value, over = owed(m.invoice_amount, item.confirmed)
+                    row.due = rupees(row.due_value)
+                    if over is not None:
+                        row.over_invoice = rupees(over)
+            else:
+                row.received = rupees(m.amount_received)
             # Ruling 5: no invoice amount (an invoice recorded before B3) reads "amount
             # not set"; the agreed amount is never used in its place.
-            if m.invoice_amount is not None:
+            if item is None and m.invoice_amount is not None:
                 row.due_value = m.invoice_amount - (m.amount_received or Decimal('0'))
                 row.due = rupees(row.due_value)
             row.waiting = _days(today, row.since)
@@ -309,6 +340,17 @@ def _milestone_rows(user, today, params):
             row.kind = 'advance'
             row.since = timezone.localdate(project.activated_at) if project.activated_at else None
             action = 'Confirm advance on the site page'
+            if item is not None and item.confirmed and m.amount is None:
+                # Ruling Q9: money is already confirmed but no agreed amount exists, so
+                # the advance cannot be Received yet (FR24). The label says that in the
+                # "Xd unconfirmed" pill's place; it carries the figure, so the "confirmed
+                # so far" line is not repeated.
+                # The wording is milestone_receipt_label's "Amount needed — ₹x confirmed"
+                # branch (the only one an M1 with confirmed money and no agreed amount can
+                # reach), with the figure in this page's whole-rupee style (ruling 25 Nov)
+                # rather than the helper's paise-showing one.
+                row.label = f'Amount needed — {rupees(item.confirmed)} confirmed'
+                row.confirmed_so_far = ''
         else:
             row.trigger = TRIGGER_TASKS[m.milestone_name]
             # R8 with ruling 4: due when the trigger task is Done; a site with no trigger
@@ -728,7 +770,9 @@ def finance_work(request):
     if not client_receipts_shown and params['focus'] in CLIENT_RECEIPT_SECTIONS:
         params = {**params, 'focus': ''}
 
-    to_act, invoiced, not_due = _milestone_rows(request.user, today, params)
+    # FIN-M-B5-6 (Q9): the switch read once here, for the milestone rows' receipt figures.
+    to_act, invoiced, not_due = _milestone_rows(request.user, today, params,
+                                                receipts_on=receipts_live())
     payments = _payment_section(params, today)
     # Who may follow a receipt to its challan page: the DC page's own role rule. No query.
     receipts = _receipt_rows(today, user_has_dc_read_role(request.user))

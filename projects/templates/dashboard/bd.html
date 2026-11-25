@@ -216,11 +216,11 @@
           <div class="d-flex align-items-center gap-1 mb-1">
             <span class="small fw-bold text-secondary">{{ m.milestone_name }}</span>
             {% if m.status == 'Received' %}
-              <span class="badge" style="background:var(--hz-green);font-size:.6rem;padding:.15rem .35rem;">Received</span>
+              <span class="badge{% if m.label %} text-wrap text-start{% endif %}" style="background:var(--hz-green);font-size:.6rem;padding:.15rem .35rem;">{% if m.label %}{{ m.label }}{% else %}Received{% endif %}</span>
             {% elif m.status == 'Invoiced' %}
-              <span class="badge bg-primary" style="font-size:.6rem;padding:.15rem .35rem;">Invoiced</span>
+              <span class="badge bg-primary{% if m.label %} text-wrap text-start{% endif %}" style="font-size:.6rem;padding:.15rem .35rem;">{% if m.label %}{{ m.label }}{% else %}Invoiced{% endif %}</span>
             {% else %}
-              <span class="badge bg-secondary" style="font-size:.6rem;padding:.15rem .35rem;">Pending</span>
+              <span class="badge bg-secondary{% if m.label %} text-wrap text-start{% endif %}" style="font-size:.6rem;padding:.15rem .35rem;">{% if m.label %}{{ m.label }}{% else %}Pending{% endif %}</span>
             {% endif %}
           </div>
           {% if m.amount is not None %}

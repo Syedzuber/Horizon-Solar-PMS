@@ -17,8 +17,8 @@ PRESENTATION ONLY. Rung 0 of `_apply_task_status_change()` is the guarantee: it
 refuses every human write on a mirror through both status views. Nothing here is a
 permission check, and deleting this branch would change no refusal.
 {% endcomment %}
-{% load mirror_tags %}
-{% if not task.is_mirror and is_assignee %}
+{% load mirror_tags receipt_tags %}
+{% if not task.is_mirror and is_assignee and not task|follows_receipts:project %}
   <form method="post"
         action="{% url 'task_detail_status_update' project.project_id task.pk %}"
         class="d-inline"
@@ -73,7 +73,10 @@ permission check, and deleting this branch would change no refusal.
           title="{{ task|mirror_source }}">
       <i data-lucide="link" style="width:9px;height:9px;vertical-align:-1px;"></i> Derived
     </span>
-  {% endif %}
+  {% endif %}{% if task|follows_receipts:project %}{% comment %}FIN-M-B5-6 (J7, ruling Q11): a confirmation task that
+     follows confirmed receipts gets no select above (the not-follows term) and says why
+     here; switch on only, inline so the switch-off block is byte-for-byte as before.{% endcomment %}
+  <span class="text-muted ms-1 small" data-follows-receipts>Follows Finance confirmation</span>{% endif %}
 {% endif %}
 {% comment %}PHASE-RULE OVERRIDES ON THIS TASK (OPEX v1), for every viewer of the task page:
    each rule the start bypassed, with the PM side's reason or "Awaiting PM reason". The

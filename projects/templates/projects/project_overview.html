@@ -337,11 +337,11 @@
         <div class="d-flex gap-1">
           {% for m in milestones %}
             {% if m.status == 'Received' %}
-              <span class="badge" style="background:var(--hz-green)" title="{{ m.milestone_name }} — Received">{{ m.milestone_name }}</span>
+              <span class="badge" style="background:var(--hz-green)" title="{{ m.milestone_name }} — {% if m.money %}{{ m.money.label }}{% else %}Received{% endif %}">{{ m.milestone_name }}</span>
             {% elif m.status == 'Invoiced' %}
-              <span class="badge bg-primary" title="{{ m.milestone_name }} — Invoiced{% if m.invoice_number %} ({{ m.invoice_number }}){% endif %}">{{ m.milestone_name }}</span>
+              <span class="badge bg-primary" title="{{ m.milestone_name }} — {% if m.money %}{{ m.money.label }}{% else %}Invoiced{% endif %}{% if m.invoice_number %} ({{ m.invoice_number }}){% endif %}">{{ m.milestone_name }}</span>
             {% else %}
-              <span class="badge bg-secondary" title="{{ m.milestone_name }} — Pending">{{ m.milestone_name }}</span>
+              <span class="badge bg-secondary" title="{{ m.milestone_name }} — {% if m.money %}{{ m.money.label }}{% else %}Pending{% endif %}">{{ m.milestone_name }}</span>
             {% endif %}
           {% empty %}
             <span class="text-muted small">—</span>
@@ -375,7 +375,23 @@
                     {% if m.invoice_amount is not None %}<br>Invoiced: ₹{{ m.invoice_amount|floatformat:0 }}{% endif %}
                   </div>
                 {% endif %}
-                {% if m.amount_received is not None %}
+                {% if m.money %}{% comment %}FIN-M-B5-6 (J4, rulings Q3-Q6): only while CLIENT_RECEIPTS_LIVE
+                   is on (project_overview sets m.money then, from client_money). Every
+                   confirmed receipt with its date received, newest first, five at most then
+                   "+ n more" (a link only for someone the receipt list page admits — the
+                   record page is that list, and it admits only those who may record); an old
+                   record's old amount (FR37); money paid beyond the agreed amount (FR20);
+                   money still waiting for Finance, apart (FR2). No "short": the label on the
+                   badge says "Part received ₹x of ₹y". No variance reason (Q6). Written
+                   inline after the tag so the switch-off page is byte-for-byte as before.{% endcomment %}
+                  <div style="font-size:.75rem;" class="text-muted" data-card-money>
+                    {% if m.money.old_record %}<div>{% if m.money.old_amount %}{{ m.money.old_amount }} received — old record{% else %}Amount not recorded — old record{% endif %}</div>{% endif %}
+                    {% for line in m.money.lines %}<div>{{ line.amount }} received {{ line.date|date:"d M Y" }}</div>{% endfor %}
+                    {% if m.money.more %}<div>{% if m.can_record_receipt %}<a href="{% url 'receipt_record' project.project_id m.pk %}">+ {{ m.money.more }} more</a>{% else %}+ {{ m.money.more }} more{% endif %}</div>{% endif %}
+                    {% if m.money.over_agreed %}<div class="text-danger">{{ m.money.over_agreed }} over agreed amount</div>{% endif %}{% if m.money.over_agreed_old %}<div class="text-danger">{{ m.money.over_agreed_old }} over agreed amount (old record)</div>{% endif %}
+                    {% if m.money.awaiting %}<div class="text-warning-emphasis">{{ m.money.awaiting_text }} awaiting Finance confirmation</div>{% endif %}
+                  </div>
+                {% elif m.amount_received is not None %}
                   <div style="font-size:.75rem;" class="text-muted">
                     Received: ₹{{ m.amount_received|floatformat:0 }}
                     {% if m.variance is not None and m.variance != 0 %}
@@ -390,11 +406,11 @@
               </div>
               <div class="d-flex align-items-center gap-1 ms-2 flex-shrink-0">
                 {% if m.status == 'Received' %}
-                  <span class="badge" style="background:var(--hz-green)">Received</span>
+                  <span class="badge{% if m.money %} text-wrap text-end{% endif %}" style="background:var(--hz-green)">{% if m.money %}{{ m.money.label }}{% else %}Received{% endif %}</span>
                 {% elif m.status == 'Invoiced' %}
-                  <span class="badge bg-primary">Invoiced</span>
+                  <span class="badge bg-primary{% if m.money %} text-wrap text-end{% endif %}">{% if m.money %}{{ m.money.label }}{% else %}Invoiced{% endif %}</span>
                 {% else %}
-                  <span class="badge bg-secondary">Pending</span>
+                  <span class="badge bg-secondary{% if m.money %} text-wrap text-end{% endif %}">{% if m.money %}{{ m.money.label }}{% else %}Pending{% endif %}</span>
                 {% endif %}
                 {% if m.invoiceable %}
                   <button class="btn btn-outline-primary milestone-edit-btn"

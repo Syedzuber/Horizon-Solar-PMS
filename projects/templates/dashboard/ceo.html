@@ -255,7 +255,7 @@ below, unchanged.
     <div class="card shadow-sm text-center py-3">
       <div class="card-body p-2">
         <div class="fw-bold fs-2 text-dark">₹{{ fin_client_payment_pending|floatformat:0 }}</div>
-        <div class="text-muted small mt-1">Payment Pending from Client</div>
+        <div class="text-muted small mt-1">Payment Pending from Client</div>{% if fin_client_payment_older %}{# FIN-M-B5-6 Q2: switch on only (0 while off) #}<div class="text-muted small" data-older-no-amount>plus {{ fin_client_payment_older }} older milestone{{ fin_client_payment_older|pluralize }} with no amount recorded</div>{% endif %}
       </div>
     </div>
   </div>

@@ -459,7 +459,33 @@ class Command(BaseCommand):
 
         # A/B — invoiced today vs received (paid) today. Separate DateFields, not conflated.
         invoiced = PaymentMilestone.objects.filter(invoice_date=today).count()
-        paid     = PaymentMilestone.objects.filter(received_date=today).count()
+        # FIN-M-B5-6 (J5, ruling Q1): with CLIENT_RECEIPTS_LIVE on, "paid today" is the
+        # client receipts Finance CONFIRMED today (IST) — a daily notice reports what
+        # happened today, so a receipt confirmed today with an earlier date received is
+        # in, one confirmed yesterday is not, and a part payment counts. Scope: Residential,
+        # not deleted, not a test site (as the receipt alerts). One query, read through
+        # client_money (J2), which replaces the milestone count; the tile keeps the count
+        # and a list follows it. Switch off: the old count, unscoped as before (J1).
+        # Lazy imports, following this command's own convention (its model import above is
+        # inside the method too; the module imports no project code at load). There is no
+        # circular import to avoid: neither module imports this command.
+        from projects.receipts import receipts_live
+        paid_list = None
+        if receipts_live():
+            from projects.client_money import receipts_confirmed_on
+            from projects.money_format import format_rupees
+            paid_list = [
+                {'site': r.milestone.project.site_code or r.milestone.project.project_id,
+                 'milestone': r.milestone.milestone_name,
+                 'amount': format_rupees(r.amount),
+                 # "received 18 Nov" only when the money arrived on another day than today.
+                 'received': (f'{r.date_received.day} {r.date_received:%b}'
+                              if r.date_received != today else '')}
+                for r in receipts_confirmed_on(today, {'project_type': 'Residential',
+                                                       'is_deleted': False, 'is_test': False})]
+            paid = len(paid_list)
+        else:
+            paid = PaymentMilestone.objects.filter(received_date=today).count()
 
         # C — distinct Delivery Challans with at least one line item received (GRN) today.
         # Count DISTINCT challans, NOT line items (line items inflate the number).
@@ -493,12 +519,16 @@ class Command(BaseCommand):
                     'count': top['c'],
                 }
 
-        return {
+        metrics = {
             'invoiced_today':   invoiced,
             'paid_today':       paid,
             'deliveries_today': deliveries,
             'most_active':      most_active,   # None -> template shows "No activity recorded today"
         }
+        if paid_list is not None:
+            # FIN-M-B5-6: only with the switch on, so the switch-off dict is as before.
+            metrics['paid_list'] = paid_list
+        return metrics
 
     def _aggregate_recipient_labels(self):
         """'Label <email>' for everyone a real aggregate run would reach. SELECT-only, and

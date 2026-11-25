@@ -80,9 +80,9 @@
         <button type="button" class="qrow" style="--cols: minmax(0,1.3fr) minmax(0,1.2fr) minmax(0,.9fr) minmax(0,1fr);"
                 @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="false" aria-controls="ms-{{ r.milestone.pk }}">
           <span><span class="code">{{ r.code }}</span><span class="meta">{{ r.project.customer_name }} · {{ r.project.city }}</span></span>
-          <span><b>{{ r.milestone.milestone_name }}</b><span class="meta">{% if r.agreed %}Agreed <span class="amt">{{ r.agreed }}</span>{% else %}<span class="na">amount not set</span>{% endif %}</span></span>
+          <span><b>{{ r.milestone.milestone_name }}</b><span class="meta">{% if r.agreed %}Agreed <span class="amt">{{ r.agreed }}</span>{% else %}<span class="na">amount not set</span>{% endif %}{% if r.confirmed_so_far %} · <span class="amt" data-confirmed>{{ r.confirmed_so_far }}</span> confirmed so far{% endif %}</span></span>
           <span>{% if r.since %}<span class="meta">{% if r.kind == 'advance' %}Activated{% else %}Due since{% endif %}</span>{{ r.since|date:"j M Y" }}{% elif r.note %}<span class="pill mut" data-note>{{ r.note }}</span>{% else %}<span class="meta">—</span>{% endif %}</span>
-          <span>{% if r.waiting is not None %}<span class="pill {{ r.tone }}">{{ r.waiting }}d {% if r.kind == 'advance' %}unconfirmed{% else %}not invoiced{% endif %}</span>{% else %}<span class="pill warn" data-check>check</span>{% endif %}</span>
+          <span>{% if r.waiting is not None %}{% if r.label %}<span class="pill {{ r.tone }}" data-label>{{ r.label }}</span>{% else %}<span class="pill {{ r.tone }}">{{ r.waiting }}d {% if r.kind == 'advance' %}unconfirmed{% else %}not invoiced{% endif %}</span>{% endif %}{% else %}<span class="pill warn" data-check>check</span>{% endif %}</span>
           <i data-lucide="chevron-down" class="chev" aria-hidden="true"></i>
         </button>
         <div class="qdet" id="ms-{{ r.milestone.pk }}" x-show="open" x-cloak>
@@ -118,8 +118,8 @@
         <button type="button" class="qrow" style="--cols: minmax(0,1fr) minmax(0,1.4fr) minmax(0,1fr) minmax(0,1fr);"
                 @click="open = !open" :aria-expanded="open ? 'true' : 'false'" aria-expanded="false" aria-controls="inv-{{ r.milestone.pk }}">
           <span><span class="code">{{ r.milestone.invoice_number|default:"No number" }}</span><span class="meta">{{ r.since|date:"j M Y"|default:"no date" }}</span></span>
-          <span><b>{{ r.code }}</b> · {{ r.milestone.milestone_name }}<span class="meta">{{ r.project.customer_name }}</span></span>
-          <span>{% if r.due %}<span class="amt" data-due>{{ r.due }}</span><span class="meta">due</span>{% else %}<span class="na" data-due>amount not set</span>{% endif %}</span>
+          <span><b>{{ r.code }}</b> · {{ r.milestone.milestone_name }}<span class="meta">{{ r.project.customer_name }}{% if r.confirmed_so_far %} · <span class="amt" data-confirmed>{{ r.confirmed_so_far }}</span> confirmed so far{% endif %}</span></span>
+          <span>{% if r.due %}<span class="amt" data-due>{{ r.due }}</span><span class="meta">due</span>{% else %}<span class="na" data-due>amount not set</span>{% endif %}{% if r.over_invoice %}<span class="meta" data-over>{{ r.over_invoice }} over invoice</span>{% endif %}</span>
           <span>{% if r.waiting is not None %}<span class="pill {{ r.tone }}">{{ r.waiting }}d since invoice</span>{% endif %}</span>
           <i data-lucide="chevron-down" class="chev" aria-hidden="true"></i>
         </button>

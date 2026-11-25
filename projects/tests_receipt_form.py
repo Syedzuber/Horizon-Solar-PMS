@@ -630,6 +630,10 @@ class QueryCountTests(ReceiptFormBase):
         return len(ctx.captured_queries)
 
     def test_the_button_adds_no_query_to_the_overview(self):
+        # FIN-M-B5-6 (ruling Q10, 25 Nov): the switch-on card now reads its milestones'
+        # receipts — ONE query (client_money.milestone_money) for the whole card, whatever
+        # the number of milestones. Pinned EXACTLY at one, not "at most": the button itself
+        # still adds none, and any other growth would be a regression.
         one = self.site(amounts=(None,), name='One milestone')
         for project in (one, self.project):
             for who in (self.bd, self.pm, self.coord, self.fin, self.ceo):
@@ -639,7 +643,7 @@ class QueryCountTests(ReceiptFormBase):
                         off = self.overview_queries(who, project)
                     with override_settings(CLIENT_RECEIPTS_LIVE=True):
                         on = self.overview_queries(who, project)
-                    self.assertEqual(on, off)
+                    self.assertEqual(on, off + 1)
 
     @LIVE
     def test_record_page_is_a_fixed_count(self):
