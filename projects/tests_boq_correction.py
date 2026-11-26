@@ -49,7 +49,8 @@ from .permissions import (
     project_boq_is_design_locked, project_boq_is_group_locked,
     can_view_boq_corrections,
     boq_correction_closed_reason,
-    BOQ_CORRECTION_WINDOW_STATUSES, BOQ_CORRECTION_PAST_REVIEW_STATUSES,
+    DESIGN_REVIEWER_TURN_WINDOWS, REVIEWER_ACTION_BOQ_CORRECT, REVIEWER_TURN_HEAD,
+    REVIEWER_TURN_QC, BOQ_CORRECTION_PAST_REVIEW_STATUSES,
     BOQ_CORRECTION_CR_PENDING, BOQ_CORRECTION_CR_OPEN_VERDICTS,
     BOQ_CORRECTION_CLOSED_PAST_REVIEW, BOQ_CORRECTION_CLOSED_NOT_SUBMITTED,
     BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW, BOQ_CORRECTION_CLOSED_CHANGE_REQUEST,
@@ -945,8 +946,13 @@ class WindowTests(WindowBase):
     def test_the_permissions_literals_match_the_model_constants(self):
         """permissions.py imports no models, so the window is spelled in literals. If a
         status or verdict is ever renamed in models.py this fails, instead of the window
-        silently never opening."""
-        self.assertEqual(BOQ_CORRECTION_WINDOW_STATUSES, {
+        silently never opening.
+
+        DW-2a: the window is the `boq_correct` row of the reviewer-turn table now — QC while
+        the package is handed in or with QC, the Head also once QC has passed it (DW-R2)."""
+        cells = DESIGN_REVIEWER_TURN_WINDOWS[REVIEWER_ACTION_BOQ_CORRECT]
+        self.assertEqual(cells[REVIEWER_TURN_QC], {DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC})
+        self.assertEqual(cells[REVIEWER_TURN_HEAD], {
             DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC})
         self.assertEqual(BOQ_CORRECTION_PAST_REVIEW_STATUSES, {
             DESIGN_AWAITING_PM_APPROVAL, DESIGN_RELEASED})
@@ -1056,7 +1062,9 @@ class WindowTests(WindowBase):
         self.assertFalse(self.boq.items.filter(item_master__code='OPX-010').exists())
 
     def test_the_sites_designer_is_still_refused_in_the_window(self):
-        for status in BOQ_CORRECTION_WINDOW_STATUSES:
+        # DW-2a: every status in which a reviewer may correct (the Head's cells hold QC's).
+        for status in DESIGN_REVIEWER_TURN_WINDOWS[REVIEWER_ACTION_BOQ_CORRECT][
+                REVIEWER_TURN_HEAD]:
             with self.subTest(status=status):
                 self._at(status)
                 self.assertFalse(self._can(self.designer))

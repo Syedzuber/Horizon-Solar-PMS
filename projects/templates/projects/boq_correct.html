@@ -176,22 +176,32 @@ their name.
                   Offered only in the review statuses (Q3), and never on an item that is on
                   the BOQ more than once (Q9: those lines are not calculated).
                   {% endcomment %}
+                  {% comment %}
+                  DW-2a (answer 5) — THE NOTE COMES FIRST, labelled, and is not `required`: an
+                  empty note is answered by the server beside this form (row.override_error,
+                  set by boq_correct()), with the typed quantity kept, rather than by a browser
+                  bubble pointing at a box below the button that read as an inactive button.
+                  {% endcomment %}
                   {% if row.formula_info and can_override and not row.formula_info.is_multiple %}
                     <form method="post" class="boq-override-form">
                       {% csrf_token %}
                       <input type="hidden" name="action" value="override_set">
                       <input type="hidden" name="line_id" value="{{ row.pk }}">
+                      <label class="form-label small mb-0" for="ovr_note_{{ row.pk }}">Note (required)</label>
+                      <input type="text" name="note" id="ovr_note_{{ row.pk }}"
+                             class="form-control form-control-sm mb-1"
+                             placeholder="Why the calculated figure is wrong"
+                             aria-label="Override note for {{ row.description }}">
                       <div class="d-flex gap-1 justify-content-end">
                         <input type="text" inputmode="decimal" name="quantity" required
                                class="form-control form-control-sm text-end" style="max-width:110px"
-                               value="{{ row.boq_quantity|default_if_none:'' }}"
+                               value="{% if row.override_error %}{{ row.override_error.quantity }}{% else %}{{ row.boq_quantity|default_if_none:'' }}{% endif %}"
                                aria-label="Override quantity for {{ row.description }}">
                         <button type="submit" class="btn btn-sm btn-outline-secondary">{% if row.formula_info.is_overridden %}Change{% else %}Override{% endif %}</button>
                       </div>
-                      <input type="text" name="note" required
-                             class="form-control form-control-sm mt-1"
-                             placeholder="Why the calculated figure is wrong (required)"
-                             aria-label="Override note for {{ row.description }}">
+                      {% if row.override_error %}
+                        <div class="text-danger mt-1 boq-override-error" style="font-size:.75rem">{{ row.override_error.message }}</div>
+                      {% endif %}
                     </form>
                     {% if row.formula_info.is_overridden %}
                       <form method="post" class="text-end mt-1 boq-override-clear">
@@ -294,7 +304,7 @@ their name.
       block). Each says why it is 0; in the review statuses a reviewer may put one on with an
       override (quantity and a note), which creates the line under the BOQ lock.
       {% endcomment %}
-      <details class="border-top px-2 py-2" id="boqCalcAbsent">
+      <details class="border-top px-2 py-2" id="boqCalcAbsent"{% if calculated_absent_error %} open{% endif %}>
         <summary class="small fw-semibold">
           Calculated items not on this BOQ ({{ calculated_absent|length }})
         </summary>
@@ -312,20 +322,26 @@ their name.
                 <td class="text-muted" style="width:70px">{{ item.unit }}</td>
                 <td style="width:230px">
                   {% if can_override %}
+                    {# DW-2a (answer 5): note first, labelled, server-checked; see the row form above. #}
                     <form method="post" class="boq-override-form">
                       {% csrf_token %}
                       <input type="hidden" name="action" value="override_set">
                       <input type="hidden" name="master_id" value="{{ item.master_id }}">
+                      <label class="form-label small mb-0" for="ovr_note_m{{ item.master_id }}">Note (required)</label>
+                      <input type="text" name="note" id="ovr_note_m{{ item.master_id }}"
+                             class="form-control form-control-sm mb-1"
+                             placeholder="Why the calculated figure is wrong"
+                             aria-label="Override note for {{ item.description }}">
                       <div class="d-flex gap-1 justify-content-end">
                         <input type="text" inputmode="decimal" name="quantity" required
                                class="form-control form-control-sm text-end" style="max-width:110px"
+                               value="{{ item.override_error.quantity|default_if_none:'' }}"
                                aria-label="Override quantity for {{ item.description }}">
                         <button type="submit" class="btn btn-sm btn-outline-secondary">Override</button>
                       </div>
-                      <input type="text" name="note" required
-                             class="form-control form-control-sm mt-1"
-                             placeholder="Why the calculated figure is wrong (required)"
-                             aria-label="Override note for {{ item.description }}">
+                      {% if item.override_error %}
+                        <div class="text-danger mt-1 boq-override-error" style="font-size:.75rem">{{ item.override_error.message }}</div>
+                      {% endif %}
                     </form>
                   {% else %}
                     <div class="text-end text-muted">—</div>

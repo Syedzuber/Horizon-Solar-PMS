@@ -1124,8 +1124,12 @@ def attention_list(sites, today=None, limit=ATTENTION_LIMIT,
 #               was deleted or the site had none then, and the current designer did not do
 #               that work (answer 36). Those sites are their own footnote, so the
 #               corrections' `unassigned_sites` is unchanged.
-#   * scope     the same sites and the same reached-review gate as the corrections, so
-#               the gate never drops one in practice: a revision opens only from in_qc.
+#   * scope     the same sites and the same reached-review gate as the corrections. Since
+#               DW-2a an Arka may also be revised at Arka review, before its QC verdict
+#               (`arka_submitted` is not a reached-review status): such a revision is
+#               counted once the site reaches package review, and not before — nor ever, if
+#               the site never gets there (Zuber, answer 3, 26 Nov 2026). Every other
+#               revision opens only from in_qc, so the gate drops none of those.
 #   * counts only — no revisions rate, so REVIEWED_MIN_FOR_RATE has nothing to hide (Q1).
 #   * NO CHANGE-REQUEST EXCLUSION (Q5): design_views._revision_window_refusal() refuses
 #     while a change request is open on the attempt, and a change request cites BOQ

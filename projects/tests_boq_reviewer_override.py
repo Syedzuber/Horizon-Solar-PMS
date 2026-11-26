@@ -44,13 +44,14 @@ from .models import (
     OVERRIDE_SET_AS_DESIGNER, OVERRIDE_SET_AS_HEAD, OVERRIDE_SET_AS_QC, Project,
 )
 from .permissions import user_can_correct_boq
-from .tests_boq_formula_display import BASELINE, WITH_RULES_EXTRA, DisplayBase
-from .views import REVIEWER_OVERRIDE_CLOSED_MESSAGE, boq_override_set_log_text
+from .tests_boq_formula_display import (WITH_RULES_EXTRA, DisplayBase,
+                                        screens_expected)
+from .views import (REVIEWER_OVERRIDE_CLOSED_MESSAGE, REVIEWER_OVERRIDE_NOTE_REQUIRED_MESSAGE,
+                    boq_override_set_log_text)
 
 D = Decimal
 
 NOTHING_SAVED = 'Nothing was saved.'
-BLANK_NOTE = 'An override needs a note saying why the calculated figure is wrong for this site.'
 
 #: set_quantity on the correction screen, measured on 84bbb98 (B-2e pre-flight) with
 #: DisplayBase's 5-rule fixture, no redirect followed. The reviewer override must not cost
@@ -163,8 +164,18 @@ class SetTests(ReviewerOverrideBase):
     def test_a_blank_note_is_refused_and_nothing_is_saved(self):
         self._login(self.qc)
         response = self._set(self.logger, 4, '   ')
-        self.assertIn(BLANK_NOTE, self._messages(response))
-        self.assertIn(NOTHING_SAVED, self._messages(response))
+        # DW-2a (answer 8): answered on the page, beside the form it came from, with the
+        # typed quantity kept — HTTP 200, no redirect and no banner at the top.
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.redirect_chain, [])
+        self.assertEqual(self._messages(response), [])
+        self.assertIn(NOTHING_SAVED, REVIEWER_OVERRIDE_NOTE_REQUIRED_MESSAGE)
+        page = response.content.decode()
+        form = page[page.index(f'name="line_id" value="{self.logger.pk}"'):]
+        form = form[:form.index('</form>')]
+        self.assertIn(REVIEWER_OVERRIDE_NOTE_REQUIRED_MESSAGE, form)
+        self.assertIn('name="quantity" required', form)
+        self.assertIn('value="4"', form)
         self.assertEqual(self._qty('FX-LOG', self.review), D(2))
         self.assertFalse(BOQLineOverride.objects.exists())
         self.assertFalse(BOQRecalculation.objects.exists())
@@ -612,4 +623,4 @@ class QueryTests(DisplayBase):
             BOQLineOverride.objects.create(line=self._lines('FX-EARTH', site)[0],
                                            note='set by hand', set_by=profile, set_as=set_as)
         self.assertEqual(self._screens(),
-                         {k: v + WITH_RULES_EXTRA for k, v in BASELINE.items()})
+                         screens_expected(WITH_RULES_EXTRA))

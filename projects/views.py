@@ -197,15 +197,17 @@ from .permissions import (
     # Session B - reviewer correction. A THIRD write authority, not a widening of the
     # second: user_can_edit_project_boq() is unchanged and still refuses a reviewer.
     # can_view_boq_corrections is the READ side of the trail it writes - Admin/CEO.
-    user_can_correct_boq, can_view_boq_corrections,
-    # BC-1 - the two halves of user_can_correct_boq(), read by boq_correct() only after
-    # the predicate refuses, to word the refusal.
-    user_has_boq_correction_authority, boq_correction_closed_reason,
+    can_view_boq_corrections,
+    # BC-1 - the reason codes a reviewer's refusal is worded from (boq_correct()).
     BOQ_CORRECTION_CLOSED_PAST_REVIEW, BOQ_CORRECTION_CLOSED_NOT_SUBMITTED,
     BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW, BOQ_CORRECTION_CLOSED_CHANGE_REQUEST,
-    # B-2e - a reviewer's override of a calculated figure: the review statuses only (Q3),
-    # and Head authority (Head or deputy) decides whether it is stamped as the Head's.
-    boq_formula_override_window_open, user_has_design_head_authority,
+    # DW-2a - whose turn it is, the one rule for BOQ correction and the B-2e override (and
+    # the Arka/CAD revisions in design_views): the window table, its two new refusals and
+    # the note shown in place of the buttons, and the QC-pool outsider's message.
+    design_reviewer_turn, design_reviewer_turns,
+    REVIEWER_ACTION_BOQ_CORRECT, REVIEWER_ACTION_BOQ_OVERRIDE, REVIEWER_TURN_HEAD,
+    REVIEWER_TURN_QC_PASSED, REVIEWER_TURN_QC_PASSED_MESSAGE, REVIEWER_TURN_QC_PASSED_NOTE,
+    REVIEWER_TURN_NOT_REVIEWER, qc_pool_outsider_message,
     # Part 12 — the narrow helper, deputy excluded. Used on the design dashboard only, to
     # decide whether the OPEX catalogue link renders. No gate in this module reads it.
     user_is_design_head,
@@ -9869,6 +9871,12 @@ def boq_detail(request, project_id):
                              .select_related('group', 'group__locked_by__user').first())
         locked_group = locked_membership.group if locked_membership else None
 
+    # SESSION B / DW-2a — whether the reader is a design reviewer whose turn it is to correct
+    # this sheet (design_reviewer_turn, the rule boq_correct() enforces), and, for QC after
+    # it has passed the package, the one-line note shown where the link would be (answer
+    # 10). Same evaluation user_can_correct_boq() made here before: no extra query.
+    correction_turn = design_reviewer_turn(request.user, project, REVIEWER_ACTION_BOQ_CORRECT)
+
     return render(request, 'projects/boq_detail.html', {
         'project':             project,
         'boq':                 boq,
@@ -9882,7 +9890,9 @@ def boq_detail(request, project_id):
         # it. Drives ONE header link and nothing else on this page: no input, no button and
         # no form here changes behaviour, and in particular the Design write branches above
         # are untouched. False on every Residential project by construction.
-        'can_correct_boq':     user_can_correct_boq(request.user, project),
+        'can_correct_boq':     correction_turn.allowed,
+        'reviewer_turn_note':  (REVIEWER_TURN_QC_PASSED_NOTE
+                                if correction_turn.reason == REVIEWER_TURN_QC_PASSED else ''),
         'vendors_by_category': _build_vendors_by_category(),
         'category_choices':    BOQItem.CATEGORY_CHOICES,
         'uom_choices':         BOQItem.UOM_CHOICES,
@@ -12473,8 +12483,8 @@ def _boq_correction_identity(row):
     return ((row.item_master.code if row.item_master_id else ''), row.description)
 
 
-#: BC-1 — what a reviewer is told when the correction window is closed, keyed by
-#: permissions.boq_correction_closed_reason().
+#: BC-1 — what a reviewer is told when the correction window is closed, keyed by the
+#: reason code of permissions.design_reviewer_turn() for `boq_correct` (DW-2a).
 BOQ_CORRECTION_CLOSED_MESSAGES = {
     BOQ_CORRECTION_CLOSED_PAST_REVIEW:
         'This design has moved past review. Raise a change request instead.',
@@ -12485,6 +12495,8 @@ BOQ_CORRECTION_CLOSED_MESSAGES = {
     BOQ_CORRECTION_CLOSED_CHANGE_REQUEST:
         'A change request is open on this design. The BOQ cannot be corrected until it '
         'is decided.',
+    # DW-2a (DW-R2): QC at awaiting_head_qc — the package is the Head's now.
+    REVIEWER_TURN_QC_PASSED: REVIEWER_TURN_QC_PASSED_MESSAGE,
 }
 
 #: The correction screen's two POST refusals, shared by its own actions and (B-2e) the
@@ -12504,17 +12516,32 @@ REVIEWER_OVERRIDE_CLOSED_MESSAGE = (
     'with QC, or with the Head). Under a change request, correct the item it is '
     'calculated from instead. Nothing was saved.')
 
+#: DW-2a (answer 1) — a reviewer override while a change request is open on the design under
+#: review. Correction may still be open to the Head there (BC-1's exception); the override
+#: is not.
+REVIEWER_OVERRIDE_CHANGE_REQUEST_MESSAGE = (
+    'A change request is open on this design, so a calculated figure cannot be overridden '
+    'until it is decided. Correct the item it is calculated from instead. Nothing was saved.')
 
-def _boq_correct_override(request, project, group_locked):
+#: DW-2a (answer 5/8) — an override posted with no note. Shown beside the form it came
+#: from, with the typed quantity kept, instead of only the browser's own bubble.
+REVIEWER_OVERRIDE_NOTE_REQUIRED_MESSAGE = (
+    'Add a note saying why the calculated figure is wrong for this site. Nothing was saved.')
+
+
+def _boq_correct_override(request, project, group_locked, override_turn):
     """boq_correct's `override_set` / `override_clear` POST (B-2e): QC or the Head
-    overrides a CALCULATED figure (E1), or clears an override. Returns the redirect.
+    overrides a CALCULATED figure (E1), or clears an override. Returns the redirect, or —
+    for a set with no note only — a dict naming the form and its message, which
+    boq_correct() renders beside that form with the typed quantity kept (DW-2a, answer 8).
 
     Access: reached only from boq_correct() AFTER its gate — user_can_correct_boq(), the
     same people who may correct this BOQ (QC or Head verdict authority, never the site's
-    designer). Narrower in time than correction (Q3): only while the design is in review.
-    Under a change request (branch 2 of the window, any status, `released` included) the
-    Head corrects what the line is calculated from instead, which is the evidence a
-    `corrected` verdict needs; an override writes no BOQCorrection.
+    designer). `override_turn` is design_reviewer_turn() for the override: the same cells
+    as correction (QC while handed in or with QC, the Head also once QC passed it) but with
+    no change-request exception (B-2e Q3; DW-2a answer 1). Under a change request the Head
+    corrects what the line is calculated from instead, which is the evidence a `corrected`
+    verdict needs; an override writes no BOQCorrection.
 
     The refusals before the helper are the correction screen's own, in its words and
     order: the procurement lock, then no BOQ.
@@ -12529,16 +12556,28 @@ def _boq_correct_override(request, project, group_locked):
     except BOQ.DoesNotExist:
         messages.error(request, BOQ_CORRECTION_NO_BOQ_MESSAGE)
         return back
-    # Q3: the review statuses only; see boq_formula_override_window_open().
-    if not boq_formula_override_window_open(project):
-        messages.error(request, REVIEWER_OVERRIDE_CLOSED_MESSAGE)
+    # When: the override's own turn. Correction may be open to the Head under a pending
+    # change request (in review or after release); the override is not, and says which.
+    if not override_turn.allowed:
+        messages.error(request, (REVIEWER_OVERRIDE_CHANGE_REQUEST_MESSAGE
+                                 if override_turn.reason == BOQ_CORRECTION_CLOSED_CHANGE_REQUEST
+                                 else REVIEWER_OVERRIDE_CLOSED_MESSAGE))
         return back
 
     action = 'set' if request.POST.get('action') == 'override_set' else 'clear'
+    # DW-2a (answer 8): a set with no note is answered on the page, beside the form it came
+    # from, not with a redirect — so the typed quantity is still there to keep. Nothing is
+    # read or written for it; _boq_line_override() keeps its own refusal as the backstop.
+    if action == 'set' and not (request.POST.get('note') or '').strip():
+        return {'line_id': request.POST.get('line_id', ''),
+                'master_id': request.POST.get('master_id', ''),
+                'quantity': request.POST.get('quantity', ''),
+                'message': REVIEWER_OVERRIDE_NOTE_REQUIRED_MESSAGE}
     # Q1: the capacity is stamped now, from authority at this moment: Head authority (the
-    # Head or his named deputy) is the Head's, anyone else here is QC. A set records it on
-    # the override; a clear needs it for its activity entry ("Name (Head) cleared", Q5).
-    set_as = (OVERRIDE_SET_AS_HEAD if user_has_design_head_authority(request.user)
+    # Head or his named deputy) is the Head's, anyone else here is QC — the turn's role, so
+    # one person holding both is the Head (W-5 Q6). A set records it on the override; a
+    # clear needs it for its activity entry ("Name (Head) cleared", Q5).
+    set_as = (OVERRIDE_SET_AS_HEAD if override_turn.role == REVIEWER_TURN_HEAD
               else OVERRIDE_SET_AS_QC)
     # E2: THE DESIGNER'S OVERRIDE LOGIC, not a second copy. `line_id`, not `item_id`, names
     # the line, so a calculated row never carries set_quantity's field (E6: the plain
@@ -12555,9 +12594,12 @@ def _boq_correct_override(request, project, group_locked):
 def boq_correct(request, project_id):
     """The reviewer's correction screen — change a quantity, or add a line that was missed.
 
-    Access: user_can_correct_boq() — Design QC or Design Head verdict authority on this
-    site (never its own designer), and only inside the BC-1 window: the package under
-    review with the BOQ stamped, or the Head while a change request is pending on him.
+    Access: Design QC or Design Head verdict authority on this site (never its own
+    designer), and only in that reviewer's turn — permissions.design_reviewer_turn() for
+    `boq_correct` (DW-2a): QC while the package is handed in or with QC, the Head also once
+    QC has passed it, the BOQ stamped; or the Head while a change request is pending on him
+    (BC-1). A Design QC flag holder on a site named to another reviewer is told whose it is;
+    anyone else outside the reviewers gets a 403.
 
     GET renders this site's sheet with a quantity box per row and the catalogue rows that
     are not on it yet. POST takes one of exactly two actions, ONE ROW AT A TIME:
@@ -12606,27 +12648,47 @@ def boq_correct(request, project_id):
         return HttpResponseForbidden()
 
     # Who: verdict authority at either design gate, which excludes the site's own
-    # designer. When: the BC-1 review window. One predicate answers both, the same one the
-    # two "Correct BOQ" links read. Checked on every request, POST included, so a stale
-    # tab cannot save after the design has moved past review.
-    if not user_can_correct_boq(request.user, project):
-        # Not a reviewer at all: a bare 403, as before. A reviewer outside the window is
-        # told why and sent back to the sheet they can still read.
-        if not user_has_boq_correction_authority(request.user, project):
-            return HttpResponseForbidden()
-        reason = boq_correction_closed_reason(request.user, project)
+    # designer. When: whose turn it is (DW-2a) — QC while the package is handed in or with
+    # QC, the Head also once QC has passed it, plus BC-1's Head exception under a pending
+    # change request. One evaluation answers both, for correction and for the override
+    # (they share the attempt and change-request reads), the same rule the two "Correct
+    # BOQ" links read. Checked on every request, POST included, so a stale tab cannot save
+    # after the design has moved on.
+    turns = design_reviewer_turns(request.user, project,
+                                  (REVIEWER_ACTION_BOQ_CORRECT, REVIEWER_ACTION_BOQ_OVERRIDE))
+    turn = turns[REVIEWER_ACTION_BOQ_CORRECT]
+    if not turn.allowed:
+        if turn.reason == REVIEWER_TURN_NOT_REVIEWER:
+            # Not a reviewer at all: a bare 403, as before — except a Design QC flag holder
+            # on a site whose review was named to someone else, who is told whose it is
+            # (answer 9). Their authority is unchanged: they are refused either way.
+            outsider = qc_pool_outsider_message(
+                request.user, getattr(project, 'design_assignment', None))
+            if not outsider:
+                return HttpResponseForbidden()
+            messages.error(request, outsider)
+            return redirect('boq_detail', project_id=project_id)
+        # A reviewer outside their turn is told why and sent back to the sheet they can
+        # still read.
         messages.error(request, BOQ_CORRECTION_CLOSED_MESSAGES.get(
-            reason, BOQ_CORRECTION_CLOSED_MESSAGES[BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW]))
+            turn.reason, BOQ_CORRECTION_CLOSED_MESSAGES[BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW]))
         return redirect('boq_detail', project_id=project_id)
 
     profile      = request.user.profile
     group_locked = project_boq_is_group_locked(project)
 
     # B-2e — the two override actions are answered here, before the catalogue is loaded:
-    # they never read it, and their query budget is set_quantity's (P7).
+    # they never read it, and their query budget is set_quantity's (P7). The one exception
+    # is a set with no note (DW-2a): the page is drawn again with the message beside that
+    # form, so the request falls through to the GET below with `override_error` set.
+    override_error = None
     if (request.method == 'POST'
             and request.POST.get('action', '') in ('override_set', 'override_clear')):
-        return _boq_correct_override(request, project, group_locked)
+        result = _boq_correct_override(request, project, group_locked,
+                                       turns[REVIEWER_ACTION_BOQ_OVERRIDE])
+        if not isinstance(result, dict):
+            return result
+        override_error = result
 
     catalogue       = get_opex_boq_catalogue()
     catalogue_by_id = {m.pk: m for m in catalogue}
@@ -12637,7 +12699,7 @@ def boq_correct(request, project_id):
     except BOQ.DoesNotExist:
         boq = None
 
-    if request.method == 'POST':
+    if request.method == 'POST' and override_error is None:
         # The procurement lock is final and is answered before anything else is read.
         if group_locked:
             messages.error(request, BOQ_CORRECTION_GROUP_LOCKED_MESSAGE)
@@ -12833,6 +12895,18 @@ def boq_correct(request, project_id):
 
     corrections = list(boq.corrections.select_related('corrected_by__user')) if boq else []
 
+    calculated_absent = _calculated_absent_rows(formulas, catalogue_by_id)
+    # DW-2a (answer 8) — an override posted with no note: the message goes beside the one
+    # form it came from, and that form keeps the typed quantity. The ids are only compared
+    # with rows already on this page, never used to read or write anything.
+    if override_error is not None:
+        for row in rows_on:
+            if str(row.pk) == override_error['line_id']:
+                row.override_error = override_error
+        for item in calculated_absent:
+            if str(item['master_id']) == override_error['master_id']:
+                item['override_error'] = override_error
+
     return render(request, 'projects/boq_correct.html', {
         'project':         project,
         'boq':             boq,
@@ -12850,10 +12924,13 @@ def boq_correct(request, project_id):
         'formula_reviewer_message': FORMULA_REVIEWER_MESSAGE,
         # B-2e — the override form on calculated rows, and the calculated items with no
         # line (E5). Offered only where the POST would accept it: a BOQ, no procurement
-        # lock, the review statuses (Q3). No query: the assignment is already loaded.
+        # lock, and the override's turn (DW-2a: the review statuses by role, no change
+        # request). No query: the turn was evaluated with the correction's at the top.
         'can_override':    (boq is not None and not group_locked
-                            and boq_formula_override_window_open(project)),
-        'calculated_absent': _calculated_absent_rows(formulas, catalogue_by_id),
+                            and turns[REVIEWER_ACTION_BOQ_OVERRIDE].allowed),
+        'calculated_absent': calculated_absent,
+        # Opens the "calculated items not on this BOQ" block when its form has the error.
+        'calculated_absent_error': any('override_error' in item for item in calculated_absent),
     })
 
 

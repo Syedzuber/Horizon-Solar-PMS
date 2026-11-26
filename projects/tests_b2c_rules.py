@@ -50,7 +50,7 @@ from .models import (
 )
 from .tests_boq_formula_apply import BASELINE as WRITE_BASELINE, FormulaBase
 from .tests_boq_formula_display import (
-    BASELINE as SCREEN_BASELINE, WITH_RULES_EXTRA, DisplayBase,
+    WITH_RULES_EXTRA, DisplayBase, screens_expected,
 )
 from .tests_catalogue_hygiene import _post_data
 from .tests_tin_shade_ballast_fix import TsbBase
@@ -713,7 +713,7 @@ class AllRulesScreenQueryTests(RulesFileMixin, DisplayBase):
         self.load('--apply')
         self._sheets()
         self.assertEqual(self._screens(),
-                         {k: v + WITH_RULES_EXTRA for k, v in SCREEN_BASELINE.items()})
+                         screens_expected(WITH_RULES_EXTRA))
 
 
 #: B-2c, measured with the file's 39 active rules on this fixture, a save in which no

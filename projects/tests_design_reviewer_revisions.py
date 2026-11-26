@@ -30,6 +30,7 @@ from decimal import Decimal
 from unittest import mock
 
 from django.contrib.auth.models import User
+from django.contrib.messages import get_messages
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -38,7 +39,6 @@ from .design_analytics import (
     analytics_dataset, m_arka_iterations, m_queue_latency, m_stage_dwell,
 )
 from .design_metrics import arka_is_approved
-from .design_views import user_may_revise_design
 from .models import (
     ActivityLog, ArkaSubmission, BOQ, BOQCorrection, BOQItem, DesignAssignment,
     DesignAttempt, DesignChangeRequest, DesignFile, Program, Project, SiteGroup,
@@ -49,7 +49,10 @@ from .models import (
     DESIGN_PM_REJECTED, DESIGN_RELEASED, DESIGN_SURVEY_RETURNED, ERR_LAYOUT, QC_PASSED,
     REVIEWER_ROLE_HEAD, REVIEWER_ROLE_QC, SITE_GROUP_LOCKED,
 )
-from .permissions import user_can_correct_boq
+from .permissions import (
+    REVIEWER_ACTION_ARKA_REVISE, REVIEWER_TURN_QC_PASSED_MESSAGE, design_reviewer_turn,
+    user_can_correct_boq,
+)
 
 ACTION_CODE = 'design_arka_reviewer_revised'
 EXTRACT = 'projects.design_views.extract_cad_pdfs'
@@ -175,16 +178,27 @@ class WindowTests(RevisionBase):
 
     def test_qc_and_the_head_may_revise_in_each_window_status(self):
         # artifacts_uploaded left out: ruling 5 (W-5b) opens revisions at in_qc.
-        for status in (DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC):
-            for who in (self.qc, self.head):
-                with self.subTest(status=status, who=who.user.username):
-                    self._set_status(status)
-                    before = self._current_arka()
-                    self._revise(who, capacity=str(before.capacity_kw - 1))
-                    after = self._current_arka()
-                    self.assertEqual(after.version, before.version + 1)
-                    self.a.refresh_from_db()
-                    self.assertEqual(self.a.status, status)
+        # DW-2a (DW-R2): once QC has passed the package only the Head may revise it, so QC
+        # revises at in_qc only; test_qc_passed_is_the_heads_turn pins the refusal.
+        for status, who in ((DESIGN_IN_QC, self.qc), (DESIGN_IN_QC, self.head),
+                            (DESIGN_AWAITING_HEAD_QC, self.head)):
+            with self.subTest(status=status, who=who.user.username):
+                self._set_status(status)
+                before = self._current_arka()
+                self._revise(who, capacity=str(before.capacity_kw - 1))
+                after = self._current_arka()
+                self.assertEqual(after.version, before.version + 1)
+                self.a.refresh_from_db()
+                self.assertEqual(self.a.status, status)
+
+    def test_qc_passed_is_the_heads_turn(self):
+        """DW-R2: at awaiting_head_qc QC is refused, with the reason, and nothing is written."""
+        self._at_head()
+        response = self._revise(self.qc)
+        self.assertEqual(response.status_code, 302)
+        self._assert_nothing_written()
+        self.assertIn(REVIEWER_TURN_QC_PASSED_MESSAGE,
+                      ' '.join(str(m) for m in get_messages(response.wsgi_request)))
 
     @mock.patch(EXTRACT)
     def test_every_other_status_is_refused_and_writes_nothing(self, extract):
@@ -238,7 +252,8 @@ class WindowTests(RevisionBase):
 
     def test_a_stale_tab_after_release_is_refused(self):
         """The window is checked on the POST, under the row lock, not only on the form."""
-        self.assertTrue(user_may_revise_design(self.qc.user, self.site))
+        self.assertTrue(design_reviewer_turn(self.qc.user, self.site,
+                                             REVIEWER_ACTION_ARKA_REVISE).allowed)
         self._set_status(DESIGN_RELEASED)
         self._revise(self.qc)
         self._assert_nothing_written()

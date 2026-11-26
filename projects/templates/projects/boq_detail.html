@@ -31,6 +31,9 @@
       {% endcomment %}
       {% if can_correct_boq %}
         <a href="{% url 'boq_correct' project.project_id %}" class="btn btn-outline-primary btn-sm">Correct BOQ</a>
+      {% elif reviewer_turn_note %}
+        {# DW-2a (answer 10): QC after passing the package — the note stands where the link was. #}
+        <span class="small text-muted align-self-center js-reviewer-turn-note">{{ reviewer_turn_note }}</span>
       {% endif %}
     {% endif %}
     <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary btn-sm">← Project</a>

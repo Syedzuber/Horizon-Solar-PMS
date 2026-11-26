@@ -31,17 +31,19 @@ from django.urls import reverse
 from django.utils import timezone
 
 from . import design_views
-from .design_views import user_may_revise_design
 from .models import (
     ActivityLog, ArkaSubmission, BOQCorrection, DesignAttempt, DesignFile, DesignFilePdf,
-    SiteGroup, SiteGroupMembership,
+    Project, SiteGroup, SiteGroupMembership,
     CAD_PDF_EXTRACTED, DESIGN_ARKA_SUBMITTED, DESIGN_ARTIFACTS_UPLOADED,
     DESIGN_AWAITING_HEAD_QC, DESIGN_AWAITING_PM_APPROVAL, DESIGN_FILE_CAD_ZIP,
     DESIGN_IN_DESIGN, DESIGN_IN_QC, DESIGN_PM_REJECTED, DESIGN_RELEASED,
     DESIGN_SURVEY_RETURNED, ERR_LAYOUT, REVIEWER_ROLE_HEAD, REVIEWER_ROLE_QC,
     SITE_GROUP_LOCKED,
 )
-from .permissions import user_can_correct_boq
+from .permissions import (
+    REVIEWER_ACTION_ARKA_REVISE, REVIEWER_ACTION_CAD_REVISE, design_reviewer_turn,
+    user_can_correct_boq,
+)
 from .site_drawings_views import site_drawings_context
 from .tests_design_reviewer_revisions import RevisionBase
 
@@ -105,18 +107,19 @@ class WindowTests(CadRevisionBase):
 
     def test_qc_and_the_head_may_revise_in_each_window_status(self):
         # artifacts_uploaded left out: ruling 5 opens revisions at in_qc (see Ruling5Tests).
-        for status in (DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC):
-            for who in (self.qc, self.head):
-                with self.subTest(status=status, who=who.user.username):
-                    self._set_status(status)
-                    before = self._current_cad()
-                    _response, mocks = self._cad(who)
-                    after = self._current_cad()
-                    self.assertEqual(after.version, before.version + 1)
-                    self.assertEqual(after.uploaded_by_id, who.pk)
-                    mocks.extract.assert_called_once()
-                    self.a.refresh_from_db()
-                    self.assertEqual(self.a.status, status)
+        # DW-2a (DW-R2): once QC has passed the package only the Head may revise the CAD.
+        for status, who in ((DESIGN_IN_QC, self.qc), (DESIGN_IN_QC, self.head),
+                            (DESIGN_AWAITING_HEAD_QC, self.head)):
+            with self.subTest(status=status, who=who.user.username):
+                self._set_status(status)
+                before = self._current_cad()
+                _response, mocks = self._cad(who)
+                after = self._current_cad()
+                self.assertEqual(after.version, before.version + 1)
+                self.assertEqual(after.uploaded_by_id, who.pk)
+                mocks.extract.assert_called_once()
+                self.a.refresh_from_db()
+                self.assertEqual(self.a.status, status)
 
     def test_every_other_status_is_refused_and_stores_nothing(self):
         for status in (DESIGN_IN_DESIGN, DESIGN_ARKA_SUBMITTED, DESIGN_AWAITING_PM_APPROVAL,
@@ -323,12 +326,13 @@ class StoreTests(CadRevisionBase):
 
     def test_no_status_change_no_attempt_no_boq_correction_no_advance(self):
         # awaiting_head_qc replaces artifacts_uploaded, now outside the window (ruling 5).
-        for status in (DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC):
+        # DW-2a: at awaiting_head_qc it is the Head's turn, so the Head uploads there.
+        for status, who in ((DESIGN_IN_QC, self.qc), (DESIGN_AWAITING_HEAD_QC, self.head)):
             with self.subTest(status=status):
                 self._set_status(status)
                 with mock.patch.object(design_views, '_maybe_advance_to_artifacts_uploaded') \
                         as advance:
-                    _response, mocks = self._cad(self.qc)
+                    _response, mocks = self._cad(who)
                 mocks.store.assert_called_once()   # accepted, not refused
                 advance.assert_not_called()
                 self.a.refresh_from_db()
@@ -553,12 +557,15 @@ class DisplayTests(CadRevisionBase):
         self._set_status(DESIGN_IN_QC)
         self.assertNotIn(self._url(), self._page(self.designer, 'design_site_workspace'))
 
-    def test_one_flag_drives_both_forms(self):
+    def test_each_form_has_its_own_flag(self):
+        """DW-2a: the Arka and CAD turns differ (QC's Arka turn starts at Arka review), so
+        W-5b's one flag became two; at in_qc both are open for QC."""
         self._login(self.qc)
         response = self.client.get(
             reverse('design_qc_review', kwargs={'project_id': self.site.project_id}))
-        self.assertTrue(response.context['can_revise_design'])
-        self.assertNotIn('can_revise_arka', response.context)
+        self.assertTrue(response.context['can_revise_arka'])
+        self.assertTrue(response.context['can_revise_cad'])
+        self.assertNotIn('can_revise_design', response.context)
         html = response.content.decode()
         self.assertIn(reverse('design_arka_revise', kwargs={'project_id': self.site.project_id}),
                       html)
@@ -608,14 +615,21 @@ class Ruling5Tests(CadRevisionBase):
         self.assertEqual(self.a.status, DESIGN_ARTIFACTS_UPLOADED)
 
     def test_the_window_opens_at_in_qc_and_holds_at_the_head(self):
+        def may(who, action):
+            return design_reviewer_turn(who.user, Project.objects.get(pk=self.site.pk),
+                                        action).allowed
+        actions = (REVIEWER_ACTION_ARKA_REVISE, REVIEWER_ACTION_CAD_REVISE)
         for who in (self.qc, self.head):
-            self.assertFalse(user_may_revise_design(who.user, self.site))
-        for status in (DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC):
+            for action in actions:
+                self.assertFalse(may(who, action))
+        # DW-2a (DW-R2): it opens for both at in_qc, and holds at the Head for the Head only.
+        for status, allowed in ((DESIGN_IN_QC, {self.qc, self.head}),
+                                (DESIGN_AWAITING_HEAD_QC, {self.head})):
             self._set_status(status)
-            self.site.refresh_from_db()
             for who in (self.qc, self.head):
-                with self.subTest(status=status, who=who.user.username):
-                    self.assertTrue(user_may_revise_design(who.user, self.site))
+                for action in actions:
+                    with self.subTest(status=status, who=who.user.username, action=action):
+                        self.assertEqual(may(who, action), who in allowed)
 
     def test_boq_correction_is_still_allowed_in_artifacts_uploaded(self):
         for who in (self.qc, self.head):
@@ -626,7 +640,8 @@ class Ruling5Tests(CadRevisionBase):
         self._login(self.qc)
         response = self.client.get(
             reverse('design_qc_review', kwargs={'project_id': self.site.project_id}))
-        self.assertFalse(response.context['can_revise_design'])
+        self.assertFalse(response.context['can_revise_arka'])
+        self.assertFalse(response.context['can_revise_cad'])
         html = response.content.decode()
         for name in ('design_arka_revise', 'design_cad_revise'):
             self.assertNotIn(reverse(name, kwargs={'project_id': self.site.project_id}), html)

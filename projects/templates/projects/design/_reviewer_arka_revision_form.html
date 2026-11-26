@@ -1,11 +1,13 @@
 {% comment %}
-W-5a — Design QC or the Design Head revises the Arka during package review.
+W-5a — Design QC or the Design Head revises the Arka during package review; DW-2a adds
+Arka review, while the Arka verdict is still pending.
 
-Rendered by qc_review.html only when the view's `can_revise_design` is true, which is
-user_may_revise_design(): BOQ-correction authority AND the reviewer-revision window
-(in_qc / awaiting_head_qc; not artifacts_uploaded, ruling 5). The
-template never tests the status itself, so the form cannot appear where
-design_arka_revise() would refuse it.
+Rendered by qc_review.html and (DW-2a, answer 4) head_review.html only when the view's
+`can_revise_arka` is true, which is permissions.design_reviewer_turn() for `arka_revise`:
+QC at Arka review while the verdict is pending and at in_qc, the Head also at
+awaiting_head_qc. The template never tests the status itself, so the form cannot appear
+where design_arka_revise() would refuse it. The closing line reads the version's verdict:
+a pending version stays pending after the revision, an approved one keeps its approval.
 
 PRE-FILLED WITH THE CURRENT VERSION (ruling 7): a reviewer may change just the link, just
 the capacity, or both; the view refuses a POST that changes neither. The reason is
@@ -38,9 +40,15 @@ and an always-open form would read as something the reviewer is meant to fill in
       </div>
     </div>
     <div class="text-muted mt-2" style="font-size:.75rem;">
-      Your version becomes the current Arka and is recorded against your name; the
-      designer's version stays in the history. The site stays where it is in review, the
-      Design QC approval is kept, and the current CAD stays current.
+      {% if arka.verdict == 'pending' %}
+        Your version becomes the current Arka and is recorded against your name; the
+        designer's version stays in the history. It still needs the Design QC verdict,
+        which is then given on your version.
+      {% else %}
+        Your version becomes the current Arka and is recorded against your name; the
+        designer's version stays in the history. The site stays where it is in review, the
+        Design QC approval is kept, and the current CAD stays current.
+      {% endif %}
     </div>
     <button class="btn btn-sm btn-outline-primary mt-2">Save the revised Arka</button>
   </form>

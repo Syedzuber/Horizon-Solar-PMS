@@ -12,6 +12,9 @@ this screen read-only. `can_move_on_legacy` is the W-1 fallback for a site still
 `awaiting_head_arka`: QC already approved it, so the only action is to move it on. It and
 `can_qc_verdict` need different statuses, so at most one form is ever on the page.
 
+DW-2a: one more form, the reviewer's Arka revision while the Arka verdict is pending
+(`can_revise_arka`), for QC or the Head. It sits beside the verdict, not instead of it.
+
 EVERY BUTTON HERE IS A CONVENIENCE, NOT A GATE. design_arka_approve / _reject re-check the
 flag, the self-review exclusion, the one-person-two-verdicts rule and the status on POST,
 so a direct POST to a bare URL is refused exactly as a hidden button would have prevented.
@@ -66,6 +69,10 @@ so a direct POST to a bare URL is refused exactly as a hidden button would have 
           Submitted {{ arka.submitted_at|date:"d M Y H:i" }} by
           {{ arka.submitted_by.user.get_full_name|default:arka.submitted_by.user.username }}
         </div>
+        {% if arka.reviewer_role %}
+          {# DW-2a: a reviewer revised this version before the QC verdict (answer 2's wording). #}
+          <div class="small mt-1">{{ arka.revision_approval_text }}</div>
+        {% endif %}
         {% if can_move_on_legacy %}
           <div class="small mt-2">
             Passed Design QC
@@ -180,6 +187,18 @@ so a direct POST to a bare URL is refused exactly as a hidden button would have 
         No Arka is awaiting a verdict from you on this site
         (status &ldquo;{{ assignment.get_status_display }}&rdquo;).
       </div>
+    {% endif %}
+
+    {% comment %}
+    DW-2a (answer 4) — the reviewer's Arka revision at Arka review, while the verdict is
+    pending: `can_revise_arka` is the view's reading of design_reviewer_turn(). The revised
+    version stays pending and QC then rules on it with the forms above. After the verdict
+    `reviewer_turn_note` says the turn has passed to the designer.
+    {% endcomment %}
+    {% if can_revise_arka %}
+      {% include "projects/design/_reviewer_arka_revision_form.html" %}
+    {% elif reviewer_turn_note %}
+      <div class="small text-muted mt-2 js-reviewer-turn-note">{{ reviewer_turn_note }}</div>
     {% endif %}
   </div>
 </div>

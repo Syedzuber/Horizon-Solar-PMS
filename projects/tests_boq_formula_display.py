@@ -49,6 +49,19 @@ BASELINE = {'picker': 18, 'preview': 14, 'correct': 21, 'review_qc': 38, 'review
 #: of the lines with their overrides: five, whatever the number of rules.
 WITH_RULES_EXTRA = 5
 
+#: DW-2a — the package review screen now asks whose turn it is ONCE for its three buttons
+#: (permissions.design_reviewer_turns: correct the BOQ, revise the Arka, revise the CAD)
+#: instead of user_can_correct_boq() plus user_may_revise_design(), which between them read
+#: the current attempt, its change requests and the group lock twice over. Five queries
+#: fewer, for QC and for the Head; measured at the DW-2a build. The other screens are as
+#: they were.
+DW2A_REVIEW_SAVING = {'review_qc': 5, 'review_head': 5}
+
+
+def screens_expected(extra):
+    """BASELINE plus `extra` on every screen, less DW-2a's saving on the review screen."""
+    return {k: v + extra - DW2A_REVIEW_SAVING.get(k, 0) for k, v in BASELINE.items()}
+
 OVERFLOW = 'outside what a BOQ line can hold'
 
 
@@ -130,7 +143,7 @@ class NoRulesTests(DisplayBase):
         self._sheets()
 
     def test_each_screen_costs_its_baseline_plus_one_exists(self):
-        self.assertEqual(self._screens(), {k: v + 1 for k, v in BASELINE.items()})
+        self.assertEqual(self._screens(), screens_expected(1))
 
     def test_the_picker_payloads_and_page_are_as_before(self):
         self._login(self.designer)
@@ -161,7 +174,7 @@ class WithRulesQueryTests(DisplayBase):
         self._five_rules()
         self._sheets()
         self.assertEqual(self._screens(),
-                         {k: v + WITH_RULES_EXTRA for k, v in BASELINE.items()})
+                         screens_expected(WITH_RULES_EXTRA))
 
 
 # ===========================================================================

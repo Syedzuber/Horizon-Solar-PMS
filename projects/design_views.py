@@ -156,12 +156,18 @@ from .permissions import (
     user_can_qc_gate_design, user_can_head_gate_design, user_is_design_qc,
     user_can_view_design_qc_dashboard, user_can_view_qc_queue,
     user_is_assigned_qc_reviewer,
-    # Session B - reviewer BOQ correction. Read here only to decide whether the QC review
-    # screen renders the link; the authority itself is enforced in views.boq_correct().
-    user_can_correct_boq,
-    # W-5: the BC-1 window, read as it stands for the reviewer Arka/CAD revisions too.
-    user_has_boq_correction_authority, boq_correction_closed_reason,
+    # W-5: who may revise — BOQ correction's authority (QC or Head verdict authority).
+    user_has_boq_correction_authority,
+    # DW-2a: WHEN — whose turn it is, the one rule for the Arka and CAD revisions, BOQ
+    # correction and the override. The review screens read it for their buttons; the
+    # revision views enforce it; views.boq_correct() enforces it for the BOQ.
+    design_reviewer_turn, design_reviewer_turns,
+    REVIEWER_ACTION_ARKA_REVISE, REVIEWER_ACTION_CAD_REVISE, REVIEWER_ACTION_BOQ_CORRECT,
     BOQ_CORRECTION_CLOSED_PAST_REVIEW, BOQ_CORRECTION_CLOSED_CHANGE_REQUEST,
+    REVIEWER_TURN_BEFORE_QC, REVIEWER_TURN_GROUP_LOCKED, REVIEWER_TURN_QC_PASSED,
+    REVIEWER_TURN_ARKA_DECIDED,
+    REVIEWER_TURN_QC_PASSED_MESSAGE, REVIEWER_TURN_ARKA_DECIDED_MESSAGE,
+    REVIEWER_TURN_QC_PASSED_NOTE, qc_pool_outsider_message,
     # Prompt 3.1b-1 — the PM's release approval: the per-site authority, and its
     # queryset form for the queue.
     can_approve_design_release, manageable_projects_q,
@@ -3823,6 +3829,10 @@ def design_head_review(request, project_id):
     site still parked at `awaiting_head_arka`: QC has already approved its Arka, so the only
     action is to move it on (design_arka_approve's legacy branch). The two are mutually
     exclusive by status.
+
+    DW-2a: `can_revise_arka` is the reviewer's Arka revision form at Arka review (QC or the
+    Head, while the Arka verdict is pending); after the verdict, `reviewer_turn_note` says
+    the turn has passed to the designer.
     """
     project = _opex_site(project_id)
     assignment = getattr(project, 'design_assignment', None)
@@ -3860,6 +3870,21 @@ def design_head_review(request, project_id):
     )
     ctx['error_categories'] = DESIGN_ERROR_CATEGORY_CHOICES
     ctx['is_design_qc']     = can_qc_gate
+    # DW-2a (answer 4) — the reviewer's Arka revision at ARKA REVIEW: QC (or the Head) may
+    # revise the Arka here while its verdict is pending, and QC then rules on that version.
+    # Asked only at `arka_submitted`: from `in_qc` the revision is part of the package
+    # review and its form is on design_qc_review. The rule is the endpoint's own
+    # (design_reviewer_turn), with the attempt and Arka this screen already read; once the
+    # verdict is given the turn says so, and the screen shows that line instead of a form.
+    ctx['can_revise_arka'] = False
+    ctx['reviewer_turn_note'] = ''
+    if assignment.status == DESIGN_ARKA_SUBMITTED and (can_qc_gate or can_head_gate):
+        turn = design_reviewer_turn(request.user, project, REVIEWER_ACTION_ARKA_REVISE,
+                                    attempt=ctx['attempt'], arka=arka)
+        ctx['can_revise_arka'] = turn.allowed
+        if turn.reason == REVIEWER_TURN_ARKA_DECIDED:
+            ctx['reviewer_turn_note'] = REVIEWER_TURN_ARKA_DECIDED_MESSAGE
+    ctx['revision_reason_max'] = REVISION_REASON_MAX
     return render(request, 'projects/design/head_review.html', ctx)
 
 
@@ -4198,9 +4223,15 @@ def design_arka_reject(request, project_id):
 #: reason is shown inline on the artifacts panel and in the activity line.
 REVISION_REASON_MAX = 1000
 
-#: Why a revision is refused, keyed by permissions.boq_correction_closed_reason(). Every
-#: other code (not submitted, not in review) gets _REVISION_NOT_IN_REVIEW. Worded for "the
-#: design" because the Arka revision and the CAD revision (W-5b) share them (ruling Q3).
+#: Why a revision is refused, keyed by the reason code of permissions.design_reviewer_turn().
+#: Every other code (not submitted, not in review, a closed attempt, no Arka) gets
+#: _REVISION_NOT_IN_REVIEW. Worded for "the design" because the Arka revision and the CAD
+#: revision (W-5b) share them (ruling Q3).
+_REVISION_NOT_IN_REVIEW = ('the design can be revised only while the package is in review — '
+                           'with Design QC or with the Design Head.')
+_REVISION_GROUP_LOCKED = ('this site is in a locked procurement group, so its design is '
+                          'final and cannot be revised.')
+_REVISION_BEFORE_QC = 'Revisions open once QC has started reviewing the package.'
 _REVISION_CLOSED_MESSAGES = {
     BOQ_CORRECTION_CLOSED_PAST_REVIEW:
         'this design has moved past review. A drawing change now goes back to the '
@@ -4208,70 +4239,45 @@ _REVISION_CLOSED_MESSAGES = {
     BOQ_CORRECTION_CLOSED_CHANGE_REQUEST:
         'a change request is open on this design. The design cannot be revised until it '
         'is decided.',
+    REVIEWER_TURN_BEFORE_QC: _REVISION_BEFORE_QC,
+    REVIEWER_TURN_GROUP_LOCKED: _REVISION_GROUP_LOCKED,
+    # DW-2a — the two refusals the turn adds, in the words every screen uses.
+    REVIEWER_TURN_QC_PASSED: REVIEWER_TURN_QC_PASSED_MESSAGE,
+    REVIEWER_TURN_ARKA_DECIDED: REVIEWER_TURN_ARKA_DECIDED_MESSAGE,
 }
-_REVISION_NOT_IN_REVIEW = ('the design can be revised only while the package is in review — '
-                           'with Design QC or with the Design Head.')
-_REVISION_GROUP_LOCKED = ('this site is in a locked procurement group, so its design is '
-                          'final and cannot be revised.')
-_REVISION_BEFORE_QC = 'Revisions open once QC has started reviewing the package.'
 
 
-def _revision_window_refusal(user, project, attempt):
-    """'' when the reviewer-revision window is open on `project`, otherwise the sentence
-    saying why it is closed. The WHEN half; the WHO half is
-    permissions.user_has_boq_correction_authority(), read by the caller.
+def _revision_window_refusal(user, project, attempt, action):
+    """'' when it is `user`'s turn to make the reviewer revision `action` (the Arka or the
+    CAD) on `project`, otherwise the sentence saying why not.
 
-    ONE WINDOW FOR BOQ CORRECTION AND THESE REVISIONS (ruling Q5, 22 Nov 2026), so it is
-    BC-1's own function, called as it stands: boq_correction_closed_reason(). BOQ
-    correction is not changed by W-5 and the two windows cannot drift apart.
-
-    FOUR TERMS ARE ADDED ON TOP, ALL NARROWING, NONE WIDENING:
-      * not `artifacts_uploaded` (ruling 5, 22 Nov 2026): revisions open when review
-        starts, at `in_qc`. See the comment at the check.
-      * no open change request on the attempt. BC-1 opens its window for the Head while a
-        change request is pending, in any status (D-7, so he can record `corrected`). That
-        exception is NOT extended here: after release a drawing changes through the
-        designer on a new attempt. The exception is the only way the BC-1 function returns
-        None while a request is open, so this term removes exactly it.
-      * the current attempt is not closed. A backstop, as in _design_uploads_open(): no
-        window status ever has a closed current attempt.
-      * the procurement group lock, which BOQ correction applies in its view rather than
-        in the BC-1 function. Locked groups hold released sites only, so this is a
-        backstop too.
+    DW-2a: THE RULE IS permissions.design_reviewer_turn(), the one table BOQ correction and
+    the override read too — QC may revise the Arka at Arka review while its verdict is
+    pending and both drawings while the package is with QC; the Head also once QC has
+    passed it. This function only words the refusal. The terms W-5 added here (not before
+    QC starts, no open change request — BC-1's Head exception is not extended to a
+    revision — the attempt open, the group lock) live in the turn now, unchanged.
 
     `project.design_assignment` must already be the row the caller holds (the revision
-    view seats the LOCKED row there), because the BC-1 function reads the status off it.
+    views seat the LOCKED row there), because the turn reads the status off it.
     """
-    reason = boq_correction_closed_reason(user, project)
-    if reason is not None:
-        return _REVISION_CLOSED_MESSAGES.get(reason, _REVISION_NOT_IN_REVIEW)
-    # NOT BEFORE QC STARTS (ruling 5). In `artifacts_uploaded` the package is handed in but
-    # review has not begun, and W-4 still lets the designer upload a CAD there, so a reviewer
-    # revision could be silently superseded by the designer's next upload. BOQ correction
-    # keeps `artifacts_uploaded` (BC-1 is unchanged): there is no overlap for the BOQ,
-    # because a submitted BOQ is locked to the designer.
-    if project.design_assignment.status == DESIGN_ARTIFACTS_UPLOADED:
-        return _REVISION_BEFORE_QC
-    if _open_change_requests(attempt).exists():
-        return _REVISION_CLOSED_MESSAGES[BOQ_CORRECTION_CLOSED_CHANGE_REQUEST]
-    if attempt is None or attempt.closed_at is not None:
-        return _REVISION_NOT_IN_REVIEW
-    if project_boq_is_group_locked(project):
-        return _REVISION_GROUP_LOCKED
-    return ''
+    turn = design_reviewer_turn(user, project, action, attempt=attempt)
+    if turn.allowed:
+        return ''
+    return _REVISION_CLOSED_MESSAGES.get(turn.reason, _REVISION_NOT_IN_REVIEW)
 
 
-def user_may_revise_design(user, project):
-    """Whether `user` may make a reviewer revision on `project` right now: BOQ-correction
-    authority (Design QC or Design Head verdict authority, never the site's designer) AND
-    the window above. Feeds the review screen's one form flag (can_revise_design), so both
-    revision forms show exactly when design_arka_revise() and design_cad_revise() would
-    accept them.
-    """
-    if not user_has_boq_correction_authority(user, project):
-        return False
-    attempt = _current_attempt(project.design_assignment)
-    return not _revision_window_refusal(user, project, attempt)
+def _revision_forbidden(request, project, what):
+    """The refusal for someone with no reviewer authority on `project`: a Design QC flag
+    holder on a site named to another reviewer is told whose review it is and sent to the
+    review screen (answer 9, 26 Nov 2026); anyone else gets the 403 W-5 gave."""
+    outsider = qc_pool_outsider_message(request.user,
+                                        getattr(project, 'design_assignment', None))
+    if outsider:
+        messages.error(request, f'{project.project_id}: {outsider}')
+        return redirect('design_qc_review', project_id=project.project_id)
+    return HttpResponseForbidden(f'Revising the {what} is for Design QC or the Design Head '
+                                 f'reviewing this site, never its designer.')
 
 
 def _reviewer_role(user, assignment):
@@ -4285,21 +4291,28 @@ def _reviewer_role(user, assignment):
 
 @login_required
 def design_arka_revise(request, project_id):
-    """A reviewer puts in a new Arka version during package review (W-5). POST only.
+    """A reviewer puts in a new Arka version (W-5), during Arka review or package review.
+    POST only.
 
     Access: Design QC or the Design Head (or his named deputy) with verdict authority on
     this site — BOQ correction's authority, user_has_boq_correction_authority(), which
-    refuses the site's own designer — and only inside the reviewer-revision window
-    (_revision_window_refusal: `in_qc` or `awaiting_head_qc` — not `artifacts_uploaded`,
-    ruling 5 — the BOQ stamped on the current attempt, no open change request).
+    refuses the site's own designer — and only in that reviewer's turn (DW-2a,
+    permissions.design_reviewer_turn for `arka_revise`): QC at `arka_submitted` while the
+    Arka verdict is pending, and at `in_qc`; the Head at those and at `awaiting_head_qc`.
+    No open change request, the attempt open, no procurement lock; in package review the BOQ
+    stamped too. A Design QC flag holder on a site named to someone else is told whose it is.
 
     THE NEW VERSION:
       * link and/or capacity changed (at least one must differ from the current version),
         with a mandatory reason (ruling 7);
       * becomes current on the current attempt; the designer's version stays in history;
-      * keeps the QC approval of the version it replaces (option A) — so it counts as
-        approved for package completeness with no fresh verdict, and the Head's
-        final-approval check still sees whoever really gave the QC verdict;
+      * in package review, keeps the QC approval of the version it replaces (option A) — so
+        it counts as approved for package completeness with no fresh verdict, and the
+        Head's final-approval check still sees whoever really gave the QC verdict;
+      * at Arka review (DW-2a), BEFORE any verdict: it copies the pending verdict, so it is
+        still waiting for Design QC, which then rules on it — and may pass a version it
+        revised itself (DW-R2; the Head gives the final approval). Nothing is approved by
+        the revision;
       * records the reviewer's role, the reason and the designer at revision.
 
     WHAT DOES NOT HAPPEN: no status change (the site stays where it is in review), no new
@@ -4312,14 +4325,19 @@ def design_arka_revise(request, project_id):
     # correction. The designer is refused by that predicate: a reviewer revision is a
     # reviewer's act, and the designer has their own Arka path (design_arka_submit).
     if not user_has_boq_correction_authority(request.user, project):
-        return HttpResponseForbidden('Revising the Arka is for Design QC or the Design Head '
-                                     'reviewing this site, never its designer.')
+        return _revision_forbidden(request, project, 'Arka')
+    # Back to the screen the form was on (answer 4): the Arka review screen while the site
+    # is at Arka review, the package review otherwise. Read from the status before the lock;
+    # it only chooses a page, never decides anything.
+    back_to = ('design_head_review'
+               if project.design_assignment.status == DESIGN_ARKA_SUBMITTED
+               else 'design_qc_review')
     if request.method != 'POST':
-        return redirect('design_qc_review', project_id=project.project_id)
+        return redirect(back_to, project_id=project.project_id)
 
     def _back(msg, ok=False):
         (messages.success if ok else messages.error)(request, f'{project.project_id}: {msg}')
-        return redirect('design_qc_review', project_id=project.project_id)
+        return redirect(back_to, project_id=project.project_id)
 
     capacity, arka_link, field_error = _read_arka_fields(request.POST)
     if field_error:
@@ -4351,14 +4369,22 @@ def design_arka_revise(request, project_id):
         # Seat the locked row where the BC-1 function reads it.
         project.design_assignment = assignment
         attempt = _current_attempt(assignment)
-        refusal = _revision_window_refusal(request.user, project, attempt)
+        refusal = _revision_window_refusal(request.user, project, attempt,
+                                           REVIEWER_ACTION_ARKA_REVISE)
         if refusal:
             return _back(refusal)
 
-        # Every package in the window has a QC-approved current Arka (nothing reaches
-        # `artifacts_uploaded` without one). Checked anyway: the revision COPIES that
-        # approval, and must never manufacture one from a pending or rejected version.
-        old = _approved_arka(attempt)
+        # THE VERSION BEING REVISED, AND THE VERDICT IT CARRIES OVER. At Arka review the
+        # turn has just required its verdict to be pending, so the copy below carries
+        # 'pending' and no reviewer: the revision is still waiting for QC (DW-2a, P3), and
+        # W-5's copied approval does not apply. In package review every package has a
+        # QC-approved current Arka (nothing reaches `artifacts_uploaded` without one).
+        # Checked anyway: the revision COPIES that approval, and must never manufacture one
+        # from a pending or rejected version.
+        if assignment.status == DESIGN_ARKA_SUBMITTED:
+            old = _current_arka(attempt)
+        else:
+            old = _approved_arka(attempt)
         if old is None:
             return _back('there is no approved Arka on this attempt to revise.')
 
@@ -4373,9 +4399,10 @@ def design_arka_revise(request, project_id):
 
         new = _add_arka_version(
             attempt, capacity_kw=capacity, arka_link=arka_link, submitted_by=profile,
-            # The QC approval of the layout being revised, kept with its author and time
-            # (option A). Never this reviewer's name: a QC revision must not read as a QC
-            # verdict by the reviser, nor a Head revision as one by the Head. The head_*
+            # The QC verdict of the layout being revised, kept with its author and time:
+            # an approval in package review (option A), 'pending' with no reviewer at Arka
+            # review (DW-2a). Never this reviewer's name: a QC revision must not read as a
+            # QC verdict by the reviser, nor a Head revision as one by the Head. The head_*
             # columns stay 'pending', as on every Arka since W-1.
             verdict=old.verdict, reviewed_by_id=old.reviewed_by_id,
             reviewed_at=old.reviewed_at,
@@ -4392,6 +4419,10 @@ def design_arka_revise(request, project_id):
                      entity_type='ArkaSubmission', entity_id=new.pk,
                      action_code='design_arka_reviewer_revised')
 
+    if new.verdict == ARKA_PENDING:
+        return _back(f'Arka v{new.version} is now current and still waiting for the Design '
+                     f'QC verdict — your revision is recorded against your name. The site\'s '
+                     f'status is unchanged.', ok=True)
     return _back(f'Arka v{new.version} is now current — your revision is recorded against '
                  f'your name. The CAD and the site\'s status are unchanged.', ok=True)
 
@@ -4601,8 +4632,10 @@ def design_cad_revise(request, project_id):
 
     Access: Design QC or the Design Head (or his named deputy) with verdict authority on
     this site — user_has_boq_correction_authority(), which refuses the site's own designer —
-    and only inside the reviewer-revision window (_revision_window_refusal), the same one
-    as design_arka_revise.
+    and only in that reviewer's turn (DW-2a, design_reviewer_turn for `cad_revise`): QC at
+    `in_qc`, the Head at `in_qc` and `awaiting_head_qc`. Never at `artifacts_uploaded`,
+    where the designer may still upload (ruling 5). A Design QC flag holder on a site named
+    to someone else is told whose it is.
 
     THE NEW VERSION goes through the designer's own helpers: validate_cad_zip and storage
     (_put_design_object), version N+1 superseding the current zip
@@ -4626,8 +4659,7 @@ def design_cad_revise(request, project_id):
     # revision and BOQ correction. The designer is refused by that predicate: their own
     # upload path (design_artifact_upload) is closed in review by W-4 on purpose.
     if not user_has_boq_correction_authority(request.user, project):
-        return HttpResponseForbidden('Revising the CAD is for Design QC or the Design Head '
-                                     'reviewing this site, never its designer.')
+        return _revision_forbidden(request, project, 'CAD')
     if request.method != 'POST':
         return redirect('design_qc_review', project_id=project.project_id)
 
@@ -4648,7 +4680,8 @@ def design_cad_revise(request, project_id):
     # across a 25 MB upload would make every verdict on this site wait for it (ruling Q1),
     # so the lock is taken only for the re-check and the write below.
     refusal = _revision_window_refusal(request.user, project,
-                                       _current_attempt(project.design_assignment))
+                                       _current_attempt(project.design_assignment),
+                                       REVIEWER_ACTION_CAD_REVISE)
     if refusal:
         return _back(refusal)
 
@@ -4669,7 +4702,8 @@ def design_cad_revise(request, project_id):
             # Seat the locked row where the BC-1 function reads the status.
             project.design_assignment = assignment
             attempt = _current_attempt(assignment)
-            refusal = _revision_window_refusal(request.user, project, attempt)
+            refusal = _revision_window_refusal(request.user, project, attempt,
+                                               REVIEWER_ACTION_CAD_REVISE)
             arka = None if refusal else _current_arka(attempt)
             if not refusal and arka is None:
                 # Never in the window (nothing reaches review without an Arka), but
@@ -7967,16 +8001,23 @@ def design_qc_review(request, project_id):
             ctx['arka'] is not None and ctx['arka'].verdict == ARKA_APPROVED),
     })
     ctx.update(_boq_review_panel(ctx['boq']))
-    # Session B - whether this reviewer may CORRECT the bill they are reading, rather than
-    # only fail the attempt over it. Taken from the permission helper rather than spelled
-    # as `can_qc_gate or can_head_gate` here: the rule has one home, and the screen must
-    # not be able to offer a link the endpoint would refuse.
-    ctx['can_correct_boq'] = user_can_correct_boq(request.user, project)
-    # W-5a/W-5b — the reviewer's Arka and CAD revision forms. One flag for both: the same
-    # authority and window as both endpoints (user_may_revise_design), computed here and
-    # never re-derived from the status in the template, so the forms show exactly when
-    # design_arka_revise() and design_cad_revise() would accept them.
-    ctx['can_revise_design'] = user_may_revise_design(request.user, project)
+    # DW-2a — WHOSE TURN IT IS, for the three buttons this screen offers: correct the BOQ
+    # (Session B), revise the Arka (W-5a) and revise the CAD (W-5b). One evaluation of the
+    # one rule the endpoints enforce (permissions.design_reviewer_turn), reusing the
+    # attempt and Arka already read, so a form shows exactly when its endpoint would accept
+    # it and the template never tests a status. The Arka and CAD flags are separate now:
+    # QC's Arka turn starts at Arka review, its CAD turn at `in_qc`.
+    turns = design_reviewer_turns(
+        request.user, project,
+        (REVIEWER_ACTION_BOQ_CORRECT, REVIEWER_ACTION_ARKA_REVISE, REVIEWER_ACTION_CAD_REVISE),
+        attempt=attempt, arka=ctx['arka'])
+    ctx['can_correct_boq'] = turns[REVIEWER_ACTION_BOQ_CORRECT].allowed
+    ctx['can_revise_arka'] = turns[REVIEWER_ACTION_ARKA_REVISE].allowed
+    ctx['can_revise_cad'] = turns[REVIEWER_ACTION_CAD_REVISE].allowed
+    # The one line shown where the buttons were, once QC has passed the package (P7).
+    ctx['reviewer_turn_note'] = (
+        REVIEWER_TURN_QC_PASSED_NOTE
+        if any(t.reason == REVIEWER_TURN_QC_PASSED for t in turns.values()) else '')
     ctx['revision_reason_max'] = REVISION_REASON_MAX
     # W-5a — which Arka the current CAD was drawn from, when it is not the current one.
     # Shown to everyone who opens this screen (QC, the Head, an assigned reviewer):

@@ -936,13 +936,17 @@ def user_can_correct_boq(user, project):
     Residential BOQ has no reviewer to correct it and nothing here changes that.
 
     BC-1: AUTHORITY AND A WINDOW, AND BOTH ARE REQUIRED. Verdict authority says WHO may
-    correct; boq_correction_closed_reason() says WHEN. The window is the review itself —
-    the BOQ stamped and the package with Design QC or the Head — plus one exception for
-    the Head while a change request waits on him. It was authority alone until BC-1, which
-    left correction open from the survey to the procurement lock, alongside the
-    designer's picker before submission and alongside the change request after release.
-    Both questions are answered here so that the two "Correct BOQ" links and the save in
-    boq_correct() read one predicate and cannot disagree.
+    correct; the window says WHEN. The window is the review itself — the BOQ stamped and
+    the package with Design QC or the Head — plus one exception for the Head while a change
+    request waits on him. It was authority alone until BC-1, which left correction open
+    from the survey to the procurement lock, alongside the designer's picker before
+    submission and alongside the change request after release.
+
+    DW-2a: THE WINDOW IS NOW WHOSE TURN IT IS. This is design_reviewer_turn() for the
+    `boq_correct` action, the one rule the Arka and CAD revisions and the calculated-line
+    overrides read too: QC while the package is handed in or with QC, the Head also once
+    QC has passed it. Both questions are answered there so that the two "Correct BOQ"
+    links and the save in boq_correct() read one predicate and cannot disagree.
 
     THE DESIGN LOCK IS STILL NOT LOOSENED. Inside the window the BOQ is design-locked by
     construction (the window requires the same stamp), and the lock is still ANDed against
@@ -961,9 +965,7 @@ def user_can_correct_boq(user, project):
     `user_can_edit_project_boq()`, which this does not touch, and both refuse a reviewer
     today for the same reason they always did.
     """
-    if not user_has_boq_correction_authority(user, project):
-        return False
-    return boq_correction_closed_reason(user, project) is None
+    return design_reviewer_turn(user, project, REVIEWER_ACTION_BOQ_CORRECT).allowed
 
 
 def user_has_boq_correction_authority(user, project):
@@ -984,22 +986,66 @@ def user_has_boq_correction_authority(user, project):
 
 
 # ---------------------------------------------------------------------------
-# BC-1 — the reviewer correction window
+# DW-2a — WHOSE TURN IT IS: one rule for the four reviewer actions
 #
-# Literals rather than model constants, for the reason 'released' and 'locked' are
-# literals elsewhere in this module: it imports no models. tests_boq_correction pins each
-# literal equal to its models.py constant, so a renamed status fails a test rather than
-# silently closing the window.
+# QC kept changing sites after passing them, because the Arka revision, the CAD revision,
+# BOQ correction and the calculated-line override each read their own status window. They
+# now read ONE table (DESIGN_REVIEWER_TURN_WINDOWS) through ONE function
+# (design_reviewer_turn), and so do the screens that show or hide those buttons.
+#
+#   QC    may act during its own turn: the Arka at Arka review while its verdict is still
+#         pending, and the package (CAD, BOQ, overrides) while it is handed in or with QC.
+#   Head  may also act once QC has passed the package (awaiting_head_qc).
+#
+# WHO stays exactly as before (Zuber, DW-R2): the QC gate or the Head gate, never the site's
+# designer, and a person holding both counts as the Head (W-5 Q6). This section changes
+# WHEN only. It still imports no models: statuses and verdicts are literals, pinned against
+# their models.py constants by tests_design_reviewer_turn.
+#
+# BC-1 kept: the correction window's reason codes below keep their meaning, and the Head's
+# change-request exception (D-7) stays — for BOQ correction only.
 # ---------------------------------------------------------------------------
 
-#: The package review: handed in (`artifacts_uploaded`), with Design QC (`in_qc`), passed
-#: QC and with the Head (`awaiting_head_qc`). The BOQ is judged here and nowhere else.
-#: The Arka gate's two statuses (`arka_submitted`, `awaiting_head_arka`) are NOT members
-#: although a stamped BOQ can sit in them: that review is of the Arka, not the bill
-#: (BC-1 rulings A and B).
-BOQ_CORRECTION_WINDOW_STATUSES = frozenset({
-    'artifacts_uploaded', 'in_qc', 'awaiting_head_qc',
-})
+#: The four reviewer actions. DW-2b adds the ACCB edit as a fifth: one key here and one row
+#: in the table below.
+REVIEWER_ACTION_ARKA_REVISE  = 'arka_revise'
+REVIEWER_ACTION_CAD_REVISE   = 'cad_revise'
+REVIEWER_ACTION_BOQ_CORRECT  = 'boq_correct'
+REVIEWER_ACTION_BOQ_OVERRIDE = 'boq_override'
+
+#: The capacity a reviewer acts in. Same values as models.REVIEWER_ROLE_QC / _HEAD and
+#: OVERRIDE_SET_AS_QC / _HEAD, so a caller can stamp them directly.
+REVIEWER_TURN_QC   = 'qc'
+REVIEWER_TURN_HEAD = 'head'
+
+#: THE TABLE (DW-R2, answers 1-4, 26 Nov 2026): action -> role -> the statuses in which
+#: that role may take that action. Every reviewer write path and every screen flag reads it
+#: through design_reviewer_turn(); nothing else may hold a status list for these actions.
+#:   * Arka at `arka_submitted` only while the Arka verdict is pending (answer 1, checked
+#:     in design_reviewer_turn): after QC approves it, `arka_submitted` is the designer's
+#:     turn (CAD and BOQ outstanding), for the Head as well (answer 7).
+#:   * CAD not at `artifacts_uploaded` (W-5b ruling 5): the designer may still upload there
+#:     (W-4), so a reviewer CAD could be superseded unseen. BOQ correction and overrides keep
+#:     it: a submitted BOQ is locked to the designer, so there is no overlap.
+#:   * the legacy `awaiting_head_arka` is in no cell (answer 6): QC already approved those.
+DESIGN_REVIEWER_TURN_WINDOWS = {
+    REVIEWER_ACTION_ARKA_REVISE: {
+        REVIEWER_TURN_QC:   frozenset({'arka_submitted', 'in_qc'}),
+        REVIEWER_TURN_HEAD: frozenset({'arka_submitted', 'in_qc', 'awaiting_head_qc'}),
+    },
+    REVIEWER_ACTION_CAD_REVISE: {
+        REVIEWER_TURN_QC:   frozenset({'in_qc'}),
+        REVIEWER_TURN_HEAD: frozenset({'in_qc', 'awaiting_head_qc'}),
+    },
+    REVIEWER_ACTION_BOQ_CORRECT: {
+        REVIEWER_TURN_QC:   frozenset({'artifacts_uploaded', 'in_qc'}),
+        REVIEWER_TURN_HEAD: frozenset({'artifacts_uploaded', 'in_qc', 'awaiting_head_qc'}),
+    },
+    REVIEWER_ACTION_BOQ_OVERRIDE: {
+        REVIEWER_TURN_QC:   frozenset({'artifacts_uploaded', 'in_qc'}),
+        REVIEWER_TURN_HEAD: frozenset({'artifacts_uploaded', 'in_qc', 'awaiting_head_qc'}),
+    },
+}
 
 #: Both gates have passed. From here a BOQ change is a change request (R2).
 BOQ_CORRECTION_PAST_REVIEW_STATUSES = frozenset({'awaiting_pm_approval', 'released'})
@@ -1009,109 +1055,292 @@ BOQ_CORRECTION_PAST_REVIEW_STATUSES = frozenset({'awaiting_pm_approval', 'releas
 BOQ_CORRECTION_CR_PENDING = 'pending'
 BOQ_CORRECTION_CR_OPEN_VERDICTS = ('pending', 'with_pm')
 
-#: Why the window is closed — returned by boq_correction_closed_reason(), turned into a
-#: message by views.boq_correct().
+#: ArkaSubmission.verdict while Design QC has not ruled (models.ARKA_PENDING).
+REVIEWER_TURN_ARKA_PENDING = 'pending'
+
+#: Why a turn is closed — DesignReviewerTurn.reason. The first four are BC-1's codes,
+#: unchanged in meaning; each view turns a code into its own message.
 BOQ_CORRECTION_CLOSED_PAST_REVIEW    = 'past_review'
 BOQ_CORRECTION_CLOSED_NOT_SUBMITTED  = 'not_submitted'
 BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW  = 'not_in_review'
 BOQ_CORRECTION_CLOSED_CHANGE_REQUEST = 'change_request'
+REVIEWER_TURN_NOT_REVIEWER   = 'not_reviewer'    # no QC or Head authority on this site
+REVIEWER_TURN_QC_PASSED      = 'qc_passed'       # QC at awaiting_head_qc: the Head's turn
+REVIEWER_TURN_ARKA_DECIDED   = 'arka_decided'    # arka_submitted after the Arka verdict
+REVIEWER_TURN_BEFORE_QC      = 'before_qc'       # a revision at artifacts_uploaded
+REVIEWER_TURN_ATTEMPT_CLOSED = 'attempt_closed'  # backstop, as _design_uploads_open()
+REVIEWER_TURN_NO_ARKA        = 'no_arka'         # arka_submitted with no Arka (backstop)
+REVIEWER_TURN_GROUP_LOCKED   = 'group_locked'    # revisions; correction refuses in its view
+
+#: The two refusals DW-2a adds, worded once so every path and screen says the same thing
+#: (B-2b.1 A4: a refusal says why).
+REVIEWER_TURN_QC_PASSED_MESSAGE = ('QC has passed this site. Only the Design Head can change '
+                                   'it now.')
+REVIEWER_TURN_ARKA_DECIDED_MESSAGE = ('The Arka is approved. The designer is preparing the '
+                                      'CAD and BOQ; you can review them once they are '
+                                      'handed in.')
+#: The one-line note a screen shows in place of the buttons QC no longer has (P7).
+REVIEWER_TURN_QC_PASSED_NOTE = 'Passed by QC: only the Design Head can make changes now.'
+
+_TURN_UNSET = object()
+
+
+class DesignReviewerTurn:
+    """The answer design_reviewer_turn() gives: `allowed`, `reason` ('' when allowed) and,
+    on demand, `role` ('head', 'qc' or None).
+
+    ROLE IS WORKED OUT LAZILY, AND THAT IS ABOUT QUERIES, NOT MEANING. Head authority costs a
+    query for anyone who is not the Head himself (the deputy lookup). The window is answered
+    QC-first, so a QC reviewer inside QC's own cells never pays it on a screen; a write path
+    that stamps the role reads `role` and pays it then, as _reviewer_role() always did. The
+    answer is the same either way: the Head's cells contain all of QC's, and a person with
+    both authorities is 'head' (W-5 Q6) whenever `role` is read.
+    """
+
+    __slots__ = ('allowed', 'reason', '_user', '_assignment', '_qc', '_head')
+
+    def __init__(self, user, assignment, qc):
+        self.allowed = False
+        self.reason = ''
+        self._user = user
+        self._assignment = assignment
+        self._qc = qc
+        self._head = None
+
+    def is_head(self):
+        """Head gate authority on this site (Head or deputy, never its designer). Cached."""
+        if self._head is None:
+            self._head = (self._assignment is not None
+                          and user_can_head_gate_design(self._user, self._assignment))
+        return self._head
+
+    @property
+    def role(self):
+        if self.is_head():
+            return REVIEWER_TURN_HEAD
+        return REVIEWER_TURN_QC if self._qc else None
+
+    def _close(self, reason=''):
+        self.allowed = not reason
+        self.reason = reason
+        return self
+
+
+class _TurnFacts:
+    """The rows a turn reads, each read at most once however many actions are asked — so a
+    screen offering several buttons pays for one evaluation, not one per button. A caller
+    that already holds the current attempt or Arka passes it in."""
+
+    def __init__(self, project, assignment, attempt, arka):
+        self.project = project
+        self.assignment = assignment
+        self._attempt = attempt
+        self._arka = arka
+        self._open_verdicts = _TURN_UNSET
+        self._group_locked = _TURN_UNSET
+
+    @property
+    def attempt(self):
+        if self._attempt is _TURN_UNSET:
+            a = self.assignment
+            self._attempt = (a.attempts.filter(attempt_number=a.current_attempt_number).first()
+                             if a.current_attempt_number else None)
+        return self._attempt
+
+    @property
+    def open_verdicts(self):
+        if self._open_verdicts is _TURN_UNSET:
+            attempt = self.attempt
+            # Fetches only this attempt's undecided requests — at most one exists, by the
+            # partial unique constraint on open verdicts.
+            self._open_verdicts = set() if attempt is None else set(
+                attempt.change_requests.filter(verdict__in=BOQ_CORRECTION_CR_OPEN_VERDICTS)
+                .values_list('verdict', flat=True))
+        return self._open_verdicts
+
+    @property
+    def arka(self):
+        if self._arka is _TURN_UNSET:
+            attempt = self.attempt
+            self._arka = (None if attempt is None
+                          else attempt.arka_submissions.filter(is_current=True).first())
+        return self._arka
+
+    @property
+    def group_locked(self):
+        if self._group_locked is _TURN_UNSET:
+            self._group_locked = project_boq_is_group_locked(self.project)
+        return self._group_locked
+
+
+def _in_own_cell(turn, status, cells):
+    """Whether this reviewer's role may act at `status`. QC's cells first, so a QC reviewer
+    inside them costs no Head lookup (see DesignReviewerTurn)."""
+    if turn._qc and status in cells[REVIEWER_TURN_QC]:
+        return True
+    return status in cells[REVIEWER_TURN_HEAD] and turn.is_head()
+
+
+def _boq_turn(turn, facts, action, status, cells):
+    """BOQ correction and the calculated-line override: BC-1's window, by role.
+
+        (1) status in the role's cells AND the BOQ stamped on the CURRENT attempt AND no open
+            change request (pending or with_pm) on it
+        (2) correction only: Head authority AND a `pending` request on the current attempt,
+            at any status, `released` included — BC-1's exception for the Head's
+            `corrected` verdict (D-7), unchanged (answer 3). `with_pm` does not open it: the
+            Head cannot decide a request the PM has not forwarded.
+
+    The override has no (2) (B-2e Q3; answer 1, 26 Nov): under a change request the Head
+    corrects what a calculated line is worked out from, which is the evidence a `corrected`
+    verdict needs; an override writes no BOQCorrection. The procurement group lock is not
+    read here: boq_correct() refuses on it before any save, for both.
+
+    Order is BC-1's, so its codes keep their meaning: past review, not submitted, not in
+    review, then (DW-2a) not this role's turn, then an open change request.
+    """
+    if (action == REVIEWER_ACTION_BOQ_CORRECT
+            and BOQ_CORRECTION_CR_PENDING in facts.open_verdicts and turn.is_head()):
+        return turn._close()
+    if status in BOQ_CORRECTION_PAST_REVIEW_STATUSES:
+        return turn._close(BOQ_CORRECTION_CLOSED_PAST_REVIEW)
+    attempt = facts.attempt
+    if attempt is None or attempt.boq_submitted_at is None:
+        return turn._close(BOQ_CORRECTION_CLOSED_NOT_SUBMITTED)
+    if status not in cells[REVIEWER_TURN_QC] | cells[REVIEWER_TURN_HEAD]:
+        return turn._close(BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW)
+    if not _in_own_cell(turn, status, cells):
+        return turn._close(REVIEWER_TURN_QC_PASSED)
+    if facts.open_verdicts:
+        return turn._close(BOQ_CORRECTION_CLOSED_CHANGE_REQUEST)
+    return turn._close()
+
+
+def _revision_turn(turn, facts, action, status, cells):
+    """The Arka and CAD revisions (W-5a/W-5b), by role.
+
+    The terms W-5 put in design_views._revision_window_refusal(), moved here unchanged
+    except for the turn: past review, outside the cells (`artifacts_uploaded` says why: the
+    designer may still upload there), not this role's turn, a closed attempt (a backstop),
+    then the Arka state, the BOQ stamp, an open change request (BC-1's Head exception is NOT
+    extended to revisions: after release a drawing changes through the designer) and the
+    procurement group lock (a backstop: locked groups hold released sites only).
+
+    THE ARKA AT ARKA REVIEW (DW-R2, answer 1). At `arka_submitted` the Arka may be revised
+    only while its QC verdict is pending — QC's turn there covers the verdict and nothing
+    after it. No BOQ stamp is required there: the package has not been handed in. Elsewhere
+    the BOQ stamp is required, as BC-1's window always required it.
+
+    Cheapest terms first: a screen whose reviewer is outside the turn pays no query here.
+    """
+    if status in BOQ_CORRECTION_PAST_REVIEW_STATUSES:
+        return turn._close(BOQ_CORRECTION_CLOSED_PAST_REVIEW)
+    if status not in cells[REVIEWER_TURN_QC] | cells[REVIEWER_TURN_HEAD]:
+        return turn._close(REVIEWER_TURN_BEFORE_QC if status == 'artifacts_uploaded'
+                           else BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW)
+    if not _in_own_cell(turn, status, cells):
+        return turn._close(REVIEWER_TURN_QC_PASSED)
+    attempt = facts.attempt
+    if attempt is None or attempt.closed_at is not None:
+        return turn._close(REVIEWER_TURN_ATTEMPT_CLOSED)
+    if status == 'arka_submitted':
+        arka = facts.arka
+        if arka is None:
+            return turn._close(REVIEWER_TURN_NO_ARKA)
+        if arka.verdict != REVIEWER_TURN_ARKA_PENDING:
+            return turn._close(REVIEWER_TURN_ARKA_DECIDED)
+    elif attempt.boq_submitted_at is None:
+        return turn._close(BOQ_CORRECTION_CLOSED_NOT_SUBMITTED)
+    if facts.open_verdicts:
+        return turn._close(BOQ_CORRECTION_CLOSED_CHANGE_REQUEST)
+    if facts.group_locked:
+        return turn._close(REVIEWER_TURN_GROUP_LOCKED)
+    return turn._close()
+
+
+_TURN_EVALUATORS = {
+    REVIEWER_ACTION_ARKA_REVISE:  _revision_turn,
+    REVIEWER_ACTION_CAD_REVISE:   _revision_turn,
+    REVIEWER_ACTION_BOQ_CORRECT:  _boq_turn,
+    REVIEWER_ACTION_BOQ_OVERRIDE: _boq_turn,
+}
+
+
+def design_reviewer_turns(user, project, actions, *, attempt=_TURN_UNSET, arka=_TURN_UNSET):
+    """{action: DesignReviewerTurn} for each of `actions` on `project` — whether it is
+    `user`'s turn to take it now, and if not, why. THE ONE PLACE THE RULE IS EVALUATED.
+
+    `attempt` / `arka`: the current attempt and its current Arka, when the caller already
+    holds them (a review screen does), so they are not read again. `project.design_assignment`
+    must be the row the caller acts on: the revision views seat their LOCKED row there.
+
+    Queries: whatever of the current attempt, its open change requests, the current Arka and
+    the group lock the asked actions need, each at most once; plus the Head lookup only when
+    QC's cells say no or a caller reads `role`. None for a user with no authority beyond the
+    gate predicates' own.
+    """
+    assignment = getattr(project, 'design_assignment', None) if project is not None else None
+    turns = {}
+    if assignment is None:
+        for action in actions:
+            turns[action] = DesignReviewerTurn(user, None, False)._close(
+                BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW)
+        return turns
+    qc = user_can_qc_gate_design(user, assignment)
+    facts = _TurnFacts(project, assignment, attempt, arka)
+    shared = DesignReviewerTurn(user, assignment, qc)
+    for action in actions:
+        cells = DESIGN_REVIEWER_TURN_WINDOWS[action]
+        turn = DesignReviewerTurn(user, assignment, qc)
+        # One Head lookup for all the actions asked, whichever evaluates it first.
+        turn._head = shared._head
+        if not qc and not turn.is_head():
+            turns[action] = turn._close(REVIEWER_TURN_NOT_REVIEWER)
+        else:
+            turns[action] = _TURN_EVALUATORS[action](turn, facts, action,
+                                                     assignment.status, cells)
+        shared._head = turn._head
+    return turns
+
+
+def design_reviewer_turn(user, project, action, **known):
+    """The DesignReviewerTurn for one action. See design_reviewer_turns()."""
+    return design_reviewer_turns(user, project, (action,), **known)[action]
 
 
 def boq_correction_closed_reason(user, project):
-    """Return None if the correction window is open for `user` on `project`, otherwise
-    the reason it is closed (one of the BOQ_CORRECTION_CLOSED_* codes).
+    """None if `user` may correct `project`'s BOQ now, otherwise the reason code — BC-1's
+    name for the WHEN of BOQ correction, kept for its callers and its tests. The rule
+    itself is design_reviewer_turn()'s `boq_correct` row (DW-2a).
 
-    The WHEN half of user_can_correct_boq(). It does NOT check authority — call the
-    predicate, not this, to decide anything.
-
-        OPEN (1)  status in BOQ_CORRECTION_WINDOW_STATUSES
-                  AND boq_submitted_at stamped on the CURRENT attempt
-                  AND no open change request (pending or with_pm) on that attempt
-        OPEN (2)  Head authority (Head or deputy, not the site's designer)
-                  AND a `pending` change request on the current attempt — any status,
-                  `released` included
-
-    STATUS AND STAMP, BOTH. Status alone would be enough today — nothing reaches
-    `artifacts_uploaded` without the stamp (design_views._maybe_advance_to_artifacts_uploaded)
-    — but the stamp is the fact this window is about, and reading it keeps the rule true if
-    a status is ever reached some other way.
-
-    AN OPEN CHANGE REQUEST CLOSES (1). It suspends both review gates
-    (design_views._open_change_requests), and a reviewer correcting a BOQ that may be about
-    to be reworked is the same waste as recording a verdict on it.
-
-    (2) EXISTS FOR THE HEAD'S `corrected` OUTCOME (D-7). design_change_request_correct()
-    settles a pending request only when a BOQCorrection was made after the raise, and
-    boq_correct() is the only writer of one. SCM raises only on a released site, so without
-    this the Head could never record `corrected`. `with_pm` does not open it: the Head
-    cannot decide a request the PM has not forwarded (design_views._triage_guard).
-    A correction made under (2) is not forced to be cited by a verdict
-    (DESIGN_MODULE_DEFERRED V3).
-
-    The procurement group lock is NOT read here. boq_correct() refuses on it before any
-    save, unchanged, and it still applies to both branches.
-
-    Queries: the assignment (cached after the first read), the current attempt, and its
-    open change requests — two at most once the assignment is loaded.
+    One difference from BC-1, by construction: a user with no reviewer authority gets
+    REVIEWER_TURN_NOT_REVIEWER rather than a window reason. Every caller asks authority first
+    (boq_correct() uses this only to word a reviewer's refusal).
     """
-    if project is None:
-        return BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW
-    assignment = getattr(project, 'design_assignment', None)
-    if assignment is None:
-        return BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW
-
-    attempt = None
-    if assignment.current_attempt_number:
-        attempt = assignment.attempts.filter(
-            attempt_number=assignment.current_attempt_number).first()
-    open_verdicts = set()
-    if attempt is not None:
-        # Fetches only this attempt's undecided requests — at most one exists, by the
-        # partial unique constraint on open verdicts.
-        open_verdicts = set(attempt.change_requests.filter(
-            verdict__in=BOQ_CORRECTION_CR_OPEN_VERDICTS).values_list('verdict', flat=True))
-
-    # (2) first: it is the one branch that opens a status the rest would close.
-    if (BOQ_CORRECTION_CR_PENDING in open_verdicts
-            and user_can_head_gate_design(user, assignment)):
-        return None
-
-    if assignment.status in BOQ_CORRECTION_PAST_REVIEW_STATUSES:
-        return BOQ_CORRECTION_CLOSED_PAST_REVIEW
-    if attempt is None or attempt.boq_submitted_at is None:
-        return BOQ_CORRECTION_CLOSED_NOT_SUBMITTED
-    if assignment.status not in BOQ_CORRECTION_WINDOW_STATUSES:
-        return BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW
-    if open_verdicts:
-        return BOQ_CORRECTION_CLOSED_CHANGE_REQUEST
-    return None
+    turn = design_reviewer_turn(user, project, REVIEWER_ACTION_BOQ_CORRECT)
+    return None if turn.allowed else turn.reason
 
 
-def boq_formula_override_window_open(project):
-    """Return True if a reviewer may override a CALCULATED BOQ figure on `project` now
-    (B-2e, Zuber Q3) — NARROWER than the correction window, and only ever asked AFTER
-    user_can_correct_boq() has said yes.
+def qc_pool_outsider_message(user, assignment):
+    """The plain refusal for a Design QC flag holder on a site whose QC review was given to
+    someone else (answer 9, 26 Nov 2026), or '' when that is not who `user` is.
 
-        the design is in artifacts_uploaded, in_qc or awaiting_head_qc
-
-    That is branch (1) of boq_correction_closed_reason(), the review itself. Branch (2) —
-    the Head while a change request is pending, at ANY status, `released` included — is
-    NOT an override window: under a change request the Head corrects what the line is
-    calculated from (which is the evidence a `corrected` verdict needs; an override writes
-    no BOQCorrection), or decides the request.
-
-    STATUS ONLY, NO ATTEMPT READ. user_can_correct_boq() has already required either the
-    stamp on the current attempt (branch 1) or a pending request (branch 2); within these
-    three statuses the stamp holds too, because nothing reaches them without it
-    (design_views._maybe_advance_to_artifacts_uploaded). Reading the attempt again here
-    would add a query to every correction-screen GET for no case it could catch.
-
-    Queries: none once project.design_assignment is loaded (user_can_correct_boq loads it).
+    WHO IS UNCHANGED: such a person has no authority here (user_can_qc_gate_design: a named
+    reviewer takes the site out of the pool) and is still refused. This only replaces the
+    bare 403 they got with a sentence naming whose review it is. Everyone else outside the
+    reviewers (the designer, a PM, an outsider) keeps the 403.
     """
-    assignment = getattr(project, 'design_assignment', None) if project is not None else None
-    if assignment is None:
-        return False
-    return assignment.status in BOQ_CORRECTION_WINDOW_STATUSES
+    if assignment is None or not user_is_design_qc(user):
+        return ''
+    if user_is_assigned_designer(user, assignment):
+        return ''
+    profile = getattr(user, 'profile', None)
+    if assignment.qc_assigned_to_id is None or assignment.qc_assigned_to_id == profile.pk:
+        return ''
+    reviewer = assignment.qc_assigned_to.user
+    name = reviewer.get_full_name() or reviewer.username
+    return (f'QC for this site is assigned to {name}. Only they or the Design Head can '
+            f'change it.')
 
 
 def user_can_view_design_qc_dashboard(user):

@@ -6993,9 +6993,30 @@ class ArkaSubmission(models.Model):
         One property so the chip, the review screens and the activity entry cannot word it
         differently — and so no screen can show only "approved by Y" on a version Y never
         saw.
+
+        DW-2a (answer 2): A REVISION MADE AT ARKA REVIEW, BEFORE ANY VERDICT, keeps nothing —
+        it carries the pending verdict and QC rules on the revised version itself. Three
+        cases, told apart without a new field:
+          * verdict pending                      -> 'Revised by X (role) before the QC
+                                                     verdict: reason'
+          * verdict given AFTER this version was
+            submitted (reviewed_at >= submitted_at) -> 'Approved (or Rejected) by Design QC
+                                                     (Y) after the revision; revised by ...'
+          * otherwise (the approval was copied from the version it replaced, so it is older
+            than this row)                       -> the W-5 'kept' wording above.
+        Known limit: a carried-forward copy gets a fresh submitted_at, so a copy of a version
+        approved after its revision reads as 'kept' on the next attempt — where the approval
+        was indeed carried.
         """
         if not self.reviewer_role:
             return ''
+        if self.verdict == ARKA_PENDING:
+            return f'Revised by {self.reviser_label} before the QC verdict: {self.revision_reason}'
+        if (self.reviewed_at is not None and self.submitted_at is not None
+                and self.reviewed_at >= self.submitted_at):
+            ruled = 'Rejected' if self.verdict == ARKA_REJECTED else 'Approved'
+            return (f'{ruled} by Design QC ({_revision_person(self.reviewed_by)}) after the '
+                    f'revision; revised by {self.reviser_label}: {self.revision_reason}')
         return (f'QC approval by {_revision_person(self.reviewed_by)} kept; revised by '
                 f'{self.reviser_label}: {self.revision_reason}')
 

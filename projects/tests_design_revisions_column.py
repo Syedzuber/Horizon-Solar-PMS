@@ -39,7 +39,10 @@ from .models import (
     DESIGN_ARTIFACTS_UPLOADED, DESIGN_AWAITING_HEAD_QC, DESIGN_FILE_CAD_ZIP,
     DESIGN_IN_DESIGN, DESIGN_IN_QC, ERR_LAYOUT, QC_PASSED, REVIEWER_ROLE_QC,
 )
-from .permissions import BOQ_CORRECTION_WINDOW_STATUSES
+from .permissions import (
+    DESIGN_REVIEWER_TURN_WINDOWS, REVIEWER_ACTION_ARKA_REVISE, REVIEWER_ACTION_CAD_REVISE,
+    REVIEWER_TURN_HEAD, REVIEWER_TURN_QC,
+)
 from .tests_design_change_window import _profile
 from .tests_design_reviewer_cad_revisions import BUCKET, DELETE, EXTRACT, STORE, _zip
 from .tests_reviewer_corrections import ReviewerCorrectionBase, UNASSIGNED_NOTE
@@ -246,17 +249,22 @@ class ScopeTests(RevisionColumnBase):
         self.assertEqual(self._panel()['total_revisions'], 1)
 
     def test_07_the_reached_review_gate_never_drops_a_revision_the_product_writes(self):
-        # The window statuses (BC-1's minus artifacts_uploaded, ruling 5) are all
-        # reached-review statuses...
-        window = set(BOQ_CORRECTION_WINDOW_STATUSES) - {DESIGN_ARTIFACTS_UPLOADED}
-        self.assertTrue(window <= set(PACKAGE_REVIEW_REACHED_STATUSES))
+        # The revision statuses (DW-2a's turn table) are all reached-review statuses except
+        # one: `arka_submitted`, where an Arka may be revised before its QC verdict. Such a
+        # revision is counted once the site reaches review (answer 3, 26 Nov 2026)...
+        window = set()
+        for action in (REVIEWER_ACTION_ARKA_REVISE, REVIEWER_ACTION_CAD_REVISE):
+            for role in (REVIEWER_TURN_QC, REVIEWER_TURN_HEAD):
+                window |= DESIGN_REVIEWER_TURN_WINDOWS[action][role]
+        self.assertEqual(window - set(PACKAGE_REVIEW_REACHED_STATUSES), {'arka_submitted'})
         # ...so a revision at each is counted, and still counted after a fail moves the
         # site out of review (attempt 1's qc_started keeps it reached).
         at_qc, _ = self._pre_release('W6-G1')
         self._arka_revise(at_qc)
         at_head, head_assignment = self._pre_release('W6-G2')
         self._at_head(head_assignment)
-        self._cad_revise(at_head)
+        # DW-2a (DW-R2): after QC has passed the package, the revision is the Head's.
+        self._cad_revise(at_head, who=self.head)
         self._head_fail_boq_only(at_head, head_assignment)
         self.assertNotIn(head_assignment.status, PACKAGE_REVIEW_REACHED_STATUSES)
 

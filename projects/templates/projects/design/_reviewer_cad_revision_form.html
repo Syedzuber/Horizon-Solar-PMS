@@ -1,9 +1,10 @@
 {% comment %}
 W-5b — Design QC or the Design Head revises the CAD during package review.
 
-Rendered by qc_review.html beside the Arka revision form, under the same flag
-(`can_revise_design` = user_may_revise_design()), so it shows exactly when
-design_cad_revise() would accept it. The template never tests the status itself.
+Rendered by qc_review.html beside the Arka revision form, under its own flag
+(`can_revise_cad` = permissions.design_reviewer_turn() for `cad_revise`, DW-2a: QC at
+in_qc, the Head also at awaiting_head_qc), so it shows exactly when design_cad_revise()
+would accept it. The template never tests the status itself.
 
 A cad_zip only (ruling Q4: the BOQ goes through BOQ correction), with a mandatory reason.
 The zip is checked as the designer's is (validate_cad_zip) and drawn from the CURRENT Arka,
