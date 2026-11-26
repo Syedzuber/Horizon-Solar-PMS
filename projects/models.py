@@ -1,3 +1,4 @@
+import logging
 import re
 
 from django.core.exceptions import ValidationError
@@ -1211,6 +1212,113 @@ def get_opex_mandatory_items():
         .filter(is_active=True, project_type='OPEX', is_mandatory=True)
         .order_by('sort_order', 'code')
     )
+
+
+# ---------------------------------------------------------------------------
+# DW-1 (ruling DW-R5) — the minimum an OPEX BOQ must carry
+# ---------------------------------------------------------------------------
+#
+# Since design groups (B-5) the PMS BOQ is what SCM orders from, and a module-only BOQ was
+# being marked complete and released (DW-0: 30 MPUVL sites, and 1613 on production). Two
+# readers use the rule below: design_boq_complete() refuses a BOQ that fails it (DW-1a),
+# and the design-group screen and Excel warn about each counted site that fails it (DW-1b).
+# THE RULE LIVES ONLY HERE, so it can be extended by editing BOQ_MINIMUM_CONTENT.
+#
+# OPEX ONLY. The groups are the B-2c OPEX formula groups, and both callers are OPEX-only
+# (design_boq_complete through _opex_site, design groups through their OPEX-only picker).
+
+#: One entry per test: (gap key, the formula groups any of whose items satisfies it, whether
+#: a line on the configured-ACCB item OPX-273 also satisfies it). The groups are READ FROM
+#: THE DATABASE (BOQItemGroupMember), never hard-coded item codes, so a group edited with
+#: load_formula_rules moves this rule with it. Membership ignores is_active (B-2a): a line on
+#: a retired inverter is still a real line and still counts.
+BOQ_MINIMUM_CONTENT = (
+    ('no_inverter',       ('all inverters',),         False),
+    ('no_dcdb_acdb_accb', ('all DCDBs', 'all ACDBs'), True),
+)
+
+#: How each gap key is worded, on the refusal, the group screen and the Summary sheet alike
+#: (Zuber, DW-1 Q5). "With a quantity" because a line with a blank or 0 quantity does not
+#: count, and a designer looking at such a line would otherwise read "no inverter line" as
+#: a bug. A snapshot stores the KEYS, so it is worded by these words when it is shown.
+BOQ_GAP_WORDS = {
+    'no_inverter':       'no inverter line with a quantity',
+    'no_dcdb_acdb_accb': 'no DCDB, ACDB or ACCB line with a quantity',
+}
+
+#: The sets of missing group names already logged by this process, so the warning is
+#: written once per process and not on every request (DW-1 Q7).
+_MINIMUM_CONTENT_LOGGED = set()
+
+
+def boq_minimum_content_rules():
+    """The tests BOQ_MINIMUM_CONTENT describes, resolved to catalogue item pks. One query.
+
+    Returns [(gap key, frozenset of item pks, accb satisfies)], in BOQ_MINIMUM_CONTENT order.
+
+    A TEST WHOSE GROUP IS MISSING IS DROPPED, NOT ENFORCED (DW-1 Q7). On a fresh database
+    with no formula rules loaded every group is absent, and enforcing would refuse every BOQ
+    in the system. If even one of a test's groups is missing the WHOLE test is dropped:
+    without "all ACDBs", a site carrying only an ACDB would be refused for a line it has. A
+    group with no members cannot be told apart from a missing one here and is treated the
+    same. Logged once per process (logger.warning) so the gap in protection is on record.
+    """
+    names = {name for _key, groups, _accb in BOQ_MINIMUM_CONTENT for name in groups}
+    # Every member of the named groups, in one join; the group rows themselves are not needed.
+    members = {}
+    for name, item_id in (BOQItemGroupMember.objects.filter(group__name__in=names)
+                          .values_list('group__name', 'item_id')):
+        members.setdefault(name, set()).add(item_id)
+
+    rules, missing = [], []
+    for key, groups, accb_counts in BOQ_MINIMUM_CONTENT:
+        absent = [name for name in groups if name not in members]
+        if absent:
+            missing.extend(absent)
+            continue
+        rules.append((key, frozenset().union(*(members[name] for name in groups)),
+                      accb_counts))
+    if missing and frozenset(missing) not in _MINIMUM_CONTENT_LOGGED:
+        _MINIMUM_CONTENT_LOGGED.add(frozenset(missing))
+        logging.getLogger(__name__).warning(
+            'DW-1: BOQ formula group(s) %s not found or empty; the BOQ minimum-content '
+            'test(s) that need them are skipped until the rules are loaded.',
+            ', '.join(sorted(missing)))
+    return rules
+
+
+def minimum_content_gaps(item_ids, has_accb, rules):
+    """The gap keys for one BOQ, from what is already known about its lines. No query.
+
+    `item_ids` is the set of catalogue item pks on lines with a quantity above 0 (so blank,
+    0 and lines with no catalogue item never count); `has_accb` is whether one of those
+    lines is on OPX-273; `rules` is boq_minimum_content_rules(). Pure, so the design-group
+    screen can run it per site over lines it has already loaded instead of a query per site.
+    An empty list means the BOQ passes.
+    """
+    gaps = []
+    for key, members, accb_counts in rules:
+        if item_ids & members or (accb_counts and has_accb):
+            continue
+        gaps.append(key)
+    return gaps
+
+
+def boq_minimum_content_gaps(boq, rules=None):
+    """The gap keys for one saved BOQ (or None), e.g. ['no_inverter']; [] when it passes.
+
+    Reads the SAVED lines: what is on the page and not yet saved cannot count. Two queries
+    (the rules, then the lines), one if `rules` is passed in.
+    """
+    rules = boq_minimum_content_rules() if rules is None else rules
+    if not rules:
+        return []
+    rows = [] if boq is None else list(
+        boq.items.filter(boq_quantity__gt=0, item_master__isnull=False)
+        .values_list('item_master_id', 'item_master__code'))
+    return minimum_content_gaps({pk for pk, _code in rows},
+                                any(code == ACCB_CONFIGURED_CODE for _pk, code in rows),
+                                rules)
 
 
 def opex_catalogue_category_order():

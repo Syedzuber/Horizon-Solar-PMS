@@ -10165,8 +10165,10 @@ def opex_boq_entry(request, project_id):
             # the assignment status, an approved Arka, "not already stamped", and at least
             # one quantity. Called rather than duplicated so the two cannot disagree. It
             # redirects to the site workspace and messages for itself.
+            # sheet_saved=True (DW-1 Q6): the sheet above is already committed, so a refusal
+            # there starts "Your sheet was saved, but ..." and nothing reads as lost.
             from .design_views import design_boq_complete
-            return design_boq_complete(request, project_id)
+            return design_boq_complete(request, project_id, sheet_saved=True)
 
         messages.success(request, 'BOQ saved.')
         return redirect('opex_boq_entry', project_id=project_id)

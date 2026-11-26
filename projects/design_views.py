@@ -133,6 +133,8 @@ from .models import (
     # screen groups the sheet exactly the way the entry screen does.
     get_opex_boq_catalogue, opex_catalogue_category_order, get_opex_mandatory_items,
     split_opex_boq_rows, group_boq_rows_by_category,
+    # DW-1a — the minimum an OPEX BOQ must carry before it can be marked complete.
+    boq_minimum_content_gaps, BOQ_GAP_WORDS,
     # B-3a — configured ACCB lines: the read-only review block and the SCM grouping.
     accb_rows,
     # Part 12 — the catalogue table itself, managed by the Design Head at the foot of
@@ -4734,9 +4736,31 @@ def design_file_download(request, project_id, pk):
 # 10. BOQ completion
 # ---------------------------------------------------------------------------
 
+def _minimum_content_refusal(project, gaps, sheet_saved):
+    """DW-1a: the refusal for a BOQ missing an inverter and/or a DCDB, ACDB or ACCB.
+
+    Names exactly what is missing, in BOQ_GAP_WORDS (the group screen uses the same words).
+    `sheet_saved` is True when the picker's Mark complete saved the sheet on the way here,
+    so the designer is told nothing they typed was lost (Zuber, DW-1 Q6).
+    """
+    words = [BOQ_GAP_WORDS.get(gap, gap) for gap in gaps]
+    missing = words[0] if len(words) == 1 else ', and '.join(words)
+    if sheet_saved:
+        text = f'Your sheet was saved, but {project.project_id} can\'t be marked complete'
+    else:
+        text = f"{project.project_id}: can't mark this BOQ complete"
+    text += f": it has {missing}. Add {'it' if len(words) == 1 else 'them'} and save first."
+    if 'no_dcdb_acdb_accb' in gaps:
+        text += ' An ACCB saves from its own card.'
+    return text
+
+
 @login_required
-def design_boq_complete(request, project_id):
+def design_boq_complete(request, project_id, sheet_saved=False):
     """The allocated DESIGNER marks the BOQ complete for the current attempt.
+
+    `sheet_saved` is never set by the URL: opex_boq_entry() passes True when its Mark
+    complete has just saved the sheet, so a refusal can say the sheet was kept (DW-1 Q6).
 
     THE BOQ ITSELF IS NOT DUPLICATED (settled decision 4). Quantities live in the
     existing BOQ / BOQItem rows and are entered through the existing `boq_detail`
@@ -4818,6 +4842,16 @@ def design_boq_complete(request, project_id):
             f'{project.project_id}: every mandatory item needs a quantity before the BOQ '
             f'can be marked complete — still missing ' +
             ', '.join(f'{m.code} {m.description}' for m in unquantified) + '.')
+
+    # DW-1a (DW-R5): AND AN INVERTER, AND A DCDB, ACDB OR ACCB. Since design groups (B-5)
+    # this BOQ is what SCM orders from, and a module-only BOQ was being marked complete and
+    # released (DW-0). The rule is boq_minimum_content_gaps()'s, not this view's; it reads
+    # the SAVED lines, which is why the message says "save first" — an ACCB saves from its
+    # own card, so one still being edited there is not on the BOQ yet. A BOQ stamped before
+    # DW-1 is never re-checked here (DW-R1): this test runs only on a new completion.
+    gaps = boq_minimum_content_gaps(boq)
+    if gaps:
+        return _back(_minimum_content_refusal(project, gaps, sheet_saved))
 
     # Optional note for the reviewer, captured at the moment of completion and never
     # afterwards. Read HERE rather than in each caller because both submitting controls
