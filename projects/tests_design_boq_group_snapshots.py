@@ -35,26 +35,28 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from openpyxl import load_workbook
 
+from . import models as models_module
 from . import urls as project_urls
 from .design_boq_group_views import (
     DELETE_NAME_MISMATCH, GROUP_BOQ_DATA_KEYS, GROUP_BOQ_KEYS_IGNORED, GROUP_BOQ_KEYS_READ,
     GROUP_HAS_SNAPSHOTS, NOTHING_TO_SNAPSHOT, SNAPSHOT_NOT_OPEN, _canon, _live_members,
     _member_rows, consolidate, group_boq_data, hydrate, snapshot_changes,
-    snapshot_fingerprint, warning_lines,
+    snapshot_fingerprint, warning_lines, SUMMARY_SHEET,
 )
 from .models import (
-    ActivityLog, BOQ, BOQItem, BOQItemMaster, DesignAssignment, DesignBOQGroup,
+    ActivityLog, BOQ, BOQItem, BOQItemGroup, BOQItemGroupMember, BOQItemMaster, DesignAssignment, DesignBOQGroup,
     DesignBOQGroupMembership, DesignBOQGroupSnapshot, Project, SnapshotImmutableError,
 )
 from .tests_accb_config import EX_TYPE1, _longest_config
 from .tests_design_boq_groups import (
-    EX_TYPE2, EX_TYPE2_REORDERED, PRICE_WORDS, DesignGroupFixture, _client, _profile,
+    EX_TYPE2, EX_TYPE2_REORDERED, EXCEL_QUERIES, PRICE_WORDS, DesignGroupFixture, _client,
+    _profile,
 )
 
 #: S1, written out by hand so a change to GROUP_BOQ_DATA_KEYS fails here rather than passing.
 STORED_KEYS = {
     'top':          {'version', 'group_name', 'sites', 'lines', 'accb_lines', 'unlinked',
-                     'blanks', 'unit_warnings'},
+                     'blanks', 'unit_warnings', 'content_gaps'},
     'site':         {'id', 'code', 'name', 'tender', 'designer', 'status', 'counted'},
     'line':         {'code', 'description', 'unit', 'site_count', 'total', 'retired', 'per_site'},
     'accb':         {'config_key', 'description', 'unit', 'site_count', 'total', 'retired',
@@ -62,6 +64,7 @@ STORED_KEYS = {
     'unlinked':     {'site', 'description', 'unit', 'quantity'},
     'blank':        {'site', 'code', 'description'},
     'unit_warning': {'site', 'code', 'quantity', 'line_unit', 'catalogue_unit', 'reasons'},
+    'content_gap':  {'site', 'gaps'},
 }
 
 #: Measured at build time and pinned, for a PLAIN DESIGNER (the costliest reader: the
@@ -70,9 +73,11 @@ STORED_KEYS = {
 #: profile loads; the take POST includes its savepoints and the group-row lock. With
 #: snapshots the group screen adds the readable check on their stored sites and the newest
 #: one's data (the snapshot list itself is already in the 17).
-DETAIL_NO_SNAPSHOTS = 17
-DETAIL_WITH_SNAPSHOTS = 19
-TAKE_QUERIES = 18
+#: DW-1b: +1 each on the screen and the take, for the formula-group members the content-gap
+#: warning reads (one query, whatever the number of sites). Snapshot view/Excel unchanged.
+DETAIL_NO_SNAPSHOTS = 18
+DETAIL_WITH_SNAPSHOTS = 20
+TAKE_QUERIES = 19
 SNAPSHOT_VIEW_QUERIES = 8
 SNAPSHOT_EXCEL_QUERIES = 6
 
@@ -100,6 +105,21 @@ class SnapshotFixture(DesignGroupFixture):
             fingerprint=snapshot_fingerprint(data),
             site_ids=site_ids if site_ids is not None else [s['id'] for s in data['sites']],
             sites_counted=counted, sites_not_counted=len(data['sites']) - counted)
+
+    def load_content_groups(self):
+        """DW-1b: the three B-2c formula groups the content-gap warning reads, each with one
+        item of its own, as load_formula_rules would make them. Returns the masters."""
+        masters = {}
+        for code, name, description in (('OPX-010', 'all inverters', 'String inverter'),
+                                         ('OPX-020', 'all DCDBs', 'DCDB'),
+                                         ('OPX-030', 'all ACDBs', 'ACDB')):
+            master = BOQItemMaster.objects.create(
+                code=code, description=description, unit='Nos', category='Electrical',
+                project_type='OPEX', sort_order=int(code[4:]))
+            group = BOQItemGroup.objects.create(name=name, label=name.split(' ', 1)[1])
+            BOQItemGroupMember(group=group, item=master).save()
+            masters[name] = master
+        return masters
 
     def snapshot_page(self, profile, snapshot):
         return _client(profile).get(reverse('design_boq_group_snapshot_detail',
@@ -140,7 +160,8 @@ class PlainDataTests(SnapshotFixture):
     def every_kind(self):
         """A group holding every row kind: counted lines with a per-site split, a retired
         item, an ACCB, a line with no catalogue item, a blank, a fractional Tin Shade, a
-        unit mismatch and a not-counted site."""
+        unit mismatch, a not-counted site and (DW-1b) counted sites missing an inverter."""
+        self.load_content_groups()
         self.accb(self.a1, EX_TYPE2)
         self.accb(self.a2, EX_TYPE2_REORDERED)
         group = self.group('Every kind', [self.a1, self.a2, self.a3, self.a4])
@@ -150,6 +171,7 @@ class PlainDataTests(SnapshotFixture):
         self.assertTrue(any(len(l['per_site_list']) > 1 for l in boq['lines']))
         self.assertTrue(any(l['retired'] for l in boq['lines']))
         self.assertTrue(boq['accb_lines'] and boq['unlinked'] and boq['blanks'] and boq['not_counted'])
+        self.assertTrue(boq['content_gaps'])
         self.assertEqual({tuple(w['reasons']) for w in boq['unit_warnings']},
                          {('not a whole number',), ('unit differs from the catalogue',)})
         return group, rows, boq
@@ -190,6 +212,7 @@ class PlainDataTests(SnapshotFixture):
             'accb':         boq['accb_lines'],
             'blank':        boq['blanks'],
             'unit_warning': boq['unit_warnings'],
+            'content_gap':  boq['content_gaps'],
             'member_row':   rows,
         }
         for level, dicts in levels.items():
@@ -200,7 +223,7 @@ class PlainDataTests(SnapshotFixture):
 
     def test_hydrate_refuses_an_unknown_version(self):
         data = self.live_data(self.group('G', [self.a1]))
-        for bad in (2, None, '1'):
+        for bad in (0, 3, None, '1', '2', True):
             with self.subTest(version=bad):
                 data['version'] = bad
                 with self.assertRaisesRegex(ValueError, 'is not one this code can read'):
@@ -217,7 +240,7 @@ class PlainDataTests(SnapshotFixture):
         self.assertEqual(set(data), STORED_KEYS['top'])
         for level, key in (('site', 'sites'), ('line', 'lines'), ('accb', 'accb_lines'),
                            ('unlinked', 'unlinked'), ('blank', 'blanks'),
-                           ('unit_warning', 'unit_warnings')):
+                           ('unit_warning', 'unit_warnings'), ('content_gap', 'content_gaps')):
             self.assertTrue(data[key], key)
             for row in data[key]:
                 with self.subTest(level=level):
@@ -697,3 +720,145 @@ class SnapshotQueryCountTests(SnapshotFixture):
         self.assertIn('id="boqGroupDiffers"', client.get(url).content.decode())
         self.assertEqual(seen, {0: DETAIL_NO_SNAPSHOTS, 1: DETAIL_WITH_SNAPSHOTS,
                                 30: DETAIL_WITH_SNAPSHOTS})
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DW-1b — counted sites missing an inverter or a DCDB, ACDB or ACCB
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: The group-screen words for a site with both gaps (BOQ_GAP_WORDS, Zuber DW-1 Q5).
+BOTH_GAPS = ('no inverter line with a quantity; no DCDB, ACDB or ACCB line with a quantity. '
+             'Still counted in the totals.')
+BOTH_KEYS = ['no_inverter', 'no_dcdb_acdb_accb']
+
+
+class ContentGapTests(SnapshotFixture):
+
+    def setUp(self):
+        super().setUp()
+        models_module._MINIMUM_CONTENT_LOGGED.clear()
+        self.masters = self.load_content_groups()
+        self.inv = self.masters['all inverters']
+        self.dcdb = self.masters['all DCDBs']
+        self.acdb = self.masters['all ACDBs']
+
+    def add_line(self, site, master, qty):
+        BOQItem.objects.create(
+            boq=BOQ.objects.get(project=site), serial_no=50, category='Electrical',
+            item_master=master, description=master.description, uom=master.unit,
+            boq_quantity=None if qty is None else Decimal(qty))
+
+    @staticmethod
+    def gap_lines(lines):
+        return [line for line in lines if 'with a quantity' in line]
+
+    @staticmethod
+    def cells(workbook):
+        return [row[0] for row in _rows(workbook[SUMMARY_SHEET]) if row and row[0]]
+
+    def test_failing_counted_sites_warn_and_others_do_not(self):
+        self.add_line(self.a1, self.inv, '2')        # A1 passes: inverter + ACDB
+        self.add_line(self.a1, self.acdb, '1')
+        self.add_line(self.a2, self.inv, '1')        # A2: the board gap only
+        self.add_line(self.a2, self.dcdb, None)      # a blank DCDB does not count
+        self.add_line(self.a3, self.inv, '0')        # A3 is not counted: never checked
+        group = self.group('G', [self.a1, self.a2, self.a3, self.a4])   # A4: module only
+        boq = self.boq_of(group)
+        self.assertEqual(boq['content_gaps'], [
+            {'site': 'B5A-A2', 'gaps': ['no_dcdb_acdb_accb']},
+            {'site': 'B5A-A4', 'gaps': BOTH_KEYS}])
+        expected = ['B5A-A2: no DCDB, ACDB or ACCB line with a quantity. Still counted in '
+                    'the totals.', f'B5A-A4: {BOTH_GAPS}']
+        self.assertEqual(self.gap_lines(warning_lines(boq)), expected)
+
+        html = self.detail(self.head, group).content.decode()
+        for line in expected:
+            self.assertIn(line, html)
+        self.assertNotIn('B5A-A1: no', html)
+        self.assertNotIn('B5A-A3: no', html)
+        self.assertEqual(self.gap_lines(self.cells(self.live_xlsx(self.head, group))), expected)
+
+    def test_an_accb_satisfies_the_board_test(self):
+        self.add_line(self.a1, self.inv, '1')
+        self.accb(self.a1, EX_TYPE2)
+        self.assertEqual(self.boq_of(self.group('G', [self.a1]))['content_gaps'], [])
+
+    def test_totals_and_fingerprint_do_not_depend_on_the_check(self):
+        group = self.group('G', [self.a1, self.a2, self.a4])
+        checked = self.live_data(group)
+        self.assertEqual(len(checked['content_gaps']), 3)
+        BOQItemGroup.objects.all().delete()          # a database with no rules loaded
+        with self.assertLogs('projects.models', 'WARNING'):
+            unchecked = self.live_data(group)
+        self.assertEqual(unchecked['content_gaps'], [])
+        for key in ('sites', 'lines', 'accb_lines', 'unlinked', 'blanks', 'unit_warnings'):
+            self.assertEqual(checked[key], unchecked[key], key)
+        self.assertEqual(snapshot_fingerprint(checked), snapshot_fingerprint(unchecked))
+
+    def test_snapshot_stores_the_keys_and_shows_the_same_words_frozen(self):
+        group = self.group('G', [self.a1, self.a4])
+        self.take(self.head, group)
+        snap = DesignBOQGroupSnapshot.objects.get()
+        self.assertEqual(snap.data['version'], 2)
+        self.assertEqual(snap.data['content_gaps'], [{'site': 'B5A-A1', 'gaps': BOTH_KEYS},
+                                                     {'site': 'B5A-A4', 'gaps': BOTH_KEYS}])
+        expected = [f'B5A-A1: {BOTH_GAPS}', f'B5A-A4: {BOTH_GAPS}']
+        self.assertEqual(warning_lines(hydrate(snap.data)['boq'])[-2:], expected)
+
+        # A1 is fixed afterwards: live stops warning, the snapshot still says what it saw.
+        self.add_line(self.a1, self.inv, '1')
+        self.add_line(self.a1, self.dcdb, '1')
+        html = self.snapshot_page(self.head, snap).content.decode()
+        for line in expected:
+            self.assertIn(line, html)
+        _response, workbook = self.snapshot_xlsx(self.head, snap)
+        self.assertEqual(self.gap_lines(self.cells(workbook)), expected)
+        live = self.detail(self.head, group).content.decode()
+        self.assertNotIn('B5A-A1: no', live)
+        self.assertIn(f'B5A-A4: {BOTH_GAPS}', live)
+
+    def test_a_version_1_snapshot_opens_with_no_content_gap_line(self):
+        group = self.group('G', [self.a1, self.a4])
+        data = self.live_data(group)
+        self.assertTrue(data['content_gaps'])
+        old = {k: v for k, v in data.items() if k != 'content_gaps'}
+        old['version'] = 1                                           # B-5b's shape exactly
+        self.assertEqual(set(old), STORED_KEYS['top'] - {'content_gaps'})
+        counted = sum(1 for s in old['sites'] if s['counted'])
+        snap = DesignBOQGroupSnapshot.objects.create(
+            group=group, taken_by=self.head, taken_by_name='Head', data=old,
+            fingerprint=snapshot_fingerprint(old), site_ids=[s['id'] for s in old['sites']],
+            sites_counted=counted, sites_not_counted=len(old['sites']) - counted)
+        self.assertEqual(hydrate(old)['boq']['content_gaps'], [])
+
+        page = self.snapshot_page(self.head, snap)
+        self.assertEqual(page.status_code, 200)
+        self.assertNotIn('with a quantity', page.content.decode())
+        _response, workbook = self.snapshot_xlsx(self.head, snap)
+        self.assertEqual(self.gap_lines(self.cells(workbook)), [])
+
+        # The fingerprint ignores the version and the warnings, so the group screen, whose
+        # newest snapshot is this one, opens with no "differs" banner and the live warnings.
+        self.assertEqual(snapshot_fingerprint(old), snapshot_fingerprint(data))
+        screen = self.detail(self.head, group)
+        self.assertEqual(screen.status_code, 200)
+        html = screen.content.decode()
+        self.assertNotIn('id="boqGroupDiffers"', html)
+        self.assertIn(f'B5A-A1: {BOTH_GAPS}', html)
+
+    def test_query_counts_are_the_pinned_ones_with_failing_sites(self):
+        """The groups are loaded and every site fails: still one query for the rule."""
+        client = _client(self.des_a)
+        for n in (5, 20):
+            sites = [self.site(f'W{n}-{i}', self.t1, self.des_a, 'released',
+                               [(self.m_module, '2')]) for i in range(n)]
+            group = self.group(f'Gaps {n}', sites, by=self.des_a)
+            self.assertEqual(len(self.boq_of(group)['content_gaps']), n)
+            for name, pin in (('design_boq_group_detail', DETAIL_NO_SNAPSHOTS),
+                              ('design_boq_group_excel', EXCEL_QUERIES)):
+                url = reverse(name, args=[group.pk])
+                client.get(reverse('design_boq_group_list'))         # warm the session
+                with CaptureQueriesContext(connection) as ctx:
+                    self.assertEqual(client.get(url).status_code, 200)
+                with self.subTest(view=name, sites=n):
+                    self.assertEqual(len(ctx.captured_queries), pin)

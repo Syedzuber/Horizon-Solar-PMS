@@ -55,6 +55,8 @@ from .design_views import aggregate_group_boq
 from .models import (
     BOQItem, DesignAssignment, DesignBOQGroup, DesignBOQGroupMembership,
     DesignBOQGroupSnapshot, Project, DESIGN_BOQ_COUNTED_STATUSES, log_activity,
+    # DW-1b: the one BOQ minimum-content rule, read per counted site for the warnings.
+    BOQ_GAP_WORDS, boq_minimum_content_rules, minimum_content_gaps,
 )
 from .permissions import (
     boq_readable_project_ids, boq_readable_projects_q, user_can_use_design_boq_groups,
@@ -237,8 +239,41 @@ def _member_rows(members):
     return rows
 
 
+def _content_gaps(counted_codes, agg):
+    """DW-1b: [{'site', 'gaps'}] for each counted site whose BOQ fails the DW-1 rule
+    (models.BOQ_MINIMUM_CONTENT), in member order. Sites that pass are left out.
+
+    FROM THE LINES aggregate_group_boq() ALREADY LOADED, not a query per site: its catalogue
+    `contributions` and its ACCB rows are exactly the lines with a quantity above 0 and a
+    catalogue item, which is what the rule counts. The rules themselves cost one query, and
+    none when nothing is counted. An OPX-273 line with no ACCB configuration stays in `lines`
+    and is counted as an ACCB too, as boq_minimum_content_gaps() counts it.
+    """
+    if not counted_codes:
+        return []
+    rules = boq_minimum_content_rules()
+    if not rules:
+        return []
+    items = {code: set() for code in counted_codes}
+    has_accb = set()
+    for line in agg['lines']:
+        for site, _qty in line['contributions']:
+            items.setdefault(site, set()).add(line['item_master'])
+            if line['item_master__code'] == ACCB_CONFIGURED_CODE:
+                has_accb.add(site)
+    for accb in agg['accb_lines']:
+        has_accb.update(site for site, _qty in accb['contributions'])
+    out = []
+    for code in counted_codes:
+        gaps = minimum_content_gaps(items[code], code in has_accb, rules)
+        if gaps:
+            out.append({'site': code, 'gaps': gaps})
+    return out
+
+
 def consolidate(member_rows):
-    """The live consolidated BOQ of the counted members. 4 queries, whatever the size.
+    """The live consolidated BOQ of the counted members. 5 queries, whatever the size (4
+    when nothing is counted).
 
     aggregate_group_boq() supplies the catalogue lines, the ACCB configurations and the
     lines with no catalogue item, exactly as SCM's screen gets them (3 queries). One more
@@ -249,6 +284,9 @@ def consolidate(member_rows):
       * a retired catalogue item — still summed (it is a real BOQ line), marked "Retired";
       * OPX-037 / OPX-038 with a fraction, or a line whose stored unit differs from the
         catalogue unit — listed; the line still counts in the total.
+
+    DW-1b adds the fifth: the formula groups for `content_gaps`, each counted site missing an
+    inverter or a DCDB, ACDB or ACCB (_content_gaps). Warned about, still counted.
     """
     counted_ids = [r['project'].pk for r in member_rows if r['counted']]
     agg = aggregate_group_boq(counted_ids)
@@ -311,14 +349,16 @@ def consolidate(member_rows):
         accb['retired'] = accb['config_key'] in retired_accb_keys
         accb['code'] = ACCB_CONFIGURED_CODE
 
+    counted_codes = [r['code'] for r in member_rows if r['counted']]
     return {
         'lines':          agg['lines'],
         'accb_lines':     agg['accb_lines'],
         'unlinked':       agg['unlinked'],
-        'counted_codes':  [r['code'] for r in member_rows if r['counted']],
+        'counted_codes':  counted_codes,
         'not_counted':    [r for r in member_rows if not r['counted']],
         'blanks':         blanks,
         'unit_warnings':  unit_warnings,
+        'content_gaps':   _content_gaps(counted_codes, agg),
     }
 
 
@@ -328,13 +368,19 @@ def consolidate(member_rows):
 
 #: Bump when group_boq_data()'s shape changes; hydrate() refuses any other (Zuber A1), so an
 #: old snapshot can never be silently misread by newer code.
-GROUP_BOQ_DATA_VERSION = 1
+#: 2 — DW-1b (Zuber, DW-1 Q4): adds `content_gaps`. A version-1 snapshot predates the check,
+#: so it is read as having none, and shows no content-gap line and no "checked" wording.
+GROUP_BOQ_DATA_VERSION = 2
+
+#: Every version hydrate() can read. Each older one is named here and handled explicitly in
+#: hydrate(), never guessed at (Zuber A1).
+GROUP_BOQ_DATA_READABLE = (1, 2)
 
 #: Every key group_boq_data() writes, per level. NO PRICES (S1): a snapshot stores these and
 #: nothing else. tests_design_boq_group_snapshots pins this list by hand.
 GROUP_BOQ_DATA_KEYS = {
     'top':          ('version', 'group_name', 'sites', 'lines', 'accb_lines', 'unlinked',
-                     'blanks', 'unit_warnings'),
+                     'blanks', 'unit_warnings', 'content_gaps'),
     'site':         ('id', 'code', 'name', 'tender', 'designer', 'status', 'counted'),
     'line':         ('code', 'description', 'unit', 'site_count', 'total', 'retired', 'per_site'),
     'accb':         ('config_key', 'description', 'unit', 'site_count', 'total', 'retired',
@@ -342,6 +388,8 @@ GROUP_BOQ_DATA_KEYS = {
     'unlinked':     ('site', 'description', 'unit', 'quantity'),
     'blank':        ('site', 'code', 'description'),
     'unit_warning': ('site', 'code', 'quantity', 'line_unit', 'catalogue_unit', 'reasons'),
+    # DW-1b: the gap KEYS (e.g. 'no_inverter'), worded by BOQ_GAP_WORDS when shown (A9).
+    'content_gap':  ('site', 'gaps'),
 }
 
 #: What group_boq_data() reads from consolidate() and _member_rows(), per level. With
@@ -350,13 +398,15 @@ GROUP_BOQ_DATA_KEYS = {
 #: consolidate()'s `unlinked` holds BOQItem objects, not dicts; their four fields are read
 #: in group_boq_data() and pinned by the round-trip test instead.
 GROUP_BOQ_KEYS_READ = {
-    'boq':          {'lines', 'accb_lines', 'unlinked', 'blanks', 'unit_warnings'},
+    'boq':          {'lines', 'accb_lines', 'unlinked', 'blanks', 'unit_warnings',
+                     'content_gaps'},
     'line':         {'item_master__code', 'item_master__description', 'item_master__unit',
                      'site_count', 'total_quantity', 'retired', 'per_site_list'},
     'accb':         {'config_key', 'description', 'unit', 'site_count', 'total_quantity',
                      'retired', 'per_site_list'},
     'blank':        {'site', 'code', 'description'},
     'unit_warning': {'site', 'code', 'quantity', 'line_unit', 'catalogue_unit', 'reasons'},
+    'content_gap':  {'site', 'gaps'},
     'member_row':   {'project', 'code', 'tender', 'designer', 'status', 'counted'},
 }
 
@@ -373,6 +423,7 @@ GROUP_BOQ_KEYS_IGNORED = {
                    'code':          'always ACCB_CONFIGURED_CODE, put back by hydrate()'},
     'blank':        {},
     'unit_warning': {},
+    'content_gap':  {},
     'member_row': {'membership': 'live only: the Sites tab Remove button'},
 }
 
@@ -456,15 +507,20 @@ def group_boq_data(group_name, member_rows, boq):
             'catalogue_unit': w['catalogue_unit'],
             'reasons':        list(w['reasons']),
         } for w in boq['unit_warnings']],
+        'content_gaps': [{
+            'site': g['site'], 'gaps': list(g['gaps']),
+        } for g in boq['content_gaps']],
     }
 
 
 def _require_version(data):
     """Refuse data in a shape this code doesn't know (Zuber A1). Never guess at old data."""
     version = data.get('version') if isinstance(data, dict) else None
-    if version != GROUP_BOQ_DATA_VERSION:
+    # `type(...) is int` so True (== 1 in Python) and '1' are refused, not read as version 1.
+    if type(version) is not int or version not in GROUP_BOQ_DATA_READABLE:
         raise ValueError(f'Design BOQ group data version {version!r} is not one this code '
-                         f'can read (it reads version {GROUP_BOQ_DATA_VERSION}).')
+                         f'can read (it reads versions '
+                         f'{", ".join(map(str, GROUP_BOQ_DATA_READABLE))}).')
 
 
 def _per_site_view(pairs):
@@ -522,6 +578,11 @@ def hydrate(data):
             'blanks':        [dict(b) for b in data['blanks']],
             'unit_warnings': [dict(w, quantity=_dec(w['quantity']), reasons=list(w['reasons']))
                               for w in data['unit_warnings']],
+            # Version 1 predates DW-1b and has no such list: it was never checked, so it
+            # shows no content-gap line at all (Zuber, DW-1 Q4). Later versions always carry
+            # the key, so it is read directly and a damaged one raises.
+            'content_gaps':  ([] if data['version'] == 1 else
+                              [dict(g, gaps=list(g['gaps'])) for g in data['content_gaps']]),
         },
     }
 
@@ -1242,6 +1303,12 @@ def warning_lines(boq):
         lines.append(f"{w['site']} {w['code']}: quantity {qty}, line unit {w['line_unit']}, "
                      f"catalogue unit {w['catalogue_unit']} — {' and '.join(w['reasons'])}. "
                      f"Still counted in the total.")
+    # DW-1b: one line per counted site missing an inverter or a DCDB, ACDB or ACCB, in the
+    # refusal's own words (BOQ_GAP_WORDS, Zuber DW-1 Q5). An unknown key, from a snapshot
+    # taken under a later rule, is shown as stored rather than dropped.
+    for g in boq['content_gaps']:
+        lines.append(f"{g['site']}: " + '; '.join(BOQ_GAP_WORDS.get(k, k) for k in g['gaps'])
+                     + '. Still counted in the totals.')
     return lines
 
 
