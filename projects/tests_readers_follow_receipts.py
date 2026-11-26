@@ -662,20 +662,27 @@ class TaskRowTests(CaseBase):
 
 class FinanceHeadTests(CaseBase):
 
-    def test_the_finance_head_page_is_the_same_with_the_switch_on_and_off(self):
+    def test_with_the_switch_off_receipts_change_nothing_on_the_finance_head_page(self):
+        # Narrowed in FIN-M-B5-8 (Zuber, 26 Nov): B5-6 pinned on == off because the page
+        # was outside B5-6; B5-8 makes the switch-on page follow receipts (its tests are in
+        # tests_finance_head_receipts). What still holds here is K1: with the switch OFF,
+        # neither the page nor finance_head_summary() reads a receipt, so taking every
+        # receipt away changes neither.
+        from .finance_head import finance_head_summary
+        from .models import PaymentReceiptQuery
         c = _client(self.ceo)
         url = reverse('finance_head')
-        with LIVE:
-            on = TOKEN.sub('T', c.get(url).content.decode())
         with OFF:
-            off = TOKEN.sub('T', c.get(url).content.decode())
-        self.assertEqual(on, off)
-        from .finance_head import finance_head_summary
-        with LIVE:
-            s_on = finance_head_summary()
+            before = TOKEN.sub('T', c.get(url).content.decode())
+            s_before = finance_head_summary()
+        self.assertTrue(PaymentReceipt.objects.exists())
+        PaymentReceiptQuery.objects.all().delete()
+        PaymentReceipt.objects.all().delete()
         with OFF:
-            s_off = finance_head_summary()
-        self.assertEqual(s_on, s_off)
+            after = TOKEN.sub('T', c.get(url).content.decode())
+            s_after = finance_head_summary()
+        self.assertEqual(before, after)
+        self.assertEqual(s_before, s_after)
 
 
 class QueryCountTests(CaseBase):

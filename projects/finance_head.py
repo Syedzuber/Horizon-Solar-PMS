@@ -68,8 +68,25 @@ RULINGS IMPLEMENTED (Zuber, 16 Nov 2026)
 Null amounts are COUNTED SEPARATELY and add 0 to every sum; they are never folded into
 "with amount" coverage.
 
-Not a views module: imports models, payments, milestone_queries and utils only — never
-views or decorators — so any page or command can import it without a cycle. No writes,
+FIN-M-B5-8 — WITH CLIENT_RECEIPTS_LIVE ON (receipts_on=True; the view reads the switch
+once). With it off nothing below runs and the six queries are exactly as before (K1).
+    Money in (period, all time) and the weekly bars come from client_money.money_in():
+           Finance-confirmed receipts on their DATE RECEIVED (FR13, replacing H17's
+           "recorded" basis), old Received milestones at their old amount until a
+           confirmed receipt replaces it (FR37), stragglers at amount_received (K4).
+           Its two queries replace the weekly money-in query: SEVEN queries in all.
+           Money recorded but awaiting Finance (FR2) is returned apart as
+           'awaiting_receipts', never in money in.
+    Not due / due / invoiced / ageing / to collect: what is still owed — the agreed
+           (or invoice) amount less the confirmed money, never below 0, per milestone
+           (client_money.owed, K9). The confirmed money is the cached amount_received,
+           exact for a Pending or Invoiced milestone (client_money.unreceived_money says
+           why), so this costs no query. Received milestones are never in these figures,
+           so FR42(2)'s "plus n older" line never arises here.
+
+Not a views module: imports models, payments, milestone_queries, client_money and utils
+only — never views or decorators — so any page or command can import it without a cycle
+(client_money imports receipts, which imports views only inside a function). No writes,
 no signals, no cache.
 """
 from datetime import date, datetime, time, timedelta
@@ -81,6 +98,7 @@ from django.db.models import (BooleanField, Case, CharField, Count, DateTimeFiel
 from django.db.models.functions import Coalesce, TruncWeek
 from django.utils import timezone
 
+from .client_money import money_in, owed
 from .milestone_queries import annotate_trigger_done
 from .models import (APPROVAL_APPROVED, APPROVAL_KIND_CONTRACTOR_BILL,
                      ContractorBillDetail, PaymentMilestone, PaymentRequest,
@@ -238,9 +256,21 @@ def due_state(row):
     return 'not_due', None
 
 
-def _incoming(today, start):
+def _still_owed(base, row, receipts_on):
+    """K9: with the switch on, `base` (agreed or invoice amount) less the confirmed money
+    (the cached amount_received, exact for Pending / Invoiced), never below 0, through
+    client_money.owed — the one copy of the rule. Off: `base` as before."""
+    if not receipts_on:
+        return base
+    left, _ = owed(base, row['amount_received'] or ZERO)
+    return left
+
+
+def _incoming(today, start, receipts_on=False):
     """coverage, not_due, due, invoiced, received_period, received_all_time and
-    receivables_ageing from the one milestone read."""
+    receivables_ageing from the one milestone read. `receipts_on` (FIN-M-B5-8): owed
+    amounts net of confirmed money (K9); the received figures computed here are then
+    replaced by money_in()'s in finance_head_summary."""
     coverage = {'total': 0, 'with_amount': 0, 'without_amount': 0}
     not_due = {'count': 0, 'sum': ZERO, 'null_amount_count': 0}
     due = {'count': 0, 'sum': ZERO, 'null_amount_count': 0,
@@ -263,12 +293,13 @@ def _incoming(today, start):
                 continue                                             # H26
             state, since = due_state(row)
             target = due if state == 'due' else not_due
+            value = _still_owed(amount, row, receipts_on)
             target['count'] += 1
-            target['sum'] += amount or ZERO
+            target['sum'] += value or ZERO
             target['null_amount_count'] += amount is None
             if state == 'due':
                 _add(due['m1' if row['milestone_name'] == PaymentMilestone.M1 else 'm2_m3'],
-                     1, amount)
+                     1, value)
                 if since is None:
                     due['undated_count'] += 1
                 elif due['oldest_due_since'] is None or since < due['oldest_due_since']:
@@ -278,9 +309,11 @@ def _incoming(today, start):
             # The invoice figure when Finance recorded one, else the agreed amount; a row
             # with neither adds 0 and is counted.
             value = row['invoice_amount'] if row['invoice_amount'] is not None else amount
+            null_value = value is None
+            value = _still_owed(value, row, receipts_on)
             invoiced['count'] += 1
             invoiced['sum'] += value or ZERO
-            invoiced['null_amount_count'] += value is None
+            invoiced['null_amount_count'] += null_value
             # Age from the invoice date; an invoice saved without one (before B3) falls
             # back to the trigger's Done date; neither -> 'unknown' (H30).
             if row['invoice_date'] is not None:
@@ -471,23 +504,30 @@ def _week_key(value):
     return value.date() if isinstance(value, datetime) else value
 
 
-def _weekly(today):
+def _weekly(today, received=None):
     """The last WEEKS weeks, Monday-start, oldest first, the current week last (it runs
     to today). Both source fields are DateFields already in IST (received_date and
     payment_date are calendar days), so the weeks need no time-zone conversion. TWO
-    queries: one per object type; empty weeks are zero-filled here."""
+    queries: one per object type; empty weeks are zero-filled here.
+
+    `received` (FIN-M-B5-8, K6): the MoneyIn already read with the switch on. The money-in
+    bars then come from it — confirmed receipts by date received, old records by their
+    old date — and the money-in query below is not run (ONE query here)."""
     this_monday = today - timedelta(days=today.weekday())
     starts = [this_monday - timedelta(weeks=i) for i in range(WEEKS - 1, -1, -1)]
     first = starts[0]
 
-    money_in = {}
-    for row in (live_residential_milestones()
-                .filter(status=PaymentMilestone.RECEIVED,
-                        received_date__gte=first, received_date__lte=today)
-                .annotate(week=TruncWeek('received_date'))
-                .order_by().values('week')
-                .annotate(n=Count('pk'), s=Sum('amount_received'))):
-        money_in[_week_key(row['week'])] = (row['n'], row['s'] or ZERO)
+    if received is not None:
+        money_in_weeks = received.by_week(first, today)
+    else:
+        money_in_weeks = {}
+        for row in (live_residential_milestones()
+                    .filter(status=PaymentMilestone.RECEIVED,
+                            received_date__gte=first, received_date__lte=today)
+                    .annotate(week=TruncWeek('received_date'))
+                    .order_by().values('week')
+                    .annotate(n=Count('pk'), s=Sum('amount_received'))):
+            money_in_weeks[_week_key(row['week'])] = (row['n'], row['s'] or ZERO)
 
     money_out = {}
     for row in (scoped_payments()
@@ -500,7 +540,7 @@ def _weekly(today):
 
     weeks = []
     for start in starts:
-        in_n, in_s = money_in.get(start, (0, ZERO))
+        in_n, in_s = money_in_weeks.get(start, (0, ZERO))
         out_by_type = {}
         for t in TYPES:
             n, s = money_out.get((start, t), (0, ZERO))
@@ -519,19 +559,34 @@ def _weekly(today):
 # Public
 # ---------------------------------------------------------------------------
 
-def finance_head_summary(period='month', today=None):
+def finance_head_summary(period='month', today=None, receipts_on=False):
     """Every Finance Head figure for `period` ('month', '30d' or 'fy') ending `today`
     (default timezone.localdate(), H22). SIX queries whatever the data size; see the
-    module docstring for the rulings and the return shape."""
+    module docstring for the rulings and the return shape.
+
+    `receipts_on` (FIN-M-B5-8): CLIENT_RECEIPTS_LIVE as the caller read it. On, money in
+    follows confirmed receipts (client_money.money_in, K2-K6) and owed figures net of
+    confirmed money (K9): SEVEN queries. received_period / received_all_time then carry
+    basis 'date_received', old_count and old_sum (the old-records part, K5), and the
+    result gains 'awaiting_receipts' {sum, count, queried} (FR2). Off: exactly as before."""
     today = today or timezone.localdate()
     start = period_start(period, today)
 
     result = {'period': period, 'period_start': start, 'period_end': today,
               'booked': _booked()}
-    result.update(_incoming(today, start))
+    result.update(_incoming(today, start, receipts_on))
     result.update(_outgoing(today, start))
     result['bills_not_forwarded'] = _bills_not_forwarded()
-    result['weekly'] = _weekly(today)
+    received = None
+    if receipts_on:
+        received = money_in(live_residential_milestones())
+        result['received_period'] = {**received.between(start, today),
+                                     'basis': 'date_received'}
+        result['received_all_time'] = {**received.all_time(), 'basis': 'date_received'}
+        result['awaiting_receipts'] = {'sum': received.awaiting,
+                                       'count': received.awaiting_receipts,
+                                       'queried': received.queried_receipts}
+    result['weekly'] = _weekly(today, received)
 
     # H7/H8: money in, "to collect" and net exist for Residential only; None elsewhere
     # means "not in PMS", which the page must not draw as 0.

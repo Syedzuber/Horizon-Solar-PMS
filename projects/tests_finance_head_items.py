@@ -577,10 +577,12 @@ class CheckFilterTests(ItemsFixture):
                 self.assertIsNone(result['filters']['check'])
 
     def test_each_item_carries_its_note(self):
+        # FIN-M-B5-8: on late_invoice (by_coordinator, the check this used, was withdrawn).
         self.build_one_of_each()
-        result, _ = self.checked(check='by_coordinator')
+        result, _ = self.checked(check='late_invoice')
+        done = self.today - timedelta(days=10)
         self.assertEqual([i.check_note for i in result['items']],
-                         ['Recorded by Fw_Coord (Project Coordinator)'])
+                         [f'Trigger done {done.day} {done:%b %Y}, 10 days ago'])
 
     def test_the_section_says_which_check_and_keeps_it_in_links(self):
         self.build_one_of_each()

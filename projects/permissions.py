@@ -3414,10 +3414,9 @@ FINANCE_HEAD_HOLDER_ROLES = frozenset({'Finance'})
 #: holding the flag (user_is_finance_head), which is the point of the flag.
 FINANCE_HEAD_PAGE_ROLES = frozenset({'CEO', 'Admin', 'System Admin'})
 
-#: Roles expected to record client money (FIN-H-B5). A receipt recorded by any other
-#: role at the time (Coordinator, PM, an automatic move) is flagged on the Finance Head
-#: page's "Recorded outside Finance" check. Read only by finance_head_checks.
-MONEY_RECORDER_ROLES = frozenset({'Finance'})
+# FIN-M-B5-8 (K7, ruling H65 / FIN-H-B5-1, 17 Nov): MONEY_RECORDER_ROLES and the Finance
+# Head page's "Recorded outside Finance" check were withdrawn — BD and the PM side record
+# client money as their job (FR1, FR8), so flagging them flagged people doing their job.
 
 
 def _user_and_profile_active(user):
@@ -4889,8 +4888,7 @@ def user_can_import_milestone_amounts(user):
 # ---------------------------------------------------------------------------
 
 #: The role that checks receipts against the bank (FR2) and may record on any milestone
-#: (FR11). The same role as MONEY_RECORDER_ROLES, named apart because the two answer
-#: different questions and may diverge.
+#: (FR11).
 RECEIPT_FINANCE_ROLES = frozenset({'Finance'})
 
 #: Administrators who never record a receipt (D6), even if some site lists them as its PM
@@ -5118,8 +5116,11 @@ def user_can_view_receipt(user, receipt, can_manage=None):
         side on any milestone, the site's BD on M1 — the people who answer for it when
         the recorder has left.
     Blocked, and why:
-      * CEO, Admin and System Admin — they see totals on the Finance Head page (B5-8),
-        never single receipts, in this build (F5);
+      * CEO, Admin and System Admin — they do not open a receipt's PAGE or its proof
+        (F5). This governs the receipt page only: the Finance Head page's own history
+        lines (amount, date received, person, event) show to everyone who may open that
+        page (FIN-M-B5-8 ruling Q5; H3, H5, H12), and only its LINK to this page asks
+        this helper;
       * everyone else who can see the site (another BD, the BD on M2/M3, SE, SCM …);
       * anyone deactivated.
     `can_manage` is passed through to user_can_record_receipt (see there). Finance and

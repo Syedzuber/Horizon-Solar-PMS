@@ -3,10 +3,10 @@ FIN-H-B5 — the Finance Head page's data-trust checks and "Who recorded what"
 (finance_head_checks.py and its two sections on /finance/head/).
 
 THE RULES PINNED HERE (rulings H18, H20, H60-H62; B5 answers 1-11):
-  * Eight checks, each counting only items the item list draws (count == items opened),
+  * Seven checks, each counting only items the item list draws (count == items opened),
     test and soft-deleted sites excluded, a count of 0 drawn without a link.
-  * Recorded outside Finance: the recorder's role AT THE TIME (transition, else the older
-    line's text) not in MONEY_RECORDER_ROLES; older ones marked.
+  * "Recorded outside Finance" is gone (withdrawn by H65 / FIN-H-B5-1, removed in
+    FIN-M-B5-8 K7); an old ?check=by_coordinator link shows the normal list.
   * Amount changed after Received: amount lines more than 60 s after the receipt.
   * Late invoice / late payment at 6 vs 7 days; undated rows reported, not counted.
   * Payment with no vendor invoice: order-backed only; a bill payment never.
@@ -27,12 +27,11 @@ from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-from .finance_head_checks import CHECK_KEYS, OLDER_ROLE_NOTE, finance_head_checks
-from .models import (ACTOR_ROLE_SYSTEM, SUBJECT_PAYMENT_MILESTONE, SUBJECT_PAYMENT_REQUEST,
+from .finance_head_checks import CHECK_KEYS, finance_head_checks
+from .models import (SUBJECT_PAYMENT_MILESTONE, SUBJECT_PAYMENT_REQUEST,
                      VENDOR_ORDER_DOC_INVOICE, ActivityLog, PaymentMilestone,
                      PaymentRequest, PaymentRequestHold, StatusTransition,
                      VendorOrderDocument)
-from .permissions import MONEY_RECORDER_ROLES
 from .tests_finance_head_items import ItemsFixture
 from .tests_finance_head_page import URL
 from .tests_finance_work import _profile
@@ -108,12 +107,10 @@ class ChecksFixture(ItemsFixture):
 
 class ConstantTests(ChecksFixture):
 
-    def test_money_recorder_roles_is_finance_only(self):
-        self.assertEqual(MONEY_RECORDER_ROLES, frozenset({'Finance'}))
-
-    def test_eight_checks_in_the_page_order(self):
+    def test_seven_checks_in_the_page_order(self):
+        # FIN-M-B5-8 K7: by_coordinator withdrawn; the order of the rest is unchanged.
         self.assertEqual(CHECK_KEYS, (
-            'no_amount', 'received_no_amount', 'by_coordinator', 'invoiced_no_number',
+            'no_amount', 'received_no_amount', 'invoiced_no_number',
             'paid_no_vendor_invoice', 'late_invoice', 'late_payment',
             'changed_after_received'))
 
@@ -152,45 +149,23 @@ class AmountChecksTests(ChecksFixture):
         self.assertEqual(self.ids('invoiced_no_number'), {f'milestone-{m2.pk}'})
 
 
-class RecordedOutsideFinanceTests(ChecksFixture):
+class WithdrawnCheckTests(ChecksFixture):
+    """FIN-M-B5-8 K7 (H65 / FIN-H-B5-1): "Recorded outside Finance" flagged BD and the PM
+    side for recording client money, which is their job (FR1, FR8). It is gone, and an
+    old link to it falls back to the normal list."""
 
-    def test_transition_role_decides(self):
-        coord = self.received_by(self.site(), 'M1', self.coord, COORD, self.ago(3))
-        self.received_by(self.site(), 'M1', self.finance, 'Finance', self.ago(3))
-        system = self.received_by(self.site(), 'M1', None, ACTOR_ROLE_SYSTEM, self.ago(3))
-        check = self.checks()['by_coordinator']
-        self.assertEqual(set(check['items']),
-                         {f'milestone-{coord.pk}', f'milestone-{system.pk}'})
-        self.assertEqual(check['items'][f'milestone-{coord.pk}'],
-                         f'Recorded by Fw_Coord ({COORD})')
-        self.assertEqual(check['items'][f'milestone-{system.pk}'], 'Recorded by System')
-        self.assertEqual(check['extra'], '')
-
-    def test_older_line_role_decides_and_is_marked(self):
-        coord = self.older_receipt(self.site(), 'M1', 'Fw_Coord', COORD, self.ago(80))
-        self.older_receipt(self.site(), 'M1', 'Fw_Fin', 'Finance', self.ago(80))
-        check = self.checks()['by_coordinator']
-        self.assertEqual(set(check['items']), {f'milestone-{coord.pk}'})
-        self.assertEqual(check['items'][f'milestone-{coord.pk}'],
-                         f'Recorded by Fw_Coord ({COORD}) — {OLDER_ROLE_NOTE}')
-        self.assertEqual(check['extra'], f'1 of these from older records — {OLDER_ROLE_NOTE}')
-
-    def test_the_transition_wins_over_the_older_line(self):
-        # The 12 ledger receipts also have the older line, written ms later.
-        site = self.site()
-        m = self.received_by(site, 'M1', self.finance, 'Finance', self.ago(3))
-        self.log(site, "Milestone M1 auto-marked Received via completion of Finance task "
-                       f"'Advance Payment' by Fw_Coord ({COORD})", self.ago(3))
-        self.assertNotIn(f'milestone-{m.pk}', self.ids('by_coordinator'))
-
-    def test_a_receipt_with_no_record_is_not_counted(self):
-        self.received(self.site(), 'M1', '1', self.today)
-        self.assertEqual(self.checks()['by_coordinator']['count'], 0)
-
-    def test_test_and_deleted_sites_are_out(self):
-        self.received_by(self.site(is_test=True), 'M1', self.coord, COORD, self.ago(3))
-        self.older_receipt(self.site(is_deleted=True), 'M1', 'Fw_Coord', COORD, self.ago(80))
-        self.assertEqual(self.checks()['by_coordinator']['count'], 0)
+    def test_gone_and_an_old_link_falls_back_to_the_normal_list(self):
+        self.received_by(self.site(), 'M1', self.coord, COORD, self.ago(3))
+        self.older_receipt(self.site(), 'M1', 'Fw_Coord', COORD, self.ago(80))
+        self.assertNotIn('by_coordinator', self.checks())
+        client = self.client_for(self.head)
+        old = client.get(URL + '?check=by_coordinator').content.decode()
+        plain = client.get(URL).content.decode()
+        self.assertNotIn('Recorded outside Finance', old)
+        self.assertNotIn('data-items-check', old)
+        section = lambda html: (html.split('<!-- fhi:start -->', 1)[1]    # noqa: E731
+                                .split('<!-- fhi:end -->', 1)[0])
+        self.assertEqual(section(old), section(plain))
 
 
 class ChangedAfterReceivedTests(ChecksFixture):
@@ -442,7 +417,7 @@ class QueryCountTests(ChecksFixture):
             if i % 3 == 0:
                 self.invoice_doc(p)
         with_payments = self.count()
-        checked = self.count('?check=by_coordinator&q=fw')
+        checked = self.count('?check=late_payment&q=fw')
         print(f'\nFIN-H-B5 queries: 3/0={small}, 30/0={large}, 30/10={with_payments}, '
               f'check={checked}')
         self.assertEqual((small, large, with_payments, checked), (23, 23, 23, 23))

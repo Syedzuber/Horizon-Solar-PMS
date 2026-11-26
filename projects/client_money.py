@@ -20,24 +20,35 @@ here while it is off (ruling J1: every page exactly as before, query counts incl
 
 QUERIES. Set-based, a fixed number per call whatever the number of milestones or
 receipts (J10): milestone_money() and receipts_confirmed_on() are one query each,
-client_payment_owed() is one aggregate, unreceived_money() and owed() none. Never a
-query per row.
+client_payment_owed() is one aggregate, money_in() two, unreceived_money() and owed()
+none. Never a query per row.
 
 SCOPE (J9) belongs to the caller: each function takes the milestones, the queryset or the
 project filter the calling page already uses; nothing here narrows or widens it.
 
-Out of scope (J8, ruling Q12): the Finance Head page and its period figures. money_in()
-and the unmarked-Received question move to FIN-M-B5-8.
+money_in() (FIN-M-B5-8, K2) is the Finance Head page's period and weekly money in: the
+only reader that dates money, so the only one that reads every confirmed receipt's own
+date received (FR13).
+
+KNOWN DIFFERENCE (FIN-M-B5-8 ruling Q1): a "straggler" — Received through an old path,
+not marked received_before_receipts, no receipt row (FR40(1)) — counts at its cached
+amount_received in money_in() and client_payment_owed(), but milestone_money() gives it
+₹0 confirmed, so the milestone card shows it with no money line.
+TODO: make the card show a straggler's amount_received (follow-up, ruled out of FIN-M-B5-8;
+expected 0 stragglers after the marking command runs).
 """
 from dataclasses import dataclass, field
+from datetime import timedelta
 from decimal import Decimal
 
-from django.db.models import Count, DecimalField, Exists, F, OuterRef, Q, Sum, Value
+from django.db.models import (Case, Count, DateField, DecimalField, Exists, F, OuterRef, Q,
+                              Sum, Value, When)
 from django.db.models.functions import Coalesce
 
-from .models import PaymentReceipt
+from .models import PaymentMilestone, PaymentReceipt
 from .money_format import format_rupees
-from .receipts import UNCONFIRMED_STATUSES, ReceiptTotals, milestone_receipt_label
+from .receipts import (LIVE_STATUSES, UNCONFIRMED_STATUSES, ReceiptTotals,
+                       milestone_receipt_label)
 
 ZERO = Decimal('0.00')
 
@@ -197,3 +208,131 @@ def receipts_confirmed_on(day, project_filter):
                 .filter(status=PaymentReceipt.CONFIRMED, confirmed_at__date=day, **scope)
                 .select_related('milestone__project')
                 .order_by('confirmed_at', 'pk'))
+
+
+@dataclass
+class MoneyIn:
+    """Client money in, grouped by day, for the Finance Head page (money_in). Each dict is
+    {day: [count, sum]} or {day: [count, sum, count without amount]}; a day of None means
+    no date was ever recorded (an old record), counted in all_time() only."""
+    confirmed: dict                   # Finance-confirmed receipts by date received (FR13)
+    old: dict                         # old records: legacy (FR37) + stragglers (Q1)
+    awaiting: Decimal = ZERO          # recorded + queried: current state, never money in (FR2)
+    awaiting_receipts: int = 0
+    queried_receipts: int = 0
+
+    def _days(self):
+        for day, (n, s) in self.confirmed.items():
+            yield day, n, s, 0, False
+        for day, (n, s, blank) in self.old.items():
+            yield day, n, s, blank, True
+
+    def between(self, start, end):
+        """{count, sum, null_amount_count, old_count, old_sum} for days start..end
+        (inclusive). `count` is confirmed receipts plus old-record milestones."""
+        out = {'count': 0, 'sum': ZERO, 'null_amount_count': 0, 'old_count': 0,
+               'old_sum': ZERO}
+        for day, n, s, blank, is_old in self._days():
+            if day is None or not start <= day <= end:
+                continue
+            out['count'] += n
+            out['sum'] += s
+            out['null_amount_count'] += blank
+            if is_old:
+                out['old_count'] += n
+                out['old_sum'] += s
+        return out
+
+    def all_time(self):
+        """As between(), over every day, undated old records included (as the cache-based
+        figure counted every Received milestone whatever its date)."""
+        out = {'count': 0, 'sum': ZERO, 'null_amount_count': 0, 'old_count': 0,
+               'old_sum': ZERO}
+        for _, n, s, blank, is_old in self._days():
+            out['count'] += n
+            out['sum'] += s
+            out['null_amount_count'] += blank
+            if is_old:
+                out['old_count'] += n
+                out['old_sum'] += s
+        return out
+
+    def by_week(self, first_monday, end):
+        """{Monday: (count, sum)} for days first_monday..end, each day in its Monday-start
+        week (the page's weekly chart)."""
+        weeks = {}
+        for day, n, s, _, _ in self._days():
+            if day is None or not first_monday <= day <= end:
+                continue
+            monday = day - timedelta(days=day.weekday())
+            count, total = weeks.get(monday, (0, ZERO))
+            weeks[monday] = (count + n, total + s)
+        return weeks
+
+
+def money_in(milestones):
+    """Money in for the caller's scoped `milestones` (a PaymentMilestone queryset; the
+    Finance Head page passes finance_head.live_residential_milestones()), as a MoneyIn.
+    TWO queries whatever the data size (K2); periods, weeks and the all-time figure are
+    then worked out in Python from the grouped rows, so they can never disagree.
+
+    WHAT COUNTS (FR2, FR13, FR37, K4):
+      * every CONFIRMED receipt, on its own date received — two receipts on one milestone
+        can land in different periods and weeks; an overpayment counts in full (it is
+        cash that came in); an undone confirmation is no longer confirmed, so it drops out;
+      * a legacy milestone (received_before_receipts) with NO confirmed receipt, at its
+        old amount on its old date (legacy_amount_received / legacy_received_date) —
+        back again if every confirmation on it is undone;
+      * a straggler — Received, not marked, no receipt row of any status (FR40(1), the
+        rows recompute leaves alone) — at amount_received on received_date (ruling Q1).
+    Recorded and queried receipts are returned apart as `awaiting` (FR2); rejected and
+    amount-needed rows count nowhere.
+
+    Project type: the Finance Head page passes Residential milestones only; receipts
+    exist on Residential sites only (FR28), so no other type is ever summed here."""
+    # A subquery, not an id list: the scope's size never changes the query's shape.
+    scope = milestones.order_by().values('pk')
+    money = MoneyIn(confirmed={}, old={})
+
+    # Query 1. What it fetches: every live receipt (recorded, queried, confirmed) on the
+    # scope, grouped by status and date received — confirmed rows give money in, the
+    # other two the awaiting line, from the same read.
+    for row in (PaymentReceipt.objects
+                .filter(milestone__in=scope, status__in=LIVE_STATUSES)
+                .values('status', 'date_received')
+                .annotate(n=Count('pk'), s=Sum('amount'))
+                .order_by()):
+        if row['status'] == PaymentReceipt.CONFIRMED:
+            money.confirmed[row['date_received']] = [row['n'], row['s'] or ZERO]
+        else:
+            money.awaiting += row['s'] or ZERO
+            money.awaiting_receipts += row['n']
+            if row['status'] == PaymentReceipt.QUERIED:
+                money.queried_receipts += row['n']
+
+    # Query 2. What it fetches: the old records, grouped by their day — legacy milestones
+    # with no confirmed receipt (FR37) and stragglers (K4). The two Exists are correlated
+    # inside the one statement, never a query per milestone.
+    confirmed = Exists(PaymentReceipt.objects.filter(milestone=OuterRef('pk'),
+                                                     status=PaymentReceipt.CONFIRMED))
+    any_receipt = Exists(PaymentReceipt.objects.filter(milestone=OuterRef('pk')))
+    legacy = Q(received_before_receipts=True)
+    old_rows = (milestones
+                .filter((legacy & ~confirmed)
+                        | (Q(status=PaymentMilestone.RECEIVED, received_before_receipts=False)
+                           & ~any_receipt))
+                .annotate(day=Case(When(legacy, then=F('legacy_received_date')),
+                                   default=F('received_date'), output_field=DateField()),
+                          money=Case(When(legacy, then=F('legacy_amount_received')),
+                                     default=F('amount_received'),
+                                     output_field=DecimalField(max_digits=12,
+                                                               decimal_places=2)))
+                .order_by()
+                .values('day')
+                .annotate(n=Count('pk'), s=Sum('money'),
+                          blank=Count('pk', filter=(legacy
+                                                    & Q(legacy_amount_received__isnull=True))
+                                      | (~legacy & Q(amount_received__isnull=True)))))
+    for row in old_rows:
+        money.old[row['day']] = [row['n'], row['s'] or ZERO, row['blank']]
+    return money

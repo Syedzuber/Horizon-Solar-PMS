@@ -860,8 +860,9 @@ def apply_confirmation_task_status(task, milestone, new_status, actor, remark=''
 def milestone_receipt_label(milestone, totals):
     """The words a page shows for `milestone`'s money state (H6), from its stored status
     and `totals` (its ReceiptTotals from receipt_totals()). No stored status is added:
-    "Part received" and "Amount needed" are display only. Built for FIN-M-B5-6; no page
-    uses it yet.
+    "Part received" and "Amount needed" are display only. Read by client_money (the
+    milestone card, BD and Finance work, FIN-M-B5-6) and the Finance Head item list
+    (FIN-M-B5-8).
 
       Received                      status Received (and money confirmed, or not legacy)
       Received before receipts      legacy (FR37) Received, no confirmed money yet

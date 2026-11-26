@@ -44,10 +44,26 @@ keeps ?period= and lands on #items. Alpine holds only which rows are expanded.
 
 FIN-H-B5 adds two sections before the list: "Who recorded what" (the period's receipts,
 invoices, approvals, holds and payments per person, alphabetical, workload not a
-ranking) and "Can these numbers be trusted?" (eight all-time checks, each count opening
-its items in the list through ?check=<key>#items). Both come from
-finance_head_checks.finance_head_checks() (four more queries, fixed: 23 in all); the
-list's check filter reuses its results and adds none.
+ranking) and "Can these numbers be trusted?" (seven all-time checks since FIN-M-B5-8
+withdrew "Recorded outside Finance", each count opening its items in the list through
+?check=<key>#items). Both come from finance_head_checks.finance_head_checks() (four more
+queries, fixed: 23 in all); the list's check filter reuses its results and adds none.
+
+FIN-M-B5-8 — CLIENT_RECEIPTS_LIVE, read ONCE here (receipts.receipts_live) and passed to
+the three data calls. Off: the page is exactly as before (23 queries). On (27 queries:
++1 figures, +2 checks, +1 list):
+    * money in is "received — confirmed by Finance, by date received" (FR13, replacing
+      H17's "recorded"), with "includes ₹x from old records (before receipts)" when old
+      Received milestones are in it (FR37), and money awaiting Finance on its own row
+      (FR2) — never in money in; the chart follows (K6); owed figures net of confirmed
+      money (K9);
+    * the checks gain "Awaiting Finance confirmation" and "No BD set" (its sites listed
+      in place, collapsed; there is no ?check= for it), "Amount not set" reads "No
+      agreed amount", "Received with no amount" reads "Received before receipts, not yet
+      recorded" (K8);
+    * "Who recorded what" shows Receipts recorded and Receipts confirmed (K11, ruling Q7);
+    * the list shows money labels, owed amounts, receipt history and, for a viewer the
+      receipt page admits, receipt links (K10, ruling Q5).
 """
 from decimal import ROUND_HALF_UP, Decimal
 from urllib.parse import urlencode
@@ -63,6 +79,7 @@ from .finance_head_checks import check_filters, finance_head_checks
 from .finance_head_items import clean_item_params, finance_head_items
 from .models import APPROVAL_APPROVED, APPROVAL_KIND_CONTRACTOR_BILL, PaymentRequest
 from .permissions import user_can_view_approval_list, user_can_view_finance_head_page
+from .receipts import receipts_live
 # Finance work's rupees() is the page family's one full-figure format (views._format_inr
 # underneath). views_finance_work imports views at module level, never this module, so
 # this import is not circular.
@@ -80,6 +97,12 @@ NO_MONEY_OUT = 'Money out is not recorded in PMS yet.'
 #: FIN-H-B5: the who-recorded-what footnote (ruling wording).
 WHO_FOOTNOTE = ('From PMS records. Older receipts (before mid-September) show the role '
                 'written in the log at the time.')
+#: FIN-M-B5-8 ruling Q7: with the switch on, the clause the footnote gains when "Receipts
+#: recorded" includes recordings from before receipt records began.
+WHO_FOOTNOTE_OLD = ('Receipts recorded includes {n} recorded before receipt records began '
+                    '(older receipts may have no amount).')
+#: FIN-M-B5-8 (K5): the money-in basis with the switch on, replacing "Recorded".
+RECEIVED_BASIS = 'confirmed by Finance, by date received'
 #: An empty cell in the who-recorded-what table.
 NONE_MARK = '—'
 #: H8: money in, to collect and net for RESCO / CAPEX (None in the data).
@@ -190,7 +213,7 @@ def _tile(key, label, value, detail, href=None, tone='', message=None):
             'message': message}
 
 
-def _tiles(s, recorded_label):
+def _tiles(s, recorded_label, receipts_on=False):
     has_payments = s['has_payment_data']
     received, paid = s['received_period'], s['paid_period']
     invoiced, due = s['invoiced'], s['due']
@@ -198,9 +221,13 @@ def _tiles(s, recorded_label):
     coverage = s['coverage']
     out_types = [f'{TYPE_LABELS[t]} {rupees(paid["by_type"][t]["sum"])}' for t in TYPES
                  if t != 'CAPEX' or paid['by_type'][t]['count']]
+    # K5: with the switch on, money in is received money Finance confirmed, by the day it
+    # arrived (FR13) — no longer the day it was recorded (H17).
+    in_basis = ([f'Received {recorded_label}', RECEIVED_BASIS] if receipts_on
+                else [f'Recorded {recorded_label}'])
     return [
         _tile('in', 'Money in', received['sum'],
-              [f'Recorded {recorded_label}', 'Residential', _unset(received['null_amount_count'])]),
+              in_basis + ['Residential', _unset(received['null_amount_count'])]),
         _tile('out', 'Money out', paid['sum'],
               [f'Paid {recorded_label}', ' · '.join(out_types)],
               message=None if has_payments else NO_PAYMENTS),
@@ -250,7 +277,7 @@ def _ageing(buckets):
     return {'parts': parts, 'count': total_n, 'empty': total_n == 0}
 
 
-def _incoming(s, recorded_label):
+def _incoming(s, recorded_label, receipts_on=False):
     booked, not_due, due = s['booked'], s['not_due'], s['due']
     invoiced, received, all_time = s['invoiced'], s['received_period'], s['received_all_time']
     due_notes = [f'M1 {due["m1"]["count"]} · M2/M3 {due["m2_m3"]["count"]}']
@@ -258,7 +285,16 @@ def _incoming(s, recorded_label):
         due_notes.append(f'oldest due since {_day_month(due["oldest_due_since"])}')
     if due['undated_count']:
         due_notes.append(f'{due["undated_count"]} with no due date')
-    return [
+    received_label = f'Recorded {recorded_label}'
+    received_notes = [f'All time {rupees(all_time["sum"])} ({all_time["count"]})',
+                      _unset(received['null_amount_count'])]
+    if receipts_on:
+        received_label = f'Received {recorded_label} — {RECEIVED_BASIS}'
+        # K5: said only when old Received milestones are in the period's figure (FR37).
+        if received['old_sum'] > 0:
+            received_notes.append(f'includes {rupees(received["old_sum"])} from old records '
+                                  f'(before receipts)')
+    rows = [
         {'key': 'booked', 'label': 'Booked contract value', 'amount': rupees(booked['sum']),
          'count': _plural(booked['count'], 'activated site'),
          'notes': [f'+ {booked["draft_count"]} Draft' if booked['draft_count'] else '',
@@ -273,11 +309,23 @@ def _incoming(s, recorded_label):
         {'key': 'invoiced', 'label': 'Invoiced, awaiting payment',
          'amount': rupees(invoiced['sum']), 'count': _plural(invoiced['count'], 'invoice'),
          'notes': [_unset(invoiced['null_amount_count'])], 'href': _finance_work('invoiced')},
-        {'key': 'received', 'label': f'Recorded {recorded_label}',
+        {'key': 'received', 'label': received_label,
          'amount': rupees(received['sum']), 'count': _plural(received['count'], 'receipt'),
-         'notes': [f'All time {rupees(all_time["sum"])} ({all_time["count"]})',
-                   _unset(received['null_amount_count'])], 'href': None},
+         'notes': received_notes, 'href': None},
     ]
+    if receipts_on:
+        # K5 / FR2: money recorded but not yet confirmed — a current state, not a period
+        # figure, and never part of money in.
+        waiting = s['awaiting_receipts']
+        rows.append({
+            'key': 'awaiting_receipts', 'label': 'Awaiting Finance confirmation',
+            'amount': rupees(waiting['sum']),
+            'count': (f'{rupees(waiting["sum"])} recorded, awaiting Finance confirmation '
+                      f'({_plural(waiting["count"], "receipt")})'),
+            'notes': [f'{waiting["queried"]} queried' if waiting['queried'] else '',
+                      'not in money in'],
+            'href': None})
+    return rows
 
 
 def _outgoing(s, recorded_label):
@@ -365,12 +413,31 @@ def _net_cards(s):
 
 def _trust(checks, period):
     """FIN-H-B5 "Can these numbers be trusted?": each check as drawn. A count above 0
-    links to the item list filtered to exactly those items (?check=); 0 has no link."""
-    return [{'key': c['key'], 'label': c['label'], 'why': c['why'], 'count': c['count'],
-             'extra': c['extra'],
-             'href': (f'?{urlencode({"period": period, "check": c["key"]})}#items'
-                      if c['count'] else None)}
-            for c in checks]
+    links to the item list filtered to exactly those items (?check=); 0 has no link.
+
+    FIN-M-B5-8 (ruling Q2): "No BD set" counts sites, which the list cannot open, so it
+    has no link; its sites are listed in place (collapsed), each linking to the site's
+    overview, where the BD is set. Count = sites listed (H66)."""
+    rows = []
+    for c in checks:
+        row = {'key': c['key'], 'label': c['label'], 'why': c['why'], 'count': c['count'],
+               'extra': c['extra'],
+               'href': (f'?{urlencode({"period": period, "check": c["key"]})}#items'
+                        if c['count'] and 'sites' not in c else None)}
+        if 'sites' in c:
+            row['sites'] = [{**site, 'href': reverse('project_overview',
+                                                     args=[site['project_id']])}
+                            for site in c['sites']]
+        rows.append(row)
+    return rows
+
+
+def _who_footnote(who, receipts_on):
+    """The table's footnote; with the switch on it says how many "Receipts recorded"
+    entries date from before receipt records began (ruling Q7), when there are any."""
+    if receipts_on and who['old_receipts']:
+        return f'{WHO_FOOTNOTE} {WHO_FOOTNOTE_OLD.format(n=who["old_receipts"])}'
+    return WHO_FOOTNOTE
 
 
 def _who_rows(who):
@@ -397,9 +464,12 @@ def _who_rows(who):
                                                      if r['held_n'] else '')
             if r['paid_n']:
                 paid = f'{r["paid_n"]} · {rupees(r["paid_sum"])}'
+        # FIN-M-B5-8 (K11): receipts still confirmed, by the person who confirmed them.
+        confirmed = (f'{r["confirmed_n"]} · {rupees(r["confirmed_sum"])}'
+                     if r['confirmed_n'] else NONE_MARK)
         rows.append({'key': r['key'], 'name': r['name'], 'role': ' / '.join(r['roles']),
                      'head': r['head'], 'finance': r['finance'], 'older': r['older'],
-                     'money': money, 'unset': r['received_unset'],
+                     'money': money, 'unset': r['received_unset'], 'confirmed': confirmed,
                      'invoices': str(r['invoices_n']) if r['invoices_n'] else NONE_MARK,
                      'approvals': approvals, 'paid': paid})
     return rows
@@ -437,7 +507,10 @@ def finance_head(request):
         return _forbidden(request)
 
     period = _period(request)
-    s = finance_head_summary(period)
+    # FIN-M-B5-8: the switch, read once and handed to all three data calls, so the
+    # figures, the checks and the list can never disagree about it mid-request.
+    receipts_on = receipts_live()
+    s = finance_head_summary(period, receipts_on=receipts_on)
     recorded_label = _range_label(s['period_start'], s['period_end'])
 
     # The approvals list admits SCM, PM, CEO, Admin, System Admin and Design Head
@@ -455,12 +528,15 @@ def finance_head(request):
     # FIN-H-B5: trust checks (all-time) and who recorded what (the period). Worked out
     # once, before the list, because the list's ?check= filter reads these results
     # instead of querying again.
-    checks = finance_head_checks(period)
+    checks = finance_head_checks(period, receipts_on=receipts_on)
 
     # FIN-H-B4: the "Every item" list. Its GET parameters are cleaned (unknown values fall
     # back to defaults) and the period rides along so every list link keeps it.
+    # FIN-M-B5-8: the viewer is passed only so a receipt link is drawn for someone the
+    # receipt page admits (F5, ruling Q5).
     items = finance_head_items({**clean_item_params(request.GET), 'period': period},
-                               can_open_approvals, checks=check_filters(checks['checks']))
+                               can_open_approvals, checks=check_filters(checks['checks']),
+                               receipts_on=receipts_on, viewer=request.user)
 
     bills = s['bills_not_forwarded']
     return render(request, 'projects/finance_head.html', {
@@ -471,8 +547,9 @@ def finance_head(request):
         'recorded_label': recorded_label,
         'has_payment_data': s['has_payment_data'],
         'no_payments': NO_PAYMENTS,
-        'tiles': _tiles(s, recorded_label),
-        'incoming': _incoming(s, recorded_label),
+        'receipts_on': receipts_on,
+        'tiles': _tiles(s, recorded_label, receipts_on),
+        'incoming': _incoming(s, recorded_label, receipts_on),
         'receivables': _ageing(s['receivables_ageing']['buckets']),
         'receivables_unset': _unset(s['invoiced']['null_amount_count']),
         'outgoing': _outgoing(s, recorded_label),
@@ -489,5 +566,5 @@ def finance_head(request):
         'trust': _trust(checks['checks'], period),
         'who': {'rows': _who_rows(checks['who']),
                 'has_payment_data': checks['who']['has_payment_data'],
-                'footnote': WHO_FOOTNOTE},
+                'footnote': _who_footnote(checks['who'], receipts_on)},
     })

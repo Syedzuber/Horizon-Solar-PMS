@@ -191,7 +191,7 @@
   <section class="chartbox" id="weekly" aria-labelledby="h-weekly" x-data="{ sel: null }">
     <h2 id="h-weekly">Last 8 weeks</h2>
     <div class="chartlegend" aria-hidden="true">
-      <span><i style="background: var(--fh-in)"></i>Money in (recorded, Residential)</span>
+      <span><i style="background: var(--fh-in)"></i>Money in ({% if receipts_on %}received, confirmed by Finance{% else %}recorded{% endif %}, Residential)</span>
       <span><i style="background: var(--fh-out)"></i>Money out (paid, all types){% if not has_payment_data %} — {{ no_payments }}{% endif %}</span>
     </div>
     <div class="tip idle" x-show="sel === null">Tap or hover a week for its figures.</div>
@@ -241,12 +241,17 @@
 <!-- fh:end -->
 
 {% comment %}FIN-H-B5 — "Who recorded what" (the period) and "Can these numbers be trusted?"
-   (eight all-time checks). Data: finance_head_checks.finance_head_checks() (four queries,
+   (seven all-time checks). Data: finance_head_checks.finance_head_checks() (four queries,
    fixed). Own .sd wrapper and markers after fh:end, as the item list has, so the B3 tests
    over the fh markers are untouched. No form: each check count is a plain link to the item
    list below (?check=<key>#items); a count of 0 is grey text, not a link. The table scrolls
    sideways inside its own box at phone width; the page itself never does. Rows are
-   alphabetical with no totals, percentages or colour scale (workload, not a ranking).{% endcomment %}
+   alphabetical with no totals, percentages or colour scale (workload, not a ranking).
+   FIN-M-B5-8, switch on (receipts_on): the table's money column becomes "Receipts
+   recorded" and "Receipts confirmed" is added (K11); two more checks; "No BD set" has no
+   link — its sites are listed in place in a <details>, collapsed by default (ruling Q2,
+   phone first). Every switch-on part is inside {% if %} on an existing line, so the
+   switch-off page renders exactly as before (K1).{% endcomment %}
 <!-- fht:start -->
 <div class="sd" id="finance-head-trust">
 <style>
@@ -273,11 +278,11 @@
   {% if not who.has_payment_data %}<p class="meta" data-who-no-payments>{{ no_payments }}</p>{% endif %}
   <div class="fht-scroll" role="region" aria-labelledby="h-who" tabindex="0">
     <table class="fht-table">
-      <thead><tr><th scope="col">Person</th><th scope="col">Money received</th><th scope="col">Invoices raised</th><th scope="col">Approvals</th><th scope="col">Paid out</th></tr></thead>
+      <thead><tr><th scope="col">Person</th>{% if receipts_on %}<th scope="col">Receipts recorded</th><th scope="col">Receipts confirmed</th>{% else %}<th scope="col">Money received</th>{% endif %}<th scope="col">Invoices raised</th><th scope="col">Approvals</th><th scope="col">Paid out</th></tr></thead>
       <tbody>
         {% for r in who.rows %}<tr data-who="{{ r.key }}">
           <th scope="row">{{ r.name }}{% if r.head %} <span class="pill info" data-head>Head</span>{% endif %}<span class="meta" data-role>{{ r.role }}</span></th>
-          <td{% if r.unset %} data-unset{% endif %}>{{ r.money }}</td><td>{{ r.invoices }}</td><td>{{ r.approvals }}</td><td>{{ r.paid }}</td>
+          <td{% if r.unset %} data-unset{% endif %}>{{ r.money }}</td>{% if receipts_on %}<td data-confirmed>{{ r.confirmed }}</td>{% endif %}<td>{{ r.invoices }}</td><td>{{ r.approvals }}</td><td>{{ r.paid }}</td>
         </tr>{% endfor %}
       </tbody>
     </table>
@@ -291,8 +296,8 @@
   <ul class="fht-checks">
     {% for c in trust %}
     <li data-check="{{ c.key }}"{% if not c.count %} class="zero"{% endif %}>
-      {% if c.href %}<a class="fht-n" href="{{ c.href }}" data-check-link aria-label="{{ c.count }}: {{ c.label }} — show these items">{{ c.count }}</a>{% else %}<span class="fht-n" data-check-zero>0</span>{% endif %}
-      <span><span class="lbl">{{ c.label }}</span><span class="meta">{{ c.why }}</span>{% if c.extra %}<span class="meta" data-check-extra>{{ c.extra }}</span>{% endif %}</span>
+      {% if c.href %}<a class="fht-n" href="{{ c.href }}" data-check-link aria-label="{{ c.count }}: {{ c.label }} — show these items">{{ c.count }}</a>{% elif c.sites %}<span class="fht-n" data-check-count>{{ c.count }}</span>{% else %}<span class="fht-n" data-check-zero>0</span>{% endif %}
+      <span><span class="lbl">{{ c.label }}</span><span class="meta">{{ c.why }}</span>{% if c.extra %}<span class="meta" data-check-extra>{{ c.extra }}</span>{% endif %}{% if c.sites %}<details class="meta" data-check-sites><summary>Show the {{ c.count }} site{{ c.count|pluralize }}</summary><ul>{% for site in c.sites %}<li data-site="{{ site.pk }}"><a href="{{ site.href }}">{{ site.code }}</a>{% if site.name %} · {{ site.name }}{% endif %} · {{ site.status }} — {{ site.reason }}</li>{% endfor %}</ul></details>{% endif %}</span>
     </li>
     {% endfor %}
   </ul>
@@ -382,13 +387,13 @@
         <span><span class="dir dir-{{ i.direction }}" data-dir="{{ i.direction }}">{{ i.mark }}</span><span class="code" data-ref>{{ i.reference }}</span><span class="meta">{{ i.type_label }}{% if i.detail %} · {{ i.detail }}{% endif %}</span>{% if i.check_note %}<span class="meta" data-check-note>{{ i.check_note }}</span>{% endif %}</span>
         <span>{{ i.party|default:"—" }}</span>
         <span>{% if i.amount_text %}<span class="amt" data-amount>{{ i.amount_text }}</span>{% else %}<span class="na" data-unset>amount not set</span>{% endif %}<span class="meta">{{ i.amount_label }}</span></span>
-        <span><span class="pill {{ i.tone }}">{{ i.status_label }}</span>{% if i.age is not None %}<span class="meta" data-age>open {{ i.age }} day{{ i.age|pluralize }}</span>{% endif %}</span>
+        <span><span class="pill {{ i.tone }}">{{ i.status_label }}</span>{% if i.money_label %}<span class="meta" data-money-label>{{ i.money_label }}</span>{% endif %}{% if i.age is not None %}<span class="meta" data-age>open {{ i.age }} day{{ i.age|pluralize }}</span>{% endif %}</span>
         <span>{% if i.last_date %}{{ i.last_date|date:"j M Y" }}{% else %}—{% endif %}{% if i.last_who %}<span class="meta" data-last-who>{{ i.last_who }}</span>{% endif %}</span>
         <i data-lucide="chevron-down" class="chev" aria-hidden="true"></i>
       </button>
       <div class="qdet" id="it-{{ i.key }}" x-show="open" x-cloak>
         <ol class="hist" aria-label="History, newest first" data-history>
-          {% for h in i.history %}<li data-line><span class="when">{{ h.when|default:"date not recorded" }}</span><span class="what">{{ h.text }}{% if h.note %} <span class="tag" data-note>{{ h.note }}</span>{% endif %}</span>{% if h.who_text %}<span class="meta" data-who>{{ h.who_text }}</span>{% endif %}</li>
+          {% for h in i.history %}<li data-line><span class="when">{{ h.when|default:"date not recorded" }}</span><span class="what">{{ h.text }}{% if h.note %} <span class="tag" data-note>{{ h.note }}</span>{% endif %}{% if h.href %} <a href="{{ h.href }}" data-history-link="receipt">Open receipt</a>{% endif %}</span>{% if h.who_text %}<span class="meta" data-who>{{ h.who_text }}</span>{% endif %}</li>
           {% empty %}<li class="meta">No history recorded.</li>{% endfor %}
         </ol>
         {% if i.links %}<div class="wbtns">{% for l in i.links %}<a class="wbtn" href="{{ l.href }}" data-link="{{ l.kind }}">{{ l.label }} →</a>{% endfor %}</div>{% endif %}

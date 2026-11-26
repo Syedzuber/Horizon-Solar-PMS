@@ -3,8 +3,9 @@ Finance Head data-trust checks and "Who recorded what" (FIN-H-B5). Data only: no
 URL or template here (views_finance_head draws both sections).
 
 PUBLIC
-    finance_head_checks(period='month', today=None)
+    finance_head_checks(period='month', today=None, receipts_on=False)
         {'checks': [...], 'who': {...}} from FOUR queries, whatever the data size
+        (SIX with the switch on: FIN-M-B5-8 below)
     trust_checks(today=None)            the 'checks' part alone (same four queries)
     who_recorded(period, today=None)    the 'who' part alone (same four queries)
     check_filters(checks)               {key: check} for finance_head_items' ?check=
@@ -19,11 +20,9 @@ SCOPE: the page's own, imported from finance_head and never copied — live, rea
 Residential milestones (live_residential_milestones) and payment requests in scope
 (scoped_payments). Test and soft-deleted sites are out (H14, H28, H31).
 
-THE EIGHT CHECKS (rulings H18, H20, H60-H62; B5 answers 1-7), all-time:
+THE SEVEN CHECKS (rulings H18, H20, H60-H62; B5 answers 1-7), all-time:
     no_amount              milestone amount null
     received_no_amount     Received, amount_received null
-    by_coordinator         Received; the recorder's role AT THE TIME was not in
-                           permissions.MONEY_RECORDER_ROLES (Coordinator, PM, automatic)
     invoiced_no_number     Invoiced M2/M3 with a blank invoice number (M1 never has one)
     paid_no_vendor_invoice order-backed APPROVED / CONFIRMED payment whose order has no
                            VendorOrderDocument of doc_type 'invoice' (a bill's PDF is
@@ -36,6 +35,36 @@ THE EIGHT CHECKS (rulings H18, H20, H60-H62; B5 answers 1-7), all-time:
                            SAME_EVENT_SECONDS after it became Received (a PM save that
                            sets the amount and Received together writes its amount line
                            a few ms after the move: one act, not a later change)
+A recompute that turns a milestone Received when its agreed amount is set never fires
+changed_after_received: the amount line is written BEFORE the move, and recompute's own
+lines use other codes (milestone_amount_received, milestone_updated).
+"Recorded outside Finance" (by_coordinator) was withdrawn (H65 / FIN-H-B5-1, removed in
+FIN-M-B5-8, K7): an old ?check=by_coordinator link is an unknown key, so the item list
+falls back to its normal view.
+
+FIN-M-B5-8 — WITH CLIENT_RECEIPTS_LIVE ON (receipts_on=True), two more queries:
+    5. receipts     every receipt on in-scope milestones, any status, with the role of
+                    its recorder and confirmer AT THE TIME (its first transition / its
+                    latest move to confirmed; correlated subqueries)
+    6. no BD        site_bd.sites_without_bd() (FR21), the one definition of the list
+and the checks read:
+    no_amount              label "No agreed amount" (FR24); same items; the line says how
+                           many are not yet received (receipts can't complete those)
+    received_no_amount     "Received before receipts, not yet recorded" (REM c): marked
+                           legacy milestones with no non-rejected receipt, plus stragglers
+                           (Received, unmarked, no receipt row; FR40(1), ruling Q1)
+    awaiting_confirmation  NEW: milestones with at least one recorded or queried receipt
+    no_bd                  NEW: in-scope sites with no active BD (FR7 scope: Residential,
+                           not deleted, not test, every status but Cancelled — Draft
+                           included). Sites are not items the list can open, so its sites
+                           travel with the check and the page lists them in place (ruling
+                           Q2); check_filters() leaves it out, so ?check=no_bd is ignored.
+and "Who recorded what" (K11, ruling Q7) reads "Receipts recorded" from PaymentReceipt
+(recorder, recorded_at in the period, any status) PLUS the old source's moves to Received
+in the period on milestones marked received_before_receipts (the pre-receipt recordings,
+at their old amount), and adds "Receipts confirmed" (receipts still confirmed, by
+confirmer, confirmed_at in the period; an undone confirmation clears both fields, so it
+drops out). Each act is filed under the role at the time.
 
 WHO RECORDED THE RECEIPT. The latest StatusTransition to Received (actor and
 actor_role_code, copied at write time). Older receipts (before the ledger, mid-September)
@@ -57,11 +86,14 @@ THE FOUR QUERIES
     4. people       every profile, with "is an active Finance user", and the holds it
                     placed in the period (count and role) as subqueries
 
-Not a views module: imports models, permissions, finance_head, finance_head_items and
-milestone_queries only (none of them imports this module, so no cycle). No writes.
+Not a views module: imports models, permissions, finance_head, finance_head_items,
+milestone_queries, receipts, site_bd and views_finance_work (for rupees(), as
+finance_head_items already does) — none of them imports this module, so no cycle. No
+writes.
 """
 from collections import defaultdict
 from datetime import datetime, time, timedelta
+from decimal import Decimal
 
 from django.db.models import Count, Exists, IntegerField, OuterRef, Q, Subquery, Value
 from django.db.models.functions import Coalesce
@@ -72,11 +104,14 @@ from .finance_head import (NOT_ACTIONABLE_STATUSES, due_state, live_residential_
 from .finance_head_items import (AMOUNTS_NAME_RE, AMOUNTS_PREFIX, LEGACY_RECEIVED_RE,
                                  MILESTONE_ENTITY, SAME_EVENT_SECONDS)
 from .milestone_queries import annotate_trigger_done
-from .models import (ACTOR_ROLE_SYSTEM, SUBJECT_PAYMENT_MILESTONE, SUBJECT_PAYMENT_REQUEST,
-                     VENDOR_ORDER_DOC_INVOICE, ActivityLog, PaymentMilestone,
-                     PaymentRequest, PaymentRequestHold, StatusTransition, UserProfile,
-                     VendorOrderDocument)
-from .permissions import MONEY_RECORDER_ROLES, active_finance_users
+from .models import (ACTOR_ROLE_SYSTEM, SUBJECT_PAYMENT_MILESTONE, SUBJECT_PAYMENT_RECEIPT,
+                     SUBJECT_PAYMENT_REQUEST, VENDOR_ORDER_DOC_INVOICE, ActivityLog,
+                     PaymentMilestone, PaymentReceipt, PaymentRequest, PaymentRequestHold,
+                     StatusTransition, UserProfile, VendorOrderDocument)
+from .permissions import active_finance_users
+from .receipts import UNCONFIRMED_STATUSES
+from .site_bd import sites_without_bd, stale_bd_reason
+from .views_finance_work import rupees
 
 #: Ruling: "late" means this many whole days or more.
 LATE_DAYS = 7
@@ -84,15 +119,12 @@ LATE_DAYS = 7
 #: for the PM edit, views.set_milestone_amounts for BD; migration 0121 stamped BD's
 #: older lines with it).
 AMOUNT_CODE = 'milestone_amounts_set'
-#: Shown on items whose recorder is known only from the older log line.
-OLDER_ROLE_NOTE = 'role as recorded in the older log'
 
-#: (key, label, why) in the page's order (B5 answer 1: eight checks).
+#: (key, label, why) in the page's order (B5 answer 1, less the withdrawn by_coordinator:
+#: seven checks).
 CHECKS = (
     ('no_amount', 'Milestone amount not set', 'These count as ₹0 in every total.'),
     ('received_no_amount', 'Received with no amount', 'Money in is understated.'),
-    ('by_coordinator', 'Recorded outside Finance',
-     'Finance did not record this client money; check each receipt against the bank.'),
     ('invoiced_no_number', 'Invoiced with no invoice number',
      "The invoice cannot be matched to the customer's payment."),
     ('paid_no_vendor_invoice', 'Payment approved or paid with no vendor invoice',
@@ -105,6 +137,28 @@ CHECKS = (
      'The agreed figure moved after the money came in.'),
 )
 CHECK_KEYS = tuple(key for key, _, _ in CHECKS)
+
+#: FIN-M-B5-8, switch on: the two checks whose label changes (FR24, REM c) ...
+RECEIPT_LABELS = {
+    'no_amount': 'No agreed amount',
+    'received_no_amount': 'Received before receipts, not yet recorded',
+}
+#: ... and the two added at the end, after the existing order (K8).
+RECEIPT_CHECKS = (
+    ('awaiting_confirmation', 'Awaiting Finance confirmation',
+     'Recorded money counts nowhere until Finance checks it against the bank.'),
+    # FR28: only the site's BD may record the advance; reminders do not exist yet, so the
+    # line names who can record it instead (Zuber's wording ruling, FIN-M-B5-8).
+    ('no_bd', 'No BD set',
+     "The BD can't record the advance (M1) on these sites; only the PM side or Finance can."),
+)
+#: Switch on: the why line that changes with its label (Zuber's wording ruling). Switch
+#: off keeps CHECKS' text, so the page keeps its bytes.
+RECEIPT_WHYS = {
+    'received_no_amount': 'Old money not yet backed by receipt records. Where no amount '
+                          'was recorded, money in is understated.',
+}
+RECEIPT_CHECK_KEYS = tuple(key for key, _, _ in RECEIPT_CHECKS)
 
 
 # ---------------------------------------------------------------------------
@@ -131,10 +185,6 @@ def _full_name(first, last):
 
 def _role_label(code):
     return 'System' if code == ACTOR_ROLE_SYSTEM else (code or '')
-
-
-def _who(name, role):
-    return f'{name} ({role})' if name and role else name or role or 'not recorded'
 
 
 def _plural(n, word):
@@ -181,7 +231,9 @@ def _milestone_rows():
         .values('pk', 'milestone_name', 'status', 'amount', 'amount_received',
                 'invoice_number', 'project', 'project__status', 'project__activated_at',
                 'trigger_status', 'trigger_na', 'trigger_done_at', 'recv_at',
-                'recv_actor', 'recv_role', 'inv_at', 'inv_actor', 'inv_role'))
+                'recv_actor', 'recv_role', 'inv_at', 'inv_actor', 'inv_role',
+                # FIN-M-B5-8: the legacy state, read by the switch-on checks and table.
+                'received_before_receipts', 'legacy_amount_received'))
 
 
 def _log_rows():
@@ -260,6 +312,44 @@ def _people(start, today):
                 'held_n', 'hold_role'))
 
 
+def _receipt_role(order, **match):
+    """The actor_role_code of one of the receipt's transitions (`order` picks which),
+    correlated on the receipt: the role its recorder or confirmer held AT THE TIME."""
+    return Subquery(
+        StatusTransition.objects.filter(subject_type=SUBJECT_PAYMENT_RECEIPT,
+                                        subject_id=OuterRef('pk'), **match)
+        .order_by(*order).values('actor_role_code')[:1])
+
+
+def _receipt_rows():
+    """Query 5 (switch on only, FIN-M-B5-8). Every receipt on an in-scope milestone, any
+    status, light: who recorded and confirmed it and when, with the role each held at the
+    time (the receipt's FIRST transition — its recording — and its latest move to
+    confirmed). Rejected rows are read too: "Receipts recorded" counts every recording
+    (K11) and the legacy check needs "no non-rejected receipt". Scope is a subquery, so
+    the statement's shape never grows with the data."""
+    scope = live_residential_milestones().order_by().values('pk')
+    return list(
+        PaymentReceipt.objects.filter(milestone__in=scope)
+        .annotate(recorded_role=_receipt_role(('occurred_at', 'pk')),
+                  confirmed_role=_receipt_role(('-occurred_at', '-pk'),
+                                               to_status=PaymentReceipt.CONFIRMED))
+        .order_by()
+        .values('pk', 'milestone', 'status', 'amount', 'recorded_by', 'recorded_at',
+                'confirmed_by', 'confirmed_at', 'recorded_role', 'confirmed_role'))
+
+
+def _no_bd_sites():
+    """Query 6 (switch on only). site_bd.sites_without_bd() — the one definition of the
+    "No BD set" list (FR21, FR7 scope, Draft sites included: they have no milestone rows,
+    so a milestone filter would miss them) — as the page lists them in place (ruling Q2).
+    One query: the BD and its login come with it (select_related) for the reason."""
+    return [{'pk': p.pk, 'project_id': p.project_id, 'code': p.site_code or p.project_id,
+             'name': p.site_name or p.customer_name or '', 'status': p.status,
+             'reason': stale_bd_reason(p)}
+            for p in sites_without_bd()]
+
+
 # ---------------------------------------------------------------------------
 # Receipts and amount lines
 # ---------------------------------------------------------------------------
@@ -310,30 +400,60 @@ def _receipt(m, older, names, active_by_name):
 # Checks
 # ---------------------------------------------------------------------------
 
-def _checks(milestones, receipts, amount_lines, payments, today):
-    found = {key: {} for key in CHECK_KEYS}
+def _checks(milestones, receipts, amount_lines, payments, today, live=None):
+    """The checks, in the page's order. `live` (FIN-M-B5-8) is None with the switch off;
+    on, {'receipts': query 5's rows, 'no_bd': query 6's sites} and the switch-on rules in
+    the module docstring apply."""
+    found = {key: {} for key in CHECK_KEYS + (RECEIPT_CHECK_KEYS if live else ())}
     extra = defaultdict(str)
-    older_outside = 0
     undated_invoice = 0
     undated_payment = 0
+
+    # Switch on: each milestone's receipts by status, from query 5 (no query here).
+    by_milestone = defaultdict(list)
+    for r in (live['receipts'] if live else ()):
+        by_milestone[r['milestone']].append(r)
+    not_received_unset = legacy_blank = stragglers = 0
+    awaiting_sum, awaiting_queried = Decimal('0'), 0
 
     for m in milestones:
         if not _listed(m):
             continue
         key = f'milestone-{m["pk"]}'
         status = m['status']
+        mine = by_milestone.get(m['pk'], [])
         if m['amount'] is None:
             found['no_amount'][key] = ''
+            not_received_unset += status != PaymentMilestone.RECEIVED
+        if live:
+            # K8a: at least one receipt waiting for Finance (recorded or queried).
+            waiting = [r for r in mine if r['status'] in UNCONFIRMED_STATUSES]
+            if waiting:
+                money = sum((r['amount'] or 0 for r in waiting), Decimal('0'))
+                queried = sum(r['status'] == PaymentReceipt.QUERIED for r in waiting)
+                awaiting_sum += money
+                awaiting_queried += queried
+                found['awaiting_confirmation'][key] = (
+                    f'{rupees(money)} awaiting Finance · {_plural(len(waiting), "receipt")}'
+                    + (f', {queried} queried' if queried else ''))
         if status == PaymentMilestone.RECEIVED:
-            if m['amount_received'] is None:
+            if live:
+                # K8d / REM (c): an old receipt not yet recorded as a receipt — a marked
+                # legacy milestone with no non-rejected receipt, or a straggler (no
+                # receipt row at all, not marked; ruling Q1). Each says which it is.
+                if m['received_before_receipts']:
+                    if not any(r['status'] != PaymentReceipt.REJECTED for r in mine):
+                        blank = m['legacy_amount_received'] is None
+                        legacy_blank += blank
+                        found['received_no_amount'][key] = (
+                            'no amount recorded' if blank
+                            else f'old amount {rupees(m["legacy_amount_received"])}')
+                elif not mine:
+                    stragglers += 1
+                    found['received_no_amount'][key] = 'not yet marked'
+            elif m['amount_received'] is None:
                 found['received_no_amount'][key] = ''
             rec = receipts.get(m['pk'])
-            if rec is not None and rec['role'] not in MONEY_RECORDER_ROLES:
-                note = f'Recorded by {_who(rec["name"], _role_label(rec["role"]))}'
-                if rec['older']:
-                    note += f' — {OLDER_ROLE_NOTE}'
-                    older_outside += 1
-                found['by_coordinator'][key] = note
             if rec is not None:
                 # B5 answer 6: a line within SAME_EVENT_SECONDS after the receipt is the
                 # same save (amount and status together), not a later change.
@@ -371,27 +491,56 @@ def _checks(milestones, receipts, amount_lines, payments, today):
                 found['late_payment'][key] = \
                     f'Approved {_day(approved)}, {(today - approved).days} days ago'
 
-    if older_outside:
-        extra['by_coordinator'] = (f'{older_outside} of these from older records — '
-                                   f'{OLDER_ROLE_NOTE}')
+    if live:
+        # Ruling Q3: same items, one more line: how many are not yet received. From the
+        # same rows, never a second query.
+        if not_received_unset:
+            extra['no_amount'] = (f"{not_received_unset} not yet received — receipts can't "
+                                  f'complete these')
+        extra['received_no_amount'] = (f'{legacy_blank} with no amount recorded · '
+                                       f'{stragglers} not yet marked')
+        n = len(found['awaiting_confirmation'])
+        if n:
+            extra['awaiting_confirmation'] = (f'{_plural(n, "milestone")} · '
+                                              f'{rupees(awaiting_sum)} '
+                                              f'({awaiting_queried} queried)')
     if undated_invoice:
         extra['late_invoice'] = f'{undated_invoice} due with no trigger date'
     if undated_payment:
         extra['late_payment'] = f'{_plural(undated_payment, "approved request")} ' \
                                 f'with no approval date'
 
-    return [{'key': key, 'label': label, 'why': why, 'count': len(found[key]),
-             'extra': extra[key], 'items': found[key]} for key, label, why in CHECKS]
+    checks = [{'key': key, 'label': RECEIPT_LABELS.get(key, label) if live else label,
+               'why': RECEIPT_WHYS.get(key, why) if live else why,
+               'count': len(found[key]), 'extra': extra[key],
+               'items': found[key]} for key, label, why in CHECKS]
+    if live:
+        checks.append({'key': 'awaiting_confirmation', 'label': RECEIPT_CHECKS[0][1],
+                       'why': RECEIPT_CHECKS[0][2],
+                       'count': len(found['awaiting_confirmation']),
+                       'extra': extra['awaiting_confirmation'],
+                       'items': found['awaiting_confirmation']})
+        # K8b / ruling Q2: count = the sites listed in place (H66); no items to open.
+        checks.append({'key': 'no_bd', 'label': RECEIPT_CHECKS[1][1],
+                       'why': RECEIPT_CHECKS[1][2], 'count': len(live['no_bd']),
+                       'extra': '', 'items': {}, 'sites': live['no_bd']})
+    return checks
 
 
 # ---------------------------------------------------------------------------
 # Who recorded what
 # ---------------------------------------------------------------------------
 
-def _who_recorded(milestones, receipts, payments, people, start, today):
+def _who_recorded(milestones, receipts, payments, people, start, today, live=None):
     """One row per active Finance user (always) and per anyone else with a recorded act
     in the period: a receipt, an invoice, an approval, a hold or a payment (B5 answer 9).
-    Each act is filed under the person and the role they held when they did it."""
+    Each act is filed under the person and the role they held when they did it.
+
+    `live` (FIN-M-B5-8, switch on): received_* become "Receipts recorded" — PaymentReceipt
+    rows recorded in the period (any status) plus the old source's moves to Received in
+    the period on marked legacy milestones, at their old amount (old_n counts those);
+    confirmed_* are "Receipts confirmed" (ruling Q7, K11). The old moves never go in
+    confirmed."""
     by_pk = {p['pk']: p for p in people}
     by_user = {p['user']: p['pk'] for p in people}
     rows = {}
@@ -412,6 +561,7 @@ def _who_recorded(milestones, receipts, payments, people, start, today):
                 'finance': bool(person and person['is_finance']),
                 'roles': set(), 'older': False,
                 'received_n': 0, 'received_sum': 0, 'received_unset': 0,
+                'old_n': 0, 'confirmed_n': 0, 'confirmed_sum': 0,
                 'invoices_n': 0, 'approvals_n': 0, 'held_n': 0, 'paid_n': 0, 'paid_sum': 0,
             }
         return rows[key]
@@ -422,15 +572,23 @@ def _who_recorded(milestones, receipts, payments, people, start, today):
 
     for m in milestones:
         rec = receipts.get(m['pk']) if m['status'] == PaymentMilestone.RECEIVED else None
+        # Switch on: the old source speaks only for marked legacy milestones (their
+        # pre-receipt recording, at the old amount). A milestone recompute turned
+        # Received has a transition whose actor is the CONFIRMER, not a recorder, so it
+        # is never read here; its receipts are below.
+        if live and not m['received_before_receipts']:
+            rec = None
         if rec is not None and in_period(_local(rec['at'])):
             r = row(rec['actor'], rec['name'])
             r['received_n'] += 1
             r['roles'].add(_role_label(rec['role']))
             r['older'] = r['older'] or rec['older']
-            if m['amount_received'] is None:
+            got = m['legacy_amount_received'] if live else m['amount_received']
+            r['old_n'] += bool(live)
+            if got is None:
                 r['received_unset'] += 1
             else:
-                r['received_sum'] += m['amount_received']
+                r['received_sum'] += got
         if in_period(_local(m['inv_at'])):
             r = row(m['inv_actor'])
             r['invoices_n'] += 1
@@ -456,6 +614,27 @@ def _who_recorded(milestones, receipts, payments, people, start, today):
             r['held_n'] += p['held_n']
             r['roles'].add(_role_label(p['hold_role'] or p['role']))
 
+    by_pk_role = {p['pk']: p['role'] for p in people}
+    for rc in (live['receipts'] if live else ()):
+        # K11: every recording in the period, whatever became of it (rejected included).
+        if in_period(_local(rc['recorded_at'])):
+            r = row(rc['recorded_by'])
+            r['received_n'] += 1
+            if rc['amount'] is None:          # a legacy row still waiting for its figures
+                r['received_unset'] += 1
+            else:
+                r['received_sum'] += rc['amount']
+            r['roles'].add(_role_label(rc['recorded_role']
+                                       or by_pk_role.get(rc['recorded_by'], '')))
+        # Still confirmed now, confirmed in the period: undo clears confirmed_by/_at.
+        if (rc['status'] == PaymentReceipt.CONFIRMED
+                and in_period(_local(rc['confirmed_at']))):
+            r = row(rc['confirmed_by'])
+            r['confirmed_n'] += 1
+            r['confirmed_sum'] += rc['amount'] or 0
+            r['roles'].add(_role_label(rc['confirmed_role']
+                                       or by_pk_role.get(rc['confirmed_by'], '')))
+
     result = []
     for r in rows.values():
         r['roles'] = sorted(r['roles']) or ([r['current_role']] if r['current_role'] else [])
@@ -469,14 +648,17 @@ def _who_recorded(milestones, receipts, payments, people, start, today):
 # Public
 # ---------------------------------------------------------------------------
 
-def finance_head_checks(period='month', today=None):
-    """The eight trust checks (all-time) and the who-recorded-what rows for `period`
+def finance_head_checks(period='month', today=None, receipts_on=False):
+    """The seven trust checks (all-time) and the who-recorded-what rows for `period`
     ('month', '30d' or 'fy', finance_head.period_start) ending `today` (default the IST
     date, H22). FOUR queries whatever the data size (module docstring).
 
     Returns {'checks': [...], 'who': {'rows', 'has_payment_data', 'period_start',
-    'period_end'}}. has_payment_data is any scoped payment request, any status: the
-    same rule as finance_head_summary's (H21)."""
+    'period_end', 'old_receipts'}}. has_payment_data is any scoped payment request, any
+    status: the same rule as finance_head_summary's (H21).
+
+    `receipts_on` (FIN-M-B5-8): CLIENT_RECEIPTS_LIVE as the view read it. On: SIX
+    queries, nine checks and the receipt columns (module docstring). Off: as before."""
     today = today or timezone.localdate()
     start = period_start(period, today)
 
@@ -484,6 +666,8 @@ def finance_head_checks(period='month', today=None):
     logs = _log_rows()
     payments = _payment_rows()
     people = _people(start, today)
+    live = ({'receipts': _receipt_rows(), 'no_bd': _no_bd_sites()} if receipts_on
+            else None)
 
     names = {p['pk']: (_full_name(p['user__first_name'], p['user__last_name'])
                        or p['user__username']) for p in people}
@@ -502,16 +686,20 @@ def finance_head_checks(period='month', today=None):
             if rec is not None:
                 receipts[m['pk']] = rec
 
+    rows = _who_recorded(milestones, receipts, payments, people, start, today, live)
     return {
-        'checks': _checks(milestones, receipts, amount_lines, payments, today),
-        'who': {'rows': _who_recorded(milestones, receipts, payments, people, start, today),
+        'checks': _checks(milestones, receipts, amount_lines, payments, today, live),
+        'who': {'rows': rows,
                 'has_payment_data': bool(payments),
-                'period_start': start, 'period_end': today},
+                'period_start': start, 'period_end': today,
+                # Ruling Q7: how many "Receipts recorded" entries came from before receipt
+                # records began (switch on; 0 off), for the footnote.
+                'old_receipts': sum(r['old_n'] for r in rows)},
     }
 
 
 def trust_checks(today=None):
-    """The eight checks alone. Four queries; the page calls finance_head_checks once
+    """The seven checks alone. Four queries; the page calls finance_head_checks once
     instead, so it never pays for both halves twice."""
     return finance_head_checks('month', today)['checks']
 
@@ -523,5 +711,7 @@ def who_recorded(period, today=None):
 
 def check_filters(checks):
     """{key: check} for finance_head_items(checks=...): the ?check= value picks one, and
-    its `items` are exactly the rows the count counted. No query."""
-    return {c['key']: c for c in checks}
+    its `items` are exactly the rows the count counted. No query. "No BD set" lists sites,
+    which the item list cannot open, so it is left out (ruling Q2): ?check=no_bd is an
+    unknown key there and the list shows its normal view."""
+    return {c['key']: c for c in checks if 'sites' not in c}

@@ -66,6 +66,32 @@ reach the same status, and are at most SAME_EVENT_SECONDS apart (A4): one line, 
 text and name, the transition's role. The same rule merges a payment's hold rows with its
 on-hold / answered transitions.
 
+FIN-M-B5-8 (ruling Q4, BOTH switch states): a milestone_legacy_marked log line (written
+once per old Received milestone by mark_legacy_received_milestones) is NOT movement — the
+marking moves no money, and counting it would put every old receipt in the 30-day view
+on the day the command runs. The line stays in the item's history. Every other line
+counts as before, recompute's "(from confirmed receipts)" lines included.
+
+FIN-M-B5-8 — WITH CLIENT_RECEIPTS_LIVE ON (receipts_on=True), ONE more query (eight):
+    8. receipts     PaymentReceipt rows of the SHOWN milestones (with milestone and site,
+                    for the receipt-page permission), for the money label, the receipt
+                    links and the history's receipt lines.
+  * Query 4 also reads the shown milestones' receipt transitions (one more condition,
+    not a query): recorded, queried, answered, confirmed, confirmation undone, rejected
+    (and a legacy row's amount completed), each with its person and role at the time.
+    Receipt lines are never merged by the A4 duplicate rule (they name no milestone
+    status); recompute's own milestone lines appear as they already do.
+  * A milestone row's latest receipt move counts as movement (a correlated subquery in
+    query 1): a receipt waiting for Finance is exactly what the Head needs to see.
+  * Pending / Invoiced rows show what is still owed: agreed (or invoice) amount less the
+    confirmed money, never below 0 (client_money.owed, K9). The status pill and the
+    ?status= values are unchanged; the money label (receipts.milestone_receipt_label —
+    "Amount needed", "Part received ₹x of ₹y", "Received before receipts" …) shows beneath
+    it when it says more than the stored status (ruling Q6).
+  * Links to a receipt's page are drawn only for a viewer user_can_view_receipt admits
+    (F5: not CEO, Admin, System Admin); the history lines show to everyone who may open
+    the Finance Head page (ruling Q5).
+
 Not a views module: it reads models and finance_head and formats money with Finance
 work's rupees() (views_finance_work imports views at module level, never this module, so
 the import is not circular). No writes, no cache.
@@ -80,13 +106,17 @@ from django.db.models import OuterRef, Q, Subquery
 from django.urls import reverse
 from django.utils import timezone
 
+from .client_money import owed
 from .finance_head import (NOT_ACTIONABLE_STATUSES, TYPES, due_state,
                            live_residential_milestones, payment_type_expr, period_start,
                            scoped_payments, unforwarded_bills)
 from .milestone_queries import annotate_trigger_done
-from .models import (ACTOR_ROLE_SYSTEM, SUBJECT_PAYMENT_MILESTONE, SUBJECT_PAYMENT_REQUEST,
-                     SUBJECT_TASK, ActivityLog, PaymentMilestone, PaymentRequest,
-                     PaymentRequestHold, StatusTransition, Task)
+from .models import (ACTOR_ROLE_SYSTEM, SUBJECT_PAYMENT_MILESTONE, SUBJECT_PAYMENT_RECEIPT,
+                     SUBJECT_PAYMENT_REQUEST, SUBJECT_TASK, ActivityLog, PaymentMilestone,
+                     PaymentReceipt, PaymentRequest, PaymentRequestHold, StatusTransition,
+                     Task)
+from .permissions import user_can_view_receipt
+from .receipts import UNCONFIRMED_STATUSES, ReceiptTotals, milestone_receipt_label
 from .views_finance_work import TYPE_LABELS, rupees
 
 PAGE_SIZE = 25
@@ -146,6 +176,13 @@ CREATED_PREFIX = 'Payment milestones M1'
 #: A FIN-M-L plain line's status part, e.g. "status Pending → Received".
 STATUS_MOVE_RE = re.compile(r'\bstatus (\w+) → (\w+)')
 OLDER_RECORD = 'older record'
+#: FIN-M-B5-8 ruling Q4: mark_legacy_received_milestones' code (its CODE; a test pins the
+#: two equal). Not movement; still history. Spelt here because the command imports views
+#: at module level, which this module must not.
+LEGACY_MARKED_CODE = 'milestone_legacy_marked'
+#: The money label's plain answers: the stored status itself, already said by the pill.
+PLAIN_LABELS = frozenset({PaymentMilestone.PENDING, PaymentMilestone.INVOICED,
+                          PaymentMilestone.RECEIVED})
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +282,7 @@ class Item:
     last_date: object = None
     last_who: str = ''
     check_note: str = ''      # FIN-H-B5: why this item is in the chosen ?check=
+    money_label: str = ''     # FIN-M-B5-8: the receipt label, when it says more than the pill
 
     @property
     def key(self):
@@ -279,32 +317,61 @@ class Item:
 # 1. Milestone rows
 # ---------------------------------------------------------------------------
 
-def _milestone_rows():
+def _milestone_rows(receipts_on=False):
     """Query 1. Every live Residential milestone (finance_head scope), light, with the R8
     trigger state and the trigger task's pk (milestone_queries.annotate_trigger_done:
     trigger_task_id comes from the same subquery as the state, so the history reads the
     Done of the very task the due rule read) and two more correlated subqueries, not
     queries: the latest transition and latest entity-linked log line, for movement.
-    order_by() clears Meta.ordering: the list is sorted in Python."""
+    order_by() clears Meta.ordering: the list is sorted in Python.
+
+    The log line read for movement skips LEGACY_MARKED_CODE (ruling Q4). With the switch
+    on (FIN-M-B5-8) a third correlated subquery adds the time of the latest transition of
+    any of the milestone's receipts, also movement."""
     last_transition = Subquery(
         StatusTransition.objects.filter(subject_type=SUBJECT_PAYMENT_MILESTONE,
                                         subject_id=OuterRef('pk'))
         .order_by('-occurred_at').values('occurred_at')[:1])
     last_log = Subquery(
         ActivityLog.objects.filter(entity_type=MILESTONE_ENTITY, entity_id=OuterRef('pk'))
+        .exclude(action_code=LEGACY_MARKED_CODE)
         .order_by('-timestamp').values('timestamp')[:1])
+    extra = {}
+    fields = []
+    if receipts_on:
+        # What it adds: the newest receipt event on this milestone (recorded, queried,
+        # answered, confirmed, undone, rejected) — the receipts are matched inside the
+        # same statement (nested OuterRef), never one query per milestone.
+        extra['last_receipt_move'] = Subquery(
+            StatusTransition.objects.filter(
+                subject_type=SUBJECT_PAYMENT_RECEIPT,
+                subject_id__in=PaymentReceipt.objects.filter(
+                    milestone=OuterRef(OuterRef('pk'))).values('pk'))
+            .order_by('-occurred_at').values('occurred_at')[:1])
+        fields = ['last_receipt_move', 'received_before_receipts']
     return (annotate_trigger_done(live_residential_milestones())
-            .annotate(last_transition=last_transition, last_log=last_log)
+            .annotate(last_transition=last_transition, last_log=last_log, **extra)
             .order_by()
             .values('pk', 'milestone_name', 'status', 'amount', 'amount_received',
                     'invoice_amount', 'invoice_date', 'invoice_number', 'received_date',
                     'project', 'project__project_id', 'project__site_code',
                     'project__customer_name', 'project__site_name', 'project__status',
                     'project__activated_at', 'trigger_name', 'trigger_status', 'trigger_na',
-                    'trigger_done_at', 'trigger_task_id', 'last_transition', 'last_log'))
+                    'trigger_done_at', 'trigger_task_id', 'last_transition', 'last_log',
+                    *fields))
 
 
-def _milestone_items(rows):
+def _still_owed(base, r, receipts_on):
+    """K9: with the switch on, `base` less the confirmed money (the cached
+    amount_received, exact for Pending / Invoiced), never below 0, through
+    client_money.owed — the figures' own rule (finance_head._still_owed). Off: `base`."""
+    if not receipts_on:
+        return base
+    left, _ = owed(base, r['amount_received'] or 0)
+    return left
+
+
+def _milestone_items(rows, receipts_on=False):
     items = []
     for r in rows:
         status = r['status']
@@ -315,11 +382,13 @@ def _milestone_items(rows):
             # The B2 figures' own rule (finance_head.due_state), so the list's due /
             # not-due always matches the tiles.
             key, since = due_state(r)
-            amount = r['amount']
+            amount = _still_owed(r['amount'], r, receipts_on)
         elif status == PaymentMilestone.INVOICED:
             key = 'invoiced'
             # As the figures: the invoice figure when recorded, else the agreed amount.
-            amount = r['invoice_amount'] if r['invoice_amount'] is not None else r['amount']
+            amount = _still_owed(
+                r['invoice_amount'] if r['invoice_amount'] is not None else r['amount'],
+                r, receipts_on)
             # As receivables ageing: the invoice date, else the trigger's Done date.
             since = r['invoice_date'] or (_local(r['trigger_done_at']) if trigger_done
                                           else None)
@@ -333,7 +402,8 @@ def _milestone_items(rows):
             _at(r['invoice_date']), r['project__activated_at'],
             # A1: the trigger's Done is movement only while the milestone is Pending.
             r['trigger_done_at'] if status == PaymentMilestone.PENDING and trigger_done
-            else None)
+            else None,
+            r.get('last_receipt_move'))      # FIN-M-B5-8: absent (None) with the switch off
         items.append(Item(
             kind='milestone', pk=r['pk'], direction='in', ptype='Residential', status=key,
             reference=f'{code} · {r["milestone_name"]}',
@@ -576,6 +646,59 @@ def _log_who(line):
                  line['actor__user__username'])
 
 
+def _received_on(day, today):
+    """'received 12 Nov' — the date the money arrived (FR13), with the year only when it
+    is not this year's."""
+    if day is None:
+        return 'date received not yet recorded'
+    return f'received {day.day} {day:%b}' + (f' {day.year}' if day.year != today.year else '')
+
+
+def _receipt_history(receipts, transitions, today, viewer=None):
+    """FIN-M-B5-8 (K10): one line per receipt event of the shown milestone's receipts —
+    amount, date received, the person (and role at the time) — newest first with the
+    rest. `to` is None, so the A4 merge never touches them.
+
+    Every line of a receipt (confirmed and rejected included) links to that receipt's
+    page, but only for a viewer the receipt page admits (F5, ruling Q5 and the wording
+    answer 3); the line itself shows to everyone who may open this page."""
+    lines = []
+    for receipt in receipts:
+        amount = rupees(receipt.amount) if receipt.amount is not None else 'Old receipt'
+        received = _received_on(receipt.date_received, today)
+        # Asked once per receipt; no query (site comes with the receipt, see _load_receipts).
+        href = (reverse('receipt_detail', args=[receipt.milestone.project.project_id,
+                                                receipt.pk])
+                if user_can_view_receipt(viewer, receipt) else '')
+        for t in transitions.get(receipt.pk, []):
+            frm, to = t['from_status'], t['to_status']
+            name = _name(t['actor__user__first_name'], t['actor__user__last_name'],
+                         t['actor__user__username'])
+            remark = f': {t["remark"]}' if t['remark'] else ''
+            if to == PaymentReceipt.CONFIRMED:
+                # FR13: the line's time is the confirmation; the money's day is beside it.
+                text = f'{amount} confirmed by {name or "migration"} — {received}'
+            elif to == PaymentReceipt.QUERIED:
+                text = f'{amount} queried — {received}{remark}'
+            elif to == PaymentReceipt.REJECTED:
+                text = f'{amount} rejected — {received}{remark}'
+            elif to == PaymentReceipt.RECORDED and frm == PaymentReceipt.QUERIED:
+                text = f'Query on {amount} answered — {received}{remark}'
+            elif to == PaymentReceipt.RECORDED and frm == PaymentReceipt.CONFIRMED:
+                text = f'{amount} confirmation undone — {received}{remark}'
+            elif to == PaymentReceipt.RECORDED and frm == PaymentReceipt.AMOUNT_NEEDED:
+                text = f'{amount} amount completed from the bank — {received}'
+            elif to == PaymentReceipt.RECORDED:
+                text = f'{amount} recorded — {received}'
+            else:
+                text = 'Old receipt waiting for its amount'
+            line = _event(t['occurred_at'], text, who=name, role=_role(t['actor_role_code']),
+                          source='receipt')
+            line['href'] = href
+            lines.append(line)
+    return lines
+
+
 def _milestone_history(item, transitions, task_done, entity_logs, site_logs):
     r = item.row
     records = []
@@ -732,24 +855,73 @@ ACTOR_FIELDS = ('actor__user__first_name', 'actor__user__last_name',
                 'actor__user__username')
 
 
-def _load_history(shown):
-    """Queries 4-7 for the shown items, then each item's history. Returns the number of
-    duplicate lines merged away (A4)."""
+def _load_receipts(ms, receipts_on, viewer, today):
+    """Query 8 (switch on only, FIN-M-B5-8): the shown milestones' receipts, any status,
+    as instances with milestone and site (user_can_view_receipt reads the site through
+    the receipt). Sets each milestone item's money label and its receipt links; returns
+    {milestone pk: [receipts]} for the history. Off: {} and no query.
+
+    The permission is asked per receipt but costs no query for this page's viewers: the
+    Finance Head is Finance and CEO / Admin / System Admin are refused, both by role
+    (permissions.user_can_view_receipt); the site comes with the receipt."""
+    if not receipts_on:
+        return {}
+    by_ms = defaultdict(list)
+    for receipt in (PaymentReceipt.objects.filter(milestone_id__in=_ids(i.pk for i in ms))
+                    .select_related('milestone__project').order_by('date_received', 'pk')):
+        by_ms[receipt.milestone_id].append(receipt)
+    for item in ms:
+        r, mine = item.row, by_ms.get(item.pk, [])
+        totals = ReceiptTotals(
+            confirmed=sum((x.amount for x in mine if x.status == PaymentReceipt.CONFIRMED),
+                          ReceiptTotals().confirmed),
+            unconfirmed=sum((x.amount for x in mine if x.status in UNCONFIRMED_STATUSES),
+                            ReceiptTotals().unconfirmed),
+            amount_needed=sum(x.status == PaymentReceipt.AMOUNT_NEEDED for x in mine))
+        # The label helper reads status, amount and the legacy flag from a milestone; an
+        # unsaved instance built from the light row carries exactly those (no query).
+        label = milestone_receipt_label(
+            PaymentMilestone(pk=item.pk, status=r['status'], amount=r['amount'],
+                             received_before_receipts=r['received_before_receipts']),
+            totals)
+        item.money_label = '' if label in PLAIN_LABELS else label
+        # K8a / ruling Q5: a link to each receipt still waiting for Finance, only for a
+        # viewer the receipt page admits (F5).
+        for x in mine:
+            if x.status in UNCONFIRMED_STATUSES and user_can_view_receipt(viewer, x):
+                item.links.append({
+                    'label': f'Receipt {rupees(x.amount)} ({x.get_status_display().lower()})',
+                    'kind': 'receipt',
+                    'href': reverse('receipt_detail', args=[r['project__project_id'], x.pk])})
+    return by_ms
+
+
+def _load_history(shown, receipts_on=False, viewer=None, today=None):
+    """Queries 4-7 for the shown items (and 8 with the switch on), then each item's
+    history. Returns the number of duplicate lines merged away (A4)."""
     ms = [i for i in shown if i.kind == 'milestone']
     pays = [i for i in shown if i.kind == 'payment']
     ms_ids = _ids(i.pk for i in ms)
     pay_ids = _ids(i.pk for i in pays)
     trigger_ids = _ids(i.row['trigger_task_id'] for i in ms)
     project_ids = _ids(i.row['project'] for i in ms)
+    receipts = _load_receipts(ms, receipts_on, viewer, today)
 
     # 4. Every transition the shown page needs, in one read: the milestones', the
     # payments', and the trigger tasks' Done moves (for who completed the trigger).
+    # FIN-M-B5-8, switch on: and the shown milestones' receipts' moves — a subquery on
+    # the receipt table inside the same statement, not a query.
+    wanted = (Q(subject_type=SUBJECT_PAYMENT_MILESTONE, subject_id__in=ms_ids)
+              | Q(subject_type=SUBJECT_PAYMENT_REQUEST, subject_id__in=pay_ids)
+              | Q(subject_type=SUBJECT_TASK, subject_id__in=trigger_ids,
+                  to_status=Task.DONE))
+    if receipts_on:
+        wanted |= Q(subject_type=SUBJECT_PAYMENT_RECEIPT,
+                    subject_id__in=PaymentReceipt.objects.filter(milestone_id__in=ms_ids)
+                    .values('pk'))
     transitions = list(
         StatusTransition.objects
-        .filter(Q(subject_type=SUBJECT_PAYMENT_MILESTONE, subject_id__in=ms_ids)
-                | Q(subject_type=SUBJECT_PAYMENT_REQUEST, subject_id__in=pay_ids)
-                | Q(subject_type=SUBJECT_TASK, subject_id__in=trigger_ids,
-                    to_status=Task.DONE))
+        .filter(wanted)
         .order_by('occurred_at')
         .values('pk', 'subject_type', 'subject_id', 'from_status', 'to_status',
                 'actor_role_code', 'reason_code', 'remark', 'occurred_at', *ACTOR_FIELDS))
@@ -794,9 +966,11 @@ def _load_history(shown):
         }
 
     ms_trans, pay_trans, task_done = defaultdict(list), defaultdict(list), defaultdict(list)
+    receipt_trans = defaultdict(list)
     for t in transitions:
         target = {SUBJECT_PAYMENT_MILESTONE: ms_trans, SUBJECT_PAYMENT_REQUEST: pay_trans,
-                  SUBJECT_TASK: task_done}[t['subject_type']]
+                  SUBJECT_TASK: task_done,
+                  SUBJECT_PAYMENT_RECEIPT: receipt_trans}[t['subject_type']]
         target[t['subject_id']].append(t)
     entity_logs = defaultdict(list)
     for line in logs:
@@ -808,6 +982,9 @@ def _load_history(shown):
     for item in shown:
         if item.kind == 'milestone':
             lines, n = _milestone_history(item, ms_trans, task_done, entity_logs, site_logs)
+            # FIN-M-B5-8: receipt events, after the merge so A4 never pairs them.
+            lines = lines + _receipt_history(receipts.get(item.pk, []), receipt_trans,
+                                             today, viewer)
         elif item.kind == 'payment':
             lines, n = _payment_history(item, pay_trans, holds, people)
         else:
@@ -921,7 +1098,8 @@ def _filters(p, period, page, pages, check=None):
 # Public
 # ---------------------------------------------------------------------------
 
-def finance_head_items(params, viewer_can_open_approvals, today=None, checks=None):
+def finance_head_items(params, viewer_can_open_approvals, today=None, checks=None,
+                       receipts_on=False, viewer=None):
     """The "Every item" list for cleaned `params` (clean_item_params; 'period' may ride
     along and is kept in every link). SEVEN queries whatever the data size (module
     docstring). `viewer_can_open_approvals` decides whether an unforwarded bill links to
@@ -932,7 +1110,11 @@ def finance_head_items(params, viewer_can_open_approvals, today=None, checks=Non
     out of the shown page's history.
 
     `checks` (FIN-H-B5) is {key: check} from finance_head_checks.check_filters(); the
-    ?check= value picks one (module docstring). No query: the check's items are ids."""
+    ?check= value picks one (module docstring). No query: the check's items are ids.
+
+    `receipts_on` (FIN-M-B5-8): CLIENT_RECEIPTS_LIVE as the view read it — EIGHT queries
+    (module docstring). `viewer` is the request's user, asked only whether a receipt's
+    page may be linked (permissions.user_can_view_receipt)."""
     p = {**clean_item_params({}), **params}
     check = (checks or {}).get(p['check'])
     if check is None:
@@ -940,8 +1122,8 @@ def finance_head_items(params, viewer_can_open_approvals, today=None, checks=Non
     today = today or timezone.localdate()
     window_start = period_start('30d', today)
 
-    items = (_milestone_items(_milestone_rows()) + _payment_items(_payment_rows())
-             + _bill_items(_bill_rows()))
+    items = (_milestone_items(_milestone_rows(receipts_on), receipts_on)
+             + _payment_items(_payment_rows()) + _bill_items(_bill_rows()))
     kept = _sort([i for i in items if _keep(i, p, window_start, check)], p['sort'])
 
     count = len(kept)
@@ -953,7 +1135,7 @@ def finance_head_items(params, viewer_can_open_approvals, today=None, checks=Non
         item.links = _links(item, viewer_can_open_approvals)
         if check is not None:
             item.check_note = check['items'].get(item.key, '')
-    merged = _load_history(shown)
+    merged = _load_history(shown, receipts_on, viewer, today)
 
     return {'count': count, 'page': page, 'pages': pages, 'items': shown,
             'filters': _filters(p, params.get('period', ''), page, pages, check),
