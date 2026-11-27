@@ -727,7 +727,10 @@ class NotReworkTests(CorrectionBase):
             'id', 'boq', 'item', 'item_code', 'item_description', 'action',
             'quantity_before', 'quantity_after', 'corrected_by', 'corrected_at',
             # BC-4: who held the site at the edit — a fact, not a doneness signal.
-            'designer_at_correction'})
+            'designer_at_correction',
+            # DW-2b: an ACCB correction's number, its text before and after, and the
+            # reviewer's reason — facts about the edit, not doneness signals either.
+            'accb_number', 'description_before', 'description_after', 'reason'})
         for forbidden in ('status', 'state', 'is_applied', 'is_valid', 'is_complete',
                           'approved', 'superseded_by', 'locked'):
             self.assertNotIn(forbidden, names)

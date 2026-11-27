@@ -18,8 +18,20 @@ partial, stale or truncated POST can only ever add or change — never remove.
 The quantity boxes are pre-filled with the CURRENT value, so a reviewer who submits one
 without editing it is told nothing changed rather than having a no-op recorded against
 their name.
+
+DW-2b — CONFIGURED ACCBs ARE THE EXCEPTION. QC and the Head edit, add (or duplicate) and
+remove an ACCB through the designer's own configurator, in the ACCB pop-up at the foot of
+this page, each with a required reason. A remove deletes the ACCB's line, as the designer's
+remove does; its correction record keeps the text. The server refuses outside the
+reviewer's turn, under a change request, on a line on an SCM order and for the BOQ's last
+DCDB, ACDB or ACCB, whatever this page shows.
 {% endcomment %}
 {% block title %}Correct BOQ — {{ project.project_id }} — SolarPMS{% endblock %}
+
+{% block extra_head %}
+{# DW-2b: the ACCB card's styles and Alpine, only where the pop-up is drawn. #}
+{% if can_edit_accb %}{% include "projects/partials/accb_configurator_head.html" %}{% endif %}
+{% endblock %}
 
 {% block content %}
 <div class="d-flex justify-content-between align-items-start mb-3">
@@ -57,6 +69,10 @@ their name.
   <strong>Removing a line is not a reviewer action</strong> and is not offered here —
   if a line does not belong on this bill at all, that is a verdict on the attempt, not a
   correction to it.
+  {% if can_edit_accb %}
+    ACCBs are the exception: edit, add or remove one with its buttons below, giving a
+    reason.
+  {% endif %}
 </div>
 
 {% if group_locked %}
@@ -287,20 +303,48 @@ their name.
           {% endif %}
 
           {% comment %}
-          B-3 P7 — CONFIGURED ACCB LINES ARE READ-ONLY HERE. Their quantity is 1 by
-          definition and their text is generated from the designer's configuration, so a
-          reviewer has nothing to correct on them: the route is to fail the BOQ back. No
-          form is drawn; boq_correct() refuses a crafted set_quantity on one as well.
+          CONFIGURED ACCB LINES get no quantity box (their quantity is 1 by definition and
+          boq_correct() refuses a crafted set_quantity on one). DW-2b (DW-R3): in the
+          reviewer's turn each has Edit and Remove, which open the ACCB pop-up below, and the
+          header has Add ACCB. An ACCB on an SCM order shows the note instead (Q7); the server
+          refuses it anyway. Outside the turn the lines are read-only, with the reason when
+          the page does not already say it (accb_closed_note).
           {% endcomment %}
-          {% if accb_lines %}
-            <tr><td colspan="4" class="fw-semibold py-1 small" style="background:#f1f3f5;">
-              ACCB <span class="text-muted fw-normal">{{ accb_lines|length }}</span>
-              <div class="fw-normal text-muted" id="accbReviewerNote">{{ accb_reviewer_message }}</div>
+          {% if accb_lines or can_edit_accb %}
+            <tr id="accbs"><td colspan="4" class="fw-semibold py-1 small" style="background:#f1f3f5;">
+              <div class="d-flex align-items-center gap-2">
+                <span>ACCB <span class="text-muted fw-normal">{{ accb_lines|length }}</span></span>
+                {% if can_edit_accb %}
+                  <button type="button" class="btn btn-sm btn-outline-success py-0 ms-auto accb-open"
+                          data-accb-intent="add">
+                    <i class="bi bi-plus-lg"></i> Add ACCB
+                  </button>
+                {% endif %}
+              </div>
+              {% if accb_closed_note %}
+                <div class="fw-normal text-muted" id="accbClosedNote">{{ accb_closed_note }}</div>
+              {% endif %}
             </td></tr>
             {% for row in accb_lines %}
               <tr class="small">
                 <td class="text-muted">ACCB {{ row.accb_config.number }}</td>
-                <td style="line-height:1.3">{{ row.description }}</td>
+                <td style="line-height:1.3">
+                  {{ row.description }}
+                  {% if can_edit_accb %}
+                    <div class="mt-1 d-flex gap-2 align-items-center">
+                      {% if row.on_order %}
+                        <button type="button" class="btn btn-sm btn-outline-secondary py-0" disabled>Edit</button>
+                        <button type="button" class="btn btn-sm btn-outline-danger py-0" disabled>Remove</button>
+                        <span class="text-muted accb-on-order">{{ accb_on_order_note }}</span>
+                      {% else %}
+                        <button type="button" class="btn btn-sm btn-outline-secondary py-0 accb-open"
+                                data-accb-id="{{ row.accb_config.pk }}" data-accb-intent="edit">Edit</button>
+                        <button type="button" class="btn btn-sm btn-outline-danger py-0 accb-open"
+                                data-accb-id="{{ row.accb_config.pk }}" data-accb-intent="remove">Remove</button>
+                      {% endif %}
+                    </div>
+                  {% endif %}
+                </td>
                 <td class="text-muted">{{ row.uom }}</td>
                 <td><div class="text-end">{{ row.boq_quantity|floatformat:"-2" }}</div></td>
               </tr>
@@ -403,7 +447,12 @@ their name.
               </td>
               <td class="text-muted">{{ c.item_code|default:"—" }}</td>
               <td>
-                {% if c.action == 'line_added' %}
+                {% if c.is_accb %}
+                  {# DW-2b (A7): the ACCB corrections, in the model's one wording. #}
+                  <span class="badge text-bg-primary">ACCB</span>
+                  {{ c.accb_text }}
+                  <div class="text-muted">Reason: {{ c.reason }}</div>
+                {% elif c.action == 'line_added' %}
                   <span class="badge text-bg-success">Line added</span>
                   {{ c.item_description }}
                   {% if c.quantity_after is not None %} · quantity {{ c.quantity_after }}{% endif %}
@@ -499,6 +548,63 @@ their name.
   document.addEventListener('DOMContentLoaded', function () {
     var el = document.querySelector('.boq-remove-modal[data-open-on-load]');
     if (el) { bootstrap.Modal.getOrCreateInstance(el).show(); }
+  });
+  </script>
+{% endif %}
+
+{% if can_edit_accb %}
+  {% comment %}
+  DW-2b (A2) — THE ACCB POP-UP: one Bootstrap modal holding the designer's configurator
+  (partials/accb_configurator.html, reviewer mode), which shows the one card the reviewer
+  opened. Edit / Remove / Add ACCB on the sheet above send `accb-open` with the ACCB and the
+  intent; closing the pop-up sends `accb-closed`, which drops the card. Each card posts here
+  with accb=1. A post with no reason comes back with `accb_error`: the pop-up opens again
+  on load with the message, and the script puts the setup back as typed (Q6).
+  {% endcomment %}
+  {{ accb_data|json_script:"accbData" }}
+  <div class="modal fade" id="accbModal" tabindex="-1" aria-labelledby="accbModalTitle"
+       aria-hidden="true"{% if accb_error %} data-open-on-load="1"{% endif %}>
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h6 class="modal-title" id="accbModalTitle">Correct an ACCB</h6>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <p class="small text-muted mb-2">
+            Each change is recorded as a correction against the designer, with your reason.
+          </p>
+          {% if accb_error %}
+            <div class="alert alert-danger py-2 small mb-2" id="accbReasonError">{{ accb_error.message }}</div>
+          {% endif %}
+          {% url 'boq_correct' project.project_id as accb_form_action %}
+          {% include "projects/partials/accb_configurator.html" with accb_form_action=accb_form_action accb_reviewer=True %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% include "projects/partials/accb_configurator_script.html" %}
+  <script>
+  // DW-2b — the sheet's ACCB buttons open the pop-up with one card; closing it tells the
+  // card to go. Bootstrap loads at the foot of base.html, after this inline script, so its
+  // API is used only once the document is parsed.
+  document.addEventListener('DOMContentLoaded', function () {
+    var el = document.getElementById('accbModal');
+    var modal = bootstrap.Modal.getOrCreateInstance(el);
+    document.querySelectorAll('.accb-open').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var id = button.getAttribute('data-accb-id');
+        window.dispatchEvent(new CustomEvent('accb-open', {detail: {
+          id: id ? parseInt(id, 10) : null,
+          intent: button.getAttribute('data-accb-intent')}}));
+        modal.show();
+      });
+    });
+    window.addEventListener('accb-close', function () { modal.hide(); });
+    el.addEventListener('hidden.bs.modal', function () {
+      window.dispatchEvent(new CustomEvent('accb-closed'));
+    });
+    if (el.hasAttribute('data-open-on-load')) { modal.show(); }
   });
   </script>
 {% endif %}

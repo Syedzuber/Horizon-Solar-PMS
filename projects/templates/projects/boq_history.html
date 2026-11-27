@@ -119,8 +119,8 @@ the roles that see this.
     Reviewer corrections
     <span class="text-muted fw-normal ms-1">{{ corrections|length }}</span>
     <span class="text-muted fw-normal ms-2">
-      · quantities changed and lines added by a design reviewer, outside the revision
-      timeline above
+      · quantities changed, lines added and ACCBs changed by a design reviewer, outside
+      the revision timeline above
     </span>
   </div>
   <div class="card-body p-0">
@@ -146,7 +146,12 @@ the roles that see this.
             </td>
             <td class="text-muted">{{ c.item_code|default:"—" }}</td>
             <td>
-              {% if c.action == 'line_added' %}
+              {% if c.is_accb %}
+                {# DW-2b (A7): the ACCB corrections, in the model's one wording. #}
+                <span class="badge text-bg-primary">ACCB</span>
+                {{ c.accb_text }}
+                <div class="text-muted">Reason: {{ c.reason }}</div>
+              {% elif c.action == 'line_added' %}
                 <span class="badge text-bg-success">Line added</span>
                 {{ c.item_description }}
                 {% if c.quantity_after is not None %} · quantity {{ c.quantity_after }}{% endif %}

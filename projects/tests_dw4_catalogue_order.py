@@ -478,7 +478,9 @@ QUERY_PINS = {
     # the rules check (+1, none in this fixture) and DW-1's groups (+1); no override query
     # without a calculated item. Flat in the catalogue's size (tests_dw7_master_boq_sheet).
     'download (PM)':                11,
-    'correction screen (QC)':       22,
+    # DW-2b (Q7): 23. The ACCB pop-up's one order check, for this fixture's two ACCBs
+    # (flat in their number: tests_dw2b_reviewer_accb).
+    'correction screen (QC)':       23,
     'QC review (QC)':               34,
     'site card rows':               1,
     'raise form, Residential (SCM)': 13,

@@ -318,8 +318,11 @@ both, says "Change request".
                 <tbody>
                   {% for c in rows %}
                   <tr>
-                    <td>{{ c.item_code|default:"(ad-hoc)" }} {{ c.item_description|truncatechars:60 }}
-                      <span class="text-muted">— {{ c.get_action_display|lower }}</span></td>
+                    {% comment %}DW-2b (A7): an ACCB correction in the model's one wording. None
+                    can be cited today (ACCB changes are refused under a change request); this
+                    keeps the row readable if one ever is.{% endcomment %}
+                    <td>{% if c.is_accb %}{{ c.accb_text }}{% else %}{{ c.item_code|default:"(ad-hoc)" }} {{ c.item_description|truncatechars:60 }}
+                      <span class="text-muted">— {{ c.get_action_display|lower }}</span>{% endif %}</td>
                     <td class="text-end">{{ c.quantity_before|default_if_none:"—" }}</td>
                     <td class="text-end">{{ c.quantity_after|default_if_none:"—" }}</td>
                     <td>{% if c.corrected_by %}{{ c.corrected_by.user.get_full_name|default:c.corrected_by.user.username }}{% else %}not recorded{% endif %},

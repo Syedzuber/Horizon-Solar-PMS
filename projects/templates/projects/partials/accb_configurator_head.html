@@ -1,0 +1,25 @@
+{% comment %}
+B-3a / DW-2b — the ACCB configurator's styles and Alpine, for the two pages that draw
+it: the designer's picker and the reviewer's correction screen. Include once, in the
+page's extra_head. Moved here unchanged from opex_boq_entry.html.
+{% endcomment %}
+<style>
+  /* B-3a — the ACCB section */
+  [x-cloak]       { display:none !important; }
+  .accb-card      { border:1px solid #dee2e6; border-radius:.5rem; background:#fff; }
+  .accb-head      { width:100%; text-align:left; background:none; border:0; padding:.5rem .75rem; }
+  .accb-head:focus-visible { outline:2px solid #1a7a4a; outline-offset:-2px; }
+  .accb-desc      { font-size:.83rem; line-height:1.35; }
+  .accb-feeder    { display:flex; gap:.4rem; align-items:center; margin-bottom:.3rem; }
+  /* B-3c: the full MCCB text is 88 characters. The select takes the row's width (the I/C
+     and O/G blocks are stacked full width), so on a laptop the closed select shows the
+     whole text; narrower, it truncates and its title shows the full text. */
+  .accb-feeder select { flex:1 1 auto; min-width:0; }
+  .accb-preview   { background:#f8f9fa; border-radius:.375rem; padding:.5rem .6rem; }
+</style>
+{% comment %}
+B-3a. Alpine for the ACCB section only. base.html does NOT load Alpine (checked: no
+"alpine" anywhere in it), so this page loads it once here, the same pinned version the
+dashboards load. The picker above stays plain JS and does not depend on it.
+{% endcomment %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>

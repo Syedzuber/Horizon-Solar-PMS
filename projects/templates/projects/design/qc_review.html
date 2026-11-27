@@ -354,12 +354,14 @@ reviewer and the designer are looking at the same document in the same sequence.
           {% endif %}
           {% comment %}
           B-3a — configured ACCBs. Not in either list above (they all link to one catalogue
-          row and are edited in the designer's ACCB section), so they get rows of their own.
-          The description is generated from the ACCB's configuration; quantity is always 1.
+          row and are edited in the designer's ACCB section, or by a reviewer in the
+          correction screen's ACCB pop-up since DW-2b), so they get rows of their own. The
+          description is generated from the ACCB's configuration; quantity is always 1.
+          DW-2b Q8: no "configured by the designer" label, since a reviewer may have changed it.
           {% endcomment %}
           {% if boq_accb_rows %}
             <tr><td colspan="4" class="fw-semibold py-1 small" style="background:#f1f3f5;">
-              ACCB <span class="text-muted fw-normal">{{ boq_accb_rows|length }} — configured by the designer</span>
+              ACCB <span class="text-muted fw-normal">{{ boq_accb_rows|length }}</span>
             </td></tr>
             {% for row in boq_accb_rows %}
               <tr class="small">

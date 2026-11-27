@@ -927,13 +927,16 @@ class ReviewerTests(ACCBBase):
         self._login(self.qc)
         self.url = reverse('boq_correct', kwargs={'project_id': self.site.project_id})
 
-    def test_the_correction_screen_shows_accbs_read_only_with_the_message(self):
+    def test_the_correction_screen_shows_accbs_with_edit_and_no_quantity_box(self):
+        """DW-2b (DW-R3) supersedes B-3 P7's read-only rule: the ACCB gets Edit and Remove,
+        which open the configurator pop-up (tests_dw2b_reviewer_accb). It still gets no
+        quantity box."""
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, 200)
         html = response.content.decode()
         # B-3c: the text holds '&', which the page escapes.
         self.assertIn(escape(EX_TYPE2_TEXT), html)
-        self.assertIn(ACCB_REVIEWER_MESSAGE.replace("'", '&#x27;'), html)
+        self.assertIn(f'data-accb-id="{self.accb.pk}" data-accb-intent="edit"', html)
         self.assertNotIn(f'name="item_id" value="{self.accb.boq_item_id}"', html)
 
     def test_a_crafted_quantity_change_is_refused(self):

@@ -6,6 +6,7 @@ from collections import Counter
 from dataclasses import replace as dataclass_replace
 from datetime import date, timedelta, datetime
 from decimal import Decimal, InvalidOperation
+from typing import NamedTuple, Optional
 from urllib.parse import urlencode
 
 from django.conf import settings
@@ -35,6 +36,9 @@ from .models import (
     # Session B - the per-row reviewer correction record. Append-only audit; nothing
     # in the product branches on it. See models.BOQCorrection.
     BOQCorrection, BOQ_CORRECTION_LINE_ADDED, BOQ_CORRECTION_QUANTITY_CHANGED,
+    # DW-2b - the reviewer's ACCB corrections, and DW-1's board test a remove must keep.
+    BOQ_CORRECTION_ACCB_ADD, BOQ_CORRECTION_ACCB_EDIT, BOQ_CORRECTION_ACCB_REMOVE,
+    BOQ_GAP_NO_BOARD, boq_minimum_content_gaps,
     get_opex_boq_catalogue, opex_catalogue_category_order, get_opex_mandatory_items,
     split_opex_boq_rows, group_boq_rows_by_category,
     # DW-4: the one line order every BOQ screen and download uses, in SQL and in Python.
@@ -114,6 +118,9 @@ from .models import PhaseRuleOverride
 from .accb import (
     ACCB_CONFIGURED_CODE, ACCB_CATALOGUE_LOCKED_MESSAGE, ACCB_MAX_FEEDERS,
     ACCB_MIN_FEEDERS, ACCB_REENTER_MESSAGE, ACCB_REVIEWER_MESSAGE, ACCB_TYPES,
+    # DW-2b - the reviewer's ACCB refusals and the GET's "On an SCM order" note.
+    ACCB_CHANGE_REQUEST_MESSAGE, ACCB_LAST_BOARD_MESSAGE, ACCB_ON_ORDER_MESSAGE,
+    ACCB_ON_ORDER_NOTE, ACCB_REASON_REQUIRED_MESSAGE,
     ACCB_UPLOAD_REFUSED_MESSAGE, accb_description, accb_config_key, accb_has_spd,
     accb_summary, accb_switchgear_choices, stored_accb_config, stored_feeder_option,
     validate_accb_config,
@@ -220,6 +227,8 @@ from .permissions import (
     # the note shown in place of the buttons, and the QC-pool outsider's message.
     design_reviewer_turn, design_reviewer_turns,
     REVIEWER_ACTION_BOQ_CORRECT, REVIEWER_ACTION_BOQ_OVERRIDE, REVIEWER_TURN_HEAD,
+    # DW-2b - the reviewer's ACCB edit, add and remove: one more row of the same table.
+    REVIEWER_ACTION_ACCB_EDIT,
     REVIEWER_TURN_QC_PASSED, REVIEWER_TURN_QC_PASSED_MESSAGE, REVIEWER_TURN_QC_PASSED_NOTE,
     REVIEWER_TURN_NOT_REVIEWER, qc_pool_outsider_message,
     # DW-8 - the QC-gate half of "is this viewer a reviewer on this site", for the BOQ
@@ -10502,13 +10511,23 @@ def _accb_actor_name(profile):
     return name if len(name) <= _ACCB_LOG_NAME_MAX else name[:_ACCB_LOG_NAME_MAX - 1] + '…'
 
 
-def accb_log_text(profile, verb, number, project, detail):
+def accb_log_text(profile, verb, number, project, detail, tag=''):
     """'<designer> changed ACCB 2 on <site> (<detail>)' — the B-3 Q6 short form.
 
-    Module-level so the test can build the longest case and prove it fits in 255.
+    `tag` (DW-2b, Q5): the reviewer's capacity, ' (QC)' or ' (Head)', after the name, as
+    reviewer overrides read (_OVERRIDE_LOG_TAG). The designer's lines carry none, exactly as
+    before. Module-level so the test can build the longest case and prove it fits in 255.
     """
-    return (f'{_accb_actor_name(profile)} {verb} ACCB {number} on {project.project_id} '
-            f'({detail})')
+    return (f'{_accb_actor_name(profile)}{tag} {verb} ACCB {number} on '
+            f'{project.project_id} ({detail})')
+
+
+def _accb_change_detail(before, after):
+    """The bracketed detail of a 'changed' log line. The summary holds counts, not ratings,
+    so a rating or breaker change leaves it equal; say that rather than log "X → X"."""
+    old_summary, new_summary = accb_summary(before), accb_summary(after)
+    return (f'{old_summary} → {new_summary}' if old_summary != new_summary
+            else f'{new_summary}; feeders changed')
 
 
 def _accb_line_values(master, config):
@@ -10557,6 +10576,112 @@ def _accb_create(boq, master, config, profile):
         config_key=accb_config_key(config),
         created_by=profile, updated_by=profile,
     )
+
+
+class ACCBChange(NamedTuple):
+    """What _accb_apply() did, for the caller to word and record.
+
+    kind                'added' | 'changed' | 'removed' | 'unchanged'
+    number              the ACCB acted on — the NEW one for an add or a duplicate
+    source_number       a duplicate's original, else None
+    before / after      the configuration before and after (None on an add / a remove)
+    description_before  the line's text before ('' on an add)
+    description_after   the line's text after ('' on a remove)
+    line                the BOQ line after the change (None on a remove: it is deleted)
+    """
+    kind: str
+    number: int
+    source_number: Optional[int]
+    before: Optional[dict]
+    after: Optional[dict]
+    description_before: str
+    description_after: str
+    line: Optional[BOQItem]
+
+
+class ACCBLegacy(Exception):
+    """A duplicate of an ACCB saved before the fixed switchgear list (B-3c answer 7)."""
+
+
+def _accb_posted_config(post):
+    """The configuration a configurator card posted, validated — the ONE place a POST
+    becomes a configuration, for the designer's endpoint and the reviewer's alike (DW-2b,
+    A1), so B-3c's rules are applied the same way on both. Raises ValidationError naming
+    every fault.
+
+    B-3c: one option code per feeder, and one '1'/'0' SPD value per O/G feeder (a hidden
+    field, so the list stays in step with the feeders). `in_spd` is read only so that an SPD
+    posted on an I/C feeder is refused by name.
+    """
+    return validate_accb_config(
+        post.get('accb_type'),
+        post.getlist('in_option'), post.getlist('out_option'),
+        post.getlist('out_spd'), post.getlist('in_spd'))
+
+
+def _accb_apply(boq, master, profile, action, *, accb=None, config=None):
+    """Carry out one ACCB action and return an ACCBChange. THE ONE WRITER of ACCB lines and
+    their configurations (DW-2b, A1): the designer's opex_boq_accb and the reviewer's
+    boq_correct both call it, so numbering, the generated description, has_spd and the
+    grouping key are written one way whoever acts. Who may act, and what is recorded about
+    it, stay with the caller.
+
+        add        `config` (validated by _accb_posted_config) as a new line, next number
+        save       `config` onto `accb`; kind 'unchanged' and nothing written if it is equal
+        duplicate  `accb`'s SAVED configuration, re-checked against today's rules (B-3c
+                   answer 7), as a new line; raises ACCBLegacy if it fails the re-check
+        remove     delete `accb`'s line; its configuration goes with it (CASCADE)
+
+    The caller holds the BOQ row lock (select_for_update) and passes that locked `boq`, so
+    two posts cannot take one number (_accb_create). `accb` comes with boq_item loaded.
+    Queries: exactly those the designer's endpoint made before DW-2b.
+    """
+    if action == 'add':
+        created = _accb_create(boq, master, config, profile)
+        return ACCBChange('added', created.number, None, None, config, '',
+                          created.boq_item.description, created.boq_item)
+
+    line = accb.boq_item
+    if action == 'save':
+        before = accb.as_config()
+        if before == config:
+            return ACCBChange('unchanged', accb.number, None, before, config,
+                              line.description, line.description, line)
+        description_before = line.description
+        accb.accb_type  = config['type']
+        accb.has_spd    = accb_has_spd(config)
+        accb.feeders    = {'in': config['in'], 'out': config['out']}
+        accb.config_key = accb_config_key(config)
+        accb.updated_by = profile
+        accb.save(update_fields=['accb_type', 'has_spd', 'feeders', 'config_key',
+                                 'updated_by', 'updated_at'])
+        for field, value in _accb_line_values(master, config).items():
+            setattr(line, field, value)
+        line.save(update_fields=['item_master', 'serial_no', 'category',
+                                 'description', 'uom', 'boq_quantity',
+                                 'is_standard_item'])
+        return ACCBChange('changed', accb.number, None, before, config,
+                          description_before, line.description, line)
+
+    if action == 'duplicate':
+        # B-3c answer 7: the saved configuration is re-checked against today's rules before
+        # it is copied, the way the B-4 copy does. An ACCB saved before the fixed switchgear
+        # list would otherwise be copied into a NEW ACCB that no save could have produced.
+        try:
+            source = stored_accb_config(accb.accb_type, accb.feeders)
+        except ValidationError:
+            raise ACCBLegacy() from None
+        copy = _accb_create(boq, master, source, profile)
+        return ACCBChange('added', copy.number, accb.number, None, source, '',
+                          copy.boq_item.description, copy.boq_item)
+
+    # remove
+    before, description_before, number = accb.as_config(), line.description, accb.number
+    # Deleting the line deletes the ACCBConfig (CASCADE) — one statement, so the line can
+    # never be left without its configuration or the reverse. A BOQCorrection naming the
+    # line keeps its own copy of the text (its FK is SET_NULL).
+    line.delete()
+    return ACCBChange('removed', number, None, before, None, description_before, '', None)
 
 
 @login_required
@@ -10620,13 +10745,7 @@ def opex_boq_accb(request, project_id):
     config = None
     if action in ('add', 'save'):
         try:
-            # B-3c: one option code per feeder, and one '1'/'0' SPD value per O/G feeder
-            # (a hidden field, so the list stays in step with the feeders). `in_spd` is
-            # read only so that an SPD posted on an I/C feeder is refused by name.
-            config = validate_accb_config(
-                request.POST.get('accb_type'),
-                request.POST.getlist('in_option'), request.POST.getlist('out_option'),
-                request.POST.getlist('out_spd'), request.POST.getlist('in_spd'))
+            config = _accb_posted_config(request.POST)
         except ValidationError as exc:
             for error in exc.messages:
                 messages.error(request, error)
@@ -10643,10 +10762,10 @@ def opex_boq_accb(request, project_id):
         boq = BOQ.objects.select_for_update().get(pk=boq.pk)
 
         if action == 'add':
-            accb = _accb_create(boq, master, config, profile)
+            change = _accb_apply(boq, master, profile, 'add', config=config)
             log_line = ('boq_accb_added', accb_log_text(
-                profile, 'added', accb.number, project, accb_summary(config)))
-            messages.success(request, f'ACCB {accb.number} added.')
+                profile, 'added', change.number, project, accb_summary(config)))
+            messages.success(request, f'ACCB {change.number} added.')
         else:
             raw = request.POST.get('accb_id', '')
             # Object consistency: the ACCB must be on THIS site's BOQ. An id from another
@@ -10657,59 +10776,33 @@ def opex_boq_accb(request, project_id):
                                      pk=int(raw), boq=boq)
 
             if action == 'save':
-                before = accb.as_config()
-                if before == config:
+                change = _accb_apply(boq, master, profile, 'save', accb=accb, config=config)
+                if change.kind == 'unchanged':
                     messages.info(request, f'ACCB {accb.number}: nothing changed.')
                     return back
-                old_summary, new_summary = accb_summary(before), accb_summary(config)
-                accb.accb_type  = config['type']
-                accb.has_spd    = accb_has_spd(config)
-                accb.feeders    = {'in': config['in'], 'out': config['out']}
-                accb.config_key = accb_config_key(config)
-                accb.updated_by = profile
-                accb.save(update_fields=['accb_type', 'has_spd', 'feeders', 'config_key',
-                                         'updated_by', 'updated_at'])
-                line = accb.boq_item
-                for field, value in _accb_line_values(master, config).items():
-                    setattr(line, field, value)
-                line.save(update_fields=['item_master', 'serial_no', 'category',
-                                         'description', 'uom', 'boq_quantity',
-                                         'is_standard_item'])
-                # The summary holds counts, not ratings, so a rating or breaker change
-                # leaves it equal; say that rather than log "X → X".
-                detail = (f'{old_summary} → {new_summary}' if old_summary != new_summary
-                          else f'{new_summary}; feeders changed')
                 log_line = ('boq_accb_changed', accb_log_text(
-                    profile, 'changed', accb.number, project, detail))
+                    profile, 'changed', accb.number, project,
+                    _accb_change_detail(change.before, change.after)))
                 messages.success(request, f'ACCB {accb.number} saved.')
 
             elif action == 'duplicate':
-                # B-3c answer 7: the saved configuration is re-checked against today's
-                # rules before it is copied, the way the B-4 copy does. An ACCB saved
-                # before the fixed switchgear list would otherwise be copied into a NEW
-                # ACCB that no save could have produced.
                 try:
-                    source = stored_accb_config(accb.accb_type, accb.feeders)
-                except ValidationError:
+                    change = _accb_apply(boq, master, profile, 'duplicate', accb=accb)
+                except ACCBLegacy:
                     messages.error(request, f'ACCB {accb.number} cannot be duplicated: '
                                             f'{ACCB_REENTER_MESSAGE}.')
                     return back
-                copy = _accb_create(boq, master, source, profile)
                 log_line = ('boq_accb_added', accb_log_text(
-                    profile, 'added', copy.number, project,
-                    f'{accb_summary(source)}; copy of ACCB {accb.number}'))
+                    profile, 'added', change.number, project,
+                    f'{accb_summary(change.after)}; copy of ACCB {accb.number}'))
                 messages.success(request, f'ACCB {accb.number} duplicated as ACCB '
-                                          f'{copy.number}.')
+                                          f'{change.number}.')
 
             else:  # remove
-                summary = accb_summary(accb.as_config())
-                number = accb.number
-                # Deleting the line deletes the ACCBConfig (CASCADE) — one statement, so the
-                # line can never be left without its configuration or the reverse.
-                accb.boq_item.delete()
+                change = _accb_apply(boq, master, profile, 'remove', accb=accb)
                 log_line = ('boq_accb_removed', accb_log_text(
-                    profile, 'removed', number, project, summary))
-                messages.success(request, f'ACCB {number} removed.')
+                    profile, 'removed', change.number, project, accb_summary(change.before)))
+                messages.success(request, f'ACCB {change.number} removed.')
 
     # After the write commits, never inside it — log_activity's own rule.
     if log_line:
@@ -13049,6 +13142,247 @@ def _boq_correct_override(request, project, group_locked, override_turn):
     return back
 
 
+def accb_lines_on_order(lines, project):
+    """The pks of these ACCB lines that are committed to SCM (DW-2b, answer 6 and Q1): an
+    ordered quantity on the line, an order line naming the line, or (RESCO) an order sized
+    against this site that carries a line with the ACCB's configuration. ONE query however
+    many lines; none for no lines. `lines` are ACCB lines with accb_config loaded (accb_rows
+    loads it; an ACCBConfig fetched with select_related('boq_item') seats it too).
+
+    THE THIRD TERM IS THE ONLY ONE RESCO DATA CAN MEET. A consolidated order line spans
+    several sites and names no BOQ row (VendorOrderLine.boq_item: Residential only), so the
+    first two terms, which are formula_line_blocked()'s, never fire on an OPEX site. The
+    configuration plus the site is the closest per-line test there is, and it is per site,
+    not per line: an ACCB added after the order whose setup matches one ordered with this
+    site counts as ordered too. Accepted (Zuber, DW-2b Q1).
+    TODO(DW-2b, for Praveen): confirm SCM accepts that false positive. Telling the lines
+    apart would need the raise to record which sites' ACCBs each order line covered, which
+    is an order-side change outside this session.
+    """
+    if not lines:
+        return set()
+    line_ids = {line.pk for line in lines}
+    keys = {line.accb_config.config_key for line in lines}
+    # Fetches the order lines that name one of these lines or carry one of their
+    # configurations on an order sized against this site, with the site each was found
+    # through, so the two terms can be told apart in Python.
+    named, ordered_keys = set(), set()
+    for boq_item_id, key, site_project_id in (
+            VendorOrderLine.objects
+            .filter(Q(boq_item_id__in=line_ids)
+                    | Q(accb_config_key__in=keys, order__sites__project_id=project.pk))
+            .values_list('boq_item_id', 'accb_config_key', 'order__sites__project_id')):
+        if boq_item_id in line_ids:
+            named.add(boq_item_id)
+        if key in keys and site_project_id == project.pk:
+            ordered_keys.add(key)
+    return {line.pk for line in lines
+            if line.ordered_quantity is not None or line.pk in named
+            or line.accb_config.config_key in ordered_keys}
+
+
+#: DW-2b — the configurator's four actions, as the reviewer's pop-up posts them (with
+#: `accb=1`, which is what routes a post to _boq_correct_accb).
+REVIEWER_ACCB_ACTIONS = ('add', 'save', 'duplicate', 'remove')
+
+#: DW-2b (answer 6) — what each action records. A duplicate is an add.
+_ACCB_CORRECTION_ACTION = {
+    'add':       BOQ_CORRECTION_ACCB_ADD,
+    'duplicate': BOQ_CORRECTION_ACCB_ADD,
+    'save':      BOQ_CORRECTION_ACCB_EDIT,
+    'remove':    BOQ_CORRECTION_ACCB_REMOVE,
+}
+
+#: The configurator card each action opens again when it is refused beside its form.
+_ACCB_ERROR_INTENT = {'add': 'add', 'save': 'edit', 'duplicate': 'edit', 'remove': 'remove'}
+
+
+def _accb_error_seed(post, action, message):
+    """The pop-up's state for a post refused beside its form (no reason, A4/Q6): which card,
+    which action, and the setup as typed, so the page opens it again with nothing lost.
+
+    Only values the card could have posted come back: an option code not in the fixed list
+    returns blank, an unknown type as the first type, at most ACCB_MAX_FEEDERS a side. The
+    page reads it through json_script, so nothing here is ever markup.
+    """
+    raw = post.get('accb_id', '')
+    known = {choice['code'] for choice in accb_switchgear_choices()}
+
+    def option(value):
+        value = str(value or '').strip()
+        return value if value in known else ''
+
+    posted = None
+    if action in ('add', 'save'):
+        spds = post.getlist('out_spd')
+        accb_type = post.get('accb_type')
+        posted = {
+            'type': accb_type if accb_type in ACCB_TYPES else ACCB_TYPES[0],
+            'in': [{'option': option(v)} for v in post.getlist('in_option')[:ACCB_MAX_FEEDERS]],
+            'out': [{'option': option(v), 'spd': index < len(spds) and spds[index] == '1'}
+                    for index, v in enumerate(post.getlist('out_option')[:ACCB_MAX_FEEDERS])],
+        }
+    return {'id': int(raw) if raw.isdigit() else None,
+            'intent': _ACCB_ERROR_INTENT[action], 'message': message, 'posted': posted}
+
+
+def _boq_correct_accb(request, project, group_locked, accb_turn):
+    """boq_correct's ACCB actions (DW-2b): QC or the Head edits, adds, duplicates or removes
+    a configured ACCB through the designer's own configurator, in a pop-up. Returns the
+    redirect, or — for a post with no reason only — the pop-up's state (_accb_error_seed),
+    which boq_correct() renders with the message beside the form (Q6).
+
+    Access: reached only from boq_correct() AFTER its gate (QC or Head verdict authority on
+    this site, never its designer). `accb_turn` is design_reviewer_turn() for `accb_edit`
+    (DW-R3): QC while the package is handed in or with QC, the Head also once QC passed it,
+    and NEVER under a change request — BC-1's Head exception does not apply (answer 3).
+
+    Refusals, in this order, each with a message and nothing written: not this reviewer's
+    turn; the procurement lock; no BOQ; no reason (A4); B-3c validation (the designer's
+    words, through the same _accb_posted_config); then under the BOQ lock: an ACCB not on
+    this BOQ (404); edit or remove of a line on an SCM order (answer 6, Q1); a remove that
+    would leave no DCDB, ACDB or ACCB (A6, DW-1's own test); a duplicate of an ACCB saved
+    before the fixed list (B-3c answer 7).
+
+    Each action that changes something writes ONE BOQCorrection (answer 6), credited to the
+    site's designer as the other corrections are, and one activity entry in the designer's
+    codes with the reviewer's capacity (Q5). An ACCB is in no formula rule (B-2c agenda 5),
+    so nothing is recalculated.
+    """
+    back = redirect(reverse('boq_correct', kwargs={'project_id': project.project_id})
+                    + '#accbs')
+    action = request.POST.get('action', '')
+    if action not in REVIEWER_ACCB_ACTIONS:
+        messages.error(request, 'That is not an ACCB action.')
+        return back
+    # When: the ACCB edit's own turn. The correction screen may be open to the Head under a
+    # pending change request (BC-1); ACCB changes are not (answer 3), and say why.
+    if not accb_turn.allowed:
+        messages.error(request, (
+            ACCB_CHANGE_REQUEST_MESSAGE
+            if accb_turn.reason == BOQ_CORRECTION_CLOSED_CHANGE_REQUEST
+            else BOQ_CORRECTION_CLOSED_MESSAGES.get(
+                accb_turn.reason,
+                BOQ_CORRECTION_CLOSED_MESSAGES[BOQ_CORRECTION_CLOSED_NOT_IN_REVIEW])))
+        return back
+    # The procurement lock is final for a reviewer too (Part 6), as for every correction.
+    if group_locked:
+        messages.error(request, BOQ_CORRECTION_GROUP_LOCKED_MESSAGE)
+        return back
+    try:
+        boq = project.boq
+    except BOQ.DoesNotExist:
+        messages.error(request, BOQ_CORRECTION_NO_BOQ_MESSAGE)
+        return back
+
+    # A4: every reviewer ACCB action states why. Answered on the page, not with a redirect,
+    # so the setup the reviewer chose is still there (Q6). Nothing is read or written for it.
+    reason = (request.POST.get('reason') or '').strip()
+    if not reason:
+        return _accb_error_seed(request.POST, action, ACCB_REASON_REQUIRED_MESSAGE)
+
+    config = None
+    if action in ('add', 'save'):
+        try:
+            config = _accb_posted_config(request.POST)
+        except ValidationError as exc:
+            for error in exc.messages:
+                messages.error(request, error)
+            messages.error(request, 'Nothing was saved.')
+            return back
+
+    master = (BOQItemMaster.objects
+              .filter(code=ACCB_CONFIGURED_CODE, project_type='OPEX').first())
+    if master is None:
+        # Migration 0149 writes this row; without it there is nothing to link a line to.
+        messages.error(request, f'The ACCB catalogue item {ACCB_CONFIGURED_CODE} is missing, '
+                                f'so no ACCB can be saved. Tell the administrator.')
+        return back
+
+    profile = request.user.profile
+    # Q5: the capacity is stamped from authority now: Head authority (the Head or a named
+    # deputy) is the Head's, anyone else here is QC — the turn's role, so one person holding
+    # both is the Head (W-5 Q6).
+    tag = _OVERRIDE_LOG_TAG[OVERRIDE_SET_AS_HEAD if accb_turn.role == REVIEWER_TURN_HEAD
+                            else OVERRIDE_SET_AS_QC]
+    with transaction.atomic():
+        # Lock the BOQ row: _accb_create numbers under it, and the order and A6 checks below
+        # read under it, so two removes cannot each leave the other as the last board.
+        boq = BOQ.objects.select_for_update().get(pk=boq.pk)
+        accb = None
+        if action != 'add':
+            raw = request.POST.get('accb_id', '')
+            # Object consistency: the ACCB must be on THIS site's BOQ (the designer's rule).
+            if not raw.isdigit():
+                raise Http404('No such ACCB on this BOQ.')
+            accb = get_object_or_404(ACCBConfig.objects.select_related('boq_item'),
+                                     pk=int(raw), boq=boq)
+            # Answer 6: a line committed to SCM is not changed or removed here. A duplicate
+            # changes nothing on the order, so it is not refused for this.
+            if action in ('save', 'remove') and accb_lines_on_order([accb.boq_item], project):
+                messages.error(request, ACCB_ON_ORDER_MESSAGE.format(number=accb.number))
+                return back
+            # A6: DW-1's own test, asked of the BOQ without this line. Edits and adds are
+            # never refused for it.
+            if action == 'remove' and BOQ_GAP_NO_BOARD in boq_minimum_content_gaps(
+                    boq, exclude_item=accb.boq_item_id):
+                messages.error(request, ACCB_LAST_BOARD_MESSAGE)
+                return back
+        try:
+            change = _accb_apply(boq, master, profile, action, accb=accb, config=config)
+        except ACCBLegacy:
+            messages.error(request, f'ACCB {accb.number} cannot be duplicated: '
+                                    f'{ACCB_REENTER_MESSAGE}.')
+            return back
+        if change.kind == 'unchanged':
+            messages.info(request, f'ACCB {change.number}: nothing changed, so nothing was '
+                                   f'recorded.')
+            return back
+        BOQCorrection.objects.create(
+            boq=boq, item=change.line,
+            item_code=master.code,
+            # The row's identity, as on the other corrections: the text after the change,
+            # or before it on a remove (the line is gone).
+            item_description=change.description_after or change.description_before,
+            action=_ACCB_CORRECTION_ACTION[action],
+            # One ACCB is one line of Qty 1: blank before an add, blank after a remove.
+            quantity_before=None if change.kind == 'added' else Decimal('1'),
+            quantity_after=None if change.kind == 'removed' else Decimal('1'),
+            corrected_by=profile,
+            # BC-4: the designer this correction is credited to, frozen now. boq_correct's
+            # gate needs the assignment, so it exists here.
+            designer_at_correction_id=project.design_assignment.assigned_to_id,
+            accb_number=change.number,
+            description_before=change.description_before,
+            description_after=change.description_after,
+            reason=reason,
+        )
+
+    if action == 'save':
+        log_line = ('boq_accb_changed', accb_log_text(
+            profile, 'changed', change.number, project,
+            _accb_change_detail(change.before, change.after), tag=tag))
+        done = f'ACCB {change.number} saved.'
+    elif action == 'remove':
+        log_line = ('boq_accb_removed', accb_log_text(
+            profile, 'removed', change.number, project, accb_summary(change.before), tag=tag))
+        done = f'ACCB {change.number} removed.'
+    elif action == 'duplicate':
+        log_line = ('boq_accb_added', accb_log_text(
+            profile, 'added', change.number, project,
+            f'{accb_summary(change.after)}; copy of ACCB {change.source_number}', tag=tag))
+        done = f'ACCB {change.source_number} duplicated as ACCB {change.number}.'
+    else:
+        log_line = ('boq_accb_added', accb_log_text(
+            profile, 'added', change.number, project, accb_summary(change.after), tag=tag))
+        done = f'ACCB {change.number} added.'
+    # After the write commits, never inside it — log_activity's own rule.
+    log_activity(project, profile, log_line[1], entity_type='BOQ', entity_id=boq.pk,
+                 action_code=log_line[0])
+    messages.success(request, f'{done} The correction is recorded against your name.')
+    return back
+
+
 @login_required
 def boq_correct(request, project_id):
     """The reviewer's correction screen — change a quantity, or add a line that was missed.
@@ -13080,6 +13414,12 @@ def boq_correct(request, project_id):
 
     DW-3: Remove is `override_set` at quantity 0 with a note (and `remove=1`, which only says
     where an empty-note message goes); Restore is `override_clear`. Same turn, same helper.
+
+    DW-2b: a post with `accb=1` is one of the designer's configurator actions (add, save,
+    duplicate, remove) on one configured ACCB, from the ACCB pop-up, with a required reason.
+    _boq_correct_accb() answers it, in its own turn (never under a change request). It is
+    the ONE branch here that can delete a BOQ line: an ACCB remove deletes the ACCB's line,
+    exactly as the designer's remove does (Zuber, Q2), and its BOQCorrection keeps the text.
 
     ONE ROW PER POST, NOT A SHEET SAVE, and that is the design rather than an omission. A
     whole-sheet POST is what makes absence meaningful, and absence meaning "delete" is the
@@ -13117,7 +13457,8 @@ def boq_correct(request, project_id):
     # BOQ" links read. Checked on every request, POST included, so a stale tab cannot save
     # after the design has moved on.
     turns = design_reviewer_turns(request.user, project,
-                                  (REVIEWER_ACTION_BOQ_CORRECT, REVIEWER_ACTION_BOQ_OVERRIDE))
+                                  (REVIEWER_ACTION_BOQ_CORRECT, REVIEWER_ACTION_BOQ_OVERRIDE,
+                                   REVIEWER_ACTION_ACCB_EDIT))
     turn = turns[REVIEWER_ACTION_BOQ_CORRECT]
     if not turn.allowed:
         if turn.reason == REVIEWER_TURN_NOT_REVIEWER:
@@ -13152,6 +13493,17 @@ def boq_correct(request, project_id):
             return result
         override_error = result
 
+    # DW-2b — the ACCB pop-up's actions, likewise answered before the catalogue is loaded.
+    # A post with no reason falls through to the GET with `accb_error` set, so the pop-up
+    # opens again with the message and the setup as typed (Q6).
+    accb_error = None
+    if request.method == 'POST' and request.POST.get('accb') == '1':
+        result = _boq_correct_accb(request, project, group_locked,
+                                   turns[REVIEWER_ACTION_ACCB_EDIT])
+        if not isinstance(result, dict):
+            return result
+        accb_error = result
+
     catalogue       = get_opex_boq_catalogue()
     catalogue_by_id = {m.pk: m for m in catalogue}
     category_order  = opex_catalogue_category_order()
@@ -13161,7 +13513,7 @@ def boq_correct(request, project_id):
     except BOQ.DoesNotExist:
         boq = None
 
-    if request.method == 'POST' and override_error is None:
+    if request.method == 'POST' and override_error is None and accb_error is None:
         # The procurement lock is final and is answered before anything else is read.
         if group_locked:
             messages.error(request, BOQ_CORRECTION_GROUP_LOCKED_MESSAGE)
@@ -13387,6 +13739,38 @@ def boq_correct(request, project_id):
             if str(item['master_id']) == override_error['master_id']:
                 item['override_error'] = override_error
 
+    # DW-2b — the ACCB pop-up, offered where its POST would accept it: a BOQ, no
+    # procurement lock, and the ACCB edit's turn (no query: evaluated with the others at the
+    # top). The cards are built from accb_rows(), which loads each configuration; the only
+    # query added is the order check, one for every ACCB on the sheet (Q7).
+    accb_lines = accb_rows(boq)
+    accb_turn = turns[REVIEWER_ACTION_ACCB_EDIT]
+    can_edit_accb = boq is not None and not group_locked and accb_turn.allowed
+    accb_data = None
+    if can_edit_accb:
+        ordered = accb_lines_on_order(accb_lines, project)
+        cards = []
+        for line in accb_lines:
+            line.on_order = line.pk in ordered
+            card = _accb_card(line)
+            card['on_order'] = line.on_order
+            cards.append(card)
+        # The picker's data, plus `reviewer` (one card at a time, in the pop-up) and the
+        # refused post to open again, if any. Every value is validated or generated.
+        accb_data = {
+            'accbs': cards,
+            'types': list(ACCB_TYPES),
+            'switchgear': accb_switchgear_choices(),
+            'min_feeders': ACCB_MIN_FEEDERS, 'max_feeders': ACCB_MAX_FEEDERS,
+            'reviewer': True,
+            'error': accb_error,
+        }
+    # Where the pop-up is not offered and the reason is not shown elsewhere on the page:
+    # the Head under a pending change request, who may still correct quantities (BC-1).
+    accb_closed_note = (ACCB_CHANGE_REQUEST_MESSAGE
+                        if boq is not None and not group_locked
+                        and accb_turn.reason == BOQ_CORRECTION_CLOSED_CHANGE_REQUEST else '')
+
     return render(request, 'projects/boq_correct.html', {
         # DW-8 (N1): "← My queue". Only reviewers reach this line; the turn's cached
         # is_head() answers Head authority (the designer is refused above, so the two agree).
@@ -13400,9 +13784,14 @@ def boq_correct(request, project_id):
         'group_locked':    group_locked,
         'design_locked':   project_boq_is_design_locked(project),
         'corrections':     corrections,
-        # B-3a: configured ACCB lines, shown read-only with the reason (P7).
-        'accb_lines':      accb_rows(boq),
-        'accb_reviewer_message': ACCB_REVIEWER_MESSAGE,
+        # B-3a: configured ACCB lines. DW-2b: with Edit / Remove and the pop-up's data when
+        # `can_edit_accb`; otherwise read-only, with `accb_closed_note` when there is one.
+        'accb_lines':      accb_lines,
+        'can_edit_accb':   can_edit_accb,
+        'accb_data':       accb_data,
+        'accb_error':      accb_error,
+        'accb_closed_note': accb_closed_note,
+        'accb_on_order_note': ACCB_ON_ORDER_NOTE,
         'formula_error':   formulas.error,
         'formula_reviewer_message': FORMULA_REVIEWER_MESSAGE,
         # B-2e — the override form on calculated rows, and the calculated items with no

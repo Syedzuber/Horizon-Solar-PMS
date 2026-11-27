@@ -39,7 +39,7 @@ from django.utils import timezone
 from .models import (
     ArkaSubmission, BOQCorrection, DesignAssignment, DesignAttempt, DesignChangeRequest,
     DesignFile, DueDateCommitment, StatusTransition, UserProfile, SUBJECT_DESIGN_ASSIGNMENT,
-    BOQ_CORRECTION_LINE_ADDED, BOQ_CORRECTION_QUANTITY_CHANGED,
+    BOQ_CORRECTION_LINE_ADDED, BOQ_CORRECTION_QUANTITY_CHANGED, BOQ_CORRECTION_ACCB_ACTIONS,
     CHANGE_REQUEST_OPEN_VERDICTS, CHANGE_REQUEST_PM_REJECTED,
     CHANGE_REQUEST_PENDING, CHANGE_REQUEST_ORIGIN_SCM,
     DESIGN_AWAITING_SURVEY, DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED,
@@ -1208,10 +1208,12 @@ _STAMPED     = f'{_CORRECTIONS}__designer_at_correction'
 
 def _correction_count(counted, action):
     """Count of the joined corrections that are in `counted` (reviewer_corrections()) and
-    of one action. A filtered aggregate, so the uncounted rows still join (and still form
-    their own stamped-designer groups, with 0 here) but add nothing."""
+    of one action — or, given a tuple, of any of those actions (DW-2b: the three ACCB
+    actions are one figure). A filtered aggregate, so the uncounted rows still join (and
+    still form their own stamped-designer groups, with 0 here) but add nothing."""
+    lookup = 'in' if isinstance(action, tuple) else 'exact'
     return Count(_CORRECTIONS, filter=Q(**{f'{_CORRECTIONS}__in': counted,
-                                           f'{_CORRECTIONS}__action': action}))
+                                           f'{_CORRECTIONS}__action__{lookup}': action}))
 
 
 def _stamped_designer(fact):
@@ -1281,6 +1283,8 @@ def reviewer_correction_panel(sites):
                        the template shows a dash: kept as a number rather than None so
                        the threshold is a display rule only.
       quantity_edits   counted quantity_changed rows; lines_added likewise for line_added.
+      accb_changes     DW-2b: counted ACCB edits, adds and removes, each one (Q4). They count
+                       toward sites_corrected and the rate like the other two.
       arka_revisions   W-6: reviewer Arka revisions credited to this designer (stamp only).
       cad_revisions    the same for CAD. `revisions` = their sum. Counts only, no rate.
 
@@ -1321,6 +1325,9 @@ def reviewer_correction_panel(sites):
                 assignment_id=OuterRef('pk'), qc_started_at__isnull=False)),
             quantity_edits=_correction_count(counted, BOQ_CORRECTION_QUANTITY_CHANGED),
             lines_added=_correction_count(counted, BOQ_CORRECTION_LINE_ADDED),
+            # DW-2b: one more aggregate in the same statement, so the panel's query count
+            # does not move.
+            accb_changes=_correction_count(counted, BOQ_CORRECTION_ACCB_ACTIONS),
         )
         .order_by())
     # W-6 — reviewer revisions, one query per model. Separate statements, not more
@@ -1344,6 +1351,7 @@ def reviewer_correction_panel(sites):
     def _row(designer):
         return by_designer.setdefault(designer.pk, {
             'designer': designer, 'reviewed': 0, 'quantity_edits': 0, 'lines_added': 0,
+            'accb_changes': 0,
             'arka_revisions': 0, 'cad_revisions': 0,
             'projects': [], 'corrected': {},
         })
@@ -1358,7 +1366,8 @@ def reviewer_correction_panel(sites):
     # The numerator, by stamped designer, falling back to the current one.
     unassigned = set()
     for fact in facts:
-        if fact['pk'] not in reached or not (fact['quantity_edits'] or fact['lines_added']):
+        if fact['pk'] not in reached or not (fact['quantity_edits'] or fact['lines_added']
+                                             or fact['accb_changes']):
             continue
         site = site_by_assignment[fact['pk']]
         if fact['stamped_id'] is not None:
@@ -1374,6 +1383,7 @@ def reviewer_correction_panel(sites):
         row['corrected'][site['project'].pk] = site['project']
         row['quantity_edits'] += fact['quantity_edits']
         row['lines_added']    += fact['lines_added']
+        row['accb_changes']   += fact['accb_changes']
 
     # W-6 — the revisions, by stamped designer ONLY (no fallback, ruling Q2). Same gate
     # as the corrections; a designer credited with revisions alone still gets a row
@@ -1400,7 +1410,8 @@ def reviewer_correction_panel(sites):
         row['revisions'] = row['arka_revisions'] + row['cad_revisions']
     return {
         'rows': rows,
-        'total_edits': sum(r['quantity_edits'] + r['lines_added'] for r in rows),
+        'total_edits': sum(r['quantity_edits'] + r['lines_added'] + r['accb_changes']
+                           for r in rows),
         'unassigned_sites': len(unassigned),
         'total_revisions': sum(r['revisions'] for r in rows),
         'unassigned_revision_sites': len(unassigned_revisions),

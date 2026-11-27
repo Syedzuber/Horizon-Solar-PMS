@@ -1,0 +1,171 @@
+{% comment %}
+B-3a / DW-2b — the ACCB configurator's script: the ONE copy, included once by each page that
+draws accb_configurator.html (the picker, and the correction screen's pop-up). It reads the
+page's json_script "accbData"; `reviewer` in that data switches on the pop-up behaviour.
+{% endcomment %}
+<script>
+/* B-3a — the ACCB section (Alpine). Registered on alpine:init, which fires after this
+   inline script has run because Alpine itself loads with `defer`. */
+(function () {
+  var DATA = JSON.parse(document.getElementById('accbData').textContent);
+  // B-3c: the fixed switchgear list, by option code. From the server (accb.ACCB_SWITCHGEAR)
+  // so the page never holds its own copy of the 11 texts.
+  var OPTIONS = {};
+  DATA.switchgear.forEach(function (o) { OPTIONS[o.code] = o; });
+
+  /* ---------------------------------------------------------------------------------
+     DISPLAY-ONLY COPY. The source of truth for this wording is accb_description() in
+     projects/accb.py. The server regenerates the text from the saved configuration on
+     every save and never reads this one; this exists only so the designer sees the line
+     while choosing. If the two ever disagree, accb.py is right.
+
+     Test vectors (B-3c ruling 3) — check by eye:
+       Type-2 · I/C 100A MCCB, 63A MCB · O/G 200A MCCB with SPD
+         ACCB Type-2, 4P 415V. I/C Feeder 2 Nos.: 1 x 100A, 4P, 36kA, MCCB with S/C & O/L TM Based Extended Rotary Handle + Spreader Terminals; 1 x 63A, 4P, MCB. O/G Feeder 1 No.: 1 x 200A, 4P, 36kA, MCCB with S/C & O/L TM Based Extended Rotary Handle + Spreader Terminals, with SPD.
+       Type-1 · I/C 40A, 25A, 40A MCB · O/G 125A MCCB with SPD, 125A MCCB without
+         ACCB Type-1, 4P 415V. I/C Feeder 3 Nos.: 2 x 40A, 4P, MCB; 1 x 25A, 4P, MCB. O/G Feeder 2 Nos.: 1 x 125A, 4P, 36kA, MCCB with S/C & O/L TM Based Extended Rotary Handle + Spreader Terminals, with SPD; 1 x 125A, 4P, 36kA, MCCB with S/C & O/L TM Based Extended Rotary Handle + Spreader Terminals, without SPD.
+     --------------------------------------------------------------------------------- */
+  function countText(n) { return n === 1 ? '1 No.' : n + ' Nos.'; }
+  // Groups identical feeders (same option, and on O/G the same SPD), rating high to low,
+  // then "with SPD" first; written "<n> x <text>[, with SPD | , without SPD]".
+  function groupsText(feeders, withSpd) {
+    var counts = {}, groups = [];
+    feeders.forEach(function (f) {
+      var id = f.option + (withSpd ? (f.spd ? '|1' : '|0') : '');
+      if (!counts[id]) {
+        counts[id] = 0;
+        groups.push({id: id, option: OPTIONS[f.option], spd: !!f.spd});
+      }
+      counts[id] += 1;
+    });
+    groups.sort(function (a, b) {
+      if (a.option.rating !== b.option.rating) { return b.option.rating - a.option.rating; }
+      return (b.spd ? 1 : 0) - (a.spd ? 1 : 0);
+    });
+    return groups.map(function (g) {
+      return counts[g.id] + ' x ' + g.option.text +
+             (withSpd ? (g.spd ? ', with SPD' : ', without SPD') : '');
+    }).join('; ');
+  }
+  function describe(card) {
+    var chosen = card['in'].concat(card['out']).every(function (f) { return OPTIONS[f.option]; });
+    if (!chosen) {
+      return 'Choose the switchgear on every feeder to see the description.';
+    }
+    return 'ACCB ' + card.type + ', 4P 415V. I/C Feeder ' + countText(card['in'].length) +
+           ': ' + groupsText(card['in'], false) + '. O/G Feeder ' +
+           countText(card['out'].length) + ': ' + groupsText(card['out'], true) + '.';
+  }
+  function optionText(code) { return OPTIONS[code] ? OPTIONS[code].text : ''; }
+
+  function state(card) {
+    // What "unsaved" compares: everything the form posts, as text.
+    return JSON.stringify([card.type,
+      card['in'].map(function (f) { return f.option; }),
+      card['out'].map(function (f) { return [f.option, !!f.spd]; })]);
+  }
+
+  var nextKey = 1;
+  function makeCard(source) {
+    // B-3c: a feeder saved before the fixed list arrives with option '' (and the card with
+    // legacy true), so its dropdown shows "Choose switchgear…" until it is re-entered.
+    var card = {
+      key: nextKey++, id: source.id || null, number: source.number || null,
+      type: source.type, description: source.description || '', legacy: !!source.legacy,
+      'in':  source['in'].map(function (f) { return {option: f.option || ''}; }),
+      'out': source['out'].map(function (f) { return {option: f.option || '', spd: !!f.spd}; }),
+      open: false, confirmRemove: false
+    };
+    card.saved = source.id ? state(card) : null;
+    return card;
+  }
+
+  function blankCard(posted) {
+    // A new ACCB: one blank feeder a side, or (DW-2b, a refused post) the setup as typed.
+    posted = posted || {};
+    var ins = posted['in'] && posted['in'].length ? posted['in'] : [{option: ''}];
+    var outs = posted['out'] && posted['out'].length ? posted['out'] : [{option: '', spd: false}];
+    return makeCard({type: posted.type || DATA.types[0], 'in': ins, 'out': outs});
+  }
+
+  document.addEventListener('alpine:init', function () {
+    Alpine.data('accbSection', function () {
+      return {
+        // DW-2b: in the reviewer's pop-up (DATA.reviewer) the list holds only the card the
+        // reviewer opened (openCard), so the markup and the "unsaved" guard are the
+        // picker's own. The picker starts with every saved ACCB, as before.
+        cards: DATA.reviewer ? [] : DATA.accbs.map(makeCard),
+        types: DATA.types,
+        sides: [{key: 'in', label: 'I/C feeders'}, {key: 'out', label: 'O/G feeders'}],
+        limits: DATA,
+        submitting: null,
+        describe: describe,
+        optionText: optionText,
+        isDirty: function (card) { return card.saved === null || state(card) !== card.saved; },
+        setCount: function (card, key, n) {
+          n = Math.max(DATA.min_feeders, Math.min(DATA.max_feeders, n));
+          // B-3c answer 3: a new feeder starts blank and must be chosen.
+          while (card[key].length < n) {
+            card[key].push(key === 'out' ? {option: '', spd: false} : {option: ''});
+          }
+          while (card[key].length > n) { card[key].pop(); }
+        },
+        addCard: function () {
+          var card = makeCard({type: DATA.types[0],
+                               'in': [{option: ''}],
+                               'out': [{option: '', spd: false}]});
+          card.open = true;
+          this.cards.push(card);
+        },
+        discard: function (card) {
+          this.cards = this.cards.filter(function (c) { return c.key !== card.key; });
+          // DW-2b: in the pop-up, discarding the one card closes it.
+          if (DATA.reviewer) { window.dispatchEvent(new CustomEvent('accb-close')); }
+        },
+        // DW-2b — the reviewer's pop-up opens ONE card: {id, intent: 'edit' | 'remove' |
+        // 'add', posted}. Edit opens a saved ACCB, remove opens it at its confirmation, add
+        // opens a blank card. `posted` is a refused post's setup, put back as typed.
+        openCard: function (detail) {
+          var card = null;
+          if (detail.intent === 'add') {
+            card = blankCard(detail.posted);
+          } else {
+            var source = DATA.accbs.filter(function (a) { return a.id === detail.id; })[0];
+            if (!source) { return; }
+            card = makeCard(source);
+            card.confirmRemove = detail.intent === 'remove';
+            if (detail.posted) {
+              var typed = blankCard(detail.posted);
+              card.type = typed.type;
+              card['in'] = typed['in'];
+              card['out'] = typed['out'];
+            }
+          }
+          card.open = true;
+          this.submitting = null;
+          this.cards = [card];
+        },
+        init: function () {
+          var self = this;
+          if (DATA.reviewer) {
+            window.addEventListener('accb-open', function (event) { self.openCard(event.detail); });
+            // Closing the pop-up drops its card: nothing half-edited is kept or warned about.
+            window.addEventListener('accb-closed', function () { self.cards = []; });
+            if (DATA.error) { self.openCard(DATA.error); }
+          }
+          // Warn before leaving with unsaved ACCB edits — except the card being submitted,
+          // whose edits are exactly what is being sent.
+          window.addEventListener('beforeunload', function (event) {
+            var lost = self.cards.some(function (c) {
+              return c.key !== self.submitting && self.isDirty(c);
+            });
+            if (!lost) { return; }
+            event.preventDefault();
+            event.returnValue = '';
+          });
+        }
+      };
+    });
+  });
+})();
+</script>

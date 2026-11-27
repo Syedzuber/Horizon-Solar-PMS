@@ -79,9 +79,24 @@ _TEXT_BY_PAIR = {(breaker, rating): text for breaker, rating, text in ACCB_SWITC
 ACCB_UPLOAD_REFUSED_MESSAGE = ('ACCB lines are managed in the ACCB section, not by upload. '
                                'Remove the ACCB rows from the sheet and upload again.')
 
-#: B-3 P7 — a reviewer may not change an ACCB line; this is what the correction screen says.
-ACCB_REVIEWER_MESSAGE = ('ACCB lines are edited by the designer; fail the BOQ to send it '
-                         'back.')
+#: What the correction screen says to a quantity posted on an ACCB line. B-3 P7 refused
+#: reviewers ACCBs altogether; DW-2b (DW-R3) gives them the configurator instead, so the
+#: quantity box stays refused and points at it (Zuber, DW-2b Q8).
+ACCB_REVIEWER_MESSAGE = 'Change an ACCB with its Edit button; its quantity is always 1.'
+
+#: DW-2b — the reviewer's ACCB refusals, worded once for the view and its screen.
+#: Answer 3: never under a change request, for the Head either (no BC-1 exception).
+ACCB_CHANGE_REQUEST_MESSAGE = ("A change request is open on this design, so ACCBs can't be "
+                               "changed until it is decided.")
+#: Answer 6: a line committed to SCM is not changed here. The short form is the GET's note.
+ACCB_ON_ORDER_NOTE = 'On an SCM order'
+ACCB_ON_ORDER_MESSAGE = ("ACCB {number} is on an SCM order, so it can't be changed or "
+                         "removed here. Nothing was saved.")
+#: A6: removing the BOQ's only DCDB, ACDB or ACCB (DW-1's test).
+ACCB_LAST_BOARD_MESSAGE = ("This is the BOQ's only DCDB, ACDB or ACCB. Add the replacement "
+                           "first, then remove this one.")
+#: A4: every reviewer ACCB action states why. Shown beside the form, in the pop-up.
+ACCB_REASON_REQUIRED_MESSAGE = ('Give a reason for this ACCB change. Nothing was saved.')
 
 #: B-3c answer 7 — what Duplicate says about an ACCB saved before the fixed list.
 ACCB_REENTER_MESSAGE = 're-enter the switchgear first'

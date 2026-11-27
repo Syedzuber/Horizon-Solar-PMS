@@ -1,0 +1,177 @@
+{% comment %}
+B-3a / DW-2b — THE ACCB CONFIGURATOR, one card per ACCB. ONE COPY, drawn by the designer's
+picker (opex_boq_entry.html) and, in a pop-up, by the reviewer's correction screen
+(boq_correct.html), so both edit an ACCB through the same card and the same script
+(accb_configurator_script.html, included once per page; data from json_script "accbData").
+
+  accb_form_action  where each card's form posts: opex_boq_accb for the designer,
+                    boq_correct for a reviewer
+  accb_reviewer     False on the picker, which renders exactly as before DW-2b. True in the
+                    pop-up: one card at a time (the script's openCard), a hidden accb=1 that
+                    routes the post to boq_correct's ACCB branch, and the reason box first,
+                    labelled and not `required` — the server answers an empty one beside
+                    the form (DW-2a layout, A4).
+
+The action values (add / save / duplicate / remove) are the same on both pages; the server
+decides who may take them.
+{% endcomment %}
+    <div x-data="accbSection" x-cloak>
+      {% if not accb_reviewer %}
+      <div class="small text-muted px-1 mb-2">
+        Each ACCB saves on its own. If you have unsaved quantities in the sheet above, save
+        the sheet first.
+      </div>
+      {% endif %}
+
+      <template x-for="card in cards" :key="card.key">
+        <div class="accb-card mb-2">
+          {# Collapsed by default; click (not hover) opens it. #}
+          <button type="button" class="accb-head d-flex gap-2 align-items-start"
+                  @click="card.open = !card.open" :aria-expanded="card.open">
+            <span class="fw-semibold text-nowrap" x-text="card.id ? 'ACCB ' + card.number : 'New ACCB'"></span>
+            <span class="accb-desc flex-grow-1 text-muted" x-text="card.id && !isDirty(card) ? card.description : describe(card)"></span>
+            <span class="badge text-bg-warning" x-show="isDirty(card)">Unsaved</span>
+            <i class="bi" :class="card.open ? 'bi-chevron-up' : 'bi-chevron-down'"></i>
+          </button>
+
+          <form method="post" action="{{ accb_form_action }}"
+                class="px-3 pb-3" x-show="card.open" @submit="submitting = card.key">
+            {% csrf_token %}
+            <input type="hidden" name="accb_id" :value="card.id || ''">
+            {% if accb_reviewer %}
+            <input type="hidden" name="accb" value="1">
+            {# DW-2b (A4): the reason first, labelled, server-checked (no `required`). #}
+            <div class="mb-2">
+              <label class="form-label small mb-0" :for="'accbReason' + card.key">Reason (required)</label>
+              <textarea class="form-control form-control-sm" name="reason" rows="2"
+                        :id="'accbReason' + card.key"
+                        placeholder="Why this ACCB is wrong for this site"></textarea>
+            </div>
+            {% endif %}
+
+            <div class="d-flex flex-wrap gap-3 align-items-center mb-2">
+              {# Segmented buttons: the radios must be direct children of .btn-group. #}
+              <div class="btn-group btn-group-sm" role="group" aria-label="ACCB type">
+                {% for accb_type in accb_data.types %}
+                  <input type="radio" class="btn-check" name="accb_type" value="{{ accb_type }}"
+                         :id="'accbType' + card.key + '-{{ forloop.counter }}'" x-model="card.type" required>
+                  <label class="btn btn-outline-success"
+                         :for="'accbType' + card.key + '-{{ forloop.counter }}'">{{ accb_type }}</label>
+                {% endfor %}
+              </div>
+              <span class="badge text-bg-light border">4P · 415V</span>
+            </div>
+
+            {# B-3c: an ACCB saved before the fixed switchgear list. #}
+            <div class="alert alert-warning py-2 mb-2 small" x-show="card.legacy">
+              Re-enter the switchgear: this ACCB was saved before the fixed switchgear list.
+              Choose each feeder's switchgear (and each O/G feeder's SPD), then save.
+            </div>
+
+            {# B-3c: I/C and O/G stacked full width, so the long MCCB text fits the select. #}
+            <div class="row g-3">
+              <template x-for="side in sides" :key="side.key">
+                <div class="col-12">
+                  <div class="d-flex align-items-center gap-2 mb-1">
+                    <span class="small fw-semibold" x-text="side.label"></span>
+                    <div class="btn-group btn-group-sm" role="group">
+                      <button type="button" class="btn btn-outline-secondary"
+                              @click="setCount(card, side.key, card[side.key].length - 1)"
+                              :disabled="card[side.key].length <= limits.min_feeders"
+                              :aria-label="'Fewer ' + side.label + ' feeders'">&minus;</button>
+                      <span class="btn btn-outline-secondary disabled" style="min-width:2.5rem"
+                            x-text="card[side.key].length"></span>
+                      <button type="button" class="btn btn-outline-secondary"
+                              @click="setCount(card, side.key, card[side.key].length + 1)"
+                              :disabled="card[side.key].length >= limits.max_feeders"
+                              :aria-label="'More ' + side.label + ' feeders'">+</button>
+                    </div>
+                  </div>
+                  <template x-for="(feeder, index) in card[side.key]" :key="index">
+                    <div class="accb-feeder">
+                      <span class="small text-muted flex-shrink-0" style="width:1.5rem" x-text="index + 1"></span>
+                      {% comment %}
+                      B-3c: one dropdown of the fixed list (accb.ACCB_SWITCHGEAR). The options
+                      are drawn by Django, not x-for, so they exist before x-model sets the
+                      saved value. A blank first option: a new feeder must be chosen.
+                      {% endcomment %}
+                      <select class="form-select form-select-sm" :name="side.key + '_option'"
+                              x-model="feeder.option" required :title="optionText(feeder.option)"
+                              :aria-label="side.label + ' feeder ' + (index + 1) + ' switchgear'">
+                        <option value="">Choose switchgear…</option>
+                        {% for option in accb_data.switchgear %}
+                          <option value="{{ option.code }}">{{ option.text }}</option>
+                        {% endfor %}
+                      </select>
+                      {% comment %}
+                      B-3c: SPD per O/G feeder only. The checkbox has no name: an unticked box
+                      posts nothing, which would put the SPD list out of step with the feeders.
+                      The hidden field posts '1' or '0' for every O/G feeder instead.
+                      {% endcomment %}
+                      <template x-if="side.key === 'out'">
+                        <div class="form-check mb-0 flex-shrink-0">
+                          <input class="form-check-input" type="checkbox" x-model="feeder.spd"
+                                 :id="'accbSpd' + card.key + '-' + index">
+                          <label class="form-check-label small" :for="'accbSpd' + card.key + '-' + index">SPD</label>
+                          <input type="hidden" name="out_spd" :value="feeder.spd ? '1' : '0'">
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+
+            <div class="accb-preview mt-2">
+              <div class="accb-desc" x-text="describe(card)"></div>
+              <div class="small text-muted mt-1" x-text="describe(card).length + ' characters'"></div>
+            </div>
+
+            {% comment %}
+            B-3c ruling 6: x-if, NOT x-show. Bootstrap's d-flex is display:flex !important,
+            which beats the inline display:none x-show writes, so with x-show both blocks
+            were always visible: an unsaved card showed "Remove ACCB null?", and every saved
+            card showed its "Yes, remove" button before Remove was clicked. x-if takes the
+            block out of the page entirely; the confirmation exists only on a saved ACCB
+            after Remove is clicked.
+            {% endcomment %}
+            <template x-if="!card.confirmRemove">
+              <div class="d-flex flex-wrap gap-2 mt-2 align-items-center">
+                <button type="submit" name="action" :value="card.id ? 'save' : 'add'"
+                        class="btn btn-sm text-white" style="background-color:#1a7a4a;">Save</button>
+                <template x-if="card.id">
+                  <span class="d-flex gap-2">
+                    <button type="submit" name="action" value="duplicate" formnovalidate
+                            class="btn btn-sm btn-outline-secondary" :disabled="isDirty(card) || card.legacy"
+                            :title="card.legacy ? 'Re-enter the switchgear first' : (isDirty(card) ? 'Save first — duplicate copies the saved ACCB' : 'Copy this ACCB as a new one')">Duplicate</button>
+                    <button type="button" class="btn btn-sm btn-outline-danger"
+                            @click="card.confirmRemove = true">Remove</button>
+                  </span>
+                </template>
+                <template x-if="!card.id">
+                  <button type="button" class="btn btn-sm btn-outline-secondary"
+                          @click="discard(card)">Discard</button>
+                </template>
+              </div>
+            </template>
+            {# Remove is confirmed in the page, not with a browser dialog. #}
+            <template x-if="card.id && card.confirmRemove">
+              <div class="alert alert-danger py-2 mt-2 mb-0 small d-flex flex-wrap gap-2 align-items-center">
+                <span class="me-auto" x-text="'Remove ACCB ' + card.number + '? Its BOQ line is deleted.'"></span>
+                <button type="submit" name="action" value="remove" formnovalidate
+                        class="btn btn-sm btn-danger" x-text="'Yes, remove ACCB ' + card.number"></button>
+                <button type="button" class="btn btn-sm btn-outline-secondary"
+                        @click="card.confirmRemove = false">Cancel</button>
+              </div>
+            </template>
+          </form>
+        </div>
+      </template>
+
+      {% if not accb_reviewer %}
+      <div class="px-1 small text-muted" x-show="!cards.length">No ACCBs on this BOQ.</div>
+      <button type="button" class="btn btn-sm btn-outline-success mt-1" @click="addCard()">
+        <i class="bi bi-plus-lg"></i> Add ACCB
+      </button>
+      {% endif %}
+    </div>

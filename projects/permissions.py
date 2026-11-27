@@ -1006,12 +1006,15 @@ def user_has_boq_correction_authority(user, project):
 # change-request exception (D-7) stays — for BOQ correction only.
 # ---------------------------------------------------------------------------
 
-#: The four reviewer actions. DW-2b adds the ACCB edit as a fifth: one key here and one row
-#: in the table below.
+#: The reviewer actions. DW-2b added the ACCB edit as a fifth: one key here and one row in
+#: the table below.
 REVIEWER_ACTION_ARKA_REVISE  = 'arka_revise'
 REVIEWER_ACTION_CAD_REVISE   = 'cad_revise'
 REVIEWER_ACTION_BOQ_CORRECT  = 'boq_correct'
 REVIEWER_ACTION_BOQ_OVERRIDE = 'boq_override'
+#: DW-2b (DW-R3, answer 6) — QC or the Head edits, adds (or duplicates) or removes a
+#: configured ACCB from the correction screen. One key for all three: they share one turn.
+REVIEWER_ACTION_ACCB_EDIT    = 'accb_edit'
 
 #: The capacity a reviewer acts in. Same values as models.REVIEWER_ROLE_QC / _HEAD and
 #: OVERRIDE_SET_AS_QC / _HEAD, so a caller can stamp them directly.
@@ -1042,6 +1045,13 @@ DESIGN_REVIEWER_TURN_WINDOWS = {
         REVIEWER_TURN_HEAD: frozenset({'artifacts_uploaded', 'in_qc', 'awaiting_head_qc'}),
     },
     REVIEWER_ACTION_BOQ_OVERRIDE: {
+        REVIEWER_TURN_QC:   frozenset({'artifacts_uploaded', 'in_qc'}),
+        REVIEWER_TURN_HEAD: frozenset({'artifacts_uploaded', 'in_qc', 'awaiting_head_qc'}),
+    },
+    # DW-2b: BOQ correction's cells. Evaluated by _boq_turn, whose change-request exception
+    # is keyed on boq_correct alone, so an ACCB edit is never open under a change request
+    # (answer 3), for the Head either.
+    REVIEWER_ACTION_ACCB_EDIT: {
         REVIEWER_TURN_QC:   frozenset({'artifacts_uploaded', 'in_qc'}),
         REVIEWER_TURN_HEAD: frozenset({'artifacts_uploaded', 'in_qc', 'awaiting_head_qc'}),
     },
@@ -1191,7 +1201,8 @@ def _boq_turn(turn, facts, action, status, cells):
             `corrected` verdict (D-7), unchanged (answer 3). `with_pm` does not open it: the
             Head cannot decide a request the PM has not forwarded.
 
-    The override has no (2) (B-2e Q3; answer 1, 26 Nov): under a change request the Head
+    The override and the ACCB edit have no (2) (B-2e Q3; answer 1, 26 Nov; DW-2b answer 3):
+    under a change request the Head
     corrects what a calculated line is worked out from, which is the evidence a `corrected`
     verdict needs; an override writes no BOQCorrection. The procurement group lock is not
     read here: boq_correct() refuses on it before any save, for both.
@@ -1263,6 +1274,7 @@ _TURN_EVALUATORS = {
     REVIEWER_ACTION_CAD_REVISE:   _revision_turn,
     REVIEWER_ACTION_BOQ_CORRECT:  _boq_turn,
     REVIEWER_ACTION_BOQ_OVERRIDE: _boq_turn,
+    REVIEWER_ACTION_ACCB_EDIT:    _boq_turn,
 }
 
 

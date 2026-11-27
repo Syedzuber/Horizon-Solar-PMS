@@ -1232,9 +1232,12 @@ def get_opex_mandatory_items():
 #: THE DATABASE (BOQItemGroupMember), never hard-coded item codes, so a group edited with
 #: load_formula_rules moves this rule with it. Membership ignores is_active (B-2a): a line on
 #: a retired inverter is still a real line and still counts.
+#: DW-2b (A6): the board test's key, named so a reviewer's ACCB remove can ask for it.
+BOQ_GAP_NO_BOARD = 'no_dcdb_acdb_accb'
+
 BOQ_MINIMUM_CONTENT = (
     ('no_inverter',       ('all inverters',),         False),
-    ('no_dcdb_acdb_accb', ('all DCDBs', 'all ACDBs'), True),
+    (BOQ_GAP_NO_BOARD,    ('all DCDBs', 'all ACDBs'), True),
 )
 
 #: How each gap key is worded, on the refusal, the group screen and the Summary sheet alike
@@ -1304,18 +1307,24 @@ def minimum_content_gaps(item_ids, has_accb, rules):
     return gaps
 
 
-def boq_minimum_content_gaps(boq, rules=None):
+def boq_minimum_content_gaps(boq, rules=None, exclude_item=None):
     """The gap keys for one saved BOQ (or None), e.g. ['no_inverter']; [] when it passes.
 
     Reads the SAVED lines: what is on the page and not yet saved cannot count. Two queries
     (the rules, then the lines), one if `rules` is passed in.
+
+    `exclude_item` (DW-2b, A6): the pk of one line to leave out, so a caller can ask "would
+    the BOQ still pass without this line?" before deleting it, through this same rule.
     """
     rules = boq_minimum_content_rules() if rules is None else rules
     if not rules:
         return []
-    rows = [] if boq is None else list(
-        boq.items.filter(boq_quantity__gt=0, item_master__isnull=False)
-        .values_list('item_master_id', 'item_master__code'))
+    lines = None if boq is None else boq.items.filter(boq_quantity__gt=0,
+                                                      item_master__isnull=False)
+    if lines is not None and exclude_item is not None:
+        lines = lines.exclude(pk=exclude_item)
+    rows = [] if lines is None else list(
+        lines.values_list('item_master_id', 'item_master__code'))
     return minimum_content_gaps({pk for pk, _code in rows},
                                 any(code == ACCB_CONFIGURED_CODE for _pk, code in rows),
                                 rules)
@@ -1401,7 +1410,8 @@ def split_opex_boq_rows(boq, catalogue_ids):
     two delete loops and its by_master index, and the upload's by_master index, iterate only
     what this returns, so a line with an ACCBConfig cannot be deleted, recreated or
     re-quantified by either of them. Screens that show ACCB lines ask accb_rows() for them
-    explicitly and render them read-only.
+    explicitly; only the designer's ACCB section and (DW-2b) the reviewer's ACCB pop-up
+    change them, both through views._accb_apply().
 
     DW-4: BOTH LISTS ARE IN CATALOGUE POSITION ORDER (boq_line_order()), so the picker, the
     download, the correction screen and the review panel, which all read this, list a
@@ -1561,9 +1571,10 @@ class ACCBConfig(models.Model):
     carries what the description was generated from, so it can be edited, duplicated and
     grouped.
 
-    WRITTEN ONLY BY views.opex_boq_accb, which validates through accb.validate_accb_config
-    first. The JSON column cannot be checked by the database, so that single writer is the
-    guarantee that it only holds accepted values.
+    WRITTEN ONLY BY views._accb_apply(), which the designer's opex_boq_accb and (DW-2b) the
+    reviewer's boq_correct both call, each after accb.validate_accb_config. The JSON column
+    cannot be checked by the database, so that single writer is the guarantee that it only
+    holds accepted values.
 
     DELETED WITH ITS LINE (CASCADE on boq_item). Removing an ACCB deletes the line and this
     goes with it. split_opex_boq_rows() leaves lines that have one of these out of the
@@ -1618,15 +1629,27 @@ class ACCBConfig(models.Model):
         return f"ACCB {self.number} — BOQ {self.boq_id}"
 
 
-#: What a single reviewer correction did. Two values and no third — removing a line is
-#: NOT a reviewer capability and is deliberately not representable here.
+#: What a single reviewer correction did. Removing a catalogue line is still NOT a reviewer
+#: capability and has no value here. DW-2b (DW-R3, answer 6) adds the three ACCB actions:
+#: a reviewer edits, adds (a duplicate is an add) or removes a configured ACCB, each one
+#: correction counted against the designer like the other two.
 BOQ_CORRECTION_LINE_ADDED       = 'line_added'
 BOQ_CORRECTION_QUANTITY_CHANGED = 'quantity_changed'
+BOQ_CORRECTION_ACCB_EDIT        = 'accb_edit'
+BOQ_CORRECTION_ACCB_ADD         = 'accb_add'
+BOQ_CORRECTION_ACCB_REMOVE      = 'accb_remove'
 
 BOQ_CORRECTION_ACTIONS = [
     (BOQ_CORRECTION_LINE_ADDED,       'Line added'),
     (BOQ_CORRECTION_QUANTITY_CHANGED, 'Quantity changed'),
+    (BOQ_CORRECTION_ACCB_EDIT,        'ACCB edited'),
+    (BOQ_CORRECTION_ACCB_ADD,         'ACCB added'),
+    (BOQ_CORRECTION_ACCB_REMOVE,      'ACCB removed'),
 ]
+
+#: DW-2b — the ACCB actions, for the readers that word or count them apart.
+BOQ_CORRECTION_ACCB_ACTIONS = (BOQ_CORRECTION_ACCB_EDIT, BOQ_CORRECTION_ACCB_ADD,
+                               BOQ_CORRECTION_ACCB_REMOVE)
 
 
 class BOQCorrection(models.Model):
@@ -1644,6 +1667,11 @@ class BOQCorrection(models.Model):
     A HISTORY, NOT A FIELD ON THE ROW. More than one reviewer can correct the same BOQ, and
     the same row twice; a `corrected_by` / `corrected_at` pair on BOQItem would keep only
     the last one and silently lose the rest.
+
+    DW-2b — ACCB ROWS. A reviewer's ACCB edit, add or remove is one row each, with the ACCB
+    number, the line text before and after, and the reviewer's reason. `item_code` is the
+    OPX-273 code and `item_description` the line's text after the change (before it, on a
+    remove). A remove deletes the line, so `item` goes NULL and the text fields carry it.
 
     IT SAYS NOTHING ABOUT WHETHER THE BOQ IS DONE, and that is the load-bearing constraint
     on this table rather than an observation about it. This BOQ already has THREE
@@ -1715,8 +1743,32 @@ class BOQCorrection(models.Model):
         related_name='boq_corrections_as_designer',
     )
 
+    # DW-2b — the ACCB actions only; blank / NULL on line_added and quantity_changed rows.
+    accb_number        = models.PositiveSmallIntegerField(null=True, blank=True)  # "ACCB 2" — numbers are never reused (B-3a.1), so this names one ACCB for good
+    description_before = models.TextField(blank=True, default='')  # The ACCB line's text before the change; blank on an add
+    description_after  = models.TextField(blank=True, default='')  # The ACCB line's text after the change; blank on a remove
+    reason             = models.TextField(blank=True, default='')  # The reviewer's stated reason; required for ACCB actions (A4), not asked on the other two
+
     class Meta:
         ordering = ['-corrected_at', '-pk']
+
+    @property
+    def is_accb(self):
+        """True for the three DW-2b ACCB actions."""
+        return self.action in BOQ_CORRECTION_ACCB_ACTIONS
+
+    def accb_text(self):
+        """The plain words every reader shows for an ACCB correction (DW-2b, A7), e.g.
+        "ACCB 2 edited: <before> → <after>". '' for any other action, whose readers keep
+        their own quantity wording. One definition, so every screen says the same thing."""
+        if self.action == BOQ_CORRECTION_ACCB_EDIT:
+            return (f'ACCB {self.accb_number} edited: {self.description_before} → '
+                    f'{self.description_after}')
+        if self.action == BOQ_CORRECTION_ACCB_ADD:
+            return f'ACCB {self.accb_number} added: {self.description_after}'
+        if self.action == BOQ_CORRECTION_ACCB_REMOVE:
+            return f'ACCB {self.accb_number} removed: {self.description_before}'
+        return ''
 
     def __str__(self):
         who = self.corrected_by or 'unknown'

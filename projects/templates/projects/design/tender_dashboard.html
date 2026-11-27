@@ -378,6 +378,9 @@ in during review, credited to the designer at revision time, counted once (carri
 excluded). Counts only, no rate. Not rework. The table shows when there are corrections OR
 revisions; revisions with no designer stamped are their own footnote, so the corrections
 footnote's count is unchanged.
+
+DW-2b (Q4): "ACCB changes" — a reviewer's ACCB edits, adds and removes, each one correction,
+counted in Sites corrected and the rate like the two columns before it.
 {% endcomment %}
 <div class="card shadow-sm border-0 mt-3" id="reviewerCorrections">
   <div class="card-header bg-white py-2 d-flex justify-content-between align-items-baseline">
@@ -400,6 +403,7 @@ footnote's count is unchanged.
           <th class="text-end">Rate</th>
           <th class="text-end">Quantity edits</th>
           <th class="text-end">Lines added</th>
+          <th class="text-end" title="ACCBs edited, added or removed by QC or the Head during review. Each is one correction.">ACCB changes</th>
           <th class="text-end" title="New Arka or CAD versions put in by QC or the Head during review. Not counted as rework.">Arka/CAD revisions</th>
         </tr>
       </thead>
@@ -418,6 +422,7 @@ footnote's count is unchanged.
           </td>
           <td class="text-end">{{ r.quantity_edits }}</td>
           <td class="text-end">{{ r.lines_added }}</td>
+          <td class="text-end">{{ r.accb_changes }}</td>
           <td class="text-end">
             {{ r.revisions }}
             <div class="text-muted" style="font-size:.7rem;">Arka {{ r.arka_revisions }} · CAD {{ r.cad_revisions }}</div>
@@ -466,8 +471,13 @@ footnote's count is unchanged.
           {% for c in g.corrections %}
           <tr>
             <td class="small">
-              {% if c.item_code %}<span class="fw-semibold">{{ c.item_code }}</span>{% endif %}
-              {{ c.item_description|truncatechars:60 }}
+              {% if c.is_accb %}
+                {# DW-2b (A7): an ACCB correction in the model's one wording, in full. #}
+                {{ c.accb_text }}
+              {% else %}
+                {% if c.item_code %}<span class="fw-semibold">{{ c.item_code }}</span>{% endif %}
+                {{ c.item_description|truncatechars:60 }}
+              {% endif %}
             </td>
             <td class="small">{{ c.get_action_display }}</td>
             <td class="text-end small">

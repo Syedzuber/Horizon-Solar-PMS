@@ -50,6 +50,7 @@ from .models import (
 )
 from .permissions import (
     DESIGN_REVIEWER_TURN_WINDOWS,
+    REVIEWER_ACTION_ACCB_EDIT,
     REVIEWER_ACTION_ARKA_REVISE, REVIEWER_ACTION_BOQ_CORRECT, REVIEWER_ACTION_BOQ_OVERRIDE,
     REVIEWER_ACTION_CAD_REVISE, REVIEWER_TURN_ARKA_DECIDED, REVIEWER_TURN_ARKA_DECIDED_MESSAGE,
     REVIEWER_TURN_HEAD, REVIEWER_TURN_QC, REVIEWER_TURN_QC_PASSED,
@@ -65,6 +66,7 @@ ARKA = REVIEWER_ACTION_ARKA_REVISE
 CAD = REVIEWER_ACTION_CAD_REVISE
 CORRECT = REVIEWER_ACTION_BOQ_CORRECT
 OVERRIDE = REVIEWER_ACTION_BOQ_OVERRIDE
+ACCB = REVIEWER_ACTION_ACCB_EDIT
 
 #: The ruling as Zuber wrote it (DW-R2, answers 1-4), in model constants. Independent of
 #: permissions.DESIGN_REVIEWER_TURN_WINDOWS on purpose: the generated cases below compare the
@@ -77,6 +79,10 @@ SPEC = {
     CORRECT:  {'qc':   {DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC},
                'head': {DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC}},
     OVERRIDE: {'qc':   {DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC},
+               'head': {DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC}},
+    # DW-2b (DW-R3): the ACCB edit, add and remove — BOQ correction's cells, and (answer 3)
+    # no change-request exception.
+    ACCB:     {'qc':   {DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC},
                'head': {DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC}},
 }
 
@@ -172,7 +178,7 @@ class TableTests(TurnBase):
         for who in (self.qc, self.head):
             self.assertTrue(self._turn(who, ARKA).allowed)
             # Only the Arka: the package is not in yet.
-            for action in (CAD, CORRECT, OVERRIDE):
+            for action in (CAD, CORRECT, OVERRIDE, ACCB):
                 self.assertFalse(self._turn(who, action).allowed)
 
     def _change_request(self, verdict):
@@ -189,7 +195,7 @@ class TableTests(TurnBase):
             self._set_status(status)
             with self.subTest(status=status):
                 self.assertTrue(self._turn(self.head, CORRECT).allowed)
-                for action in (OVERRIDE, ARKA, CAD):
+                for action in (OVERRIDE, ARKA, CAD, ACCB):
                     self.assertFalse(self._turn(self.head, action).allowed, action)
                 for action in SPEC:
                     self.assertFalse(self._turn(self.qc, action).allowed, action)
