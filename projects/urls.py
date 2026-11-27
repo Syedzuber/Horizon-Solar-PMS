@@ -383,6 +383,9 @@ urlpatterns = [
     # the BOQ read gate (designer, named QC reviewer, Design Head, PM, SCM/Admin/CEO) and
     # neither lock — a frozen BOQ is still one to read. 404s on a Residential site.
     path('projects/<str:project_id>/boq/download/',          views.opex_boq_download,    name='opex_boq_download'),     # OPEX, BOQ readers
+    # DW-7 — the blank master BOQ in the site download's layout, for every design user
+    # (role Design or Head authority, the B-5a Q-A rule). Carries no site data.
+    path('boq/master/download/',                             views.opex_boq_master_download, name='opex_boq_master_download'),  # Design users
     # SESSION E2 — read the filled spreadsheet back. A WRITE, so unlike boq/download/ it
     # takes the W-narrow edit gate and both locks. Its own screen because rejecting a file
     # means listing every offending row, and boq/entry/ has no validation-error render.

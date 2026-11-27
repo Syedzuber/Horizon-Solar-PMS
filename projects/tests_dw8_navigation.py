@@ -731,8 +731,10 @@ QUERY_PINS = [
     ('opex_boq_entry', 'qc', DESIGN_IN_QC, 21),                # before DW-8: 20
     ('opex_boq_entry', 'pool', DESIGN_IN_QC, 21),              # before DW-8: 20
     ('opex_boq_entry', 'head', DESIGN_IN_QC, 18),              # before DW-8: 18
-    ('opex_boq_entry', 'scm', DESIGN_IN_QC, 19),               # before DW-8: 18
-    ('opex_boq_entry', 'pm', DESIGN_IN_QC, 18),                # before DW-8: 17
+    # DW-7: +1 each, the blank-master button's Q-A check (the deputy lookup) for a reader
+    # who is not role Design. Design users answer it from their loaded profile.
+    ('opex_boq_entry', 'scm', DESIGN_IN_QC, 20),               # before DW-8: 18, DW-7: 19
+    ('opex_boq_entry', 'pm', DESIGN_IN_QC, 19),                # before DW-8: 17, DW-7: 18
     ('design_qc_review', 'qc', DESIGN_IN_QC, 37),              # before DW-8: 37
     ('design_qc_review', 'pool', DESIGN_IN_QC, 35),            # before DW-8: 35
     ('design_qc_review', 'head', DESIGN_IN_QC, 33),            # before DW-8: 33

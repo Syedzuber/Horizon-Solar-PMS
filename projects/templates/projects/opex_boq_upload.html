@@ -14,7 +14,8 @@ STAGES, all driven off `stage`, the same shape opex_site_bulk_upload.html uses:
   locked   — a lock refuses the upload; no form is rendered at all
   upload   — choose a file
   errors   — the file was rejected; nothing was written
-  preview  — what the file will do, and a Confirm control
+  preview  — what the file will do, and a Confirm control (none when it changes nothing,
+             DW-7 answer 3)
   result   — what it did
 {% endcomment %}
 {% block title %}Upload BOQ — {{ project.project_id }} — SolarPMS{% endblock %}
@@ -91,7 +92,10 @@ STAGES, all driven off `stage`, the same shape opex_site_bulk_upload.html uses:
       <li><strong>Uploading never deletes anything.</strong> Deleting rows in the
           spreadsheet has no effect — remove items on the
           <a href="{% url 'opex_boq_entry' project.project_id %}">BOQ screen</a> instead.</li>
-      <li>A blank quantity leaves the existing value alone. Enter <code>0</code> to set zero.</li>
+      <li>A blank quantity leaves an existing line alone, and adds nothing for an item the
+          site does not have. Enter <code>0</code> to set zero.</li>
+      <li>Upload this site's download or the blank master BOQ: both are read the same way.
+          Grey (calculated) rows are ignored.</li>
       <li>An item code that is not in the RESCO catalogue rejects the whole file.</li>
     </ul>
   </div>
@@ -126,8 +130,19 @@ STAGES, all driven off `stage`, the same shape opex_site_bulk_upload.html uses:
 
 {# =================== STAGE: PREVIEW =================== #}
 {% if stage == 'preview' %}
+  {% comment %}
+  DW-7 answer 3 — a file that would write nothing at all (no line added, changed, put back
+  or removed, no calculated line brought up to date) says so, and the Confirm form below is
+  not drawn. A site's own download uploaded unchanged lands here.
+  {% endcomment %}
+  {% if no_changes %}
+    <div class="alert alert-success" id="boqPreviewNoChanges">
+      <div class="fw-semibold">This file changes nothing.</div>
+      Every quantity in it is already on this BOQ, and its blank rows add nothing.
+    </div>
+  {% endif %}
   <div class="alert alert-light border">
-    <div class="fw-semibold mb-2">Nothing has been changed yet. This is what the file will do.</div>
+    <div class="fw-semibold mb-2">{% if no_changes %}What was read.{% else %}Nothing has been changed yet. This is what the file will do.{% endif %}</div>
     <div class="d-flex flex-wrap gap-2">
       <span class="badge bg-light text-dark border fs-6">Rows added: <strong>{{ plan_add|length }}</strong></span>
       <span class="badge bg-light text-dark border fs-6">Quantities changed: <strong>{{ plan_change|length }}</strong></span>
@@ -169,6 +184,29 @@ STAGES, all driven off `stage`, the same shape opex_site_bulk_upload.html uses:
       {% for r in kept_override %}
         <div><code>{{ r.code }}</code> file {{ r.file }} — Override kept: stays at {{ r.calculated }} (set by hand)</div>
       {% endfor %}
+    </div>
+  {% endif %}
+  {% comment %}
+  DW-7 answer 2 — calculated lines the engine brings up to date on this commit: a stale
+  stored figure, or one that follows a driver the file changes. Listed apart from the file's
+  own figures, because the file did not ask for them.
+  {% endcomment %}
+  {% if recalculated %}
+    <div class="alert alert-info small" id="boqPreviewRecalculated">
+      <div class="fw-semibold mb-1">{{ recalculated|length }} calculated line{{ recalculated|length|pluralize }} brought up to date by their rules</div>
+      {% for code, before, after in recalculated %}
+        <div><code>{{ code }}</code> {{ before|default_if_none:"—" }} → {{ after }}</div>
+      {% endfor %}
+    </div>
+  {% endif %}
+  {# DW-7 answer 4 — a figure for an item on 2+ lines is never written by a file. #}
+  {% if on_lines %}
+    <div class="alert alert-warning small" id="boqPreviewOnLines">
+      <div class="fw-semibold mb-1">Not written: items on more than one line</div>
+      {% for code, figure, count in on_lines %}
+        <div><code>{{ code }}</code> file {{ figure }} — this BOQ has it on {{ count }} lines</div>
+      {% endfor %}
+      Change these lines on the BOQ screen.
     </div>
   {% endif %}
   {% if plan_removed %}
@@ -237,6 +275,10 @@ STAGES, all driven off `stage`, the same shape opex_site_bulk_upload.html uses:
     </div>
   {% endif %}
 
+  {% if no_changes %}
+    <a href="{% url 'opex_boq_upload' project.project_id %}"
+       class="btn btn-sm btn-outline-secondary">Choose another file</a>
+  {% else %}
   <form method="post">
     {% csrf_token %}
     <input type="hidden" name="phase" value="commit">
@@ -249,6 +291,7 @@ STAGES, all driven off `stage`, the same shape opex_site_bulk_upload.html uses:
          class="btn btn-sm btn-outline-secondary">Cancel</a>
     </div>
   </form>
+  {% endif %}
 {% endif %}
 
 {# =================== STAGE: RESULT =================== #}

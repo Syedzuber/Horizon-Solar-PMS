@@ -92,6 +92,11 @@ dashboards load. The picker above stays plain JS and does not depend on it.
        class="btn btn-sm btn-outline-secondary">
       <i class="bi bi-download me-1"></i>Download
     </a>
+    {# DW-7 (answer 12): the blank master BOQ, for design users; it uploads to any site. #}
+    {% if can_download_master %}<a href="{% url 'opex_boq_master_download' %}"
+       class="btn btn-sm btn-outline-secondary js-boq-master-download">
+      <i class="bi bi-download me-1"></i>Download master BOQ
+    </a>{% endif %}
     {% if boq %}
       <a href="{% url 'boq_history' project.project_id %}"
          class="btn btn-sm btn-outline-secondary">History</a>
@@ -357,8 +362,10 @@ dashboards load. The picker above stays plain JS and does not depend on it.
         <div class="small mt-2">
           <a href="{% url 'opex_boq_upload' project.project_id %}">Upload quantities from a spreadsheet</a>
           <span class="text-muted">
-            — download the sheet, fill in quantities offline, upload it back. Adds rows and
-            changes quantities; rows you delete in Excel are not removed. Calculated lines
+            — download the sheet (every catalogue item, this site's quantities filled in) or
+            the blank master, fill in quantities offline, upload it back. Adds rows and
+            changes quantities; a blank row adds nothing, and rows you delete in Excel are
+            not removed. Calculated lines
             take their figure from their rule, not the file, and one that now works out to 0
             is removed.
           </span>

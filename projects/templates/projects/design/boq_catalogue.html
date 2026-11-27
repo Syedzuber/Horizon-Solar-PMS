@@ -39,6 +39,10 @@ removal this product has, and it changes what every future sheet is offered.
     {% if can_open_design_dashboard %}<a href="{% url 'dashboard_design' %}" class="btn btn-sm btn-outline-secondary js-back-to-design-dashboard">
       <i class="bi bi-arrow-left me-1"></i>Design dashboard
     </a>{% endif %}
+    {# DW-7 (answer 12): the blank master BOQ, in the layout a site's BOQ downloads in. #}
+    {% if can_download_master %}<a href="{% url 'opex_boq_master_download' %}" class="btn btn-sm btn-outline-secondary js-boq-master-download">
+      <i class="bi bi-download me-1"></i>Download master BOQ
+    </a>{% endif %}
     <a href="{% url 'design_boq_catalogue_create' %}" class="btn btn-sm text-white"
        style="background-color:#1a7a4a;">
       <i class="bi bi-plus-lg"></i> Add item

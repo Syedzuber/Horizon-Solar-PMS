@@ -39,6 +39,8 @@ from .models import (
     split_opex_boq_rows, group_boq_rows_by_category,
     # DW-4: the one line order every BOQ screen and download uses, in SQL and in Python.
     boq_line_order, boq_line_sort_key,
+    # DW-7 (answer 11): DW-1's minimum-content tests, read to mark rows on the BOQ download.
+    boq_minimum_content_rules,
     # B-3a - configured ACCBs: the configuration behind one ACCB line, and the
     # helper every sheet screen reads ACCB lines through.
     ACCBConfig, accb_rows,
@@ -118,7 +120,8 @@ from .accb import (
 )
 # B-2b - the formula engine's apply step, run by the picker, the upload and boq_correct.
 from .boq_formulas import (
-    ACTION_REMOVE, ACTION_SKIP_MULTIPLE, FORMULA_REVIEWER_MESSAGE, FormulaError, SheetLine,
+    ACTION_ADD, ACTION_CHANGE, ACTION_REMOVE, ACTION_SKIP_MULTIPLE, ACTION_ZERO,
+    FORMULA_REVIEWER_MESSAGE, FormulaError, SheetLine,
     apply_formulas, formula_summary_messages, formula_view, multiple_lines_message,
     prepare_formula_save, read_formula_rules, read_sheet, work_out_formulas,
     # B-2e - the line's joined override, read by the shared override helper.
@@ -199,6 +202,8 @@ from .permissions import (
     active_admins,
     user_can_access_program, program_ids_handed_over_by,
     user_can_view_project_boq, user_can_edit_project_boq,
+    # DW-7 (answer 9): who may download the blank master BOQ - the B-5a Q-A design users.
+    user_can_use_design_boq_groups,
     project_boq_is_group_locked, project_boq_is_design_locked,
     # Session B - reviewer correction. A THIRD write authority, not a widening of the
     # second: user_can_edit_project_boq() is unchanged and still refuses a reviewer.
@@ -10415,6 +10420,9 @@ def opex_boq_entry(request, project_id):
         'can_edit':         can_edit,
         'lock_reason':      lock_reason,
         'result_cap':       OPEX_PICKER_RESULT_CAP,
+        # DW-7 (answer 12): the blank master button, for design users only (the gate the
+        # download itself applies). PMs and SCM read this sheet too and do not see it.
+        'can_download_master': user_can_use_design_boq_groups(request.user),
     })
 
 
@@ -11072,32 +11080,37 @@ def opex_boq_override(request, project_id):
 # takes the READ gate and NEITHER LOCK. A QC reviewer or the Design Head working
 # through a package offline needs the sheet, and a BOQ that is frozen against
 # writes is still a BOQ to read.
+#
+# DW-7 (27 Nov 2026) — ONE MASTER LAYOUT. The site download lists every active catalogue
+# item in catalogue order with this site's quantities filled, and a blank master in the
+# same layout is offered to every design user; either uploads to a site (ruling DW-R8).
 # ---------------------------------------------------------------------------
 
-#: Data-sheet columns in emission order — AND THE ORDER SESSION E2 EXPECTS.
-#: (header, key), the same shape as _BULK_COLUMNS above and for the same reason:
-#: one definition drives the writer here and the header->value mapping there.
+#: Data-sheet columns in emission order. (header, key), the same shape as _BULK_COLUMNS
+#: above and for the same reason: one definition drives the writer here and the
+#: header->value mapping in the upload.
 #:
-#: `quantity` IS LAST DELIBERATELY — it is the one editable column, so it sits at
-#: the right-hand edge where a designer fills down a sheet.
-#:
-#: THERE IS NO "MANDATORY" COLUMN, and the marker E1 carried here was removed
-#: rather than hidden — a hidden column still lives in this constant, still has to
-#: be maintained, and comes back the moment somebody unhides it.
-#:
-#: It went because it could not mean anything on either side. To a reader it would
-#: have read as "you cannot remove this row", and removal is not expressible in
-#: this file at all: the upload never deletes, so no marking can describe a thing
-#: the file cannot do. To the parser it would have meant nothing either, because
-#: the upload derives the mandatory set from get_opex_mandatory_items() and never
-#: from what the file claims. What the column used to convey is now said in words
-#: on the instructions sheet, which is where a fact about the process belongs.
+#: DW-7 (ruling DW-R9): Code, Category, Description, Unit, Quantity, in every BOQ download.
+#: THE UPLOAD FINDS COLUMNS BY THESE HEADERS, never by position, which is why a sheet
+#: downloaded before DW-7 in the old order (Code, Description, Unit, Category, Quantity)
+#: still uploads. Quantity stays the right-most of the five: it is the column a designer
+#: fills down.
 BOQ_DOWNLOAD_COLUMNS = [
     ('Code',        'code'),
+    ('Category',    'category'),
     ('Description', 'description'),
     ('Unit',        'unit'),
-    ('Category',    'category'),
     ('Quantity',    'quantity'),
+]
+
+#: DW-7 (L1): two marker columns after Quantity, written for the reader and NEVER READ ON
+#: UPLOAD. The upload re-derives what they say (calculated, mandatory) from the server, so a
+#: designer who edits a marker changes nothing. They replace E1's argument against a
+#: "mandatory" column: that column could only have meant "cannot be removed", which no file
+#: expresses; these say which figure the system works out and what the BOQ must carry.
+BOQ_DOWNLOAD_MARK_COLUMNS = [
+    ('Calculated', 'calculated'),
+    ('Required',   'required'),
 ]
 
 #: 1-based column index of the one editable column. DERIVED from the list above,
@@ -11105,187 +11118,231 @@ BOQ_DOWNLOAD_COLUMNS = [
 #: the unlocked cell pointing at a spec field.
 BOQ_DOWNLOAD_QUANTITY_COL = [k for _h, k in BOQ_DOWNLOAD_COLUMNS].index('quantity') + 1
 
-#: Sheet names, shared with E2 for the same reason the columns are: its parser
-#: reads BOQ_DOWNLOAD_SHEET by exact name and skips the other two by theirs.
+#: Sheet names, shared with the upload: its parser reads BOQ_DOWNLOAD_SHEET by name (DW-7
+#: answer 7: ignoring case and surrounding spaces) and reads no other sheet at all.
 BOQ_DOWNLOAD_SHEET      = 'BOQ'
-BOQ_DOWNLOAD_OFF_SHEET  = 'Not In Catalogue'
+#: DW-7 (L5, answer 5): lines the one-row-per-item BOQ sheet cannot hold.
+BOQ_DOWNLOAD_OFF_SHEET  = 'Other lines (read only)'
 BOQ_DOWNLOAD_INFO_SHEET = 'Instructions'
-#: B-3a — configured ACCBs, reference only. Never read on upload: the parser reads
-#: BOQ_DOWNLOAD_SHEET by name and nothing else.
-BOQ_DOWNLOAD_ACCB_SHEET = 'ACCB'
+#: B-3a — configured ACCBs, reference only (DW-7 answer 6: today's columns, renamed sheet).
+BOQ_DOWNLOAD_ACCB_SHEET = 'ACCB (read only)'
+
+#: The Calculated column's words (L1). A calculated item's own figure, or a designer's
+#: override of it, is never written by an upload (B-2b D3); the column says which.
+BOQ_MARK_CALCULATED = 'Calculated'
+BOQ_MARK_OVERRIDDEN = 'Overridden'
+#: The Required column's word for a mandatory catalogue item (get_opex_mandatory_items).
+BOQ_MARK_REQUIRED = 'Required'
+#: DW-7 answer 11: how each of DW-1's minimum-content tests marks its rows, KEYED BY DW-1's
+#: OWN GAP KEYS (models.BOQ_MINIMUM_CONTENT). Which items carry a mark comes from
+#: boq_minimum_content_rules(), the groups DW-1 reads; only the words live here. A test
+#: whose groups are missing is dropped (and logged once) by that helper, so its rows simply
+#: carry no mark.
+BOQ_MINIMUM_CONTENT_MARKS = {
+    'no_inverter':       'At least one inverter',
+    'no_dcdb_acdb_accb': 'At least one DCDB, ACDB or ACCB',
+}
+
+#: The "Why" column of the Other lines sheet (answer 5).
+OTHER_LINE_WHY_RETIRED   = 'Retired catalogue item'
+OTHER_LINE_WHY_NO_ITEM   = 'No catalogue item'
+OTHER_LINE_WHY_NOT_RESCO = 'Not a RESCO catalogue item'
+OTHER_LINE_WHY_BARE_ACCB = 'ACCB line with no configuration'
+OTHER_LINE_HEADERS = ['Code', 'Category', 'Description', 'Unit', 'Quantity', 'Why']
+
+#: The grey of a calculated row (L2), as opaque ARGB (the form Excel saves it in, P5).
+BOQ_CALCULATED_FILL = 'FFD9D9D9'
 
 
-def _boq_download_row(row):
-    """One BOQ row as the data sheet's cell values, in BOQ_DOWNLOAD_COLUMNS order.
+def _on_lines_mark(count):
+    """The Calculated column for an item on 2+ lines (answer 4)."""
+    return f'On {count} lines: see Other lines'
 
-    TAKES EITHER of the two things the data sheet carries, because the sheet
-    interleaves them and the grouping helper sorts them together:
 
-      * a BOQItem     — a row actually on this BOQ. `code` comes from the linked
-                        master; `description` and `unit` come from the ROW, which
-                        holds the point-in-time snapshot taken when it was added,
-                        not from the master's current text.
-      * a BOQItemMaster — a mandatory catalogue row this BOQ does not carry yet,
-                        composed in for display exactly as the picker's GET does.
-                        Nothing is written for it; its quantity is blank.
+def _other_line_why(line):
+    """Why a line is on the Other lines sheet rather than on the BOQ sheet. No query: the
+    caller's select_related loaded item_master. `on_lines` is handled by the caller."""
+    master = line.item_master
+    if master is None:
+        return OTHER_LINE_WHY_NO_ITEM
+    if master.code == ACCB_CONFIGURED_CODE:
+        return OTHER_LINE_WHY_BARE_ACCB
+    if master.project_type != 'OPEX':
+        return OTHER_LINE_WHY_NOT_RESCO
+    return OTHER_LINE_WHY_RETIRED
 
-    A BLANK QUANTITY IS None, NEVER 0. openpyxl writes None as a genuinely empty
-    cell, and E2 has to tell "nobody has entered this yet" apart from "this site
-    needs none of it" — a zero is a statement, an empty cell is an absence.
+
+def _boq_master_rows(catalogue, on_lines, targets, overrides, mandatory_ids, minimum_rules):
+    """The BOQ sheet as dicts, one per catalogue item in catalogue order (DW-7 L1). Pure.
+
+    `on_lines` are this BOQ's catalogue lines (split_opex_boq_rows), [] for the blank master.
+    `overrides` maps a line pk to its override note. Each dict carries the cell values by
+    BOQ_DOWNLOAD_COLUMNS / BOQ_DOWNLOAD_MARK_COLUMNS key, plus `locked` (the row is grey
+    and its Quantity locked) and `item_id`.
+
+    THE QUANTITY IS THE STORED FIGURE (answer 8), the one the BOQ screen shows, overridden
+    or not, stale or not: the upload compares a calculated row's figure with exactly this
+    and treats an equal one as "as downloaded" (answer 2). Blank when the site has no line.
+
+    AN ITEM ON 2+ LINES (answer 4) has no single figure to show, so its quantity is blank,
+    its row is locked, and its lines are listed on the Other lines sheet; the upload never
+    writes a figure for it.
+
+    The text is the CATALOGUE's, not the line's snapshot: every row of this sheet is a
+    catalogue row, and the upload re-reads the catalogue anyway.
     """
-    if isinstance(row, BOQItem):
-        return {
-            'code':        row.item_master.code,
-            'description': row.description,
-            'unit':        row.uom,
-            'category':    row.category,
-            'quantity':    row.boq_quantity,
-        }
-    return {
-        'code':        row.code,
-        'description': row.description,
-        'unit':        row.unit,
-        'category':    row.category,
-        'quantity':    None,
-    }
+    lines_of = {}
+    for line in on_lines:
+        lines_of.setdefault(line.item_master_id, []).append(line)
+
+    rows = []
+    for master in catalogue:
+        own = lines_of.get(master.pk, [])
+        calculated = master.pk in targets
+        if len(own) > 1:
+            mark = _on_lines_mark(len(own))
+        elif calculated and own and own[0].pk in overrides:
+            note = overrides[own[0].pk]
+            mark = f'{BOQ_MARK_OVERRIDDEN}: {note}' if note else BOQ_MARK_OVERRIDDEN
+        elif calculated:
+            mark = BOQ_MARK_CALCULATED
+        else:
+            mark = ''
+        required = [BOQ_MARK_REQUIRED] if master.pk in mandatory_ids else []
+        required += [BOQ_MINIMUM_CONTENT_MARKS[key] for key, members, _accb in minimum_rules
+                     if master.pk in members and key in BOQ_MINIMUM_CONTENT_MARKS]
+        rows.append({
+            'item_id':     master.pk,
+            'code':        master.code,
+            'category':    master.category,
+            'description': master.description,
+            'unit':        master.unit,
+            # A BLANK QUANTITY IS None, NEVER 0: openpyxl writes None as an empty cell, and
+            # the upload reads blank and 0 differently (blank adds nothing, 0 is a figure).
+            'quantity':    own[0].boq_quantity if len(own) == 1 else None,
+            # None, not '': an empty marker is an empty cell.
+            'calculated':  mark or None,
+            'required':    '; '.join(required) or None,
+            'locked':      calculated or len(own) > 1,
+        })
+    return rows
 
 
-@login_required
-def opex_boq_download(request, project_id):
-    """Download this site's OPEX BOQ as .xlsx — specification locked, quantity editable.
+def _boq_other_lines(off_lines, on_lines):
+    """The Other lines sheet's lines (L5, answer 4/5), in catalogue position order, each as
+    (line, why): this BOQ's off-catalogue lines, and every line of an item on 2+ lines."""
+    counts = {}
+    for line in on_lines:
+        counts[line.item_master_id] = counts.get(line.item_master_id, 0) + 1
+    multi = [line for line in on_lines if counts[line.item_master_id] > 1]
+    out = [(line, _other_line_why(line)) for line in off_lines]
+    out += [(line, f'Item on {counts[line.item_master_id]} lines') for line in multi]
+    return sorted(out, key=lambda pair: boq_line_sort_key(pair[0]))
 
-    THE READ GATE, NOT THE WRITE GATE. Downloading is reading. Gating this on
-    user_can_edit_project_boq() would give the sheet to the assigned designer and
-    to nobody else — locking out the QC reviewer named on the site and the Design
-    Head, who are exactly the people who need to review a package away from the
-    screen. user_can_view_project_boq() is the gate boq_detail and the picker both
-    use to decide who may SEE a BOQ, and this shows the same rows.
 
-    NO LOCK CHECK, DELIBERATELY. Both locks stop WRITES. A design-locked BOQ is
-    with review and a group-locked one is committed to a purchase; in both states
-    reading the sheet is the point, not the risk. This is why the download control
-    sits outside the template's `can_edit` block rather than inside it.
+def _boq_instructions(project, downloaded_on):
+    """The Instructions sheet's lines, as rows. `project` is None for the blank master."""
+    if project is None:
+        rows = [['Master BOQ (blank)'],
+                [f'Downloaded {downloaded_on:%d %b %Y}'], [],
+                ['Every RESCO catalogue item is listed, in the master order, with no '
+                 'quantities. Fill it in and upload it on any RESCO site\'s BOQ screen '
+                 '(Upload quantities from a spreadsheet): only the rows you fill are read.']]
+    else:
+        rows = [[f'BOQ — {project.project_id}']]
+        if project.program_id:
+            rows.append([f'{project.program.name} ({project.program.short_tender_code})'])
+        rows += [[f'Downloaded {downloaded_on:%d %b %Y}'], [],
+                 ['Every RESCO catalogue item is listed, in the master order. This site\'s '
+                  'quantities are filled in; the rest are blank.']]
+    rows += [[], ['How this file is used'], []]
+    rules = [
+        f'Fill the Quantity column on the "{BOQ_DOWNLOAD_SHEET}" sheet, and nothing else. '
+        f'Code, Category, Description and Unit come from the catalogue and are read from it '
+        f'again on upload, so editing them here changes nothing.',
+        'Grey rows are calculated by the system from other lines (or overridden on the BOQ '
+        'screen). Their cells are locked, and a figure typed into one is ignored on upload; '
+        'the preview says so.',
+        'Leave a row blank if the site does not need the item. A blank row adds nothing, and '
+        'a blank on a line the site already has leaves that line as it is. Enter 0 only to '
+        'record that the site needs none.',
+        'Uploading never deletes a line. Deleting rows here has no effect; take a line off '
+        'on the BOQ screen.',
+        f'"{BOQ_MARK_REQUIRED}" items must have a quantity before the BOQ can be marked '
+        f'complete; one left blank on a site that has no line for it is put back blank on '
+        f'upload. "At least one ..." marks a group: the BOQ needs at least one line from it '
+        f'with a quantity.',
+        f'ACCBs are set in the ACCB section of the BOQ screen, never by upload. A file that '
+        f'carries {ACCB_CONFIGURED_CODE} on the "{BOQ_DOWNLOAD_SHEET}" sheet is refused.',
+        f'Do not rename the "{BOQ_DOWNLOAD_SHEET}" sheet: the upload reads only that sheet. '
+        f'"{BOQ_DOWNLOAD_ACCB_SHEET}" and "{BOQ_DOWNLOAD_OFF_SHEET}" are for reference, are '
+        f'not read, and are left as they are by an upload.',
+        f'A code on the "{BOQ_DOWNLOAD_SHEET}" sheet that is not in the RESCO catalogue (or '
+        f'is retired) refuses the whole file, naming the row.',
+    ]
+    rows += [[f'{n}.', text] for n, text in enumerate(rules, start=1)]
+    return rows
 
-    CREATES NOTHING. A site with no BOQ row at all — 93 of the 97 OPEX sites —
-    yields a file carrying just the mandatory rows, blank. It must NOT bring a BOQ
-    into existence, for the same reason the picker's GET must not: a read by a
-    reviewer, or a download nobody acts on, would otherwise mutate the site.
-    split_opex_boq_rows() returns ([], []) for a null BOQ, so this needs no special
-    case beyond never calling BOQ.objects.create().
 
-    SHEET PROTECTION IS AN AFFORDANCE, NOT A SECURITY BOUNDARY. It stops a
-    designer damaging the specification by accident and shows them which column is
-    theirs. It is trivially removable — any zip tool, any "unprotect" script, or a
-    save through a tool that ignores it — and it is not relied on anywhere: E2
-    re-derives every specification field from BOQItemMaster server-side and reads
-    nothing but `code` and `quantity` from the file. Do not add a check that trusts
-    what the file says about an item.
+def _boq_master_workbook(project, catalogue, *, targets, mandatory_ids, minimum_rules,
+                         on_lines=(), off_lines=(), accbs=(), overrides=None,
+                         downloaded_on=None):
+    """The DW-7 master-layout workbook: the site download (project given) or the blank
+    master (project None, no lines). One writer for both, so either file uploads to a site
+    (ruling DW-R8). Builds in memory; no query.
+
+    Sheets, in order: Instructions (L3), BOQ, then — only when there is something to show,
+    since an empty reference sheet reads as something having gone wrong — ACCB (read only)
+    (L4) and Other lines (read only) (L5).
+
+    SHEET PROTECTION IS AN AFFORDANCE, NOT A SECURITY BOUNDARY (no password, so Review ->
+    Unprotect Sheet opens it). The server is the guard: the upload reads only Code and
+    Quantity and never writes a calculated figure (B-2b D3).
     """
-    project = _active_project(project_id)
-
-    # OPEX only, the same refusal the picker makes and for the same reason: a
-    # Residential BOQ is a different sheet with a different catalogue behind it.
-    if project.project_type != 'OPEX':
-        raise Http404('The BOQ download is for RESCO sites. Residential BOQs are read on '
-                      'the standard BOQ screen.')
-
-    if not user_can_view_project_boq(request.user, project):
-        return HttpResponseForbidden()
-
-    try:
-        boq = project.boq
-    except BOQ.DoesNotExist:
-        boq = None
-
-    catalogue      = get_opex_boq_catalogue()
-    category_order = opex_catalogue_category_order()
-    added_on, added_off = split_opex_boq_rows(boq, {m.pk for m in catalogue})
-    # B-3a: configured ACCB lines are in neither list above and get a sheet of their own.
-    # They cannot go on the data sheet — their code is not in the upload's catalogue, so
-    # the file would be refused — and must not be missing from the file either.
-    accbs = accb_rows(boq)
-
-    # THE SAME COMPOSITION THE PICKER'S GET PERFORMS (see opex_boq_entry), so the
-    # file and the screen carry the same set: mandatory rows this BOQ does not hold
-    # yet appear with a blank quantity. They are composed in but NOT marked — the
-    # instructions sheet says in words that some items are always carried, which is
-    # a fact about the process rather than a property of one row.
-    on_master_ids     = {row.item_master_id for row in added_on}
-    missing_mandatory = [m for m in get_opex_mandatory_items()
-                         if m.pk not in on_master_ids]
-
+    # Lazy import, not a circular one: openpyxl is loaded only when a workbook is written,
+    # the same as the bulk-template and upload paths in this module.
     from openpyxl import Workbook
-    from openpyxl.styles import Font, Protection
+    from openpyxl.styles import Font, PatternFill, Protection
 
+    downloaded_on = downloaded_on or timezone.localdate()
+    bold = Font(bold=True)
     wb = Workbook()
-    ws = wb.active
-    ws.title = BOQ_DOWNLOAD_SHEET
-    ws.append([header for header, _key in BOQ_DOWNLOAD_COLUMNS])
+
+    info = wb.active
+    info.title = BOQ_DOWNLOAD_INFO_SHEET
+    for row in _boq_instructions(project, downloaded_on):
+        info.append(row)
+    info['A1'].font = bold
+    info.column_dimensions['A'].width = 4
+    info.column_dimensions['B'].width = 110
+    info.protection.sheet = True
+
+    ws = wb.create_sheet(BOQ_DOWNLOAD_SHEET)
+    columns = BOQ_DOWNLOAD_COLUMNS + BOQ_DOWNLOAD_MARK_COLUMNS
+    ws.append([header for header, _key in columns])
     for cell in ws[1]:
-        cell.font = Font(bold=True)
-
-    # GROUPED BY CATEGORY IN CATALOGUE ORDER, through the helper the picker and the
-    # Part 9 review panel already use. BOQItem and BOQItemMaster both carry
-    # `category`, so the composed mandatory rows sort into their own categories
-    # rather than trailing at the end — which is what the picker's renderSheet()
-    # does with the same payload. Category order comes from
-    # opex_catalogue_category_order() and is not derived a second time here.
-    # DW-4: sorted by catalogue position first, so a composed mandatory row takes its
-    # place among the saved lines instead of trailing them within its category.
-    for _category, rows in group_boq_rows_by_category(
-            sorted(added_on + missing_mandatory, key=boq_line_sort_key), category_order):
-        for row in rows:
-            values = _boq_download_row(row)
-            ws.append([values[key] for _header, key in BOQ_DOWNLOAD_COLUMNS])
-
-    # Spec cells need no explicit lock — openpyxl's default cell protection is
-    # already locked=True, and that flag does nothing at all until the sheet itself
-    # is protected on the last line here. Only the quantity column is opened up.
-    for excel_row in range(2, ws.max_row + 1):
-        ws.cell(row=excel_row, column=BOQ_DOWNLOAD_QUANTITY_COL).protection = \
-            Protection(locked=False)
-
+        cell.font = bold
+    grey = PatternFill('solid', fgColor=BOQ_CALCULATED_FILL)
+    for row in _boq_master_rows(catalogue, list(on_lines), targets, overrides or {},
+                                mandatory_ids, minimum_rules):
+        ws.append([row[key] for _header, key in columns])
+        excel_row = ws.max_row
+        if row['locked']:
+            # Grey and locked (L2): every cell keeps openpyxl's default locked=True.
+            for column in range(1, len(columns) + 1):
+                ws.cell(row=excel_row, column=column).fill = grey
+        else:
+            # The one cell a designer types into. Locking does nothing until the sheet
+            # itself is protected below.
+            ws.cell(row=excel_row, column=BOQ_DOWNLOAD_QUANTITY_COL).protection = \
+                Protection(locked=False)
     ws.freeze_panes = 'A2'
-    for column_letter, width in (('A', 11), ('B', 62), ('C', 9),
-                                 ('D', 18), ('E', 12)):
-        ws.column_dimensions[column_letter].width = width
+    for letter, width in (('A', 11), ('B', 18), ('C', 62), ('D', 9), ('E', 12),
+                          ('F', 30), ('G', 30)):
+        ws.column_dimensions[letter].width = width
     ws.protection.sheet = True
 
-    # ---- Sheet 2: rows that are not in the OPEX catalogue -------------------
-    # OMITTED ENTIRELY WHEN THERE ARE NONE — an empty sheet headed "Not In
-    # Catalogue" reads as something having gone wrong.
-    #
-    # THEY CANNOT GO ON THE DATA SHEET. E2 rejects a whole file on any code that
-    # is not in the active OPEX catalogue, so putting them there would make the
-    # download produce a file its own upload refuses. They are still shown,
-    # because a designer's file that silently omits live rows of their BOQ is not
-    # their BOQ.
-    #
-    # NO CODE COLUMN, matching the picker's own off-catalogue panel. These rows
-    # can carry a real, resolvable Residential code (ITM-001 and friends, on sites
-    # seeded before the OPEX catalogue existed) — printing it beside a "not read on
-    # upload" heading invites someone to paste it onto the data sheet, which is the
-    # one mistake this sheet exists to prevent.
-    if added_off:
-        off = wb.create_sheet(BOQ_DOWNLOAD_OFF_SHEET)
-        off.append(['These rows are on this BOQ but are NOT in the OPEX catalogue.'])
-        off.append(['Shown for reference only. They are NOT read when you upload this '
-                    'file, and uploading does not change or remove them.'])
-        off.append(['To change or remove them, use the BOQ screen.'])
-        off.append([])
-        off.append(['Description', 'Unit', 'Category', 'Quantity'])
-        for cell in off[5]:
-            cell.font = Font(bold=True)
-        for _category, rows in group_boq_rows_by_category(added_off, category_order):
-            for row in rows:
-                off.append([row.description, row.uom, row.category, row.boq_quantity])
-        for column_letter, width in (('A', 62), ('B', 9), ('C', 18), ('D', 12)):
-            off.column_dimensions[column_letter].width = width
-        off.protection.sheet = True
-
-    # ---- Sheet: configured ACCBs (B-3a) -------------------------------------
-    # Omitted when there are none, like the off-catalogue sheet. The description is the
-    # line's stored text, which IS accb_description() of its configuration.
+    # ---- ACCB (read only), B-3a / L4: today's columns, never read on upload ------------
     if accbs:
         accb_ws = wb.create_sheet(BOQ_DOWNLOAD_ACCB_SHEET)
         accb_ws.append(['Configured ACCBs on this BOQ. Shown for reference only — they are '
@@ -11295,64 +11352,140 @@ def opex_boq_download(request, project_id):
         accb_ws.append([])
         accb_ws.append(['ACCB', 'Code', 'Description', 'Unit', 'Quantity'])
         for cell in accb_ws[4]:
-            cell.font = Font(bold=True)
+            cell.font = bold
         for line in accbs:
             accb_ws.append([line.accb_config.number, line.item_master.code,
                             line.description, line.uom, line.boq_quantity])
-        for column_letter, width in (('A', 7), ('B', 11), ('C', 100), ('D', 9), ('E', 10)):
-            accb_ws.column_dimensions[column_letter].width = width
+        for letter, width in (('A', 7), ('B', 11), ('C', 100), ('D', 9), ('E', 10)):
+            accb_ws.column_dimensions[letter].width = width
         accb_ws.protection.sheet = True
 
-    # ---- Sheet 3: instructions ----------------------------------------------
-    # Kept OFF the data sheet, the same convention opex_site_bulk_template uses,
-    # so no guidance line can ever be read as a BOQ row. This copy is the
-    # user-facing contract for the upload half.
-    info = wb.create_sheet(BOQ_DOWNLOAD_INFO_SHEET)
-    info.append([f'BOQ — {project.project_id}'])
-    if project.program_id:
-        info.append([f'{project.program.name} ({project.program.short_tender_code})'])
-    info.append([])
-    info.append(['How this file is used'])
-    info.append([])
-    info.append(['1.', 'Only the Quantity column is read. Code, Description, Unit and '
-                       'Category are the item specification and are locked — they are '
-                       're-read from the catalogue on upload, so editing them here '
-                       'changes nothing.'])
-    info.append(['2.', 'If the file contains an item code that is not in the OPEX '
-                       'catalogue, THE WHOLE FILE IS REJECTED and nothing is imported. '
-                       'The error names every row and code at fault.'])
-    info.append(['3.', 'A row you leave out of the file is LEFT ALONE. Its quantity on '
-                       'the BOQ is unchanged.'])
-    info.append(['4.', 'UPLOADING NEVER DELETES ANYTHING. Deleting rows in this '
-                       'spreadsheet has no effect. Remove items on the BOQ screen '
-                       'instead — that is the only place a row can be taken off.'])
-    info.append(['5.', 'Some catalogue items are carried on EVERY OPEX BOQ. That is why a '
-                       'site with nothing entered yet still shows a few rows here with '
-                       'blank quantities. If one is missing from your file it is put back '
-                       'on upload and a message says which, and every one of them needs a '
-                       'quantity before the BOQ can be marked complete.'])
-    info.append(['6.', f'The other sheets are not read. "{BOQ_DOWNLOAD_OFF_SHEET}" and '
-                       f'"{BOQ_DOWNLOAD_ACCB_SHEET}" are reference only, and this sheet is '
-                       f'ignored.'])
-    info.append(['7.', f'Configured ACCBs are managed in the ACCB section of the BOQ '
-                       f'screen, never by upload. A file that carries the ACCB code '
-                       f'{ACCB_CONFIGURED_CODE} on the "{BOQ_DOWNLOAD_SHEET}" sheet is '
-                       f'refused.'])
-    info.append([])
-    info.append(['A blank Quantity means no quantity has been entered. It is not the '
-                 'same as 0 — enter 0 only if this site genuinely needs none.'])
-    info.column_dimensions['A'].width = 4
-    info.column_dimensions['B'].width = 96
-    info.protection.sheet = True
+    # ---- Other lines (read only), L5 / answers 4-5 ---------------------------------------
+    # Never read on upload, and the upload never changes these lines: an off-catalogue line
+    # is outside split_opex_boq_rows()'s catalogue list the upload plans over, and an item
+    # on 2+ lines is never written from a file (answer 4). The text is the LINE's own, the
+    # only wording an off-catalogue line has.
+    other = _boq_other_lines(off_lines, list(on_lines))
+    if other:
+        off = wb.create_sheet(BOQ_DOWNLOAD_OFF_SHEET)
+        off.append(['These lines are on this BOQ but cannot be one row of the '
+                    f'"{BOQ_DOWNLOAD_SHEET}" sheet. Shown for reference only: they are NOT '
+                    'read on upload, and an upload does not change or remove them.'])
+        off.append(['To change or remove them, use the BOQ screen.'])
+        off.append([])
+        off.append(OTHER_LINE_HEADERS)
+        for cell in off[4]:
+            cell.font = bold
+        for line, why in other:
+            off.append([line.item_master.code if line.item_master_id else '',
+                        line.category, line.description, line.uom, line.boq_quantity, why])
+        for letter, width in (('A', 11), ('B', 18), ('C', 62), ('D', 9), ('E', 12),
+                              ('F', 28)):
+            off.column_dimensions[letter].width = width
+        off.protection.sheet = True
+
+    return wb
+
+
+def _xlsx_response(wb, filename):
+    """An attachment response carrying `wb`."""
+    resp = HttpResponse(
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    resp['Content-Disposition'] = f'attachment; filename="{filename}"'
+    wb.save(resp)
+    return resp
+
+
+@login_required
+def opex_boq_download(request, project_id):
+    """Download this site's OPEX BOQ in the DW-7 master layout (ruling DW-R8): every active
+    catalogue item once, in catalogue order, this site's quantities filled and the rest
+    blank. Calculated rows are marked, grey and locked; the site's ACCBs and the lines the
+    layout cannot hold are on reference sheets. Uploaded unchanged, it changes nothing.
+
+    Who: anyone who may READ this site's BOQ (user_can_view_project_boq) — the designer,
+    the named QC reviewer, the Design Head, the PM, SCM/Admin/CEO. Unchanged by DW-7 (L9).
+
+    THE READ GATE, NOT THE WRITE GATE. Downloading is reading. Gating this on
+    user_can_edit_project_boq() would give the sheet to the assigned designer and to nobody
+    else — locking out the QC reviewer and the Design Head, who review a package away from
+    the screen.
+
+    NO LOCK CHECK, DELIBERATELY. Both locks stop WRITES. A design-locked BOQ is with review
+    and a group-locked one is committed to a purchase; in both states reading the sheet is
+    the point, not the risk.
+
+    CREATES NOTHING. A site with no BOQ row yields the full catalogue, blank. It must NOT
+    bring a BOQ into existence: a read by a reviewer would otherwise mutate the site.
+
+    18 queries whatever the catalogue's size (P9, answer 10): the BOQ and the program are
+    joined into the project's own query, and no query runs per row.
+    """
+    # The BOQ and the program are read with the project: one query instead of three.
+    project = _active_project(project_id, select_related=['boq', 'program'])
+
+    # OPEX only, the same refusal the picker makes and for the same reason: a
+    # Residential BOQ is a different sheet with a different catalogue behind it.
+    if project.project_type != 'OPEX':
+        raise Http404('The BOQ download is for RESCO sites. Residential BOQs are read on '
+                      'the standard BOQ screen.')
+
+    # The BOQ read gate: everyone who may see this site's BOQ on screen may download it.
+    # Others get 403 — the sheet carries the same quantities the screen does.
+    if not user_can_view_project_boq(request.user, project):
+        return HttpResponseForbidden()
+
+    try:
+        boq = project.boq
+    except BOQ.DoesNotExist:
+        boq = None
+
+    catalogue = get_opex_boq_catalogue()
+    on_lines, off_lines = split_opex_boq_rows(boq, {m.pk for m in catalogue})
+    # B-3a: configured ACCB lines are in neither list above and get their own sheet. Their
+    # code is not in the upload's catalogue, so they cannot be BOQ-sheet rows (L4).
+    accbs = accb_rows(boq)
+    targets = read_formula_rules(project.project_type).targets
+    # The overrides on this BOQ's lines, line pk -> note, for the Calculated column. One
+    # query, and only when there is a BOQ and a calculated item to override.
+    overrides = {}
+    if boq is not None and targets:
+        overrides = dict(BOQLineOverride.objects.filter(line__boq=boq)
+                         .values_list('line_id', 'note'))
+
+    wb = _boq_master_workbook(
+        project, catalogue, targets=targets,
+        mandatory_ids={m.pk for m in get_opex_mandatory_items()},
+        minimum_rules=boq_minimum_content_rules(),
+        on_lines=on_lines, off_lines=off_lines, accbs=accbs, overrides=overrides)
 
     # Windows rejects most punctuation in a filename, and project_id is
     # user-supplied at site creation — sanitised rather than trusted.
     safe_id = re.sub(r'[^A-Za-z0-9._-]', '_', project.project_id)
-    resp = HttpResponse(
-        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-    resp['Content-Disposition'] = f'attachment; filename="BOQ_{safe_id}.xlsx"'
-    wb.save(resp)
-    return resp
+    return _xlsx_response(wb, f'{safe_id}_BOQ_{timezone.localdate().isoformat()}.xlsx')
+
+
+@login_required
+def opex_boq_master_download(request):
+    """Download the blank master BOQ (DW-7, ruling DW-R8 / L8): the site download's layout
+    with every quantity blank, no override notes, and no ACCB or Other-lines sheet. It
+    uploads to any RESCO site, where only its filled rows are read.
+
+    Who: every design user (answer 12, L9) — role 'Design' (designers and Design QC) and
+    anyone with Design Head authority, the B-5a Q-A rule.
+    """
+    # Design users only (answer 9: the B-5a Q-A predicate, called directly). The blank
+    # master carries no site data, so the rule is about who it is for: PMs, SCM and the
+    # rest work from a site's own download, which keeps the BOQ read gate.
+    if not user_can_use_design_boq_groups(request.user):
+        return HttpResponseForbidden('The blank master BOQ is for design users.')
+
+    catalogue = get_opex_boq_catalogue()
+    wb = _boq_master_workbook(
+        None, catalogue, targets=read_formula_rules('OPEX').targets,
+        mandatory_ids={m.pk for m in get_opex_mandatory_items()},
+        minimum_rules=boq_minimum_content_rules())
+    return _xlsx_response(wb, f'Master_BOQ_blank_{timezone.localdate().isoformat()}.xlsx')
 
 
 # ---------------------------------------------------------------------------
@@ -11447,6 +11580,23 @@ def _boq_upload_quantity(raw):
     return value, None
 
 
+#: DW-7 (L7): where every "this is not the system's sheet" refusal points the designer.
+BOQ_UPLOAD_USE_THE_DOWNLOAD = ('Download this site\'s BOQ from the picker, fill the Quantity '
+                               'column, and upload that file.')
+
+
+def _boq_upload_sheet_name(sheetnames):
+    """The workbook's data sheet: the one named BOQ_DOWNLOAD_SHEET, ignoring case and
+    surrounding spaces (DW-7 answer 7), else None. An exact match wins if several qualify.
+
+    No other fallback, deliberately: "the first sheet" would land on the Instructions or
+    a reference sheet."""
+    if BOQ_DOWNLOAD_SHEET in sheetnames:
+        return BOQ_DOWNLOAD_SHEET
+    wanted = BOQ_DOWNLOAD_SHEET.lower()
+    return next((name for name in sheetnames if name.strip().lower() == wanted), None)
+
+
 def _parse_boq_workbook(uploaded_file):
     """Parse an uploaded BOQ .xlsx into (rows, error).
 
@@ -11475,11 +11625,14 @@ def _parse_boq_workbook(uploaded_file):
                       'this BOQ, with your quantities filled in.')
 
     try:
-        if BOQ_DOWNLOAD_SHEET not in wb.sheetnames:
-            return None, (f'This file has no "{BOQ_DOWNLOAD_SHEET}" sheet, so there is '
-                          f'nothing to read. Upload the file you downloaded from this '
-                          f'BOQ — its first sheet is named "{BOQ_DOWNLOAD_SHEET}".')
-        all_rows = list(wb[BOQ_DOWNLOAD_SHEET].iter_rows(values_only=True))
+        sheet_name = _boq_upload_sheet_name(wb.sheetnames)
+        if sheet_name is None:
+            # DW-7 (ruling DW-R6, L7): the team's own template is not parsed. Naming the
+            # sheets found tells the designer at once that this is not the system's file.
+            found = ', '.join(f"'{name}'" for name in wb.sheetnames)
+            return None, (f'This file has no sheet named {BOQ_DOWNLOAD_SHEET} '
+                          f'(found: {found}). {BOQ_UPLOAD_USE_THE_DOWNLOAD}')
+        all_rows = list(wb[sheet_name].iter_rows(values_only=True))
     finally:
         wb.close()
 
@@ -11490,6 +11643,11 @@ def _parse_boq_workbook(uploaded_file):
     wanted = {key: header.index(head.strip().lower())
               for head, key in BOQ_DOWNLOAD_COLUMNS
               if head.strip().lower() in header}
+    if 'code' not in wanted:
+        # DW-7 (L7): a "BOQ" sheet with no Code column is someone else's layout, not a
+        # damaged copy of ours, so the message says what to use instead.
+        return None, (f'This isn\'t the system\'s {BOQ_DOWNLOAD_SHEET} sheet: it has no Code '
+                      f'column. {BOQ_UPLOAD_USE_THE_DOWNLOAD}')
     missing = [head for head, key in BOQ_DOWNLOAD_COLUMNS
                if key in ('code', 'quantity') and key not in wanted]
     if missing:
@@ -11691,6 +11849,15 @@ def opex_boq_upload(request, project_id):
             'replaced':       summary['replaced'],
             'kept_override':  summary['kept_override'],
             'plan_removed':   summary['removed'],
+            # DW-7 answer 2: calculated lines the engine brings up to date on this commit,
+            # listed apart from the file's own changes.
+            'recalculated':   summary['recalculated'],
+            # DW-7 answer 4: figures for items on 2+ lines, which the file never writes.
+            'on_lines':       summary['on_lines'],
+            # DW-7 answer 3: nothing at all would be written, so the page says "This file
+            # changes nothing" and offers no Confirm. The figures the file carries for
+            # calculated or 2+-line items are still listed: they are ignored, not written.
+            'no_changes':     _boq_upload_changes_nothing(summary),
         })
         ctx.update({
             'stage': 'preview',
@@ -11773,7 +11940,8 @@ def opex_boq_upload(request, project_id):
     return render(request, 'projects/opex_boq_upload.html', ctx)
 
 
-def _boq_upload_plan(on_rows, clean, mandatory, formulas, sheet=None):
+def _boq_upload_plan(on_rows, clean, mandatory, formulas, sheet=None, *,
+                     blank_adds_line=False):
     """What the file will do. THE ONE PLANNING FUNCTION: the preview and the commit both
     call it (Zuber, B-2b.1 A2), so the preview cannot re-implement the commit's rules.
 
@@ -11781,39 +11949,64 @@ def _boq_upload_plan(on_rows, clean, mandatory, formulas, sheet=None):
     get_opex_mandatory_items(), `formulas` the rules (prepare_formula_save() on the commit,
     read_formula_rules() on the preview). Writes nothing and opens no transaction.
 
+    `blank_adds_line`: whether an entry with a blank quantity, for an item that has no line
+    here, creates a blank line. FALSE FOR THE UPLOAD (DW-7 answer 1): the master-layout
+    download lists every catalogue item, so a blank row is overwhelmingly "not needed", and
+    treating it as a line would turn one unchanged file into ~260 empty lines. TRUE FOR THE
+    B-4 COPY, whose entries are another site's real lines: a null-quantity line copies as a
+    null-quantity line (Zuber, B-4).
+
     Returns a dict:
         add        entries the commit creates a line for
         change     [{'entry', 'row', 'was'}] lines whose quantity the commit sets
         unchanged  count of entries that change nothing (blank cell, or the same figure)
+        ignored    count of blank entries for items with no line (DW-7 answer 1)
         readded    mandatory masters put back blank
         held       entries for CALCULATED items: never written by the file (D3)
+        stored     {item pk: stored quantity} for each item on exactly one line, so a
+                   calculated figure equal to it reads as "as downloaded" (DW-7 answer 2)
+        on_lines   [(code, file figure, line count)]: figures for a NON-calculated item on
+                   2+ lines, never written (DW-7 answer 4); a blank one is not listed
     and, only when `sheet` is given (the preview; the commit lets apply_formulas() do it for
     real): the engine's prediction for the sheet as it will be after the writes above,
-        results    evaluate()'s output
-        removed    codes of calculated lines D1 will remove
-        multiple   codes of calculated items on 2+ lines (not written, Q9)
-        error      the engine's reason when a rule cannot produce its figure (A4), else ''
+        results       evaluate()'s output
+        removed       codes of calculated lines D1 will remove
+        multiple      codes of calculated items on 2+ lines (not written, Q9)
+        recalculated  [(code, before, after)] calculated lines the engine adds or changes
+                      (DW-7 answer 2), sorted by code so the commit's list compares equal
+        error         the engine's reason when a rule cannot produce its figure (A4), else ''
 
     MANDATORY PUT-BACKS (the one derivation is get_opex_mandatory_items()): only a mandatory
-    item missing from BOTH the sheet and the file is put back. The picker unions over the
-    posted set because that set IS the whole sheet; here absence means nothing at all. A
-    calculated item is never put back blank: the engine adds it when its rule gives more
-    than 0.
+    item with no line and nothing the file will add is put back. The picker unions over the
+    posted set because that set IS the whole sheet; here absence means nothing at all, and
+    since DW-7 neither does a blank row. A calculated item is never put back blank: the
+    engine adds it when its rule gives more than 0.
     """
     targets = formulas.targets
-    by_master = {row.item_master_id: row for row in on_rows}
-    file_codes = {entry['code'] for entry in clean}
-    readded = [m for m in mandatory
-               if m.pk not in by_master and m.code not in file_codes and m.pk not in targets]
+    lines_of = {}
+    for row in on_rows:
+        lines_of.setdefault(row.item_master_id, []).append(row)
 
-    add, change, held, unchanged = [], [], [], 0
+    add, change, held, on_lines, unchanged, ignored = [], [], [], [], 0, 0
     for entry in clean:
         master = entry['master']
         if master.pk in targets:
             held.append(entry)
             continue
-        row = by_master.get(master.pk)
+        own = lines_of.get(master.pk, [])
+        if len(own) > 1:
+            # DW-7 answer 4: two lines, one figure. Writing it to either line would be a
+            # guess, so the file never does; the lines are changed on the BOQ screen.
+            if entry['quantity'] is not None:
+                on_lines.append((master.code, entry['quantity'], len(own)))
+            continue
+        row = own[0] if own else None
         if row is None:
+            if entry['quantity'] is None and not blank_adds_line:
+                # DW-7 answer 1: a blank row for an item the site has no line for adds
+                # nothing, as if the row were not in the file.
+                ignored += 1
+                continue
             add.append(entry)
         elif entry['quantity'] is None or entry['quantity'] == row.boq_quantity:
             # A BLANK CELL IS "LEAVE IT ALONE" (decision 5), which is what makes a
@@ -11822,8 +12015,16 @@ def _boq_upload_plan(on_rows, clean, mandatory, formulas, sheet=None):
         else:
             change.append({'entry': entry, 'row': row, 'was': row.boq_quantity})
 
-    plan = {'add': add, 'change': change, 'unchanged': unchanged, 'readded': readded,
-            'held': held, 'results': {}, 'removed': [], 'multiple': [], 'error': ''}
+    # Put back a mandatory item only if it has no line and the file adds none for it.
+    added_codes = {entry['code'] for entry in add}
+    readded = [m for m in mandatory
+               if m.pk not in lines_of and m.code not in added_codes and m.pk not in targets]
+
+    plan = {'add': add, 'change': change, 'unchanged': unchanged, 'ignored': ignored,
+            'readded': readded, 'held': held, 'on_lines': on_lines,
+            'stored': {pk: own[0].boq_quantity for pk, own in lines_of.items()
+                       if len(own) == 1},
+            'results': {}, 'removed': [], 'multiple': [], 'recalculated': [], 'error': ''}
 
     if sheet is not None and formulas.active:
         # The sheet after the commit's writes: copies of the stored lines with the file's
@@ -11849,21 +12050,38 @@ def _boq_upload_plan(on_rows, clean, mandatory, formulas, sheet=None):
                                if a.kind == ACTION_REMOVE]
             plan['multiple'] = [codes.get(a.result.item_id, '') for a in actions
                                 if a.kind == ACTION_SKIP_MULTIPLE]
+            # What apply_formulas() will add, change or set to 0, in the shape it reports
+            # (FormulaChange: before is None for an added line).
+            plan['recalculated'] = sorted(
+                (codes.get(a.result.item_id, ''),
+                 None if a.kind == ACTION_ADD else a.line.boq_quantity,
+                 a.result.computed)
+                for a in actions if a.kind in (ACTION_ADD, ACTION_CHANGE, ACTION_ZERO))
     return plan
 
 
-def _boq_upload_held_rows(held, results, multiple):
+def _boq_upload_held_rows(held, results, multiple, stored=None):
     """(replaced, kept_override) for the file's rows on calculated items (D3). Pure.
 
     Shared by the preview (with the predicted results) and the result page (with the real
     ones). A blank cell is "leave it alone" here as everywhere in the upload, so it is never
     "replaced". An item on 2+ lines is not written at all and is reported by the engine's
     own message. Each entry is {'code', 'file', 'calculated'}.
+
+    DW-7 answer 2 — A FIGURE EQUAL TO THE STORED ONE IS "AS DOWNLOADED", not a figure the
+    designer typed: the master-layout download writes every calculated line's stored
+    figure, so a file uploaded unchanged carries them all. Reporting them as "replaced"
+    would blame the file for the engine bringing a stale line up to date; that catch-up is
+    reported on its own (the plan's `recalculated`). `stored` is the plan's `stored`.
     """
+    stored = stored or {}
     replaced, kept_override = [], []
     for entry in held:
         result = results.get(entry['master'].pk)
         if entry['quantity'] is None or result is None or entry['master'].code in multiple:
+            continue
+        pk = entry['master'].pk
+        if pk in stored and entry['quantity'] == stored[pk]:
             continue
         row = {'code': entry['master'].code, 'file': entry['quantity'],
                'calculated': result.quantity}
@@ -11875,11 +12093,19 @@ def _boq_upload_held_rows(held, results, multiple):
     return replaced, kept_override
 
 
-def _boq_upload_summary(plan, results, removed, multiple):
+def _boq_upload_summary(plan, results, removed, multiple, recalculated=None):
     """What the upload does, in one comparable shape: built from the plan and the predicted
     results on the preview, from the plan and the real results on the commit. A2: the two
-    must be equal for the same file, field by field (tests_boq_formula_display pins it)."""
-    replaced, kept_override = _boq_upload_held_rows(plan['held'], results, multiple)
+    must be equal for the same file, field by field (tests_boq_formula_display pins it).
+
+    `recalculated` is the commit's real list of (code, before, after) from apply_formulas();
+    the preview passes None and the plan's prediction is used. Lines the file's own figure
+    was "replaced" on are left out of it: they are already listed there.
+    """
+    replaced, kept_override = _boq_upload_held_rows(plan['held'], results, multiple,
+                                                    plan.get('stored'))
+    replaced_codes = {row['code'] for row in replaced}
+    recalculated = plan.get('recalculated', []) if recalculated is None else recalculated
     return {
         'added':         [entry['code'] for entry in plan['add']],
         'changed':       [(item['entry']['code'], item['was'], item['entry']['quantity'])
@@ -11889,7 +12115,18 @@ def _boq_upload_summary(plan, results, removed, multiple):
         'replaced':      replaced,
         'kept_override': kept_override,
         'removed':       list(removed),
+        'recalculated':  [line for line in sorted(recalculated)
+                          if line[0] not in replaced_codes],
+        'on_lines':      list(plan.get('on_lines', [])),
     }
+
+
+def _boq_upload_changes_nothing(summary):
+    """True if an upload with this summary would write nothing at all (DW-7 answer 3): no
+    line added, changed, put back or removed, and no calculated line brought up to date.
+    Figures the upload ignores (replaced, kept_override, on_lines) are not writes."""
+    return not (summary['added'] or summary['changed'] or summary['readded']
+                or summary['removed'] or summary['recalculated'])
 
 
 def _boq_upload_write(boq, plan):
@@ -11980,9 +12217,13 @@ def _boq_upload_apply(project, clean, actor=None):
 
     # D3 — what happened to the file's figure for each calculated item, from the REAL
     # results, through the same function the preview used on its prediction.
-    upload_summary = _boq_upload_summary(plan, summary.results,
-                                         [change.code for change in summary.removed],
-                                         summary.skipped_multiple)
+    upload_summary = _boq_upload_summary(
+        plan, summary.results, [change.code for change in summary.removed],
+        summary.skipped_multiple,
+        # DW-7 answer 2: what the engine really added, changed or set to 0.
+        recalculated=[(change.code, change.before, change.after)
+                      for change in (*summary.added, *summary.changed,
+                                     *summary.kept_at_zero)])
     return boq, len(plan['add']), len(plan['change']), plan['readded'], {
         'summary': summary, 'replaced': upload_summary['replaced'],
         'kept_override': upload_summary['kept_override'],
@@ -12197,7 +12438,10 @@ def _boq_copy_plan(source_boq, target_boq, formulas, *, predict):
     if predict:
         sheet = [SheetLine(pk=None, item_master_id=accb_master.pk, boq_quantity=Decimal('1'))
                  for _accb in accbs]
-    upload = _boq_upload_plan([], clean, get_opex_mandatory_items(), formulas, sheet=sheet)
+    # blank_adds_line: a source line with no quantity copies as one (Zuber, B-4), unlike a
+    # blank row in an uploaded file (DW-7 answer 1).
+    upload = _boq_upload_plan([], clean, get_opex_mandatory_items(), formulas, sheet=sheet,
+                              blank_adds_line=True)
 
     null_quantity = (sum(1 for entry in upload['add'] if entry['quantity'] is None)
                      + sum(1 for line in off if line.boq_quantity is None))

@@ -535,6 +535,11 @@ class UploadAgreementTests(DisplayBase):
             'replaced': [{'code': 'FX-RS485', 'file': D(7), 'calculated': D(20)}],
             'kept_override': [{'code': 'FX-LOG', 'file': D(1), 'calculated': D(4)}],
             'removed': ['FX-EARTH'],
+            # DW-7 answer 2: the engine's own catch-up, apart from the file's figures. RS485
+            # is already listed as replaced, so it is not listed again.
+            'recalculated': [],
+            # DW-7 answer 4: no item here is on 2+ lines.
+            'on_lines': [],
         })
         # What the commit did is what both said.
         self.assertEqual((self._qty('FX-EARTH'), self._qty('FX-RS485'), self._qty('FX-LOG')),

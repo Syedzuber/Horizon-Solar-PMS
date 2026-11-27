@@ -182,6 +182,8 @@ from .permissions import (
     # Session B2a — who triages an SCM-raised request, and whether anybody can (Q5).
     user_can_triage_scm_change_request, scm_change_request_has_triager,
     scm_change_request_triagers,
+    # DW-7 (answer 12): the blank master BOQ's audience, for the catalogue's button.
+    user_can_use_design_boq_groups,
 )
 
 logger = logging.getLogger(__name__)
@@ -9752,6 +9754,8 @@ def design_boq_catalogue(request):
         'total_count':   _opex_catalogue_qs().count(),
         # B-3a: the row drawn as locked instead of with Edit / Deactivate.
         'accb_code':     ACCB_CONFIGURED_CODE,
+        # DW-7 (answer 12): the blank master button, on the gate its download applies.
+        'can_download_master': user_can_use_design_boq_groups(request.user),
     })
 
 

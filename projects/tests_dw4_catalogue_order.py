@@ -233,16 +233,18 @@ class ReaderOrderTests(ReaderFixture):
         sheet = load_workbook(io.BytesIO(response.content))['BOQ']
         rows = list(sheet.iter_rows(min_row=2, values_only=True))
         header = [c.value for c in sheet[1]]
-        code_col, qty_col = header.index('Code'), header.index('Quantity')
-        codes = [r[code_col] for r in rows]
-        return [_label(r[code_col], r[qty_col]) if codes.count(r[code_col]) > 1
-                else r[code_col] for r in rows]
+        # DW-7: one row per active catalogue item, in catalogue order (the two OPX-514 lines
+        # are one row here and are listed on the Other lines sheet).
+        return [r[header.index('Code')] for r in rows]
 
     def read_download_off_sheet(self):
         response = _client(self.pm).get(reverse('opex_boq_download',
                                                 args=[self.site.project_id]))
-        sheet = load_workbook(io.BytesIO(response.content))['Not In Catalogue']
-        return [r[0] for r in sheet.iter_rows(min_row=6, values_only=True) if r[0]]
+        sheet = load_workbook(io.BytesIO(response.content))['Other lines (read only)']
+        rows = [r for r in sheet.iter_rows(min_row=5, values_only=True)]
+        codes = [r[0] or 'adhoc' for r in rows]
+        return [_label(r[0], r[4]) if codes.count(r[0] or 'adhoc') > 1 else (r[0] or 'adhoc')
+                for r in rows]
 
     def read_correction_screen(self):
         response = _client(self.qc).get(reverse('boq_correct', args=[self.site.project_id]))
@@ -299,11 +301,12 @@ class ReaderOrderTests(ReaderFixture):
         ('picker: off-catalogue block', 'read_picker_off_block', OFF_LINES),
         ('picker: search results', 'read_picker_search_results',
          ['OPX-519', 'OPX-518', 'OPX-517', 'OPX-515', 'OPX-514']),
-        ('download: data sheet (the blank mandatory row in its place)',
+        ('download: data sheet (DW-7: every active catalogue item once)',
          'read_download_data_sheet',
-         ['OPX-519', 'OPX-518', 'OPX-517', 'OPX-515', 'OPX-514:2', 'OPX-514:3']),
-        ('download: Not In Catalogue sheet', 'read_download_off_sheet',
-         ['150 kW (retired)', 'Ad-hoc fitting']),
+         ['OPX-519', 'OPX-518', 'OPX-517', 'OPX-515', 'OPX-514']),
+        ('download: Other lines sheet (DW-7: retired, 2+ lines, no item last)',
+         'read_download_off_sheet',
+         ['OPX-516', 'OPX-514:2', 'OPX-514:3', 'adhoc']),
         ('correction screen', 'read_correction_screen', ON_LINES),
         ('QC review panel', 'read_review_panel', ON_LINES + OFF_LINES),
         ('boq_detail', 'read_boq_detail', ALL_LINES),
@@ -471,7 +474,10 @@ class SnapshotUnchangedTests(ReaderFixture):
 QUERY_PINS = {
     'picker GET (designer)':        20,
     'boq_detail (SCM)':             17,
-    'download (PM)':                12,
+    # DW-7: 11. BOQ and program joined into the project query (-2), category order gone (-1),
+    # the rules check (+1, none in this fixture) and DW-1's groups (+1); no override query
+    # without a calculated item. Flat in the catalogue's size (tests_dw7_master_boq_sheet).
+    'download (PM)':                11,
     'correction screen (QC)':       22,
     'QC review (QC)':               34,
     'site card rows':               1,

@@ -353,12 +353,17 @@ class BlankVersusZeroTests(UploadBase):
 
         self.assertEqual(self._quantities()['OPX-001'], Decimal('0.00'))
 
-    def test_a_new_row_with_a_blank_quantity_is_created_null(self):
+    def test_a_new_row_with_a_blank_quantity_adds_nothing(self):
+        """DW-7 answer 1: a blank row for an item the site has no line for is ignored, as
+        if it were not in the file. (Before DW-7 it created a line with no quantity; the
+        master-layout download lists every catalogue item, so that would have turned one
+        unchanged file into a line per catalogue item.)"""
+        self._seed_boq([('OPX-001', 5)])
         self._login(self.designer)
 
-        self._upload([self._row('OPX-003', None)])
+        self._upload([self._row('OPX-001', 5), self._row('OPX-003', None)])
 
-        self.assertIsNone(self._quantities()['OPX-003'])
+        self.assertEqual(self._quantities(), {'OPX-001': Decimal('5.00')})
 
     def test_a_negative_quantity_is_rejected(self):
         self._seed_boq([('OPX-001', 5)])
