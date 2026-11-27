@@ -65,6 +65,7 @@ from .models import (
     DesignAssignment,
     DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC,
     DESIGN_QC_FAILED, DESIGN_RELEASED, DESIGN_AWAITING_PM_APPROVAL, DESIGN_PM_REJECTED,
+    DESIGN_ARKA_SUBMITTED,  # DW-8: the one status whose BOQ-view badge reads the Arka
     # Prompt 0.3 — reason vocabulary for the state ledger (R-10: constants, not a table).
     REASON_CREATED, REASON_BLOCKED, REASON_UNBLOCKED, REASON_MILESTONE_SYNC,
     REASON_GRN_CONFIRMED, REASON_GRN_OVERRIDDEN, REASON_REVISION_REQUESTED,
@@ -166,6 +167,9 @@ from .client_money import client_payment_owed, milestone_money
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, SiteBdForm, TaskAddForm, VendorForm, ProgramForm, SNAPSHOT_SWITCH_ROLES, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date, TYPED_DATE_FLOOR
 from .forms import catalogue_snapshot, log_catalogue_change  # B-0: catalogue before/after log
 from .notify_registry import NOTIFICATION_EVENTS  # T2: the send-records Event filter's choices
+# DW-8: "← My queue" on the BOQ screens, and the two role lists that ARE the gates of
+# dashboard_design and program_detail, so their decorators and the links read one list.
+from .design_nav import DESIGN_DASHBOARD_ROLES, PROGRAM_DETAIL_ROLES, DesignNav
 from .decorators import (
     login_required, role_required, get_user_dashboard,
     get_post_login_url, LANDING_ROLES,
@@ -208,6 +212,10 @@ from .permissions import (
     REVIEWER_ACTION_BOQ_CORRECT, REVIEWER_ACTION_BOQ_OVERRIDE, REVIEWER_TURN_HEAD,
     REVIEWER_TURN_QC_PASSED, REVIEWER_TURN_QC_PASSED_MESSAGE, REVIEWER_TURN_QC_PASSED_NOTE,
     REVIEWER_TURN_NOT_REVIEWER, qc_pool_outsider_message,
+    # DW-8 - the QC-gate half of "is this viewer a reviewer on this site", for the BOQ
+    # view's "Open QC review" and "Download BOQ" links (the Head half is the turn's own
+    # is_head()). Read only: no write path in this module asks it.
+    user_can_qc_gate_design,
     # Part 12 — the narrow helper, deputy excluded. Used on the design dashboard only, to
     # decide whether the OPEX catalogue link renders. No gate in this module reads it.
     user_is_design_head,
@@ -324,6 +332,10 @@ from .design_views import (
     # that writer, which is what keeps the door single — and is why neither the writer
     # nor the Design derivation is named anywhere in this file, by test, on purpose.
     sync_delivery_mirrors,
+    # DW-8 (N6) — the design stage the OPEX BOQ view shows in place of "Draft", from the
+    # same reading the design workspace's stage pill uses, and the current Arka it needs
+    # (read with its attempt in one query, then handed to the reviewer turn too).
+    current_design_arka, design_stage_context,
     # T4 — the READ side of the same subject, beside the derivation for the same
     # reason. It writes nothing and decides no status: it reports the challans behind
     # a delivery mirror to the two screens that show one.
@@ -1587,7 +1599,9 @@ def _qaqc_engineer_sections(profile):
 
 
 @login_required
-@role_required(['Design'])
+# Design role only. DW-8: the list lives in design_nav so the "← Design dashboard" links
+# are shown to exactly the people this decorator admits; its value is unchanged.
+@role_required(DESIGN_DASHBOARD_ROLES)
 def dashboard_design(request):
     """Design dashboard. One card per assigned project, combined urgency circle. Design role only."""
     # The IST calendar date: task_health takes `today` from its caller.
@@ -5486,7 +5500,9 @@ def program_list(request):
 
 
 @login_required
-@role_required(['Admin', 'PM', 'CEO'])
+# Admin, PM and CEO only. DW-8: the list lives in design_nav so the Head's site list links
+# here only for someone it admits (it refuses the Head); its value is unchanged.
+@role_required(PROGRAM_DETAIL_ROLES)
 def program_detail(request, pk):
     """Program detail: the activated-site breakdown (TB-1), live aggregate rollup vs.
     planned targets, plus the child-site list (each linking to the existing
@@ -9631,6 +9647,12 @@ def boq_detail(request, project_id):
                 'project': project,
                 'boq':     None,
                 'role':    role,
+                # DW-8: the same header links as the full page below (OPEX only for the
+                # queue), so a reviewer opening a site with no BOQ yet still has a way back
+                # and "← Project" stays hidden only from whoever project_overview refuses.
+                'design_queue':     (DesignNav(request.user, project).queue()
+                                     if project.project_type == 'OPEX' else None),
+                'can_open_project': user_can_view_project(request.user, project),
             })
 
     # Handle POST actions
@@ -9875,9 +9897,45 @@ def boq_detail(request, project_id):
     # this sheet (design_reviewer_turn, the rule boq_correct() enforces), and, for QC after
     # it has passed the package, the one-line note shown where the link would be (answer
     # 10). Same evaluation user_can_correct_boq() made here before: no extra query.
-    correction_turn = design_reviewer_turn(request.user, project, REVIEWER_ACTION_BOQ_CORRECT)
+    #
+    # DW-8 (N6): on OPEX the header badge shows the design stage, not "Draft" (every OPEX
+    # BOQ is Draft). Its label reads the Arka only at `arka_submitted`: one query fetches
+    # the current Arka with its attempt, and both are handed to the turn, which would
+    # otherwise read that attempt itself.
+    design_assignment = (getattr(project, 'design_assignment', None)
+                         if project.project_type == 'OPEX' else None)
+    turn_known = {}
+    stage_arka = None
+    if design_assignment is not None and design_assignment.status == DESIGN_ARKA_SUBMITTED:
+        stage_arka = current_design_arka(design_assignment)
+        if stage_arka is not None:
+            turn_known = {'attempt': stage_arka.attempt, 'arka': stage_arka}
+    correction_turn = design_reviewer_turn(request.user, project, REVIEWER_ACTION_BOQ_CORRECT,
+                                           **turn_known)
+
+    # DW-8 — the header's links (OPEX only; a Residential BOQ view is unchanged).
+    #   * "← My queue" (N1), worked out from the viewer's role on this site. The turn's
+    #     cached is_head() is the Head answer, so the deputy lookup is made once.
+    #   * "Open QC review" and "Download BOQ (Excel)" (N4) for this site's reviewers: the QC
+    #     gate or the Head gate, the two predicates the package review screen's own gate is
+    #     wider than, so the link never leads to a 403. The download takes the BOQ read gate
+    #     this view has already passed.
+    #   * "← Project" only where project_overview would open: it 404s a QC reviewer, who
+    #     reads the BOQ by flag or assignment without being able to see the project.
+    is_opex = project.project_type == 'OPEX'
+    nav = (DesignNav(request.user, project, design_assignment,
+                     head_authority=correction_turn.is_head) if is_opex else None)
+    is_site_reviewer = bool(
+        design_assignment is not None
+        and (user_can_qc_gate_design(request.user, design_assignment)
+             or correction_turn.is_head()))
 
     return render(request, 'projects/boq_detail.html', {
+        'design_queue':        nav.queue() if nav else None,
+        'can_open_project':    user_can_view_project(request.user, project),
+        'show_reviewer_links': is_site_reviewer,
+        'design_stage':        (design_stage_context(design_assignment, stage_arka)
+                                if design_assignment is not None else None),
         'project':             project,
         'boq':                 boq,
         'items':               items,
@@ -10304,7 +10362,12 @@ def opex_boq_entry(request, project_id):
     clear_offered = can_edit and has_lines and not any(
         row.ordered_quantity is not None for row in (*added_on, *added_off, *accbs))
 
+    # DW-8: "← My queue", and "← Design workspace" only for someone the workspace admits
+    # (it refuses QC, SCM and the PM outside their approval, who can all read this sheet).
+    picker_nav = DesignNav(request.user, project)
     return render(request, 'projects/opex_boq_entry.html', {
+        'design_queue':     picker_nav.queue(),
+        'design_nav':       picker_nav,
         'copy_offered':     copy_offered,
         'clear_offered':    clear_offered,
         'accb_lines':       accbs,
@@ -12908,6 +12971,9 @@ def boq_correct(request, project_id):
                 item['override_error'] = override_error
 
     return render(request, 'projects/boq_correct.html', {
+        # DW-8 (N1): "← My queue". Only reviewers reach this line; the turn's cached
+        # is_head() answers Head authority (the designer is refused above, so the two agree).
+        'design_queue':    DesignNav(request.user, project, head_authority=turn.is_head).queue(),
         'project':         project,
         'boq':             boq,
         'rows_by_category': group_boq_rows_by_category(rows_on, category_order),

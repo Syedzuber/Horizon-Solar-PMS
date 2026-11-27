@@ -38,6 +38,7 @@ No form, no script, no prices.
   <div class="d-flex flex-wrap gap-2">
     <a href="{% url 'design_boq_group_snapshot_excel' pk=group_pk snapshot_pk=snapshot.pk %}" class="btn btn-sm btn-outline-secondary">Excel (this snapshot)</a>
     <a href="{% url 'design_boq_group_detail' pk=group_pk %}?tab=snapshots" class="btn btn-sm btn-outline-secondary">← Back to the group</a>
+    {% include "projects/design/_back_to_queue.html" %}{# DW-8 (N1) #}
   </div>
 </div>
 

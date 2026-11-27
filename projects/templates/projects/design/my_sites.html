@@ -7,11 +7,12 @@ head_sites.html for why not Tailwind. Functional workflow screen, not a dashboar
 {% endcomment %}
 {% block content %}
 
-<div class="mb-2">
+{# DW-8 answer 5: only for someone the dashboard admits; this page itself opens for anyone. #}
+{% if can_open_design_dashboard %}<div class="mb-2">
   <a href="{% url 'dashboard_design' %}" class="text-decoration-none small">
     <i class="bi bi-arrow-left me-1"></i>Design dashboard
   </a>
-</div>
+</div>{% endif %}
 
 <h5 class="mb-3">My design sites</h5>
 

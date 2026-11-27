@@ -1,0 +1,14 @@
+{% comment %}
+DW-8 (N1) — "← My queue": the one way back to the viewer's own queue, on every design screen.
+
+The target is worked out in the view by design_nav.DesignNav.queue(), from the viewer's role
+on this site (designer -> my sites, QC -> QC queue, Head -> the tender's Head dashboard), and
+passed as `design_queue`. Nothing renders when it is None: a PM or SCM user has no design
+queue and keeps the screen's own links exactly as before (DW-8 answer 4).
+
+`js-back-to-queue` and `data-queue` are read by tests_dw8_navigation, which fails for any
+design screen that stops including this file.
+{% endcomment %}
+{% if design_queue %}<a href="{{ design_queue.url }}" class="btn btn-sm btn-outline-secondary js-back-to-queue" data-queue="{{ design_queue.kind }}">
+    <i class="bi bi-arrow-left me-1"></i>My queue
+  </a>{% endif %}

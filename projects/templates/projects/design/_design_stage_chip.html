@@ -1,0 +1,49 @@
+{% comment %}
+DW-8 — the design STAGE pill, moved out of _design_status_chips.html unchanged so the
+OPEX BOQ view (boq_detail.html) can show the same label as the design workspace instead of
+"Draft". Needs `status`, `arka_approved` and `assignment` in context: _workspace_context()
+gives them to the two workspace screens, design_views.design_stage_context() to the BOQ
+view. Needs the .chip styles of _design_chips.html on the page.
+{% endcomment %}
+  {% comment %}
+  Where the site is in the sequence — one pill, driven by DesignAssignment.status.
+
+  `arka_submitted` IS TWO DIFFERENT STATES AND MUST NOT RENDER AS ONE. Part 3 settled that
+  no status value is invented for "Arka approved, artifacts outstanding": the site stays at
+  `arka_submitted` and the VERDICT disambiguates. Part 9 kept that, so a site whose Arka has
+  cleared both gates still stores `arka_submitted` — and a chip reading "Arka submitted"
+  there is actively misleading. It tells a Design Head the Arka is still waiting on somebody
+  when he has already approved it, which is exactly how a reviewer ends up hunting a site
+  that is in fact sitting with the designer.
+
+  So the label follows what design_metrics._classify() computes for the same site rather
+  than the raw status: `arka_approved` when design_metrics.arka_is_approved() holds (QC's
+  verdict since W-1), `arka_submitted` otherwise. Both surfaces now say the same thing
+  about the same row.
+
+  W-3: a legacy `awaiting_head_arka` site reads "Arka awaiting Design QC" like any
+  QC-pending Arka. W-1 removed the Head's Arka step and Design QC moves these sites on, so
+  the stored label ("awaiting Design Head") would send the reader to the wrong person.
+  {% endcomment %}
+  {% if status == 'artifacts_uploaded' %}
+    <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
+      Design: Package complete</span>
+  {% elif status == 'arka_rejected' %}
+    <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>
+      Design: Arka rejected</span>
+  {% elif status == 'arka_submitted' and arka_approved %}
+    <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
+      Design: Arka approved — CAD and BOQ outstanding</span>
+  {% elif status == 'arka_submitted' or status == 'awaiting_head_arka' %}
+    <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
+      Design: Arka awaiting Design QC</span>
+  {% elif status == 'awaiting_head_qc' or status == 'pm_rejected' %}
+    <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
+      Design: {{ assignment.get_status_display }}</span>
+  {% elif status == 'awaiting_pm_approval' %}
+    <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
+      Design: {{ assignment.get_status_display }}</span>
+  {% else %}
+    <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
+      Design: {{ assignment.get_status_display }}</span>
+  {% endif %}

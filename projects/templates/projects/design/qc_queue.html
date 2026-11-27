@@ -43,6 +43,10 @@ this module.
       {% endif %}
     </div>
   </div>
+  {# DW-8 (answer 7): this screen had no way out. For whoever the dashboard admits. #}
+  {% if can_open_design_dashboard %}<a href="{% url 'dashboard_design' %}" class="btn btn-sm btn-outline-secondary js-back-to-design-dashboard">
+    <i class="bi bi-arrow-left me-1"></i>Design dashboard
+  </a>{% endif %}
 </div>
 
 {% comment %}

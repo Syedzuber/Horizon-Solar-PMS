@@ -29,7 +29,12 @@ convenience; design_artifact_upload() refuses the POST regardless.
       ({{ project.program.short_tender_code }}){% endif %}
     </div>
   </div>
-  {% if pm_reviewing %}<a href="{% url 'design_pm_approval_queue' %}" class="btn btn-sm btn-outline-secondary">
+  {% comment %}
+  DW-8 (answer 4): "← My queue" replaces this screen's own back button for whoever gets
+  one (the designer: my sites; the Head: the tender's dashboard). The reviewing PM gets
+  none and keeps "← Design & BOQ approvals" exactly as before.
+  {% endcomment %}
+  {% if design_queue %}{% include "projects/design/_back_to_queue.html" %}{% elif pm_reviewing %}<a href="{% url 'design_pm_approval_queue' %}" class="btn btn-sm btn-outline-secondary">
     <i class="bi bi-arrow-left me-1"></i>Design &amp; BOQ approvals
   </a>{% else %}<a href="{% url 'design_my_sites' %}" class="btn btn-sm btn-outline-secondary">
     <i class="bi bi-arrow-left me-1"></i>My sites

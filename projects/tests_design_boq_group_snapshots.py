@@ -75,10 +75,12 @@ STORED_KEYS = {
 #: one's data (the snapshot list itself is already in the 17).
 #: DW-1b: +1 each on the screen and the take, for the formula-group members the content-gap
 #: warning reads (one query, whatever the number of sites). Snapshot view/Excel unchanged.
-DETAIL_NO_SNAPSHOTS = 18
-DETAIL_WITH_SNAPSHOTS = 20
+#: DW-8: +1 on the group screen and the snapshot view for "← My queue" (a designer's deputy
+#: lookup). The take and both Excel files are unchanged.
+DETAIL_NO_SNAPSHOTS = 19
+DETAIL_WITH_SNAPSHOTS = 21
 TAKE_QUERIES = 19
-SNAPSHOT_VIEW_QUERIES = 8
+SNAPSHOT_VIEW_QUERIES = 9
 SNAPSHOT_EXCEL_QUERIES = 6
 
 

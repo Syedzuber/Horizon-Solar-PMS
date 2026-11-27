@@ -153,12 +153,17 @@ untagged message the two are the same string, so this renders exactly as base.ht
     Part 5: the metrics view is the landing screen for a tender; this list is its
     drill-down. Linked both ways so neither is a dead end.
     {% endcomment %}
-    <a href="{% url 'design_tender_dashboard' pk=program.pk %}" class="btn btn-sm btn-outline-secondary">
+    {% comment %}
+    DW-8: "← My queue" is this tender's dashboard, so it replaces the "Dashboard" button
+    (answer 4). "← Tender" is shown only to someone program_detail admits (Admin, PM, CEO):
+    it refused the Head, who holds role Design (answer 5).
+    {% endcomment %}
+    {% if design_queue %}{% include "projects/design/_back_to_queue.html" %}{% else %}<a href="{% url 'design_tender_dashboard' pk=program.pk %}" class="btn btn-sm btn-outline-secondary">
       <i class="bi bi-speedometer2 me-1"></i>Dashboard
-    </a>
-    <a href="{% url 'program_detail' pk=program.pk %}" class="btn btn-sm btn-outline-secondary">
+    </a>{% endif %}
+    {% if can_open_program_detail %}<a href="{% url 'program_detail' pk=program.pk %}" class="btn btn-sm btn-outline-secondary">
       <i class="bi bi-arrow-left me-1"></i>Tender
-    </a>
+    </a>{% endif %}
   </div>
 </div>
 

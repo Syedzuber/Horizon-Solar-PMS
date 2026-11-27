@@ -23,6 +23,10 @@ grouped under. Neither is hidden — both are gone, so a crafted POST cannot set
   <a href="{% url 'design_boq_catalogue' %}" class="text-decoration-none small text-muted">
     <i class="bi bi-arrow-left"></i> Back to RESCO BOQ Catalogue
   </a>
+  {# DW-8 (answer 7): and back to the dashboard, for whoever it admits. #}
+  {% if can_open_design_dashboard %}<span class="text-muted small mx-1">·</span><a href="{% url 'dashboard_design' %}" class="text-decoration-none small text-muted js-back-to-design-dashboard">
+    <i class="bi bi-arrow-left"></i> Design dashboard
+  </a>{% endif %}
   <h5 class="mt-2 mb-0">{{ title }}</h5>
   {% if item %}
     <div class="text-muted small mt-1">

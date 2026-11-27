@@ -31,9 +31,10 @@ request is unresolved is a convenience; design_qc_pass() refuses the POST regard
       {% endif %}
     </div>
   </div>
-  <a href="{% url 'design_qc_queue' %}" class="btn btn-sm btn-outline-secondary">
+  {# DW-8 (answer 4): "← My queue" replaces "← QC queue" for whoever gets one. #}
+  {% if design_queue %}{% include "projects/design/_back_to_queue.html" %}{% else %}<a href="{% url 'design_qc_queue' %}" class="btn btn-sm btn-outline-secondary">
     <i class="bi bi-arrow-left me-1"></i>QC queue
-  </a>
+  </a>{% endif %}
 </div>
 
 {% include "projects/design/_design_status_chips.html" %}
@@ -625,10 +626,11 @@ this screen must not allow.
 {% include "projects/design/_design_artifacts.html" %}
 {% include "projects/design/_attempt_history.html" %}
 
-<div class="text-muted small">
+{# DW-8 answer 5: only for someone the workspace admits; it refuses QC. #}
+{% if design_nav.can_open_workspace %}<div class="text-muted small">
   Designer's view of this site:
   <a href="{% url 'design_site_workspace' project_id=project.project_id %}">design workspace</a>.
-</div>
+</div>{% endif %}
 
 {% if can_verdict or can_head_verdict or can_resolve_pm_rejection %}
 {{ redo_defaults_json|json_script:"redoDefaults" }}

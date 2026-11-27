@@ -71,6 +71,7 @@ No prices anywhere.
   <div class="d-flex flex-wrap gap-2 align-items-start">
     <a href="{% url 'design_boq_group_excel' pk=group.pk %}" class="btn btn-sm btn-outline-secondary">Excel (live)</a>
     <a href="{% url 'design_boq_group_list' %}" class="btn btn-sm btn-outline-secondary">← All groups</a>
+    {% include "projects/design/_back_to_queue.html" %}{# DW-8 (N1) #}
     {% if not snapshots %}
     {# B-5b S7: only a group with no snapshots can be deleted; the view re-checks both rules. #}
     {{ group.name|json_script:"boqGroupName" }}

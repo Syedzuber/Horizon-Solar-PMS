@@ -463,7 +463,8 @@ the per-card x-data expand behaviour below is untouched.
       {% endif %}{% endif %}
 
       {# BOQ Status chip — Trigger 3: 4 actual values, not 3 as originally assumed #}
-      {% if p.boq_status == 'Acknowledged' %}
+      {# DW-8 (answer 6): not on OPEX cards (p.design): every OPEX BOQ is Draft, and the design chips below say where the site is. #}
+      {% if not p.design %}{% if p.boq_status == 'Acknowledged' %}
       <span class="chip chip-green">
         <span class="chip-dot chip-dot-green"></span>BOQ: Acknowledged
       </span>
@@ -481,7 +482,7 @@ the per-card x-data expand behaviour below is untouched.
       <span class="chip chip-grey">
         <span class="chip-dot chip-dot-grey"></span>BOQ: Draft
       </span>
-      {% endif %}{% if p.design %}{% include "projects/design/_dashboard_design_chips.html" %}{% endif %}
+      {% endif %}{% endif %}{% if p.design %}{% include "projects/design/_dashboard_design_chips.html" %}{% endif %}
 
       {% if not p.design %}{% if p.revision_requested %}
       <span class="chip chip-red">

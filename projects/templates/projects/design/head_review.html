@@ -37,7 +37,13 @@ so a direct POST to a bare URL is refused exactly as a hidden button would have 
       {% endif %}
     </div>
   </div>
-  {% if project.program %}
+  {% comment %}
+  DW-8 (answer 4): "← My queue" replaces "← Tender sites" for whoever gets one, which is
+  everyone who opens this screen (QC -> QC queue, the Head -> the tender's dashboard).
+  "Tender sites" is kept only as the fallback, and only for someone design_head_sites
+  admits (Head authority): it was a 403, and QC's only way out, before DW-8.
+  {% endcomment %}
+  {% if design_queue %}{% include "projects/design/_back_to_queue.html" %}{% elif project.program and design_nav.can_open_head_sites %}
   <a href="{% url 'design_head_sites' pk=project.program_id %}" class="btn btn-sm btn-outline-secondary">
     <i class="bi bi-arrow-left me-1"></i>Tender sites
   </a>
@@ -231,9 +237,10 @@ _workspace_context(), so nothing new is queried for this.
   </div>
 {% endif %}
 
-<div class="text-muted small">
+{# DW-8 answer 5: only for someone the workspace admits; it refuses QC. #}
+{% if design_nav.can_open_workspace %}<div class="text-muted small">
   Designer's view of this site:
   <a href="{% url 'design_site_workspace' project_id=project.project_id %}">design workspace</a>.
-</div>
+</div>{% endif %}
 
 {% endblock %}

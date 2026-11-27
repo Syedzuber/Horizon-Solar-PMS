@@ -49,6 +49,10 @@ NO AUTO-REFRESH (settled decision 7). The only way this page updates is the Refr
     </div>
   </div>
   <div class="d-flex gap-2">
+    {# DW-8 (answer 7): back to the dashboard with the tender list, for whoever it admits. #}
+    {% if can_open_design_dashboard %}<a href="{% url 'dashboard_design' %}" class="btn btn-sm btn-outline-secondary js-back-to-design-dashboard">
+      <i class="bi bi-arrow-left me-1"></i>Design dashboard
+    </a>{% endif %}
     {# Manual refresh only — no polling, no auto-reload. #}
     <a href="{% url 'design_tender_dashboard' pk=program.pk %}"
        class="btn btn-sm btn-outline-secondary">Refresh</a>

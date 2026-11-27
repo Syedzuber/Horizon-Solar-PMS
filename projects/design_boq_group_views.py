@@ -52,6 +52,7 @@ from openpyxl.styles import Alignment, Font
 
 from .accb import ACCB_CONFIGURED_CODE
 from .design_views import aggregate_group_boq
+from .design_nav import DesignNav  # DW-8: "← My queue" on the group screens
 from .models import (
     BOQItem, DesignAssignment, DesignBOQGroup, DesignBOQGroupMembership,
     DesignBOQGroupSnapshot, Project, DESIGN_BOQ_COUNTED_STATUSES, log_activity,
@@ -853,7 +854,14 @@ def design_boq_group_list(request):
         group.can_open = members_by_group.get(group.pk, set()) <= readable
         group.created_by_name = _person(group.created_by)
 
+    # DW-8 (N1): no site here, so the queue is the role's own: my sites, the QC queue, or
+    # the Design dashboard for the Head (his strip). One deputy lookup at most, never per
+    # row. `queue_is_design_dashboard` keeps the page's "← Design dashboard" from showing
+    # twice when the two are the same link.
+    nav = DesignNav(request.user)
     return render(request, 'projects/design/boq_groups.html', {
+        'design_queue':    nav.queue(),
+        'design_nav':      nav,
         'groups':          groups,
         'name_max':        GROUP_NAME_MAX,
         'group_not_open':  GROUP_NOT_OPEN,
@@ -938,6 +946,8 @@ def design_boq_group_detail(request, pk):
     picker = _picker_rows(request, group)
     tab = request.GET.get('tab')
     return render(request, 'projects/design/boq_group_detail.html', {
+        # DW-8 (N1): "← My queue" beside "← All groups"; no site, so the role's own queue.
+        'design_queue': DesignNav(request.user).queue(),
         'group':        group,
         'member_rows':  member_rows,
         'boq':          live['boq'],
@@ -1193,6 +1203,8 @@ def design_boq_group_snapshot_detail(request, pk, snapshot_pk):
         return refusal
     view = hydrate(snapshot.data)
     return render(request, 'projects/design/boq_group_snapshot.html', {
+        # DW-8 (N1): "← My queue" beside "← Back to the group".
+        'design_queue': DesignNav(request.user).queue(),
         'snapshot':  snapshot,
         'group_pk':  pk,
         'view':      view,

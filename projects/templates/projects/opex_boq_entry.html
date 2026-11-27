@@ -75,10 +75,12 @@ dashboards load. The picker above stays plain JS and does not depend on it.
     </div>
   </div>
   <div class="d-flex gap-2">
-    <a href="{% url 'design_site_workspace' project_id=project.project_id %}"
+    {% include "projects/design/_back_to_queue.html" %}
+    {# DW-8 answer 5: in-flow, kept; shown only to someone the workspace admits. #}
+    {% if design_nav.can_open_workspace %}<a href="{% url 'design_site_workspace' project_id=project.project_id %}"
        class="btn btn-sm btn-outline-secondary">
       <i class="bi bi-arrow-left me-1"></i>Design workspace
-    </a>
+    </a>{% endif %}
     {% comment %}
     Session E1 — download the sheet as .xlsx. OUTSIDE every `can_edit` block on purpose:
     the locks stop writes, and a BOQ that is with review or committed to a purchase is

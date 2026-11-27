@@ -86,7 +86,9 @@ CATALOGUE = [
 #: correction screen) now asks the same exists() to mark calculated lines: REDIRECTED_EXTRA.
 #: The upload commit renders its result in place, so it stays at +1.
 REDIRECTED_EXTRA = 1
-BASELINE = {'picker': 36, 'upload': 19, 'add_line': 40, 'set_quantity': 42}
+#: DW-8: add_line / set_quantity +1 — they follow the redirect to the correction screen,
+#: whose "← My queue" asks Head authority (the deputy lookup) for the open-pool QC reviewer.
+BASELINE = {'picker': 36, 'upload': 19, 'add_line': 41, 'set_quantity': 43}
 
 
 def _profile(username, role, **flags):

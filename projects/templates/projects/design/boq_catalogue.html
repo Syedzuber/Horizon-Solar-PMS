@@ -34,10 +34,16 @@ removal this product has, and it changes what every future sheet is offered.
       Residential items are managed separately and are not shown here.
     </div>
   </div>
-  <a href="{% url 'design_boq_catalogue_create' %}" class="btn btn-sm text-white"
-     style="background-color:#1a7a4a;">
-    <i class="bi bi-plus-lg"></i> Add item
-  </a>
+  {# DW-8 (N5, answer 7): the catalogue's way back, for whoever the dashboard admits. #}
+  <div class="d-flex gap-2">
+    {% if can_open_design_dashboard %}<a href="{% url 'dashboard_design' %}" class="btn btn-sm btn-outline-secondary js-back-to-design-dashboard">
+      <i class="bi bi-arrow-left me-1"></i>Design dashboard
+    </a>{% endif %}
+    <a href="{% url 'design_boq_catalogue_create' %}" class="btn btn-sm text-white"
+       style="background-color:#1a7a4a;">
+      <i class="bi bi-plus-lg"></i> Add item
+    </a>
+  </div>
 </div>
 
 {# ── Active filter. The only axis these rows differ on. ─────────────────────── #}

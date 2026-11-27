@@ -24,7 +24,15 @@ Bootstrap only; no script on this page.
       group only. Separate from SCM's procurement groups.
     </div>
   </div>
-  <a href="{% url 'dashboard_design' %}" class="btn btn-sm btn-outline-secondary">← Design dashboard</a>
+  {% comment %}
+  DW-8: "← My queue" beside the page's own way in. "← Design dashboard" stays, shown once:
+  not when "← My queue" already points there (the Head, off a site), and only to someone
+  that dashboard's role list admits (a deputy outside the Design role is not).
+  {% endcomment %}
+  <div class="d-flex flex-wrap gap-2">
+    {% include "projects/design/_back_to_queue.html" %}
+    {% if design_nav.can_open_design_dashboard and not design_nav.queue_is_design_dashboard %}<a href="{% url 'dashboard_design' %}" class="btn btn-sm btn-outline-secondary">← Design dashboard</a>{% endif %}
+  </div>
 </div>
 
 <div class="card shadow-sm border-0 mb-3">

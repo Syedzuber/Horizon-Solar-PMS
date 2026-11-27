@@ -20,6 +20,8 @@ and an always-open form would read as something the reviewer is meant to fill in
   <summary class="small fw-semibold" style="cursor:pointer;">Revise the Arka</summary>
   <form method="post" class="mt-2" action="{% url 'design_arka_revise' project_id=project.project_id %}">
     {% csrf_token %}
+    {# DW-8 (N2): back to whichever of the two review screens this form is on; the view reads it through safe_next_url(). #}
+    <input type="hidden" name="next" value="{{ request.get_full_path }}">
     <div class="row g-2">
       <div class="col-12 col-md-8">
         <label class="form-label small mb-1" for="rev_arka_link">Arka link</label>

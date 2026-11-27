@@ -43,7 +43,9 @@ D = Decimal
 #: requests, under solarpms.test_settings: picker GET 18, upload preview 14, boq_correct GET
 #: 21, the package review screen 38 for QC and 35 for the Head. Rules made no difference
 #: then (the GETs did not read them).
-BASELINE = {'picker': 18, 'preview': 14, 'correct': 21, 'review_qc': 38, 'review_head': 35}
+#: DW-8: 'correct' +1 — the correction screen's "← My queue" asks Head authority (the deputy
+#: lookup) for this fixture's open-pool QC reviewer; a reviewer named on the site pays none.
+BASELINE = {'picker': 18, 'preview': 14, 'correct': 22, 'review_qc': 38, 'review_head': 35}
 
 #: With rules, each screen adds the exists() gate, load_rules()'s three queries and one read
 #: of the lines with their overrides: five, whatever the number of rules.

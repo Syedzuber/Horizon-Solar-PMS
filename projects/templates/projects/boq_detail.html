@@ -1,5 +1,7 @@
 {% extends "base.html" %}
 {% block title %}BOQ — {{ project.project_id }} — SolarPMS{% endblock %}
+{# DW-8: the .chip styles for the OPEX design-stage badge; other BOQ views load nothing new. #}
+{% block extra_head %}{% if design_stage %}{% include "projects/design/_design_chips.html" %}{% endif %}{% endblock %}
 
 {% block content %}
 
@@ -11,7 +13,15 @@
   </div>
   <div class="d-flex gap-2 align-items-center">
     {% if boq %}
-      {% if boq.status == 'Draft' %}
+      {% comment %}
+      DW-8 (N6) — on an OPEX site the badge is the DESIGN STAGE, the design workspace's own
+      pill: every OPEX BOQ stays `Draft` (nothing in the OPEX flow promotes it), so "Draft"
+      told every reader nothing. Display only; no reader of BOQ.status changes. A site with
+      no design assignment, and every Residential or CAPEX BOQ, keeps the old badge.
+      {% endcomment %}
+      {% if design_stage %}
+        {% include "projects/design/_design_stage_chip.html" with status=design_stage.status arka_approved=design_stage.arka_approved assignment=design_stage.assignment %}
+      {% elif boq.status == 'Draft' %}
         <span class="badge fw-normal fs-6" style="background:#6b7280; color:#fff;">Draft</span>
       {% elif boq.status == 'Submitted' %}
         <span class="badge fw-normal fs-6" style="background:#243a6b; color:#fff;">Submitted</span>
@@ -36,7 +46,18 @@
         <span class="small text-muted align-self-center js-reviewer-turn-note">{{ reviewer_turn_note }}</span>
       {% endif %}
     {% endif %}
-    <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary btn-sm">← Project</a>
+    {% comment %}
+    DW-8 (N4) — this site's reviewers (its QC, the Head) get the way to the package review
+    and the spreadsheet. `show_reviewer_links` is the QC gate or the Head gate, both inside
+    the review screen's own gate; the download takes the BOQ read gate this page passed.
+    {% endcomment %}
+    {% if show_reviewer_links %}
+      <a href="{% url 'design_qc_review' project_id=project.project_id %}" class="btn btn-outline-secondary btn-sm js-open-qc-review">Open QC review</a>
+      <a href="{% url 'opex_boq_download' project.project_id %}" class="btn btn-outline-secondary btn-sm js-boq-download">Download BOQ (Excel)</a>
+    {% endif %}
+    {% include "projects/design/_back_to_queue.html" %}
+    {# DW-8 answer 5: shown only where project_overview opens (it 404s a QC reviewer). #}
+    {% if can_open_project %}<a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary btn-sm">← Project</a>{% endif %}
   </div>
 </div>
 

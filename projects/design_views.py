@@ -43,6 +43,10 @@ from .design_metrics import (
     pending_extension, reviewer_correction_drill, reviewer_correction_panel, tender_metrics,
 )
 from .utils import design_due_date, record_transition, safe_next_url
+from .design_nav import (  # DW-8: back links and link facts
+    DesignNav, design_workspace_access, user_can_open_design_dashboard,
+    user_can_open_program_detail,
+)
 # W-5a: the reviewer's Arka capacity is checked to the column's places and ceiling.
 from .number_input import decimal_field_max, parse_decimal_input
 # Prompt 3.1b-3 — the PM gate's four in-app notifications. See the block above
@@ -1847,6 +1851,12 @@ def design_head_sites(request, pk):
         row['messages'] = by_site.get(row['site'].project_id, [])
 
     return render(request, 'projects/design/head_sites.html', {
+        # DW-8: "← My queue" is this tender's Head dashboard (it replaces the "Dashboard"
+        # button). Head authority was checked at the top, so no lookup is repeated. And
+        # "← Tender" only for someone program_detail admits: its role list refuses the
+        # Head (role Design), so the link was dead for the one person who opens this page.
+        'design_queue': DesignNav(request.user, program=program, head_authority=True).queue(),
+        'can_open_program_detail': user_can_open_program_detail(request.user),
         'program':   program,
         'rows':      rows,
         'designers': designers,
@@ -1919,7 +1929,13 @@ def design_my_sites(request):
             'revisions':   assignment.due_date_commitments.count() - 1,
         })
 
-    return render(request, 'projects/design/my_sites.html', {'rows': rows})
+    return render(request, 'projects/design/my_sites.html', {
+        'rows': rows,
+        # DW-8 answer 5: this screen opens for any profile, but its "← Design dashboard" only
+        # for the roles that dashboard admits (a role test, no query); it was a 403 for a
+        # PM or SCM user who typed or followed the URL.
+        'can_open_design_dashboard': user_can_open_design_dashboard(request.user),
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -3708,6 +3724,35 @@ def _boq_review_panel(boq):
 # 6. Screens
 # ---------------------------------------------------------------------------
 
+def current_design_arka(assignment):
+    """The current attempt's current Arka, with that attempt joined, in ONE query, or None.
+    DW-8: views.boq_detail reads it for the badge at `arka_submitted` and hands
+    `arka.attempt` to design_reviewer_turn(), which would otherwise read the attempt itself,
+    so a reviewer pays nothing extra for the badge. The same rows as
+    _current_arka(_current_attempt(assignment)): the attempt the pointer names, and the one
+    current Arka the partial unique constraint allows on it."""
+    if not assignment.current_attempt_number:
+        return None
+    return (ArkaSubmission.objects
+            .filter(attempt__assignment=assignment,
+                    attempt__attempt_number=assignment.current_attempt_number,
+                    is_current=True)
+            .select_related('attempt').first())
+
+
+def design_stage_context(assignment, arka):
+    """DW-8 (N6): what _design_stage_chip.html needs on a screen that is not a workspace —
+    the BOQ view's badge, which on OPEX shows the design stage instead of "Draft".
+
+    `arka_approved` is the workspace's reading through the one definition,
+    arka_is_approved() (W-3), and it matters ONLY at `arka_submitted`, the one status whose
+    label it changes, so the caller reads the Arka at that status only and every other
+    status costs no query."""
+    arka_approved = (assignment.status == DESIGN_ARKA_SUBMITTED and arka_is_approved(arka))
+    return {'status': assignment.status, 'arka_approved': arka_approved,
+            'assignment': assignment}
+
+
 def _workspace_context(project, assignment):
     """Shared context for both Part 3 screens, so the designer and the Head are looking
     at the same computed truth rather than two templates deriving it separately."""
@@ -3769,16 +3814,15 @@ def design_site_workspace(request, project_id):
     if assignment is None:
         raise Http404('No design assignment for this site.')
 
-    is_designer = user_is_assigned_designer(request.user, assignment)
-    # PROMPT 3.1b-1 — the site's PM (or a Coordinator) reads this screen to approve or
-    # reject the package: the Arka, the CAD archive listing and the BOQ are all here
-    # already, so there is no second, cut-down approval view (D-3). ONE OR TERM, AT THIS
-    # GATE ONLY — the two helpers above are shared by the Head's and the designer's
-    # endpoints and neither is widened. Conditioned on the status, so it opens exactly
-    # while the PM owes a verdict.
-    pm_reviewing = (assignment.status == DESIGN_AWAITING_PM_APPROVAL
-                    and can_approve_design_release(request.user, project))
-    if not (is_designer or user_has_design_head_authority(request.user) or pm_reviewing):
+    # Who may open this screen: the allocated designer, Design Head authority, or — PROMPT
+    # 3.1b-1 — the site's PM (or a Coordinator) while the package waits on their verdict,
+    # reading the Arka, CAD listing and BOQ to approve or reject it (D-3). Everyone else is
+    # refused, QC reviewers included. DW-8 moved this gate, unchanged, into
+    # design_nav.design_workspace_access() so the "design workspace" links on the review
+    # screens and the picker ask the same question and are hidden from whoever it refuses.
+    allowed, is_designer, pm_reviewing = design_workspace_access(
+        request.user, project, assignment)
+    if not allowed:
         return HttpResponseForbidden('Only the allocated designer or the Design Head '
                                      'may open this site\'s design workspace.')
 
@@ -3812,6 +3856,8 @@ def design_site_workspace(request, project_id):
         'can_edit_boq': (user_can_edit_project_boq(request.user, project)
                          and not boq_group_locked),
         'boq_group_locked': boq_group_locked,
+        # DW-8 (N1): "← My queue". None for the reviewing PM, who keeps "← approvals".
+        'design_queue': DesignNav(request.user, project, assignment).queue(),
     })
     return render(request, 'projects/design/site_workspace.html', ctx)
 
@@ -3885,6 +3931,13 @@ def design_head_review(request, project_id):
         if turn.reason == REVIEWER_TURN_ARKA_DECIDED:
             ctx['reviewer_turn_note'] = REVIEWER_TURN_ARKA_DECIDED_MESSAGE
     ctx['revision_reason_max'] = REVISION_REASON_MAX
+    # DW-8: "← My queue", and whether the "Tender sites" and "design workspace" links would
+    # open for this viewer (both were dead for QC). `can_head_gate` already paid the deputy
+    # lookup; it differs from Head authority only for the site's own designer, whom the
+    # queue rule and the workspace gate both settle before they ask.
+    nav = DesignNav(request.user, project, assignment, head_authority=can_head_gate)
+    ctx['design_queue'] = nav.queue()
+    ctx['design_nav'] = nav
     return render(request, 'projects/design/head_review.html', ctx)
 
 
@@ -4334,10 +4387,18 @@ def design_arka_revise(request, project_id):
                else 'design_qc_review')
     if request.method != 'POST':
         return redirect(back_to, project_id=project.project_id)
+    # DW-8 (N2): the form is on two screens, and at `arka_submitted` it shows on package
+    # review too (can_revise_arka there), where the status rule above would send the
+    # reviewer to Arka review instead. So the form sends the page it is on as `next`. It goes
+    # through SEC-2's safe_next_url(), which refuses another host or scheme (`//evil.com`,
+    # `http:evil.com`); a missing or refused `next` falls back to the status rule above.
+    back_url = safe_next_url(
+        request, request.POST.get('next'),
+        fallback=reverse(back_to, kwargs={'project_id': project.project_id}))
 
     def _back(msg, ok=False):
         (messages.success if ok else messages.error)(request, f'{project.project_id}: {msg}')
-        return redirect(back_to, project_id=project.project_id)
+        return redirect(back_url)
 
     capacity, arka_link, field_error = _read_arka_fields(request.POST)
     if field_error:
@@ -5284,13 +5345,16 @@ def design_qc_start(request, project_id):
         return redirect('design_qc_review', project_id=project.project_id)
     if error:
         messages.error(request, error)
-        return redirect('design_qc_queue')
+        # DW-8 (N3): a refusal lands on this site's package review, with the message,
+        # where the form was, never on the queue.
+        return redirect('design_qc_review', project_id=project.project_id)
 
     if not _package_is_complete(attempt):
         messages.error(request, f'{project.project_id}: the package is incomplete — QC '
                                 f'needs an approved Arka, at least one current CAD file '
                                 f'and a BOQ marked complete.')
-        return redirect('design_qc_queue')
+        # DW-8 (N3): back to package review, which lists what is missing.
+        return redirect('design_qc_review', project_id=project.project_id)
 
     profile = request.user.profile
     with transaction.atomic():
@@ -5357,7 +5421,9 @@ def design_qc_pass(request, project_id):
         return redirect('design_qc_review', project_id=project.project_id)
     if error:
         messages.error(request, error)
-        return redirect('design_qc_queue')
+        # DW-8 (N3): a refusal lands on this site's package review, with the message,
+        # where the form was, never on the queue.
+        return redirect('design_qc_review', project_id=project.project_id)
 
     blocked = _blocking_change_request(project, attempt)
     if blocked:
@@ -5418,7 +5484,9 @@ def design_qc_fail(request, project_id):
         return redirect('design_qc_review', project_id=project.project_id)
     if error:
         messages.error(request, error)
-        return redirect('design_qc_queue')
+        # DW-8 (N3): a refusal lands on this site's package review, with the message,
+        # where the form was, never on the queue.
+        return redirect('design_qc_review', project_id=project.project_id)
 
     blocked = _blocking_change_request(project, attempt)
     if blocked:
@@ -5509,7 +5577,9 @@ def design_head_qc_pass(request, project_id):
         return redirect('design_qc_review', project_id=project.project_id)
     if error:
         messages.error(request, error)
-        return redirect('design_qc_queue')
+        # DW-8 (N3): a refusal lands on this site's package review, with the message,
+        # where the form was, never on the queue.
+        return redirect('design_qc_review', project_id=project.project_id)
 
     blocked = _blocking_change_request(project, attempt)
     if blocked:
@@ -5607,7 +5677,9 @@ def design_head_qc_fail(request, project_id):
         return redirect('design_qc_review', project_id=project.project_id)
     if error:
         messages.error(request, error)
-        return redirect('design_qc_queue')
+        # DW-8 (N3): a refusal lands on this site's package review, with the message,
+        # where the form was, never on the queue.
+        return redirect('design_qc_review', project_id=project.project_id)
 
     blocked = _blocking_change_request(project, attempt)
     if blocked:
@@ -7877,6 +7949,9 @@ def design_qc_queue(request):
         head_change_rows, head_change_more = head_change_request_list()
 
     return render(request, 'projects/design/qc_queue.html', {
+        # DW-8 answer 7: this screen had no way out. "← Design dashboard" for whoever that
+        # dashboard's role list admits (a role test, no query).
+        'can_open_design_dashboard': user_can_open_design_dashboard(request.user),
         'arka_rows': arka_rows,
         'rows':      rows,
         'is_deputy': user_is_design_head_deputy(request.user) and not user_is_design_head(request.user),
@@ -8023,6 +8098,12 @@ def design_qc_review(request, project_id):
     # Shown to everyone who opens this screen (QC, the Head, an assigned reviewer):
     # information only, nothing is blocked by it.
     ctx['cad_pairing'] = _cad_pairing(ctx['arka'], ctx['files'])
+    # DW-8: "← My queue" (it replaces "← QC queue" for whoever gets one) and whether the
+    # footer's "design workspace" link opens for this viewer. Head authority is the value
+    # read above, so neither costs a second deputy lookup.
+    nav = DesignNav(request.user, project, assignment, head_authority=has_head_authority)
+    ctx['design_queue'] = nav.queue()
+    ctx['design_nav'] = nav
     return render(request, 'projects/design/qc_review.html', ctx)
 
 
@@ -8465,6 +8546,8 @@ def design_tender_dashboard(request, pk):
         corrections_drill = reviewer_correction_drill(corrections, corrections_designer.pk)
 
     return render(request, 'projects/design/tender_dashboard.html', {
+        # DW-8 answer 7: "← Design dashboard", for whoever its role list admits.
+        'can_open_design_dashboard': user_can_open_design_dashboard(request.user),
         'program':      program,
         'm':            metrics,
         'drill':        drill,
@@ -8529,6 +8612,8 @@ def design_qc_dashboard(request, pk):
         drill_label = STAGE_LABELS[stage]
 
     return render(request, 'projects/design/qc_dashboard.html', {
+        # DW-8 answer 7: "← Design dashboard", for whoever its role list admits.
+        'can_open_design_dashboard': user_can_open_design_dashboard(request.user),
         'program':     program,
         # A DELIBERATELY NARROWED dict, not `metrics`. See the section note above.
         'm': {
@@ -9656,6 +9741,9 @@ def design_boq_catalogue(request):
         items = items.filter(is_active=False)
 
     return render(request, 'projects/design/boq_catalogue.html', {
+        # DW-8 (N5, answer 7): the catalogue's way back. Only the Head opens this screen,
+        # and his queue off a site is the Design dashboard.
+        'can_open_design_dashboard': user_can_open_design_dashboard(request.user),
         'items':         items,
         'active_filter': active_filter,
         # Counts are of the whole OPEX catalogue, NOT of the filtered list — they are the
@@ -9705,6 +9793,7 @@ def design_boq_catalogue_create(request):
         del form.fields['project_type']
 
     return render(request, 'projects/design/boq_catalogue_form.html', {
+        'can_open_design_dashboard': user_can_open_design_dashboard(request.user),  # DW-8
         'form':  form,
         'title': 'Add RESCO Catalogue Item',
         'item':  None,
@@ -9762,6 +9851,7 @@ def design_boq_catalogue_edit(request, item_id):
         del form.fields['project_type']
 
     return render(request, 'projects/design/boq_catalogue_form.html', {
+        'can_open_design_dashboard': user_can_open_design_dashboard(request.user),  # DW-8
         'form':         form,
         'title':        f'Edit RESCO Catalogue Item — {item.code}',
         'item':         item,

@@ -568,7 +568,9 @@ PACKAGE_PINS = {('design_qc_review', 'in_qc', 'qc'): 36,
                 ('design_qc_review', 'in_qc', 'head'): 33,
                 ('design_qc_review', 'awaiting_head_qc', 'qc'): 36,
                 ('design_qc_review', 'awaiting_head_qc', 'head'): 35,
-                ('boq_correct', 'in_qc', 'qc'): 22,
+                # DW-8: 23 — "← My queue" asks Head authority (the deputy lookup) for this
+                # fixture's open-pool QC reviewer.
+                ('boq_correct', 'in_qc', 'qc'): 23,
                 ('boq_correct', 'in_qc', 'head'): 20,
                 ('boq_correct', 'awaiting_head_qc', 'head'): 20}
 
