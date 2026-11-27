@@ -188,12 +188,13 @@ same fact into the seven Design input gates below.
         </thead>
         <tbody>
           {% for item in category_items %}
-          <tr>
+          {# DW-3 (R4): a removed calculated line (overridden to 0) is greyed. #}
+          <tr{% if item.removed_marker %} class="text-muted boq-removed-row"{% endif %}>
             {# DW-4: the row's place on this page, set in boq_detail; not the stored serial_no. #}
             <td class="text-muted small align-middle">{{ item.row_number }}</td>
 
             {% if role == 'Design' %}
-              <td class="align-middle">{{ item.description }}</td>
+              <td class="align-middle">{{ item.description }}{% if item.removed_marker %}<div class="small text-muted boq-removed-marker">{{ item.removed_marker }}</div>{% endif %}</td>
               <td class="align-middle small text-muted">{{ item.uom }}</td>
               <td class="align-middle">
                 {% if design_form_open %}
@@ -202,6 +203,8 @@ same fact into the seven Design input gates below.
                        name="boq_qty_{{ item.pk }}"
                        value="{{ item.boq_quantity|default:'' }}"
                        class="form-control form-control-sm">
+                {% elif item.removed_marker %}
+                  0
                 {% else %}
                   {{ item.boq_quantity|default:"—" }}
                 {% endif %}
@@ -233,9 +236,9 @@ same fact into the seven Design input gates below.
               </td>
 
             {% elif role == 'SCM' %}
-              <td class="align-middle">{{ item.description }}</td>
+              <td class="align-middle">{{ item.description }}{% if item.removed_marker %}<div class="small text-muted boq-removed-marker">{{ item.removed_marker }}</div>{% endif %}</td>
               <td class="align-middle small text-muted">{{ item.uom }}</td>
-              <td class="align-middle text-muted">{{ item.boq_quantity|default:"—" }}</td>
+              <td class="align-middle text-muted">{% if item.removed_marker %}0{% else %}{{ item.boq_quantity|default:"—" }}{% endif %}</td>
               <td class="align-middle">
                 {% if boq.status == 'Submitted' or boq.status == 'Acknowledged' %}
                 <input form="saveSCMForm"
@@ -277,9 +280,9 @@ same fact into the seven Design input gates below.
               </td>
 
             {% else %}{# PM / Admin — read-only #}
-              <td class="align-middle">{{ item.description }}</td>
+              <td class="align-middle">{{ item.description }}{% if item.removed_marker %}<div class="small text-muted boq-removed-marker">{{ item.removed_marker }}</div>{% endif %}</td>
               <td class="align-middle small text-muted">{{ item.uom }}</td>
-              <td class="align-middle">{{ item.boq_quantity|default:"—" }}</td>
+              <td class="align-middle">{% if item.removed_marker %}0{% else %}{{ item.boq_quantity|default:"—" }}{% endif %}</td>
               <td class="align-middle">{{ item.ordered_quantity|default:"—" }}</td>
               <td class="align-middle
                 {% if item.boq_quantity and item.ordered_quantity %}

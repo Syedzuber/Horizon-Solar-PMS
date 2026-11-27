@@ -42,6 +42,9 @@ authority and both locks on the POST regardless of what this template chose to r
   .boq-chip-calc  { background:#cff4fc; color:#055160; }
   .boq-chip-ovr   { background:#fff3cd; color:#7a5b00; }
   .boq-ovr-btn    { font-size:.7rem; padding:0 .35rem; }
+  /* DW-3 — a removed calculated line (overridden to 0) is greyed */
+  .boq-removed-row td { background:#f8f9fa; color:#6c757d; }
+  .boq-chip-rm    { background:#dee2e6; color:#495057; }
   /* B-3a — the ACCB section */
   [x-cloak]       { display:none !important; }
   .accb-card      { border:1px solid #dee2e6; border-radius:.5rem; background:#fff; }
@@ -97,12 +100,65 @@ dashboards load. The picker above stays plain JS and does not depend on it.
        class="btn btn-sm btn-outline-secondary js-boq-master-download">
       <i class="bi bi-download me-1"></i>Download master BOQ
     </a>{% endif %}
+    {% comment %}
+    DW-3 (R7, answer 9) — Upload and Clear BOQ in the top bar, beside Download. Upload is
+    inside `can_edit` like the link below the sheet (it writes); Clear BOQ is offered on the
+    same condition as before (clear_offered: the designer, the edit window, nothing ordered)
+    and only opens the confirmation panel under this bar. The server's gate is unchanged.
+    {% endcomment %}
+    {% if can_edit %}<a href="{% url 'opex_boq_upload' project.project_id %}"
+       class="btn btn-sm btn-outline-secondary" id="boqUploadButton">
+      <i class="bi bi-upload me-1"></i>Upload
+    </a>{% endif %}
+    {% if clear_offered %}<button type="button" class="btn btn-sm btn-outline-danger"
+            id="boqClearToggle" data-bs-toggle="collapse" data-bs-target="#boqClear"
+            aria-expanded="false" aria-controls="boqClear">Clear BOQ</button>{% endif %}
     {% if boq %}
       <a href="{% url 'boq_history' project.project_id %}"
          class="btn btn-sm btn-outline-secondary">History</a>
     {% endif %}
   </div>
 </div>
+
+{% if clear_offered %}
+  {% comment %}
+  B-4 — Clear BOQ. ITS OWN FORM, OUTSIDE boqForm (HTML forbids nesting), posting to
+  opex_boq_clear. Confirmed in the page by typing the site code, never a browser dialog;
+  the server compares the typed code, so the button being enabled is only a convenience.
+  Offered only to the designer while the BOQ is editable and nothing on it is ordered.
+  DW-3 (R7): opened from the Clear BOQ button in the top bar (Bootstrap collapse, so no
+  display utility class fights it), instead of sitting at the foot of the page.
+  {% endcomment %}
+  <div class="collapse mb-3" id="boqClear">
+    <div class="boq-panel p-2 border-danger">
+      <form method="post" action="{% url 'opex_boq_clear' project.project_id %}">
+        {% csrf_token %}
+        <p class="small mb-2">
+          Removes every line on this BOQ, with its ACCBs and overrides. Reviewer corrections
+          stay in the history, and removed ACCB numbers are not reused.
+          Type <strong>{{ project.project_id }}</strong> to confirm.
+        </p>
+        <div class="d-flex align-items-center gap-2">
+          <input type="text" name="confirm_code" id="boqClearCode" autocomplete="off"
+                 class="form-control form-control-sm" style="max-width:220px;"
+                 data-site-code="{{ project.project_id }}">
+          <button type="submit" class="btn btn-sm btn-outline-danger" id="boqClearButton" disabled>
+            Clear BOQ
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <script>
+  (function () {
+    var input = document.getElementById('boqClearCode');
+    var button = document.getElementById('boqClearButton');
+    input.addEventListener('input', function () {
+      button.disabled = input.value.trim().toUpperCase() !== input.dataset.siteCode.toUpperCase();
+    });
+  })();
+  </script>
+{% endif %}
 
 {% if lock_reason %}
   {% comment %}
@@ -175,9 +231,10 @@ dashboards load. The picker above stays plain JS and does not depend on it.
           {% comment %}
           Q7 (B-2b.1): Override and Clear leave this page, so they are disabled while the
           sheet has unsaved changes, rather than warning: no path loses typed figures.
+          DW-3 (B-2b.1 rule): Remove and Restore leave it too, and are disabled the same way.
           {% endcomment %}
           <div class="small text-muted px-1 mb-1" id="boqOvrHint" hidden>
-            Save your changes first: Override and Clear work on the saved BOQ.
+            Save your changes first: Override, Remove and Restore work on the saved BOQ.
           </div>
         {% endif %}
         <div class="boq-sheet" id="boqSheet"></div>
@@ -433,6 +490,53 @@ dashboards load. The picker above stays plain JS and does not depend on it.
       </div>
     </div>
   </div>
+  {% comment %}
+  DW-3 — REMOVE IS AN OVERRIDE TO 0 WITH A NOTE (ruling DW-R4, R2): this pop-up posts the
+  same `set` to opex_boq_override as the Override pop-up, with the quantity fixed at 0, so
+  there is no second implementation and the server's refusals (R6) apply. Restore is the
+  existing Clear. One pop-up, filled from the button that opened it (R3): the item's words,
+  what else changes (R5, worked out by the server on page load), then the note box first
+  and the button after it (DW-2a's layout). The note is not `required`: an empty one is
+  answered beside the button by the script below (answer 7); the server still refuses it.
+  {% endcomment %}
+  <div class="modal fade" id="boqRemoveModal" tabindex="-1" aria-labelledby="boqRemoveTitle" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <form method="post" action="{% url 'opex_boq_override' project.project_id %}" id="boqRemoveForm" novalidate>
+          {% csrf_token %}
+          <input type="hidden" name="action" value="set">
+          <input type="hidden" name="quantity" value="0">
+          <input type="hidden" name="item_id" id="boqRmItem">
+          <div class="modal-header">
+            <h6 class="modal-title" id="boqRemoveTitle">Remove a calculated line</h6>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <p class="small mb-2">
+              Remove <code id="boqRmCode"></code> <span id="boqRmDesc"></span> from this BOQ?
+              The line stays at 0 and the rule won't change it. Use Restore to put the
+              calculated figure back.
+            </p>
+            <div class="small mb-2" id="boqRmFollowBlock" hidden>
+              This also changes:
+              <ul class="mb-0 ps-3" id="boqRmFollow"></ul>
+            </div>
+            <div class="small text-muted mb-2" id="boqRmAlso" hidden></div>
+            <label class="form-label small mb-1" for="boqRmNote">Note (required)</label>
+            <textarea class="form-control form-control-sm" id="boqRmNote" name="note" rows="2"
+                      placeholder="Why this line is not needed on this site"></textarea>
+          </div>
+          <div class="modal-footer">
+            <span class="small text-danger me-auto" id="boqRmError" hidden>
+              Add a note saying why this line is not needed on this site.
+            </span>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button type="submit" class="btn btn-sm btn-outline-danger" id="boqRmSubmit">Remove</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
 {% endif %}
 
 {% comment %}
@@ -620,43 +724,6 @@ with unsaved edits, so nothing typed is lost without a warning.
     {% endif %}
   {% endif %}
 </div>
-
-{% if clear_offered %}
-  {% comment %}
-  B-4 — Clear BOQ. ITS OWN FORM, OUTSIDE boqForm (HTML forbids nesting), posting to
-  opex_boq_clear. Confirmed in the page by typing the site code, never a browser dialog;
-  the server compares the typed code, so the button being enabled is only a convenience.
-  Offered only to the designer while the BOQ is editable and nothing on it is ordered.
-  {% endcomment %}
-  <details class="boq-panel p-2 mt-3" id="boqClear">
-    <summary class="small text-danger">Clear BOQ</summary>
-    <form method="post" action="{% url 'opex_boq_clear' project.project_id %}" class="mt-2">
-      {% csrf_token %}
-      <p class="small mb-2">
-        Removes every line on this BOQ, with its ACCBs and overrides. Reviewer corrections
-        stay in the history, and removed ACCB numbers are not reused.
-        Type <strong>{{ project.project_id }}</strong> to confirm.
-      </p>
-      <div class="d-flex align-items-center gap-2">
-        <input type="text" name="confirm_code" id="boqClearCode" autocomplete="off"
-               class="form-control form-control-sm" style="max-width:220px;"
-               data-site-code="{{ project.project_id }}">
-        <button type="submit" class="btn btn-sm btn-outline-danger" id="boqClearButton" disabled>
-          Clear BOQ
-        </button>
-      </div>
-    </form>
-  </details>
-  <script>
-  (function () {
-    var input = document.getElementById('boqClearCode');
-    var button = document.getElementById('boqClearButton');
-    input.addEventListener('input', function () {
-      button.disabled = input.value.trim().toUpperCase() !== input.dataset.siteCode.toUpperCase();
-    });
-  })();
-  </script>
-{% endif %}
 
 {% if can_edit %}
 <script>
@@ -899,6 +966,9 @@ with unsaved edits, so nothing typed is lost without a warning.
   // B-2b.1 — the Override (and, when set, Clear) buttons under a calculated row's figure.
   // Override opens the one modal outside boqForm; Clear submits the one clear form outside
   // it through form=, carrying this line's id.
+  // DW-3: Remove (an override to 0, its own pop-up) on a line that is not removed yet, and
+  // Restore (the existing Clear, R2) on one that is. All carry data-ovr, so syncOverrides()
+  // disables them while the sheet has unsaved changes (B-2b.1).
   function overrideControls(item, calc) {
     var out = '<div class="d-flex flex-wrap gap-1 mt-1">' +
       '<button type="button" class="btn btn-outline-secondary boq-ovr-btn" data-ovr ' +
@@ -906,9 +976,15 @@ with unsaved edits, so nothing typed is lost without a warning.
       '" data-code="' + esc(item.code) + '" data-desc="' + esc(item.desc) +
       '" data-expl="' + esc(calc.expl || '') + '" data-qty="' + esc(chosen[item.id] || '') +
       '">' + (calc.ovr ? 'Change' : 'Override') + '</button>';
+    if (!calc.rm) {
+      out += '<button type="button" class="btn btn-outline-danger boq-ovr-btn boq-rm-btn" ' +
+             'data-ovr data-bs-toggle="modal" data-bs-target="#boqRemoveModal" data-line="' +
+             calc.line + '" data-item="' + item.id + '">Remove</button>';
+    }
     if (calc.ovr) {
       out += '<button type="submit" form="boqOverrideClear" name="item_id" value="' +
-             calc.line + '" class="btn btn-outline-danger boq-ovr-btn" data-ovr>Clear</button>';
+             calc.line + '" class="btn btn-outline-danger boq-ovr-btn" data-ovr>' +
+             (calc.rm ? 'Restore' : 'Clear') + '</button>';
     }
     return out + '</div>';
   }
@@ -918,15 +994,21 @@ with unsaved edits, so nothing typed is lost without a warning.
   // qty_ field: the server ignores a calculated item's posted quantity, and if the rule is
   // retired between this page and the save, an absent quantity means "unchanged" and the
   // `item` keeps the line out of the delete loop.
+  // DW-3 (R4): a removed line (calc.rm, "Removed (0) by ...") is greyed and says who removed
+  // it and why, in place of the Overridden marker.
   function calcRow(item, calc) {
-    return '<tr><td class="boq-muted ps-3" style="width:74px">' + esc(item.code) +
+    return '<tr' + (calc.rm ? ' class="boq-removed-row"' : '') +
+      '><td class="boq-muted ps-3" style="width:74px">' + esc(item.code) +
       '</td><td class="boq-desc">' + esc(item.desc) +
       ' <span class="boq-chip boq-chip-calc">Calculated</span>' +
-      (calc.ovr ? ' <span class="boq-chip boq-chip-ovr">Overridden</span>' : '') +
+      (calc.rm ? ' <span class="boq-chip boq-chip-rm">Removed</span>'
+               : (calc.ovr ? ' <span class="boq-chip boq-chip-ovr">Overridden</span>' : '')) +
       (calc.expl ? '<div class="boq-muted">' + esc(calc.expl) + '</div>' : '') +
       // B-2e Q6: who set it, the designer's own override named the same way.
-      (calc.ovr ? '<div class="boq-muted boq-override-by">' + esc(calc.by || 'Overridden') +
-                  ': ' + esc(calc.note) + '</div>' : '') +
+      (calc.rm ? '<div class="boq-muted boq-removed-marker">' + esc(calc.rm) + ': ' +
+                 esc(calc.note) + '</div>'
+       : (calc.ovr ? '<div class="boq-muted boq-override-by">' + esc(calc.by || 'Overridden') +
+                     ': ' + esc(calc.note) + '</div>' : '')) +
       (calc.stale ? '<div class="boq-muted text-warning-emphasis">' + esc(calc.stale) +
                     '</div>' : '') +
       '</td><td class="boq-muted" style="width:60px">' + esc(item.unit) + '</td>' +
@@ -1149,6 +1231,50 @@ with unsaved edits, so nothing typed is lost without a warning.
         document.getElementById('boqOvrQty').value = button.getAttribute('data-qty') || '';
         document.getElementById('boqOvrNote').value = '';
       });
+    }
+
+    // DW-3 — the Remove pop-up, filled from the row's button: the item's words (textContent,
+    // never innerHTML) and what else changes (CALC[...].follow / .also, worked out by the
+    // server on page load, R5). Disabled while anything is unsaved; this is the backstop.
+    var elRemove = document.getElementById('boqRemoveModal');
+    if (elRemove) {
+      var rmError = document.getElementById('boqRmError');
+      var rmNote = document.getElementById('boqRmNote');
+      elRemove.addEventListener('show.bs.modal', function (event) {
+        var button = event.relatedTarget;
+        if (!button || dirty) { event.preventDefault(); return; }
+        var item = BY_ID[parseInt(button.getAttribute('data-item'), 10)] || {};
+        var calc = CALC[item.id] || {};
+        document.getElementById('boqRmItem').value = button.getAttribute('data-line') || '';
+        document.getElementById('boqRmCode').textContent = item.code || '';
+        document.getElementById('boqRmDesc').textContent = item.desc || '';
+        var list = document.getElementById('boqRmFollow');
+        list.innerHTML = '';
+        (calc.follow || []).forEach(function (text) {
+          var li = document.createElement('li');
+          li.textContent = text;
+          list.appendChild(li);
+        });
+        document.getElementById('boqRmFollowBlock').hidden = !(calc.follow || []).length;
+        var also = document.getElementById('boqRmAlso');
+        also.textContent = calc.also
+          ? 'Saving also brings ' + calc.also + ' other calculated line' +
+            (calc.also === 1 ? '' : 's') + ' up to date.'
+          : '';
+        also.hidden = !calc.also;
+        rmNote.value = '';
+        rmError.hidden = true;
+      });
+      // Answer 7: an empty note is answered here, beside the button, and nothing is posted.
+      // The server refuses one anyway (_boq_line_override), as a message on the page.
+      document.getElementById('boqRemoveForm').addEventListener('submit', function (event) {
+        if (!rmNote.value.trim()) {
+          event.preventDefault();
+          rmError.hidden = false;
+          rmNote.focus();
+        }
+      });
+      rmNote.addEventListener('input', function () { rmError.hidden = true; });
     }
 
     window.addEventListener('beforeunload', function (event) {

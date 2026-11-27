@@ -142,7 +142,8 @@ their name.
               {{ category }} <span class="text-muted fw-normal">{{ rows|length }}</span>
             </td></tr>
             {% for row in rows %}
-              <tr class="small">
+              {# DW-3 (R4): a removed calculated line (overridden to 0) is greyed. #}
+              <tr class="small{% if row.formula_info.is_removed %} text-muted boq-removed-row{% endif %}">
                 <td class="text-muted">{{ row.item_master.code }}</td>
                 <td style="line-height:1.3">
                   {{ row.description }}
@@ -153,7 +154,11 @@ their name.
                         <div class="text-muted" style="font-size:.75rem">Not calculated until the designer removes the extra line.</div>
                       {% else %}
                         <span class="badge rounded-pill text-bg-info ms-1 boq-formula-marker">Calculated</span>
-                        {% if f.is_overridden %}
+                        {% if f.is_removed %}
+                          {# DW-3 (R4): an override to 0, with who removed it and why. #}
+                          <span class="badge rounded-pill text-bg-secondary ms-1">Removed</span>
+                          <div style="font-size:.75rem" class="text-muted boq-removed-marker">{{ f.removed_by }}: {{ f.note }}</div>
+                        {% elif f.is_overridden %}
                           <span class="badge rounded-pill text-bg-warning ms-1">Overridden</span>
                           <div style="font-size:.75rem" class="boq-override-by">{{ f.override_by }}: {{ f.note }}</div>
                         {% endif %}
@@ -204,12 +209,23 @@ their name.
                         <div class="text-danger mt-1 boq-override-error" style="font-size:.75rem">{{ row.override_error.message }}</div>
                       {% endif %}
                     </form>
+                    {% comment %}
+                    DW-3 (R1, R2) — Remove opens this row's pop-up (below the table), which posts
+                    override_set at 0 with a note: the same override logic. Restore is the
+                    existing override_clear, named for what it does on a removed line.
+                    {% endcomment %}
+                    {% if not row.formula_info.is_removed %}
+                      <div class="text-end mt-1">
+                        <button type="button" class="btn btn-sm btn-outline-danger boq-remove-open"
+                                data-bs-toggle="modal" data-bs-target="#boqRemoveModal{{ row.pk }}">Remove</button>
+                      </div>
+                    {% endif %}
                     {% if row.formula_info.is_overridden %}
                       <form method="post" class="text-end mt-1 boq-override-clear">
                         {% csrf_token %}
                         <input type="hidden" name="action" value="override_clear">
                         <input type="hidden" name="line_id" value="{{ row.pk }}">
-                        <button type="submit" class="btn btn-sm btn-outline-danger">Clear override</button>
+                        <button type="submit" class="btn btn-sm btn-outline-danger">{% if row.formula_info.is_removed %}Restore{% else %}Clear override{% endif %}</button>
                       </form>
                     {% endif %}
                   {% elif row.formula_info %}
@@ -409,6 +425,83 @@ their name.
     {% endif %}
   </div>
 </div>
+
+
+{% if can_override %}
+  {% comment %}
+  DW-3 (R3, answer 8) — ONE REMOVE POP-UP PER CALCULATED ROW, drawn by the server so its
+  "This also changes" list (R5, row.removal_preview, worked out on page load) and an
+  empty-note message (row.remove_error, answer 7) sit inside the form they belong to. Each
+  posts override_set with the quantity fixed at 0: the override logic itself (R2), so its
+  refusals (R6) and the reviewer's turn (DW-2a) apply unchanged. Note first, labelled, and
+  not `required`: the server answers an empty one here, and the page opens it again.
+  {% endcomment %}
+  {% for category, rows in rows_by_category %}
+    {% for row in rows %}
+      {% if row.formula_info and not row.formula_info.is_multiple and not row.formula_info.is_removed %}
+        <div class="modal fade boq-remove-modal" id="boqRemoveModal{{ row.pk }}" tabindex="-1"
+             aria-labelledby="boqRemoveTitle{{ row.pk }}" aria-hidden="true"
+             {% if row.remove_error %}data-open-on-load="1"{% endif %}>
+          <div class="modal-dialog">
+            <div class="modal-content">
+              <form method="post">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="override_set">
+                <input type="hidden" name="remove" value="1">
+                <input type="hidden" name="line_id" value="{{ row.pk }}">
+                <input type="hidden" name="quantity" value="0">
+                <div class="modal-header">
+                  <h6 class="modal-title" id="boqRemoveTitle{{ row.pk }}">Remove a calculated line</h6>
+                  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                  <p class="small mb-2">
+                    Remove <code>{{ row.item_master.code }}</code> {{ row.description }} from this
+                    BOQ? The line stays at 0 and the rule won't change it. Use Restore to put the
+                    calculated figure back.
+                  </p>
+                  {% if row.removal_preview.follow %}
+                    <div class="small mb-2 boq-remove-follow">
+                      This also changes:
+                      <ul class="mb-0 ps-3">
+                        {% for text in row.removal_preview.follow %}<li>{{ text }}</li>{% endfor %}
+                      </ul>
+                    </div>
+                  {% endif %}
+                  {% if row.removal_preview.also_up_to_date %}
+                    <div class="small text-muted mb-2">
+                      Saving also brings {{ row.removal_preview.also_up_to_date }} other calculated
+                      line{{ row.removal_preview.also_up_to_date|pluralize }} up to date.
+                    </div>
+                  {% endif %}
+                  <label class="form-label small mb-1" for="rm_note_{{ row.pk }}">Note (required)</label>
+                  <textarea class="form-control form-control-sm" id="rm_note_{{ row.pk }}" name="note"
+                            rows="2" placeholder="Why this line is not needed on this site"></textarea>
+                </div>
+                <div class="modal-footer">
+                  {% if row.remove_error %}
+                    <span class="small text-danger me-auto boq-remove-error">{{ row.remove_error.message }}</span>
+                  {% endif %}
+                  <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                  <button type="submit" class="btn btn-sm btn-outline-danger">Remove</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      {% endif %}
+    {% endfor %}
+  {% endfor %}
+  <script>
+  // DW-3 (answer 7): a Remove refused for an empty note opens its pop-up again, with the
+  // message beside the button. Bootstrap loads at the foot of base.html, after this inline
+  // script, so its API is used only once the document is parsed.
+  document.addEventListener('DOMContentLoaded', function () {
+    var el = document.querySelector('.boq-remove-modal[data-open-on-load]');
+    if (el) { bootstrap.Modal.getOrCreateInstance(el).show(); }
+  });
+  </script>
+{% endif %}
 
 {% endif %}
 {% endblock %}

@@ -276,7 +276,8 @@ reviewer and the designer are looking at the same document in the same sequence.
               <span class="text-muted fw-normal">{{ rows|length }}</span>
             </td></tr>
             {% for row in rows %}
-              <tr class="small">
+              {# DW-3 (R4): a removed calculated line (overridden to 0) is greyed. #}
+              <tr class="small{% if row.formula_info.is_removed %} text-muted boq-removed-row{% endif %}">
                 <td class="text-muted">{{ row.item_master.code }}</td>
                 <td style="line-height:1.3">
                   {{ row.description }}
@@ -302,7 +303,11 @@ reviewer and the designer are looking at the same document in the same sequence.
                         <div class="text-muted" style="font-size:.75rem">Not calculated until the designer removes the extra line.</div>
                       {% else %}
                         <span class="badge rounded-pill text-bg-info ms-1 boq-formula-marker">Calculated</span>
-                        {% if f.is_overridden %}
+                        {% if f.is_removed %}
+                          {# DW-3 (R4): an override to 0, greyed, with who removed it and why. #}
+                          <span class="badge rounded-pill text-bg-secondary ms-1">Removed</span>
+                          <div class="small text-muted boq-removed-marker" style="font-size:.75rem">{{ f.removed_by }}: {{ f.note }}</div>
+                        {% elif f.is_overridden %}
                           <span class="badge rounded-pill text-bg-warning ms-1">Overridden</span>
                           <div class="small boq-override-by" style="font-size:.75rem">{{ f.override_by }}: {{ f.note }}</div>
                         {% endif %}
@@ -314,7 +319,9 @@ reviewer and the designer are looking at the same document in the same sequence.
                 </td>
                 <td class="text-muted">{{ row.uom }}</td>
                 <td class="text-end">
-                  {% if row.boq_quantity %}<strong>{{ row.boq_quantity|floatformat:"-2" }}</strong>
+                  {# DW-3 (answer 11): a removed line reads 0, not the red "no quantity" dash. #}
+                  {% if row.formula_info.is_removed %}0
+                  {% elif row.boq_quantity %}<strong>{{ row.boq_quantity|floatformat:"-2" }}</strong>
                   {% else %}<span class="text-danger">—</span>{% endif %}
                 </td>
               </tr>

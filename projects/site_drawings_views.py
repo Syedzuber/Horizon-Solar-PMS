@@ -44,6 +44,7 @@ from django.shortcuts import redirect
 from django.urls import reverse
 from django.utils import timezone
 
+from .boq_formulas import is_removed
 from .design_storage import (
     DesignStorageError, cad_pdf_source, cad_zip_pdf_entries, get_design_file_url,
 )
@@ -202,6 +203,11 @@ def _boq_rows(project):
 
     DW-4: in catalogue position order (boq_line_order), like every other BOQ screen. The
     values_list already joins item_master for the code, so the order costs no query.
+
+    DW-3 (answer 10): a seventh key, `removed`, True for a calculated line overridden to 0,
+    so the card can say "Removed (0)". Only the override's id is selected, to tell whether
+    there is one: the card is PM-facing, so the note and who set it are never read here.
+    Still one query (a LEFT JOIN).
     """
     rows = (
         BOQItem.objects.filter(boq__project=project)
@@ -210,12 +216,13 @@ def _boq_rows(project):
                                       Value('')))
         .order_by(*boq_line_order())
         .values_list('item_master__code', 'description', 'category', 'uom',
-                     'boq_quantity', 'make_label')
+                     'boq_quantity', 'make_label', 'formula_override__id')
     )
     return [
         {'code': code or '', 'description': description, 'category': category,
-         'unit': unit, 'quantity': quantity, 'make': make}
-        for code, description, category, unit, quantity, make in rows
+         'unit': unit, 'quantity': quantity, 'make': make,
+         'removed': is_removed(override_id is not None, quantity)}
+        for code, description, category, unit, quantity, make, override_id in rows
     ]
 
 

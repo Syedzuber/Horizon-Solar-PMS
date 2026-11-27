@@ -91,7 +91,8 @@ rows tall, with the header row sticky. At or below it there is no inner vertical
               {% for r in site_drawings.boq_rows %}
                 <tr>
                   <td class="text-nowrap">{{ r.code|default:"—" }}</td>
-                  <td style="min-width:12rem;">{{ r.description }}</td>
+                  {# DW-3 (answer 10): the word only; the note and who removed it stay on the design screens. #}
+                  <td style="min-width:12rem;">{{ r.description }}{% if r.removed %}<div class="small text-muted boq-removed-marker">Removed (0)</div>{% endif %}</td>
                   <td class="text-nowrap">{{ r.category|default:"—" }}</td>
                   <td class="text-nowrap">{{ r.unit|default:"—" }}</td>
                   <td class="text-end text-nowrap">{% if r.quantity is not None %}{{ r.quantity|floatformat:"-2" }}{% else %}—{% endif %}</td>

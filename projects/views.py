@@ -124,6 +124,9 @@ from .boq_formulas import (
     FORMULA_REVIEWER_MESSAGE, FormulaError, SheetLine,
     apply_formulas, formula_summary_messages, formula_view, multiple_lines_message,
     prepare_formula_save, read_formula_rules, read_sheet, work_out_formulas,
+    # DW-3 - Remove (an override to 0): its marker, its refusal test and its pop-up list.
+    REMOVED_MARKER, formula_line_blocked, is_removed, removal_previews, removed_label,
+    sheet_line,
     # B-2e - the line's joined override, read by the shared override helper.
     _override_of,
 )
@@ -9857,9 +9860,22 @@ def boq_detail(request, project_id):
         return redirect('boq_detail', project_id=project_id)
 
     # DW-4: catalogue position order (boq_line_order), not serial_no. item_master joins in
-    # the same query because the order reads it, so this is still one query.
-    items = list(boq.items.select_related('make_preference', 'ordered_vendor', 'item_master')
+    # the same query because the order reads it, so this is still one query. DW-3: so does
+    # each line's override and who set it, for the Removed marker (still one query).
+    items = list(boq.items.select_related('make_preference', 'ordered_vendor', 'item_master',
+                                          'formula_override__set_by__user')
                  .order_by(*boq_line_order()))
+
+    # DW-3 (R4, answer 10) — a calculated line overridden to 0 reads "Removed (0)". Who set
+    # it and the note are for the design screens only, so they are shown to Design users
+    # (the designer, QC, the Head) and not to SCM, the PM or anyone else reading this page.
+    show_removed_detail = role == 'Design'
+    for item in items:
+        override = _override_of(item)
+        item.removed_marker = ''
+        if override is not None and is_removed(True, item.boq_quantity):
+            item.removed_marker = (f'{removed_label(override)}: {override.note}'
+                                   if show_removed_detail else REMOVED_MARKER)
 
     # Annotate each item with make_brand_display: the brand label shown in the static
     # (non-editable) Make/Preference cell. Resolved from VendorBrand in one batch query.
@@ -10310,6 +10326,12 @@ def opex_boq_entry(request, project_id):
     missing_mandatory = [m for m in get_opex_mandatory_items()
                          if m.pk not in on_master_ids and m.pk not in calculated]
 
+    # DW-3 (R5, answer 1) — what Remove would change, per calculated line, for the pop-up.
+    # Pure (no query): the rules and the lines are the ones formula_view() just loaded.
+    # Only when the designer can act on it; the designer's path removes a line that follows
+    # to 0 (D1), so remove_zero is True, as opex_boq_override passes it.
+    previews = removal_previews(formulas, remove_zero=True) if can_edit else {}
+
     def _sheet_row(row):
         """One saved row for renderSheet(). The calculated fields are added only to a
         calculated row, so a row with no rule is exactly what it was before B-2b.1."""
@@ -10324,6 +10346,15 @@ def opex_boq_entry(request, project_id):
                 # B-2e Q6: who set it ("Overridden by QC (name)"), the designer's own
                 # included. Only on an overridden row, so every other row is as before.
                 entry['by'] = info.override_by
+            # DW-3: each key only where it applies, so a row with none is as before.
+            # `rm` is the Removed marker (R4); `follow` and `also` fill the Remove pop-up.
+            if info.is_removed:
+                entry['rm'] = info.removed_by
+            preview = previews.get(row.item_master_id)
+            if preview is not None and preview.follow:
+                entry['follow'] = list(preview.follow)
+            if preview is not None and preview.also_up_to_date:
+                entry['also'] = preview.also_up_to_date
         return entry
 
     # Escaped like Django's json_script: an override note is typed by a designer and this
@@ -10717,6 +10748,18 @@ _OVERRIDE_LOG_REPLACED_TAG = {
 _ACTIVITY_ACTION_MAX = 255
 
 
+#: DW-3 (R6) — the three refusals of a Remove (an override to 0), shared by the designer's
+#: and the reviewers' path because both run _boq_line_override().
+BOQ_REMOVE_ORDERED_MESSAGE = "This line is on an SCM order; it can't be removed here."
+BOQ_REMOVE_MANDATORY_MESSAGE = ("{code} is mandatory on every RESCO BOQ, so it can't be "
+                                "removed. Nothing was saved.")
+BOQ_REMOVE_NO_LINE_MESSAGE = ("{code} is not on this BOQ, so there is nothing to remove. "
+                              "Nothing was saved.")
+#: DW-3 (R3) — the empty-note refusal of a Remove, beside the Remove form (answer 7).
+BOQ_REMOVE_NOTE_REQUIRED_MESSAGE = ('Add a note saying why this line is not needed on this '
+                                    'site. Nothing was saved.')
+
+
 def _override_note_for_log(note, cap=_OVERRIDE_LOG_NOTE_MAX):
     return note if len(note) <= cap else note[:cap - 1] + '…'
 
@@ -10797,6 +10840,12 @@ def _boq_line_override(request, project, *, action, raw_item, raw_master, set_as
     B-2e Q2): the correction screen never deletes a line, so a line that works out to 0
     is set to 0 and the designer's next save removes it (D1).
 
+    DW-3 — A SET TO 0 IS A REMOVE (ruling DW-R4): the line stays at 0 with its override,
+    which the engine leaves alone (work_out_formulas skips an overridden line before its D1
+    check), so no engine change. It is refused (R6) on a mandatory item, on a line with an
+    ordered quantity or an order line (formula_line_blocked, the test D1 keeps a line by),
+    and on a calculated item with no line, which has nothing to remove.
+
     Returns nothing; the caller redirects. Refusals are messages, except a line id that
     is not on this BOQ, which is a 404 as before.
     """
@@ -10864,6 +10913,11 @@ def _boq_line_override(request, project, *, action, raw_item, raw_master, set_as
                     messages.error(request, f'{code} is already on this BOQ. Reload the '
                                             f'page and override its line.')
                     return
+                # DW-3 (R6): an override to 0 IS a Remove (ruling DW-R4), and an item with
+                # no line has nothing to remove. Refused rather than creating a line at 0.
+                if quantity == 0:
+                    messages.error(request, BOQ_REMOVE_NO_LINE_MESSAGE.format(code=code))
+                    return
                 # THE PICKER'S CREATE, FIELD FOR FIELD (Z1): the catalogue's current wording.
                 line = BOQItem.objects.create(
                     boq=boq, item_master=master, serial_no=master.sort_order,
@@ -10896,6 +10950,22 @@ def _boq_line_override(request, project, *, action, raw_item, raw_master, set_as
                 if action == 'set' and (line.same_item_lines or 0) > 1:
                     messages.error(request, multiple_lines_message(code))
                     return
+                # DW-3 (R6): an override to 0 is a Remove (ruling DW-R4, R2), from the Remove
+                # button or typed into Override — the same request either way, so both are
+                # refused alike. Read under the BOQ lock, so the line cannot be ordered or
+                # flagged between the check and the write.
+                if action == 'set' and quantity == 0:
+                    # A mandatory item stays on every RESCO BOQ (DW-R4). None is calculated
+                    # today; item_master is joined in above, so this costs no query.
+                    if line.item_master.is_mandatory:
+                        messages.error(request, BOQ_REMOVE_MANDATORY_MESSAGE.format(code=code))
+                        return
+                    # The line D1 keeps at 0 rather than deleting: an ordered quantity or an
+                    # order line. formula_line_blocked() is that one test; it queries the
+                    # order lines only when the line has no ordered quantity (+1 at most).
+                    if formula_line_blocked(sheet_line(line)):
+                        messages.error(request, BOQ_REMOVE_ORDERED_MESSAGE)
+                        return
                 before = line.boq_quantity
                 previous = _override_of(line)
 
@@ -10952,6 +11022,11 @@ def _boq_line_override(request, project, *, action, raw_item, raw_master, set_as
                     messages.success(request, f'{code} added at {quantity.normalize():f} by '
                                               f'hand. It will not recalculate until the '
                                               f'override is cleared.')
+                elif quantity == 0:
+                    # DW-3: an override to 0 is a Remove, and is told as one (R3's words).
+                    messages.success(request, f"{code} removed. The line stays at 0 and the "
+                                              f"rule won't change it. Use Restore to put "
+                                              f"the calculated figure back.")
                 else:
                     messages.success(request, f'{code} set to {quantity.normalize():f} by '
                                               f'hand. It will not recalculate until the '
@@ -11026,6 +11101,11 @@ def opex_boq_override(request, project_id):
 
     B-2e E4: the designer may replace or clear an override QC or the Head set while the BOQ
     was with them; who set it is not part of this gate.
+
+    DW-3: the picker's Remove posts `set` here with quantity 0 and its note, and Restore is
+    `clear`: a Remove IS an override to 0 (ruling DW-R4, R2), so this endpoint and its gate
+    are unchanged. _boq_line_override() refuses one on an ordered line, a mandatory item or
+    an item with no line (R6).
     """
     project = _active_project(project_id)
 
@@ -11131,6 +11211,8 @@ BOQ_DOWNLOAD_ACCB_SHEET = 'ACCB (read only)'
 #: override of it, is never written by an upload (B-2b D3); the column says which.
 BOQ_MARK_CALCULATED = 'Calculated'
 BOQ_MARK_OVERRIDDEN = 'Overridden'
+#: DW-3 (R4): a calculated line overridden to 0 — "Removed: <note>". Never read on upload.
+BOQ_MARK_REMOVED = 'Removed'
 #: The Required column's word for a mandatory catalogue item (get_opex_mandatory_items).
 BOQ_MARK_REQUIRED = 'Required'
 #: DW-7 answer 11: how each of DW-1's minimum-content tests marks its rows, KEYED BY DW-1's
@@ -11203,7 +11285,10 @@ def _boq_master_rows(catalogue, on_lines, targets, overrides, mandatory_ids, min
             mark = _on_lines_mark(len(own))
         elif calculated and own and own[0].pk in overrides:
             note = overrides[own[0].pk]
-            mark = f'{BOQ_MARK_OVERRIDDEN}: {note}' if note else BOQ_MARK_OVERRIDDEN
+            # DW-3 (R4): an override to 0 is a Remove, and the sheet says so.
+            word = (BOQ_MARK_REMOVED if is_removed(True, own[0].boq_quantity)
+                    else BOQ_MARK_OVERRIDDEN)
+            mark = f'{word}: {note}' if note else word
         elif calculated:
             mark = BOQ_MARK_CALCULATED
         else:
@@ -12938,10 +13023,15 @@ def _boq_correct_override(request, project, group_locked, override_turn):
     # from, not with a redirect — so the typed quantity is still there to keep. Nothing is
     # read or written for it; _boq_line_override() keeps its own refusal as the backstop.
     if action == 'set' and not (request.POST.get('note') or '').strip():
+        # DW-3 (answer 7): `remove` says the post came from the Remove pop-up, so the
+        # message goes beside that form (its pop-up opens again) and not the Override form.
+        remove = request.POST.get('remove') == '1'
         return {'line_id': request.POST.get('line_id', ''),
                 'master_id': request.POST.get('master_id', ''),
                 'quantity': request.POST.get('quantity', ''),
-                'message': REVIEWER_OVERRIDE_NOTE_REQUIRED_MESSAGE}
+                'remove': remove,
+                'message': (BOQ_REMOVE_NOTE_REQUIRED_MESSAGE if remove
+                            else REVIEWER_OVERRIDE_NOTE_REQUIRED_MESSAGE)}
     # Q1: the capacity is stamped now, from authority at this moment: Head authority (the
     # Head or his named deputy) is the Head's, anyone else here is QC — the turn's role, so
     # one person holding both is the Head (W-5 Q6). A set records it on the override; a
@@ -12987,6 +13077,9 @@ def boq_correct(request, project_id):
     Both run the designer's override logic (_boq_line_override, E2). They write NO
     BOQCorrection, so they never count against the designer (E3), and they never delete a
     line: one that works out to 0 is set to 0 (Q2).
+
+    DW-3: Remove is `override_set` at quantity 0 with a note (and `remove=1`, which only says
+    where an empty-note message goes); Restore is `override_clear`. Same turn, same helper.
 
     ONE ROW PER POST, NOT A SHEET SAVE, and that is the design rather than an omission. A
     whole-sheet POST is what makes absence meaningful, and absence meaning "delete" is the
@@ -13265,13 +13358,31 @@ def boq_correct(request, project_id):
     corrections = list(boq.corrections.select_related('corrected_by__user')) if boq else []
 
     calculated_absent = _calculated_absent_rows(formulas, catalogue_by_id)
+
+    # B-2e: offered only where the POST would accept it: a BOQ, no procurement lock, and the
+    # override's turn (DW-2a: the review statuses by role, no change request). No query: the
+    # turn was evaluated with the correction's at the top.
+    can_override = (boq is not None and not group_locked
+                    and turns[REVIEWER_ACTION_BOQ_OVERRIDE].allowed)
+    # DW-3 (R5, answer 1) — what a Remove would change, per calculated line, for its pop-up.
+    # Pure, no query. remove_zero False: this screen never deletes a line, so a line that
+    # follows to 0 is set to 0 (B-2e Q2), and the pop-up says "→ 0" (answer 3).
+    if can_override:
+        previews = removal_previews(formulas, remove_zero=False)
+        for row in rows_on:
+            row.removal_preview = previews.get(row.item_master_id)
+
     # DW-2a (answer 8) — an override posted with no note: the message goes beside the one
     # form it came from, and that form keeps the typed quantity. The ids are only compared
-    # with rows already on this page, never used to read or write anything.
+    # with rows already on this page, never used to read or write anything. DW-3: a Remove's
+    # goes beside the Remove form (`remove_error`), whose pop-up the page opens again.
     if override_error is not None:
         for row in rows_on:
             if str(row.pk) == override_error['line_id']:
-                row.override_error = override_error
+                if override_error.get('remove'):
+                    row.remove_error = override_error
+                else:
+                    row.override_error = override_error
         for item in calculated_absent:
             if str(item['master_id']) == override_error['master_id']:
                 item['override_error'] = override_error
@@ -13295,11 +13406,8 @@ def boq_correct(request, project_id):
         'formula_error':   formulas.error,
         'formula_reviewer_message': FORMULA_REVIEWER_MESSAGE,
         # B-2e — the override form on calculated rows, and the calculated items with no
-        # line (E5). Offered only where the POST would accept it: a BOQ, no procurement
-        # lock, and the override's turn (DW-2a: the review statuses by role, no change
-        # request). No query: the turn was evaluated with the correction's at the top.
-        'can_override':    (boq is not None and not group_locked
-                            and turns[REVIEWER_ACTION_BOQ_OVERRIDE].allowed),
+        # line (E5); DW-3 — Remove and Restore on the same rows. Worked out above.
+        'can_override':    can_override,
         'calculated_absent': calculated_absent,
         # Opens the "calculated items not on this BOQ" block when its form has the error.
         'calculated_absent_error': any('override_error' in item for item in calculated_absent),

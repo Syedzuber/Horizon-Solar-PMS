@@ -644,6 +644,7 @@ class SheetLine:
     overridden: bool = False
     override_note: str = ''
     override_label: str = ''              # B-2e: "Overridden by QC (name)", for the screens
+    removed_label: str = ''               # DW-3: "Removed (0) by QC (name)" when overridden to 0
     ordered_quantity: Decimal | None = None
     line: object = None                   # The BOQItem, for a stored line
 
@@ -656,25 +657,54 @@ def override_label(override):
 
     `set_as` is the capacity stamped at save time, never worked out from today's flags. The
     override's set_by and user must already be joined in, so this costs no query."""
+    return _override_marker('Overridden', override)
+
+
+def _override_marker(word, override):
+    """The text "<word> by <who> (<name>)", the B-2e wording shared by override_label() and
+    removed_label(). No query: set_by and its user are already joined in."""
     # Lazy import: models.py imports this module, so importing models at the top would be
     # circular.
     from .models import OVERRIDE_SET_AS_CHOICES, OVERRIDE_SET_AS_DESIGNER
     if override.set_by is None:
-        return 'Overridden (name not recorded)'
+        return f'{word} (name not recorded)'
     user = override.set_by.user
     who = dict(OVERRIDE_SET_AS_CHOICES).get(override.set_as or OVERRIDE_SET_AS_DESIGNER,
                                             'the designer')
-    return f'Overridden by {who} ({user.get_full_name() or user.username})'
+    return f'{word} by {who} ({user.get_full_name() or user.username})'
+
+
+#: DW-3 (ruling DW-R4) — the word a removed calculated line is marked with, ahead of who
+#: set it: "Removed (0) by QC (Asha Rao)". The site card shows this word alone (answer 10).
+REMOVED_MARKER = 'Removed (0)'
+
+
+def is_removed(overridden, quantity):
+    """DW-3: True if a calculated line is REMOVED — overridden to exactly 0.
+
+    REMOVE IS NOT A STATE OF ITS OWN (ruling DW-R4, R2): it is an override whose figure is
+    0, written through the one override path, so this is the only definition and every
+    screen asks it. A blank figure is not 0, and an override to any other figure keeps the
+    "Overridden" marker. Pure."""
+    return bool(overridden) and quantity is not None and quantity == 0
+
+
+def removed_label(override):
+    """DW-3 (R4): "Removed (0) by the designer (name)", "... by QC (...)", "... by the Head
+    (...)", the same "who" as override_label(). No query."""
+    return _override_marker(REMOVED_MARKER, override)
 
 
 def sheet_line(line):
     """A stored BOQItem as a SheetLine. Its override, with who set it, must already be
     joined in (read_sheet()'s select_related), so this costs no query."""
     override = _override_of(line)
+    removed = override is not None and is_removed(True, line.boq_quantity)
     return SheetLine(pk=line.pk, item_master_id=line.item_master_id,
                      boq_quantity=line.boq_quantity, overridden=override is not None,
                      override_note=override.note if override is not None else '',
                      override_label=override_label(override) if override is not None else '',
+                     removed_label=removed_label(override) if removed else '',
                      ordered_quantity=line.ordered_quantity, line=line)
 
 
@@ -942,6 +972,13 @@ class LineFormula:
     stale: bool = False             # The stored figure is not what the next save writes (Q2)
     note: str = ''                  # The override's note
     override_by: str = ''           # B-2e: "Overridden by QC (name)" (override_label())
+    removed_by: str = ''            # DW-3: "Removed (0) by QC (name)"; '' unless overridden to 0
+
+    @property
+    def is_removed(self):
+        """DW-3: an override to 0 (is_removed()). Still is_overridden: a removed line is an
+        overridden one, so a screen asks this first and shows the Removed marker instead."""
+        return bool(self.removed_by)
 
     @property
     def is_calculated(self):
@@ -1008,7 +1045,8 @@ class FormulaView:
         if stored is not None and stored.overridden:
             return LineFormula(kind=LINE_OVERRIDDEN, explanation=explanation,
                                computed=computed, note=stored.override_note,
-                               override_by=stored.override_label)
+                               override_by=stored.override_label,
+                               removed_by=stored.removed_label)
         return LineFormula(kind=LINE_CALCULATED, explanation=explanation, computed=computed,
                            stale=(computed is not None and line.boq_quantity != computed))
 
@@ -1038,3 +1076,99 @@ def formula_view(boq, project_type):
     except FormulaError as exc:
         view.error = str(exc)
     return view
+
+
+# ---------------------------------------------------------------------------
+# DW-3 — what a Remove would change, for the pop-up (read only)
+#
+# A Remove is an override to 0 (ruling DW-R4, R2), so what follows it is exactly what the
+# override would make the engine do. Worked out ON PAGE LOAD (Zuber, DW-3 answer 1) from
+# the FormulaView the screen already built: evaluate() and sheet_inputs() are pure, so the
+# list for every calculated line together costs no query. work_out_formulas() is not
+# called per line because its formula_line_blocked() queries for each stored line that
+# falls to 0; here the line's ordered_quantity (already loaded) answers that, which is the
+# whole answer on a RESCO BOQ, since a RESCO order line names no BOQ row.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class RemovalPreview:
+    """What Remove on one calculated line would change besides the line itself."""
+    follow: tuple = ()          # Plain sentences, in evaluation order: "OPX-198 2 → 0, removed from the BOQ"
+    also_up_to_date: int = 0    # Other stale calculated lines the same save brings up to date (answer 2)
+
+
+def _qty_text(value):
+    return 'blank' if value is None else _num(value)
+
+
+def _next_save_changes(result, own, remove_zero):
+    """True if the next save changes this calculated item whatever else happens (Q2's
+    "stale"), judged as work_out_formulas() would write it. Pure."""
+    if len(own) > 1 or (own and own[0].overridden):
+        return False
+    if not own:
+        return result.computed > 0
+    stored = own[0].boq_quantity
+    if result.computed == 0:
+        return (remove_zero and own[0].ordered_quantity is None) or stored != 0
+    return stored != result.computed
+
+
+def removal_previews(view, *, remove_zero):
+    """{item id: RemovalPreview} for every calculated line a Remove may be offered on: an
+    item on exactly one line that is not removed already. Pure: no query.
+
+    `remove_zero` is the path's own (True for the designer, False for QC and the Head, as
+    _boq_line_override() passes it): on the designer path a line that follows to 0 is
+    removed (D1), on the reviewer path it is set to 0, and the sentence says which (answer 3).
+
+    ONLY WHAT FOLLOWS FROM THE REMOVE IS LISTED (answer 2). The trial is compared with the
+    page's own evaluation, not with the stored figures, so a stale line the next save would
+    change anyway is not in `follow`; it is counted in `also_up_to_date` instead. The figure
+    shown on the left is the STORED one, the one on the screen.
+
+    A target whose trial cannot be worked out (a figure too large for the column) gets no
+    preview; its save refuses with the engine's reason (A4).
+    """
+    if not view.active or view.error:
+        return {}
+    sheet = [line for lines in view.lines_of.values() for line in lines]
+    quantities, lines_of, overrides = sheet_inputs(sheet, view.targets)
+    codes = view.rules.codes
+    base = view.results
+    stale = {item_id for item_id, result in base.items()
+             if _next_save_changes(result, lines_of.get(item_id, []), remove_zero)}
+    previews = {}
+    for target in view.targets:
+        own = lines_of.get(target, [])
+        if len(own) != 1 or is_removed(own[0].overridden, own[0].boq_quantity):
+            continue
+        try:
+            trial = evaluate(quantities, view.rules, {**overrides, target: ZERO})
+        except FormulaError:
+            continue
+        follow, follow_ids = [], set()
+        for item_id, result in trial.items():         # evaluation (dependency) order
+            if item_id == target or result.quantity == base[item_id].quantity:
+                continue
+            lines = lines_of.get(item_id, [])
+            if len(lines) > 1 or (lines and lines[0].overridden):
+                continue                               # not written (Q9), or left alone
+            after = result.computed
+            code = codes.get(item_id, '')
+            if not lines:
+                if after > 0:
+                    follow.append(f'{code} added at {_num(after)}')
+                    follow_ids.add(item_id)
+                continue
+            stored = lines[0].boq_quantity
+            if after == 0 and remove_zero and lines[0].ordered_quantity is None:
+                follow.append(f'{code} {_qty_text(stored)} → 0, removed from the BOQ')
+            elif stored is not None and stored == after:
+                continue                               # the line already carries it
+            else:
+                follow.append(f'{code} {_qty_text(stored)} → {_num(after)}')
+            follow_ids.add(item_id)
+        previews[target] = RemovalPreview(
+            follow=tuple(follow), also_up_to_date=len(stale - follow_ids - {target}))
+    return previews

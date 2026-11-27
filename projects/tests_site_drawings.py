@@ -11,7 +11,8 @@ WHAT IS PINNED HERE
             hidden PDF, a non-extracted row, and any PDF on a site that is not released
   states    not_released, under_revision (ledger row out of `released`), released with
             an open change request (pending AND with_pm), DR-9 unavailable, DR-10 count
-  DR-3      every BOQ dict has exactly the six keys; make is the brand label or blank,
+  DR-3      every BOQ dict has exactly the seven keys (DW-3 added `removed`, a bool: never
+            the override's note or who set it); make is the brand label or blank,
             never Vendor.name; the card holds no price word, no ordered quantity, no
             vendor name; boq_pdf / boq_excel files never appear
   feed      one activity row per open
@@ -55,7 +56,9 @@ from .site_drawings_views import (
 SIGNED = 'https://storage.example/signed/drawing.pdf?token=abc'
 SIGNER = 'projects.site_drawings_views.get_design_file_url'
 BUCKET = 'Horizon-PMS-Design'
-DR3_KEYS = {'code', 'description', 'category', 'unit', 'quantity', 'make'}
+#: DW-3 (answer 10): `removed` is the seventh key, True for a calculated line overridden to 0.
+#: Only a bool: the card is PM-facing, so the override's note and who set it never reach it.
+DR3_KEYS = {'code', 'description', 'category', 'unit', 'quantity', 'make', 'removed'}
 
 
 def _profile(username, role):
@@ -396,14 +399,15 @@ class StateTests(SiteDrawingsBase):
 
 class BoqAllowlistTests(SiteDrawingsBase):
 
-    def test_every_row_has_exactly_the_six_keys(self):
+    def test_every_row_has_exactly_the_seven_keys(self):
         rows = site_drawings_context(self.site)['boq_rows']
         self.assertEqual(len(rows), 2)
         for row in rows:
             self.assertEqual(set(row), DR3_KEYS)
         self.assertEqual(rows[0], {'code': 'DR2-001', 'description': 'Panel line 1',
                                    'category': 'Module', 'unit': 'Nos',
-                                   'quantity': Decimal('12.50'), 'make': 'SunPeak'})
+                                   'quantity': Decimal('12.50'), 'make': 'SunPeak',
+                                   'removed': False})
         self.assertEqual(rows[1]['make'], '')   # unbranded make: blank, never Vendor.name
 
     def test_rendered_card_has_no_money_no_ordered_and_no_vendor(self):
