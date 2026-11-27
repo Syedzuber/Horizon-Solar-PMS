@@ -3697,7 +3697,7 @@ def _boq_review_panel(boq):
     if boq is None:
         return {'boq_by_category': [], 'boq_off_catalogue': [], 'boq_accb_rows': [],
                 'boq_row_count': 0, 'boq_quantity_count': 0,
-                'boq_mandatory_ids': set()}
+                'boq_mandatory_ids': set(), 'boq_absent_warnings': []}
 
     category_order = opex_catalogue_category_order()
     catalogue_ids  = {m.pk for m in get_opex_boq_catalogue()}
@@ -3717,6 +3717,9 @@ def _boq_review_panel(boq):
 
     return {
         'boq_formula_error':  formulas.error,
+        # DW-6: the warnings of calculated items with no line on this sheet (a line's own
+        # are on row.formula_info). From the evaluation formula_view() just did: no query.
+        'boq_absent_warnings': formulas.absent_warnings(),
         'boq_by_category':    group_boq_rows_by_category(on_rows, category_order),
         'boq_off_catalogue':  group_boq_rows_by_category(off_rows, category_order),
         'boq_accb_rows':      accb_lines,

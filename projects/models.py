@@ -14,7 +14,10 @@ from .units import MEASURED_UNITS, UNIT_CHOICES, UNIT_CODES
 from .accb import ACCB_CONFIGURED_CODE, ACCB_TYPES
 # B-2a: the formula rules' rounding modes and the save-time check. boq_formulas imports
 # models only inside its two loader functions, so this module-level import has no cycle.
-from .boq_formulas import ROUND_NONE, ROUND_UP, ROUNDING_CHOICES, validate_formula_rules
+from .boq_formulas import (
+    DRIVER_ROLE_CHOICES, DRIVER_ROLE_SUM, ROUND_NONE, ROUND_UP, ROUNDING_CHOICES,
+    SITE_FACTOR_CHOICES, WARNING_CHECK_CHOICES, validate_formula_rules,
+)
 # NTF-DCG 5b: NotificationEventRecipient.save() asks the registry whether an event takes
 # named recipients. The registry imports nothing from this module, so there is no cycle.
 from .notify_registry import NOTIFICATION_EVENTS
@@ -1898,6 +1901,13 @@ class BOQFormulaRule(models.Model):
     requires_group = models.ForeignKey(BOQItemGroup, null=True, blank=True,
                                        on_delete=models.PROTECT,
                                        related_name='gated_rules')  # Gives 0 (constant included) unless the site has one of these; empty = always applies
+    # DW-6 (ruling DW-R12, INC 2P). Each defaults to what every earlier rule is, so the 0163
+    # migration leaves every stored rule's result unchanged. See boq_formulas.
+    site_factor   = models.CharField(max_length=16, blank=True, default='',
+                                     choices=SITE_FACTOR_CHOICES)  # DW-6: 'module_wp' multiplies by the site's module wattage (site_module_wp); '' = none
+    clamp_at_zero = models.BooleanField(default=False)  # DW-6: a result below 0 is written as 0 with a warning, instead of refusing the save
+    warning_check = models.CharField(max_length=32, blank=True, default='',
+                                     choices=WARNING_CHECK_CHOICES)  # DW-6: a named check that raises a warning ('inc_2p_structures'); '' = none
     is_active  = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1915,6 +1925,12 @@ class BOQFormulaRule(models.Model):
             models.CheckConstraint(
                 condition=models.Q(rounding__in=[ROUND_UP, ROUND_NONE]),
                 name='boqformularule_rounding_known'),
+            # DW-6: an unknown factor would make the engine refuse every save on the site
+            # type; the database refuses it first. warning_check needs no CHECK: an unknown
+            # name simply raises nothing.
+            models.CheckConstraint(
+                condition=models.Q(site_factor__in=[value for value, _ in SITE_FACTOR_CHOICES]),
+                name='boqformularule_site_factor_known'),
         ]
 
     def clean(self):
@@ -1945,10 +1961,16 @@ class BOQFormulaDriver(models.Model):
                                related_name='drivers')  # Set for a group driver ("all inverters")
     weight = models.DecimalField(max_digits=12, decimal_places=6, default=1)  # This term's factor inside the sum
     label  = models.CharField(max_length=64, blank=True)  # Short name in the explanation; blank = the item code or the group's label
+    role   = models.CharField(max_length=8, default=DRIVER_ROLE_SUM,
+                              choices=DRIVER_ROLE_CHOICES)  # DW-6: 'sum' is summed into the rule; 'check' is a cross-check line, weighted by the modules one structure holds, never summed
 
     class Meta:
         ordering = ['rule', 'pk']
         constraints = [
+            # DW-6: a role the engine does not know would silently drop out of the sum.
+            models.CheckConstraint(
+                condition=models.Q(role__in=[value for value, _ in DRIVER_ROLE_CHOICES]),
+                name='boqformuladriver_role_known'),
             models.CheckConstraint(
                 condition=(models.Q(item__isnull=False, group__isnull=True)
                            | models.Q(item__isnull=True, group__isnull=False)),

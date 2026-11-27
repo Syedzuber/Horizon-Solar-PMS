@@ -1,0 +1,7382 @@
+{
+ "about": "DW-6: before results on 3c2b17f",
+ "sheets": [
+  {
+   "before": {
+    "OPX-089": [
+     "15.00",
+     "15.00",
+     "5 m of earthing cable per lightning arrester: 3 lightning arresters (3 OPX-175) × 5 = 15 Meter",
+     false
+    ],
+    "OPX-148": [
+     "1.00",
+     "1.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 120 m of 32/40 pipe ÷ 150 = 0.8, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "4.00",
+     "4.00",
+     "2 packs of GI screws per pack of saddles: (1 packs of 40 mm saddles + 1 packs of 63 mm saddles) × 2 = 4 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "4.00",
+     "4.00",
+     "2 packs of PVC gitti per pack of saddles: (1 packs of 40 mm saddles + 1 packs of 63 mm saddles) × 2 = 4 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "5.00",
+     "5.00",
+     "5 m of PVC cable tray per inverter: 1 inverters (1 OPX-011) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-169": [
+     "65.00",
+     "65.00",
+     "One M8 nut bolt set per 2 m of GI strip: 130 m of GI strip ÷ 2 = 65 Set",
+     false
+    ],
+    "OPX-172": [
+     "4.00",
+     "4.00",
+     "One earthing chamber per earthing electrode: 4 earthing electrodes (4 OPX-170) = 4 Set",
+     false
+    ],
+    "OPX-173": [
+     "4.00",
+     "4.00",
+     "One bag of earthing compound per earthing electrode: 4 earthing electrodes (4 OPX-170) = 4 Nos",
+     false
+    ],
+    "OPX-174": [
+     "35.00",
+     "35.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 130 m of GI strip × 0.4 ÷ 1.5 = 34.6666…, rounded up to 35 Nos",
+     false
+    ],
+    "OPX-177": [
+     "76.00",
+     "76.00",
+     "2 module earthing sets per module: 38 modules (38 OPX-001) × 2 = 76 Set",
+     false
+    ],
+    "OPX-184": [
+     "1.00",
+     "1.00",
+     "One data logger per inverter: 1 inverters (1 OPX-011) = 1 Nos",
+     false
+    ],
+    "OPX-185": [
+     "5.00",
+     "5.00",
+     "5 m of RS485 cable per data logger: 1 data loggers × 5 = 5 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "1.00",
+     "1.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (0 m of 32 mm flexible conduit + 80 m of DC red cable) ÷ 150 = 0.5333…, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "1.00",
+     "1.00",
+     "As many packs of 400 mm ties as 250 mm ties: 1 packs of 250 mm ties = 1 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "2.00",
+     "2.00",
+     "One cable route marker per 5 m of trench: 10 m of trench ÷ 5 = 2 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "16.00",
+     "16.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (1 inverters (1 OPX-011) + 1 DCDBs (1 OPX-002) + 1 ACDBs (1 OPX-041)) × 4 + 4 = 16 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "1.00",
+     "1.00",
+     "One fire extinguisher per inverter: 1 inverters (1 OPX-011) = 1 Nos",
+     false
+    ],
+    "OPX-198": [
+     "2.00",
+     "2.00",
+     "2 danger boards per fire extinguisher: 1 fire extinguishers × 2 = 2 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "1.00",
+     "1.00",
+     "One display board per fire extinguisher: 1 fire extinguishers = 1 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "0.00",
+     "0.00",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 0 Tin Shade structures × 0.64 = 0 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "1.00",
+     "1.00",
+     "One insulating mat per inverter: 1 inverters (1 OPX-011) = 1 Nos",
+     false
+    ],
+    "OPX-256": [
+     "12.00",
+     "12.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 120 m of 32/40 pipe × 0.1 = 12 Nos",
+     false
+    ],
+    "OPX-257": [
+     "12.00",
+     "12.00",
+     "Tees: 10% of the 32/40 pipe in metres: 120 m of 32/40 pipe × 0.1 = 12 Nos",
+     false
+    ],
+    "OPX-258": [
+     "12.00",
+     "12.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 120 m of 32/40 pipe × 0.1 = 12 Nos",
+     false
+    ],
+    "OPX-260": [
+     "2.00",
+     "2.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 20 m of 50/63 pipe × 0.1 = 2 Nos",
+     false
+    ],
+    "OPX-261": [
+     "2.00",
+     "2.00",
+     "Tees: 10% of the 50/63 pipe in metres: 20 m of 50/63 pipe × 0.1 = 2 Nos",
+     false
+    ],
+    "OPX-262": [
+     "2.00",
+     "2.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 20 m of 50/63 pipe × 0.1 = 2 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "1.00",
+     "1.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 20 m of 50/63 pipe ÷ 150 = 0.1333…, rounded up to 1 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "38",
+    "OPX-002": "1",
+    "OPX-011": "1",
+    "OPX-027": "1",
+    "OPX-028": "1",
+    "OPX-030": "2",
+    "OPX-041": "1",
+    "OPX-059": "80",
+    "OPX-060": "70",
+    "OPX-061": "6",
+    "OPX-063": "2",
+    "OPX-087": "16",
+    "OPX-088": "10",
+    "OPX-089": "15",
+    "OPX-102": "8",
+    "OPX-105": "76",
+    "OPX-108": "10",
+    "OPX-130": "120",
+    "OPX-144": "30",
+    "OPX-148": "1",
+    "OPX-154": "4",
+    "OPX-155": "4",
+    "OPX-167": "5",
+    "OPX-168": "130",
+    "OPX-169": "65",
+    "OPX-170": "4",
+    "OPX-172": "4",
+    "OPX-173": "4",
+    "OPX-174": "35",
+    "OPX-175": "3",
+    "OPX-177": "76",
+    "OPX-178": "1",
+    "OPX-184": "1",
+    "OPX-185": "5",
+    "OPX-186": "1",
+    "OPX-187": "10",
+    "OPX-188": "1",
+    "OPX-189": "1",
+    "OPX-190": "1",
+    "OPX-191": "2",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "16",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "1",
+    "OPX-198": "2",
+    "OPX-199": "1",
+    "OPX-200": "1",
+    "OPX-203": "24.32",
+    "OPX-206": "1",
+    "OPX-255": "16",
+    "OPX-256": "12",
+    "OPX-257": "12",
+    "OPX-258": "12",
+    "OPX-259": "20",
+    "OPX-260": "2",
+    "OPX-261": "2",
+    "OPX-262": "2",
+    "OPX-267": "1",
+    "OPX-274": "20"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "10.00",
+     "10.00",
+     "5 m of earthing cable per lightning arrester: 2 lightning arresters (2 OPX-176) × 5 = 10 Meter",
+     false
+    ],
+    "OPX-148": [
+     "2.00",
+     "2.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 300 m of 32/40 pipe ÷ 150 = 2 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "4.00",
+     "4.00",
+     "2 packs of GI screws per pack of saddles: (2 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 4 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "4.00",
+     "4.00",
+     "2 packs of PVC gitti per pack of saddles: (2 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 4 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "15.00",
+     "15.00",
+     "5 m of PVC cable tray per inverter: 3 inverters (1 OPX-011 + 1 OPX-013 + 1 OPX-017) × 5 = 15 Meter",
+     false
+    ],
+    "OPX-169": [
+     "175.00",
+     "175.00",
+     "One M8 nut bolt set per 2 m of GI strip: 350 m of GI strip ÷ 2 = 175 Set",
+     false
+    ],
+    "OPX-172": [
+     "12.00",
+     "12.00",
+     "One earthing chamber per earthing electrode: 12 earthing electrodes (12 OPX-170) = 12 Set",
+     false
+    ],
+    "OPX-173": [
+     "12.00",
+     "12.00",
+     "One bag of earthing compound per earthing electrode: 12 earthing electrodes (12 OPX-170) = 12 Nos",
+     false
+    ],
+    "OPX-174": [
+     "94.00",
+     "94.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 350 m of GI strip × 0.4 ÷ 1.5 = 93.3333…, rounded up to 94 Nos",
+     false
+    ],
+    "OPX-177": [
+     "388.00",
+     "388.00",
+     "2 module earthing sets per module: 194 modules (194 OPX-001) × 2 = 388 Set",
+     false
+    ],
+    "OPX-184": [
+     "3.00",
+     "3.00",
+     "One data logger per inverter: 3 inverters (1 OPX-011 + 1 OPX-013 + 1 OPX-017) = 3 Nos",
+     false
+    ],
+    "OPX-185": [
+     "15.00",
+     "15.00",
+     "5 m of RS485 cable per data logger: 3 data loggers × 5 = 15 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "3.00",
+     "3.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (80 m of 32 mm flexible conduit + 300 m of DC red cable) ÷ 150 = 2.5333…, rounded up to 3 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "3.00",
+     "3.00",
+     "As many packs of 400 mm ties as 250 mm ties: 3 packs of 250 mm ties = 3 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "52.00",
+     "52.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (3 inverters (1 OPX-011 + 1 OPX-013 + 1 OPX-017) + 3 DCDBs (1 OPX-002 + 2 OPX-003) + 6 ACDBs (1 OPX-041 + 1 OPX-042 + 1 OPX-044 + 1 OPX-051 + 1 OPX-052 + 1 OPX-054)) × 4 + 4 = 52 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "3.00",
+     "3.00",
+     "One fire extinguisher per inverter: 3 inverters (1 OPX-011 + 1 OPX-013 + 1 OPX-017) = 3 Nos",
+     false
+    ],
+    "OPX-198": [
+     "6.00",
+     "6.00",
+     "2 danger boards per fire extinguisher: 3 fire extinguishers × 2 = 6 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "3.00",
+     "3.00",
+     "One display board per fire extinguisher: 3 fire extinguishers = 3 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "0.00",
+     "0.00",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 0 Tin Shade structures × 0.64 = 0 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "3.00",
+     "3.00",
+     "One insulating mat per inverter: 3 inverters (1 OPX-011 + 1 OPX-013 + 1 OPX-017) = 3 Nos",
+     false
+    ],
+    "OPX-256": [
+     "30.00",
+     "30.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 300 m of 32/40 pipe × 0.1 = 30 Nos",
+     false
+    ],
+    "OPX-257": [
+     "30.00",
+     "30.00",
+     "Tees: 10% of the 32/40 pipe in metres: 300 m of 32/40 pipe × 0.1 = 30 Nos",
+     false
+    ],
+    "OPX-258": [
+     "30.00",
+     "30.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 300 m of 32/40 pipe × 0.1 = 30 Nos",
+     false
+    ],
+    "OPX-260": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-261": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-262": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "0.00",
+     "0.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 0 m of 50/63 pipe ÷ 150 = 0 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "194",
+    "OPX-002": "1",
+    "OPX-003": "2",
+    "OPX-011": "1",
+    "OPX-013": "1",
+    "OPX-017": "1",
+    "OPX-029": "3",
+    "OPX-030": "1",
+    "OPX-041": "1",
+    "OPX-042": "1",
+    "OPX-044": "1",
+    "OPX-051": "1",
+    "OPX-052": "1",
+    "OPX-054": "1",
+    "OPX-059": "300",
+    "OPX-060": "420",
+    "OPX-061": "22",
+    "OPX-063": "3",
+    "OPX-065": "16",
+    "OPX-076": "3",
+    "OPX-078": "35",
+    "OPX-087": "77.6",
+    "OPX-088": "30",
+    "OPX-089": "10",
+    "OPX-090": "55",
+    "OPX-101": "16",
+    "OPX-102": "8",
+    "OPX-104": "8",
+    "OPX-105": "388",
+    "OPX-108": "32",
+    "OPX-109": "6",
+    "OPX-119": "2",
+    "OPX-120": "32",
+    "OPX-122": "24",
+    "OPX-123": "4",
+    "OPX-130": "300",
+    "OPX-134": "32",
+    "OPX-135": "32",
+    "OPX-139": "100",
+    "OPX-140": "10",
+    "OPX-141": "10",
+    "OPX-143": "80",
+    "OPX-148": "2",
+    "OPX-149": "1",
+    "OPX-154": "6",
+    "OPX-155": "6",
+    "OPX-164": "35",
+    "OPX-167": "15",
+    "OPX-168": "350",
+    "OPX-169": "175",
+    "OPX-170": "12",
+    "OPX-172": "12",
+    "OPX-173": "12",
+    "OPX-174": "93.33",
+    "OPX-176": "2",
+    "OPX-177": "388",
+    "OPX-178": "1",
+    "OPX-179": "2",
+    "OPX-181": "1",
+    "OPX-182": "1",
+    "OPX-184": "3",
+    "OPX-185": "15",
+    "OPX-186": "1",
+    "OPX-188": "3",
+    "OPX-189": "3",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "40",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "3",
+    "OPX-198": "6",
+    "OPX-199": "1",
+    "OPX-200": "3",
+    "OPX-203": "121.28",
+    "OPX-206": "3"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "5.00",
+     "5.00",
+     "5 m of earthing cable per lightning arrester: 1 lightning arresters (1 OPX-176) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-148": [
+     "2",
+     "1.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: set by hand to 2 Pkt; the rule gives 1 Pkt",
+     true
+    ],
+    "OPX-154": [
+     "6",
+     "6.00",
+     "2 packs of GI screws per pack of saddles: set by hand to 6 Pkt; the rule gives 6 Pkt",
+     true
+    ],
+    "OPX-155": [
+     "6",
+     "6.00",
+     "2 packs of PVC gitti per pack of saddles: set by hand to 6 Pkt; the rule gives 6 Pkt",
+     true
+    ],
+    "OPX-167": [
+     "5.00",
+     "5.00",
+     "5 m of PVC cable tray per inverter: 1 inverters (1 OPX-013) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-169": [
+     "75.00",
+     "75.00",
+     "One M8 nut bolt set per 2 m of GI strip: 150 m of GI strip ÷ 2 = 75 Set",
+     false
+    ],
+    "OPX-172": [
+     "4.00",
+     "4.00",
+     "One earthing chamber per earthing electrode: 4 earthing electrodes (4 OPX-170) = 4 Set",
+     false
+    ],
+    "OPX-173": [
+     "4.00",
+     "4.00",
+     "One bag of earthing compound per earthing electrode: 4 earthing electrodes (4 OPX-170) = 4 Nos",
+     false
+    ],
+    "OPX-174": [
+     "40.00",
+     "40.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 150 m of GI strip × 0.4 ÷ 1.5 = 40 Nos",
+     false
+    ],
+    "OPX-177": [
+     "124.00",
+     "124.00",
+     "2 module earthing sets per module: 62 modules (62 OPX-001) × 2 = 124 Set",
+     false
+    ],
+    "OPX-184": [
+     "1.00",
+     "1.00",
+     "One data logger per inverter: 1 inverters (1 OPX-013) = 1 Nos",
+     false
+    ],
+    "OPX-185": [
+     "5.00",
+     "5.00",
+     "5 m of RS485 cable per data logger: 1 data loggers × 5 = 5 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "1.00",
+     "1.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (30 m of 32 mm flexible conduit + 75 m of DC red cable) ÷ 150 = 0.7, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "1.00",
+     "1.00",
+     "As many packs of 400 mm ties as 250 mm ties: 1 packs of 250 mm ties = 1 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "20.00",
+     "20.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (1 inverters (1 OPX-013) + 1 DCDBs (1 OPX-003) + 2 ACDBs (1 OPX-042 + 1 OPX-052)) × 4 + 4 = 20 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "1.00",
+     "1.00",
+     "One fire extinguisher per inverter: 1 inverters (1 OPX-013) = 1 Nos",
+     false
+    ],
+    "OPX-198": [
+     "2.00",
+     "2.00",
+     "2 danger boards per fire extinguisher: 1 fire extinguishers × 2 = 2 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "1.00",
+     "1.00",
+     "One display board per fire extinguisher: 1 fire extinguishers = 1 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "0.00",
+     "0.00",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 0 Tin Shade structures × 0.64 = 0 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "1.00",
+     "1.00",
+     "One insulating mat per inverter: 1 inverters (1 OPX-013) = 1 Nos",
+     false
+    ],
+    "OPX-256": [
+     "8.00",
+     "8.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 80 m of 32/40 pipe × 0.1 = 8 Nos",
+     false
+    ],
+    "OPX-257": [
+     "8.00",
+     "8.00",
+     "Tees: 10% of the 32/40 pipe in metres: 80 m of 32/40 pipe × 0.1 = 8 Nos",
+     false
+    ],
+    "OPX-258": [
+     "8.00",
+     "8.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 80 m of 32/40 pipe × 0.1 = 8 Nos",
+     false
+    ],
+    "OPX-260": [
+     "4.00",
+     "4.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 35 m of 50/63 pipe × 0.1 = 3.5, rounded up to 4 Nos",
+     false
+    ],
+    "OPX-261": [
+     "4.00",
+     "4.00",
+     "Tees: 10% of the 50/63 pipe in metres: 35 m of 50/63 pipe × 0.1 = 3.5, rounded up to 4 Nos",
+     false
+    ],
+    "OPX-262": [
+     "4.00",
+     "4.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 35 m of 50/63 pipe × 0.1 = 3.5, rounded up to 4 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "1.00",
+     "1.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 35 m of 50/63 pipe ÷ 150 = 0.2333…, rounded up to 1 Pkt",
+     false
+    ]
+   },
+   "overrides": {
+    "OPX-148": "2",
+    "OPX-154": "6",
+    "OPX-155": "6"
+   },
+   "quantities": {
+    "OPX-001": "62",
+    "OPX-003": "1",
+    "OPX-013": "1",
+    "OPX-027": "3",
+    "OPX-028": "4",
+    "OPX-030": "1",
+    "OPX-042": "1",
+    "OPX-052": "1",
+    "OPX-059": "75",
+    "OPX-060": "80",
+    "OPX-061": "10",
+    "OPX-065": "3",
+    "OPX-076": "30",
+    "OPX-087": "24.8",
+    "OPX-088": "10",
+    "OPX-089": "5",
+    "OPX-101": "8",
+    "OPX-104": "8",
+    "OPX-105": "124",
+    "OPX-119": "14",
+    "OPX-120": "18",
+    "OPX-123": "2",
+    "OPX-130": "80",
+    "OPX-143": "30",
+    "OPX-148": "2",
+    "OPX-154": "6",
+    "OPX-155": "6",
+    "OPX-167": "5",
+    "OPX-168": "150",
+    "OPX-169": "75",
+    "OPX-170": "4",
+    "OPX-172": "4",
+    "OPX-173": "4",
+    "OPX-174": "40",
+    "OPX-176": "1",
+    "OPX-177": "124",
+    "OPX-184": "1",
+    "OPX-185": "5",
+    "OPX-186": "1",
+    "OPX-188": "1",
+    "OPX-189": "1",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "20",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "1",
+    "OPX-198": "2",
+    "OPX-199": "1",
+    "OPX-200": "1",
+    "OPX-206": "1",
+    "OPX-256": "8",
+    "OPX-257": "8",
+    "OPX-258": "8",
+    "OPX-259": "35",
+    "OPX-260": "4",
+    "OPX-261": "4",
+    "OPX-262": "4",
+    "OPX-267": "1"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "0.00",
+     "0.00",
+     "5 m of earthing cable per lightning arrester: 0 lightning arresters × 5 = 0 Meter",
+     false
+    ],
+    "OPX-148": [
+     "0.00",
+     "0.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 0 m of 32/40 pipe ÷ 150 = 0 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "0.00",
+     "0.00",
+     "2 packs of GI screws per pack of saddles: (0 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 0 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "0.00",
+     "0.00",
+     "2 packs of PVC gitti per pack of saddles: (0 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 0 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "15.00",
+     "15.00",
+     "5 m of PVC cable tray per inverter: 3 inverters (1 OPX-011 + 2 OPX-016) × 5 = 15 Meter",
+     false
+    ],
+    "OPX-169": [
+     "0.00",
+     "0.00",
+     "One M8 nut bolt set per 2 m of GI strip: 0 m of GI strip ÷ 2 = 0 Set",
+     false
+    ],
+    "OPX-172": [
+     "0.00",
+     "0.00",
+     "One earthing chamber per earthing electrode: 0 earthing electrodes = 0 Set",
+     false
+    ],
+    "OPX-173": [
+     "0.00",
+     "0.00",
+     "One bag of earthing compound per earthing electrode: 0 earthing electrodes = 0 Nos",
+     false
+    ],
+    "OPX-174": [
+     "0.00",
+     "0.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 0 m of GI strip × 0.4 ÷ 1.5 = 0 Nos",
+     false
+    ],
+    "OPX-177": [
+     "332.00",
+     "332.00",
+     "2 module earthing sets per module: 166 modules (166 OPX-001) × 2 = 332 Set",
+     false
+    ],
+    "OPX-184": [
+     "3.00",
+     "3.00",
+     "One data logger per inverter: 3 inverters (1 OPX-011 + 2 OPX-016) = 3 Nos",
+     false
+    ],
+    "OPX-185": [
+     "15.00",
+     "15.00",
+     "5 m of RS485 cable per data logger: 3 data loggers × 5 = 15 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "0.00",
+     "0.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (0 m of 32 mm flexible conduit + 0 m of DC red cable) ÷ 150 = 0 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "0.00",
+     "0.00",
+     "As many packs of 400 mm ties as 250 mm ties: 0 packs of 250 mm ties = 0 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "40.00",
+     "40.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (3 inverters (1 OPX-011 + 2 OPX-016) + 3 DCDBs (1 OPX-002 + 2 OPX-003) + 3 ACDBs (1 OPX-041 + 1 OPX-051 + 1 OPX-056)) × 4 + 4 = 40 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "3.00",
+     "3.00",
+     "One fire extinguisher per inverter: 3 inverters (1 OPX-011 + 2 OPX-016) = 3 Nos",
+     false
+    ],
+    "OPX-198": [
+     "6.00",
+     "6.00",
+     "2 danger boards per fire extinguisher: 3 fire extinguishers × 2 = 6 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "3.00",
+     "3.00",
+     "One display board per fire extinguisher: 3 fire extinguishers = 3 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "0.00",
+     "0.00",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 0 Tin Shade structures × 0.64 = 0 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "3.00",
+     "3.00",
+     "One insulating mat per inverter: 3 inverters (1 OPX-011 + 2 OPX-016) = 3 Nos",
+     false
+    ],
+    "OPX-256": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-257": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-258": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-260": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-261": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-262": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "0.00",
+     "0.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 0 m of 50/63 pipe ÷ 150 = 0 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "166",
+    "OPX-002": "1",
+    "OPX-003": "2",
+    "OPX-011": "1",
+    "OPX-016": "2",
+    "OPX-041": "1",
+    "OPX-051": "1",
+    "OPX-056": "1",
+    "OPX-167": "15",
+    "OPX-177": "332",
+    "OPX-184": "3",
+    "OPX-185": "15",
+    "OPX-186": "1",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "40",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "3",
+    "OPX-198": "6",
+    "OPX-199": "3",
+    "OPX-200": "1",
+    "OPX-206": "3"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "0.00",
+     "0.00",
+     "5 m of earthing cable per lightning arrester: 0 lightning arresters × 5 = 0 Meter",
+     false
+    ],
+    "OPX-148": [
+     "4.00",
+     "4.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 500 m of 32/40 pipe ÷ 150 = 3.3333…, rounded up to 4 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "10.00",
+     "10.00",
+     "2 packs of GI screws per pack of saddles: (4 packs of 40 mm saddles + 1 packs of 63 mm saddles) × 2 = 10 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "10.00",
+     "10.00",
+     "2 packs of PVC gitti per pack of saddles: (4 packs of 40 mm saddles + 1 packs of 63 mm saddles) × 2 = 10 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "20.00",
+     "20.00",
+     "5 m of PVC cable tray per inverter: 4 inverters (2 OPX-012 + 1 OPX-016 + 1 OPX-017) × 5 = 20 Meter",
+     false
+    ],
+    "OPX-169": [
+     "145.00",
+     "145.00",
+     "One M8 nut bolt set per 2 m of GI strip: 290 m of GI strip ÷ 2 = 145 Set",
+     false
+    ],
+    "OPX-172": [
+     "10.00",
+     "10.00",
+     "One earthing chamber per earthing electrode: 10 earthing electrodes (10 OPX-170) = 10 Set",
+     false
+    ],
+    "OPX-173": [
+     "10.00",
+     "10.00",
+     "One bag of earthing compound per earthing electrode: 10 earthing electrodes (10 OPX-170) = 10 Nos",
+     false
+    ],
+    "OPX-174": [
+     "78.00",
+     "78.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 290 m of GI strip × 0.4 ÷ 1.5 = 77.3333…, rounded up to 78 Nos",
+     false
+    ],
+    "OPX-177": [
+     "546.00",
+     "546.00",
+     "2 module earthing sets per module: 273 modules (273 OPX-001) × 2 = 546 Set",
+     false
+    ],
+    "OPX-184": [
+     "4.00",
+     "4.00",
+     "One data logger per inverter: 4 inverters (2 OPX-012 + 1 OPX-016 + 1 OPX-017) = 4 Nos",
+     false
+    ],
+    "OPX-185": [
+     "20.00",
+     "20.00",
+     "5 m of RS485 cable per data logger: 4 data loggers × 5 = 20 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "4.00",
+     "4.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (0 m of 32 mm flexible conduit + 480 m of DC red cable) ÷ 150 = 3.2, rounded up to 4 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "4.00",
+     "4.00",
+     "As many packs of 400 mm ties as 250 mm ties: 4 packs of 250 mm ties = 4 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "56.00",
+     "56.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (4 inverters (2 OPX-012 + 1 OPX-016 + 1 OPX-017) + 4 DCDBs (2 OPX-002 + 2 OPX-004) + 5 ACDBs (2 OPX-042 + 1 OPX-043 + 1 OPX-044 + 1 OPX-052)) × 4 + 4 = 56 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "4.00",
+     "4.00",
+     "One fire extinguisher per inverter: 4 inverters (2 OPX-012 + 1 OPX-016 + 1 OPX-017) = 4 Nos",
+     false
+    ],
+    "OPX-198": [
+     "8.00",
+     "8.00",
+     "2 danger boards per fire extinguisher: 4 fire extinguishers × 2 = 8 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "4.00",
+     "4.00",
+     "One display board per fire extinguisher: 4 fire extinguishers = 4 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "174.72",
+     "174.72",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 273 Tin Shade structures × 0.64 = 174.72 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "4.00",
+     "4.00",
+     "One insulating mat per inverter: 4 inverters (2 OPX-012 + 1 OPX-016 + 1 OPX-017) = 4 Nos",
+     false
+    ],
+    "OPX-256": [
+     "50.00",
+     "50.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 500 m of 32/40 pipe × 0.1 = 50 Nos",
+     false
+    ],
+    "OPX-257": [
+     "50.00",
+     "50.00",
+     "Tees: 10% of the 32/40 pipe in metres: 500 m of 32/40 pipe × 0.1 = 50 Nos",
+     false
+    ],
+    "OPX-258": [
+     "50.00",
+     "50.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 500 m of 32/40 pipe × 0.1 = 50 Nos",
+     false
+    ],
+    "OPX-260": [
+     "4.00",
+     "4.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 35 m of 50/63 pipe × 0.1 = 3.5, rounded up to 4 Nos",
+     false
+    ],
+    "OPX-261": [
+     "4.00",
+     "4.00",
+     "Tees: 10% of the 50/63 pipe in metres: 35 m of 50/63 pipe × 0.1 = 3.5, rounded up to 4 Nos",
+     false
+    ],
+    "OPX-262": [
+     "4.00",
+     "4.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 35 m of 50/63 pipe × 0.1 = 3.5, rounded up to 4 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "1.00",
+     "1.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 35 m of 50/63 pipe ÷ 150 = 0.2333…, rounded up to 1 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "273",
+    "OPX-002": "2",
+    "OPX-004": "2",
+    "OPX-012": "2",
+    "OPX-016": "1",
+    "OPX-017": "1",
+    "OPX-038": "273",
+    "OPX-042": "2",
+    "OPX-043": "1",
+    "OPX-044": "1",
+    "OPX-052": "1",
+    "OPX-059": "480",
+    "OPX-060": "520",
+    "OPX-061": "295",
+    "OPX-064": "10",
+    "OPX-066": "10",
+    "OPX-078": "10",
+    "OPX-087": "273",
+    "OPX-088": "36",
+    "OPX-095": "40",
+    "OPX-101": "12",
+    "OPX-103": "8",
+    "OPX-105": "546",
+    "OPX-107": "16",
+    "OPX-108": "40",
+    "OPX-109": "16",
+    "OPX-120": "2",
+    "OPX-122": "6",
+    "OPX-123": "10",
+    "OPX-125": "18",
+    "OPX-130": "500",
+    "OPX-148": "4",
+    "OPX-154": "10",
+    "OPX-155": "10",
+    "OPX-164": "50",
+    "OPX-167": "20",
+    "OPX-168": "290",
+    "OPX-169": "145",
+    "OPX-170": "10",
+    "OPX-172": "10",
+    "OPX-173": "10",
+    "OPX-174": "78",
+    "OPX-177": "546",
+    "OPX-179": "3",
+    "OPX-181": "2",
+    "OPX-183": "1",
+    "OPX-184": "4",
+    "OPX-185": "20",
+    "OPX-186": "1",
+    "OPX-188": "4",
+    "OPX-189": "4",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "56",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "4",
+    "OPX-198": "8",
+    "OPX-199": "4",
+    "OPX-200": "1",
+    "OPX-201": "210",
+    "OPX-202": "210",
+    "OPX-204": "174.72",
+    "OPX-206": "4",
+    "OPX-209": "2",
+    "OPX-210": "6",
+    "OPX-256": "50",
+    "OPX-257": "50",
+    "OPX-258": "50",
+    "OPX-259": "35",
+    "OPX-260": "4",
+    "OPX-261": "4",
+    "OPX-262": "4",
+    "OPX-267": "1",
+    "OPX-273": "1"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "5.00",
+     "5.00",
+     "5 m of earthing cable per lightning arrester: 1 lightning arresters (1 OPX-176) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-148": [
+     "2.00",
+     "2.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 270 m of 32/40 pipe ÷ 150 = 1.8, rounded up to 2 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "4.00",
+     "4.00",
+     "2 packs of GI screws per pack of saddles: (2 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 4 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "4.00",
+     "4.00",
+     "2 packs of PVC gitti per pack of saddles: (2 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 4 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "10.00",
+     "10.00",
+     "5 m of PVC cable tray per inverter: 2 inverters (2 OPX-016) × 5 = 10 Meter",
+     false
+    ],
+    "OPX-169": [
+     "140.00",
+     "140.00",
+     "One M8 nut bolt set per 2 m of GI strip: 280 m of GI strip ÷ 2 = 140 Set",
+     false
+    ],
+    "OPX-172": [
+     "6.00",
+     "6.00",
+     "One earthing chamber per earthing electrode: 6 earthing electrodes (6 OPX-171) = 6 Set",
+     false
+    ],
+    "OPX-173": [
+     "6.00",
+     "6.00",
+     "One bag of earthing compound per earthing electrode: 6 earthing electrodes (6 OPX-171) = 6 Nos",
+     false
+    ],
+    "OPX-174": [
+     "75.00",
+     "75.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 280 m of GI strip × 0.4 ÷ 1.5 = 74.6666…, rounded up to 75 Nos",
+     false
+    ],
+    "OPX-177": [
+     "348.00",
+     "348.00",
+     "2 module earthing sets per module: 174 modules (174 OPX-001) × 2 = 348 Set",
+     false
+    ],
+    "OPX-184": [
+     "2.00",
+     "2.00",
+     "One data logger per inverter: 2 inverters (2 OPX-016) = 2 Nos",
+     false
+    ],
+    "OPX-185": [
+     "10.00",
+     "10.00",
+     "5 m of RS485 cable per data logger: 2 data loggers × 5 = 10 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "4.00",
+     "4.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (40 m of 32 mm flexible conduit + 460 m of DC red cable) ÷ 150 = 3.3333…, rounded up to 4 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "4.00",
+     "4.00",
+     "As many packs of 400 mm ties as 250 mm ties: 4 packs of 250 mm ties = 4 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "24.00",
+     "24.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (2 inverters (2 OPX-016) + 2 DCDBs (2 OPX-003) + 1 ACDBs (1 OPX-056)) × 4 + 4 = 24 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "2.00",
+     "2.00",
+     "One fire extinguisher per inverter: 2 inverters (2 OPX-016) = 2 Nos",
+     false
+    ],
+    "OPX-198": [
+     "4.00",
+     "4.00",
+     "2 danger boards per fire extinguisher: 2 fire extinguishers × 2 = 4 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "2.00",
+     "2.00",
+     "One display board per fire extinguisher: 2 fire extinguishers = 2 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "111.36",
+     "111.36",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 174 Tin Shade structures × 0.64 = 111.36 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "2.00",
+     "2.00",
+     "One insulating mat per inverter: 2 inverters (2 OPX-016) = 2 Nos",
+     false
+    ],
+    "OPX-256": [
+     "27.00",
+     "27.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 270 m of 32/40 pipe × 0.1 = 27 Nos",
+     false
+    ],
+    "OPX-257": [
+     "27.00",
+     "27.00",
+     "Tees: 10% of the 32/40 pipe in metres: 270 m of 32/40 pipe × 0.1 = 27 Nos",
+     false
+    ],
+    "OPX-258": [
+     "27.00",
+     "27.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 270 m of 32/40 pipe × 0.1 = 27 Nos",
+     false
+    ],
+    "OPX-260": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-261": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-262": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "0.00",
+     "0.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 0 m of 50/63 pipe ÷ 150 = 0 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "174",
+    "OPX-003": "2",
+    "OPX-016": "2",
+    "OPX-038": "174",
+    "OPX-056": "1",
+    "OPX-059": "460",
+    "OPX-060": "530",
+    "OPX-061": "186",
+    "OPX-076": "6",
+    "OPX-081": "9",
+    "OPX-082": "130",
+    "OPX-087": "174",
+    "OPX-088": "16",
+    "OPX-101": "8",
+    "OPX-105": "348",
+    "OPX-108": "24",
+    "OPX-109": "12",
+    "OPX-123": "6",
+    "OPX-124": "2",
+    "OPX-125": "18",
+    "OPX-126": "6",
+    "OPX-130": "270",
+    "OPX-134": "27",
+    "OPX-135": "27",
+    "OPX-139": "6",
+    "OPX-140": "1",
+    "OPX-141": "1",
+    "OPX-143": "40",
+    "OPX-148": "2",
+    "OPX-149": "1",
+    "OPX-154": "6",
+    "OPX-155": "6",
+    "OPX-164": "140",
+    "OPX-167": "10",
+    "OPX-168": "280",
+    "OPX-169": "140",
+    "OPX-171": "6",
+    "OPX-172": "6",
+    "OPX-173": "6",
+    "OPX-174": "74.66",
+    "OPX-176": "1",
+    "OPX-177": "348",
+    "OPX-179": "1",
+    "OPX-183": "1",
+    "OPX-184": "1",
+    "OPX-185": "5",
+    "OPX-186": "1",
+    "OPX-188": "3",
+    "OPX-189": "3",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "16",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "2",
+    "OPX-198": "4",
+    "OPX-199": "2",
+    "OPX-200": "1",
+    "OPX-201": "130",
+    "OPX-202": "130",
+    "OPX-204": "107.88",
+    "OPX-206": "2"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "5.00",
+     "5.00",
+     "5 m of earthing cable per lightning arrester: 1 lightning arresters (1 OPX-176) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-148": [
+     "1.00",
+     "1.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 60 m of 32/40 pipe ÷ 150 = 0.4, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "4.00",
+     "4.00",
+     "2 packs of GI screws per pack of saddles: (1 packs of 40 mm saddles + 1 packs of 63 mm saddles) × 2 = 4 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "4.00",
+     "4.00",
+     "2 packs of PVC gitti per pack of saddles: (1 packs of 40 mm saddles + 1 packs of 63 mm saddles) × 2 = 4 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "5.00",
+     "5.00",
+     "5 m of PVC cable tray per inverter: 1 inverters (1 OPX-012) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-169": [
+     "35.00",
+     "35.00",
+     "One M8 nut bolt set per 2 m of GI strip: 70 m of GI strip ÷ 2 = 35 Set",
+     false
+    ],
+    "OPX-172": [
+     "4.00",
+     "4.00",
+     "One earthing chamber per earthing electrode: 4 earthing electrodes (4 OPX-170) = 4 Set",
+     false
+    ],
+    "OPX-173": [
+     "4.00",
+     "4.00",
+     "One bag of earthing compound per earthing electrode: 4 earthing electrodes (4 OPX-170) = 4 Nos",
+     false
+    ],
+    "OPX-174": [
+     "19.00",
+     "19.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 70 m of GI strip × 0.4 ÷ 1.5 = 18.6666…, rounded up to 19 Nos",
+     false
+    ],
+    "OPX-177": [
+     "96.00",
+     "96.00",
+     "2 module earthing sets per module: 48 modules (48 OPX-001) × 2 = 96 Set",
+     false
+    ],
+    "OPX-184": [
+     "1.00",
+     "1.00",
+     "One data logger per inverter: 1 inverters (1 OPX-012) = 1 Nos",
+     false
+    ],
+    "OPX-185": [
+     "5.00",
+     "5.00",
+     "5 m of RS485 cable per data logger: 1 data loggers × 5 = 5 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "1.00",
+     "1.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (0 m of 32 mm flexible conduit + 45 m of DC red cable) ÷ 150 = 0.3, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "1.00",
+     "1.00",
+     "As many packs of 400 mm ties as 250 mm ties: 1 packs of 250 mm ties = 1 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "3.00",
+     "3.00",
+     "One cable route marker per 5 m of trench: 13 m of trench ÷ 5 = 2.6, rounded up to 3 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "20.00",
+     "20.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (1 inverters (1 OPX-012) + 1 DCDBs (1 OPX-002) + 2 ACDBs (1 OPX-042 + 1 OPX-052)) × 4 + 4 = 20 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "1.00",
+     "1.00",
+     "One fire extinguisher per inverter: 1 inverters (1 OPX-012) = 1 Nos",
+     false
+    ],
+    "OPX-198": [
+     "2.00",
+     "2.00",
+     "2 danger boards per fire extinguisher: 1 fire extinguishers × 2 = 2 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "1.00",
+     "1.00",
+     "One display board per fire extinguisher: 1 fire extinguishers = 1 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "0.00",
+     "0.00",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 0 Tin Shade structures × 0.64 = 0 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "1.00",
+     "1.00",
+     "One insulating mat per inverter: 1 inverters (1 OPX-012) = 1 Nos",
+     false
+    ],
+    "OPX-256": [
+     "6.00",
+     "6.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 60 m of 32/40 pipe × 0.1 = 6 Nos",
+     false
+    ],
+    "OPX-257": [
+     "6.00",
+     "6.00",
+     "Tees: 10% of the 32/40 pipe in metres: 60 m of 32/40 pipe × 0.1 = 6 Nos",
+     false
+    ],
+    "OPX-258": [
+     "6.00",
+     "6.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 60 m of 32/40 pipe × 0.1 = 6 Nos",
+     false
+    ],
+    "OPX-260": [
+     "3.00",
+     "3.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 30 m of 50/63 pipe × 0.1 = 3 Nos",
+     false
+    ],
+    "OPX-261": [
+     "3.00",
+     "3.00",
+     "Tees: 10% of the 50/63 pipe in metres: 30 m of 50/63 pipe × 0.1 = 3 Nos",
+     false
+    ],
+    "OPX-262": [
+     "3.00",
+     "3.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 30 m of 50/63 pipe × 0.1 = 3 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "1.00",
+     "1.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 30 m of 50/63 pipe ÷ 150 = 0.2, rounded up to 1 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "48",
+    "OPX-002": "1",
+    "OPX-012": "1",
+    "OPX-028": "6",
+    "OPX-042": "1",
+    "OPX-052": "1",
+    "OPX-059": "45",
+    "OPX-060": "50",
+    "OPX-061": "6",
+    "OPX-064": "3",
+    "OPX-087": "19.2",
+    "OPX-088": "10",
+    "OPX-089": "5",
+    "OPX-101": "8",
+    "OPX-103": "8",
+    "OPX-105": "96",
+    "OPX-108": "10",
+    "OPX-119": "24",
+    "OPX-123": "2",
+    "OPX-130": "60",
+    "OPX-133": "20",
+    "OPX-148": "1",
+    "OPX-154": "4",
+    "OPX-155": "4",
+    "OPX-167": "5",
+    "OPX-168": "70",
+    "OPX-169": "35",
+    "OPX-170": "4",
+    "OPX-172": "4",
+    "OPX-173": "4",
+    "OPX-174": "19",
+    "OPX-176": "1",
+    "OPX-177": "96",
+    "OPX-179": "1",
+    "OPX-181": "1",
+    "OPX-184": "1",
+    "OPX-185": "5",
+    "OPX-186": "1",
+    "OPX-187": "13",
+    "OPX-188": "1",
+    "OPX-189": "1",
+    "OPX-190": "1",
+    "OPX-191": "3",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "20",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "1",
+    "OPX-198": "2",
+    "OPX-199": "1",
+    "OPX-200": "1",
+    "OPX-203": "30.72",
+    "OPX-206": "1",
+    "OPX-244": "28",
+    "OPX-256": "6",
+    "OPX-257": "6",
+    "OPX-258": "6",
+    "OPX-259": "30",
+    "OPX-260": "3",
+    "OPX-261": "3",
+    "OPX-262": "3",
+    "OPX-267": "1"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "0.00",
+     "0.00",
+     "5 m of earthing cable per lightning arrester: 0 lightning arresters × 5 = 0 Meter",
+     false
+    ],
+    "OPX-148": [
+     "0.00",
+     "0.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 0 m of 32/40 pipe ÷ 150 = 0 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "0.00",
+     "0.00",
+     "2 packs of GI screws per pack of saddles: (0 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 0 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "0.00",
+     "0.00",
+     "2 packs of PVC gitti per pack of saddles: (0 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 0 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "30.00",
+     "30.00",
+     "5 m of PVC cable tray per inverter: 6 inverters (1 OPX-013 + 2 OPX-016 + 2 OPX-017 + 1 OPX-018) × 5 = 30 Meter",
+     false
+    ],
+    "OPX-169": [
+     "0.00",
+     "0.00",
+     "One M8 nut bolt set per 2 m of GI strip: 0 m of GI strip ÷ 2 = 0 Set",
+     false
+    ],
+    "OPX-172": [
+     "0.00",
+     "0.00",
+     "One earthing chamber per earthing electrode: 0 earthing electrodes = 0 Set",
+     false
+    ],
+    "OPX-173": [
+     "0.00",
+     "0.00",
+     "One bag of earthing compound per earthing electrode: 0 earthing electrodes = 0 Nos",
+     false
+    ],
+    "OPX-174": [
+     "0.00",
+     "0.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 0 m of GI strip × 0.4 ÷ 1.5 = 0 Nos",
+     false
+    ],
+    "OPX-177": [
+     "1084.00",
+     "1084.00",
+     "2 module earthing sets per module: 542 modules (542 OPX-001) × 2 = 1084 Set",
+     false
+    ],
+    "OPX-184": [
+     "6.00",
+     "6.00",
+     "One data logger per inverter: 6 inverters (1 OPX-013 + 2 OPX-016 + 2 OPX-017 + 1 OPX-018) = 6 Nos",
+     false
+    ],
+    "OPX-185": [
+     "30.00",
+     "30.00",
+     "5 m of RS485 cable per data logger: 6 data loggers × 5 = 30 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "0.00",
+     "0.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (0 m of 32 mm flexible conduit + 0 m of DC red cable) ÷ 150 = 0 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "0.00",
+     "0.00",
+     "As many packs of 400 mm ties as 250 mm ties: 0 packs of 250 mm ties = 0 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "72.00",
+     "72.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (6 inverters (1 OPX-013 + 2 OPX-016 + 2 OPX-017 + 1 OPX-018) + 6 DCDBs (1 OPX-002 + 3 OPX-003 + 1 OPX-004 + 1 OPX-005) + 5 ACDBs (1 OPX-044 + 1 OPX-052 + 1 OPX-054 + 1 OPX-056 + 1 OPX-057)) × 4 + 4 = 72 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "6.00",
+     "6.00",
+     "One fire extinguisher per inverter: 6 inverters (1 OPX-013 + 2 OPX-016 + 2 OPX-017 + 1 OPX-018) = 6 Nos",
+     false
+    ],
+    "OPX-198": [
+     "12.00",
+     "12.00",
+     "2 danger boards per fire extinguisher: 6 fire extinguishers × 2 = 12 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "6.00",
+     "6.00",
+     "One display board per fire extinguisher: 6 fire extinguishers = 6 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "0.00",
+     "0.00",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 0 Tin Shade structures × 0.64 = 0 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "6.00",
+     "6.00",
+     "One insulating mat per inverter: 6 inverters (1 OPX-013 + 2 OPX-016 + 2 OPX-017 + 1 OPX-018) = 6 Nos",
+     false
+    ],
+    "OPX-256": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-257": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-258": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-260": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-261": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-262": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "0.00",
+     "0.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 0 m of 50/63 pipe ÷ 150 = 0 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "542",
+    "OPX-002": "1",
+    "OPX-003": "3",
+    "OPX-004": "1",
+    "OPX-005": "1",
+    "OPX-013": "1",
+    "OPX-016": "2",
+    "OPX-017": "2",
+    "OPX-018": "1",
+    "OPX-044": "1",
+    "OPX-052": "1",
+    "OPX-054": "1",
+    "OPX-056": "1",
+    "OPX-057": "1",
+    "OPX-167": "30",
+    "OPX-177": "1084",
+    "OPX-184": "6",
+    "OPX-185": "30",
+    "OPX-186": "1",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "72",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "6",
+    "OPX-198": "12",
+    "OPX-199": "6",
+    "OPX-200": "1",
+    "OPX-206": "6"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "0.00",
+     "0.00",
+     "5 m of earthing cable per lightning arrester: 0 lightning arresters × 5 = 0 Meter",
+     false
+    ],
+    "OPX-148": [
+     "0.00",
+     "0.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 0 m of 32/40 pipe ÷ 150 = 0 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "0.00",
+     "0.00",
+     "2 packs of GI screws per pack of saddles: (0 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 0 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "0.00",
+     "0.00",
+     "2 packs of PVC gitti per pack of saddles: (0 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 0 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "15.00",
+     "15.00",
+     "5 m of PVC cable tray per inverter: 3 inverters (1 OPX-011 + 1 OPX-012 + 1 OPX-013) × 5 = 15 Meter",
+     false
+    ],
+    "OPX-169": [
+     "0.00",
+     "0.00",
+     "One M8 nut bolt set per 2 m of GI strip: 0 m of GI strip ÷ 2 = 0 Set",
+     false
+    ],
+    "OPX-172": [
+     "0.00",
+     "0.00",
+     "One earthing chamber per earthing electrode: 0 earthing electrodes = 0 Set",
+     false
+    ],
+    "OPX-173": [
+     "0.00",
+     "0.00",
+     "One bag of earthing compound per earthing electrode: 0 earthing electrodes = 0 Nos",
+     false
+    ],
+    "OPX-174": [
+     "0.00",
+     "0.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 0 m of GI strip × 0.4 ÷ 1.5 = 0 Nos",
+     false
+    ],
+    "OPX-177": [
+     "250.00",
+     "250.00",
+     "2 module earthing sets per module: 125 modules (125 OPX-001) × 2 = 250 Set",
+     false
+    ],
+    "OPX-184": [
+     "3.00",
+     "3.00",
+     "One data logger per inverter: 3 inverters (1 OPX-011 + 1 OPX-012 + 1 OPX-013) = 3 Nos",
+     false
+    ],
+    "OPX-185": [
+     "15.00",
+     "15.00",
+     "5 m of RS485 cable per data logger: 3 data loggers × 5 = 15 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "0.00",
+     "0.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (0 m of 32 mm flexible conduit + 0 m of DC red cable) ÷ 150 = 0 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "0.00",
+     "0.00",
+     "As many packs of 400 mm ties as 250 mm ties: 0 packs of 250 mm ties = 0 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "40.00",
+     "40.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (3 inverters (1 OPX-011 + 1 OPX-012 + 1 OPX-013) + 3 DCDBs (3 OPX-002) + 3 ACDBs (1 OPX-042 + 1 OPX-052 + 1 OPX-054)) × 4 + 4 = 40 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "3.00",
+     "3.00",
+     "One fire extinguisher per inverter: 3 inverters (1 OPX-011 + 1 OPX-012 + 1 OPX-013) = 3 Nos",
+     false
+    ],
+    "OPX-198": [
+     "6.00",
+     "6.00",
+     "2 danger boards per fire extinguisher: 3 fire extinguishers × 2 = 6 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "3.00",
+     "3.00",
+     "One display board per fire extinguisher: 3 fire extinguishers = 3 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "0.00",
+     "0.00",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 0 Tin Shade structures × 0.64 = 0 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "3.00",
+     "3.00",
+     "One insulating mat per inverter: 3 inverters (1 OPX-011 + 1 OPX-012 + 1 OPX-013) = 3 Nos",
+     false
+    ],
+    "OPX-256": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-257": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-258": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-260": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-261": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-262": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "0.00",
+     "0.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 0 m of 50/63 pipe ÷ 150 = 0 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "125",
+    "OPX-002": "3",
+    "OPX-011": "1",
+    "OPX-012": "1",
+    "OPX-013": "1",
+    "OPX-042": "1",
+    "OPX-052": "1",
+    "OPX-054": "1",
+    "OPX-167": "15",
+    "OPX-177": "250",
+    "OPX-184": "3",
+    "OPX-185": "15",
+    "OPX-186": "1",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "40",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "3",
+    "OPX-198": "6",
+    "OPX-199": "3",
+    "OPX-200": "1",
+    "OPX-206": "3"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "10.00",
+     "10.00",
+     "5 m of earthing cable per lightning arrester: 2 lightning arresters (2 OPX-175) × 5 = 10 Meter",
+     false
+    ],
+    "OPX-148": [
+     "1.00",
+     "1.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 70 m of 32/40 pipe ÷ 150 = 0.4666…, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "2.00",
+     "2.00",
+     "2 packs of GI screws per pack of saddles: (1 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 2 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "2.00",
+     "2.00",
+     "2 packs of PVC gitti per pack of saddles: (1 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 2 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "5.00",
+     "5.00",
+     "5 m of PVC cable tray per inverter: 1 inverters (1 OPX-009) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-169": [
+     "40.00",
+     "40.00",
+     "One M8 nut bolt set per 2 m of GI strip: 80 m of GI strip ÷ 2 = 40 Set",
+     false
+    ],
+    "OPX-172": [
+     "4.00",
+     "4.00",
+     "One earthing chamber per earthing electrode: 4 earthing electrodes (4 OPX-170) = 4 Set",
+     false
+    ],
+    "OPX-173": [
+     "4.00",
+     "4.00",
+     "One bag of earthing compound per earthing electrode: 4 earthing electrodes (4 OPX-170) = 4 Nos",
+     false
+    ],
+    "OPX-174": [
+     "22.00",
+     "22.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 80 m of GI strip × 0.4 ÷ 1.5 = 21.3333…, rounded up to 22 Nos",
+     false
+    ],
+    "OPX-177": [
+     "64.00",
+     "64.00",
+     "2 module earthing sets per module: 32 modules (32 OPX-001) × 2 = 64 Set",
+     false
+    ],
+    "OPX-184": [
+     "1.00",
+     "1.00",
+     "One data logger per inverter: 1 inverters (1 OPX-009) = 1 Nos",
+     false
+    ],
+    "OPX-185": [
+     "5.00",
+     "5.00",
+     "5 m of RS485 cable per data logger: 1 data loggers × 5 = 5 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "1.00",
+     "1.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (0 m of 32 mm flexible conduit + 31 m of DC red cable) ÷ 150 = 0.2066…, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "1.00",
+     "1.00",
+     "As many packs of 400 mm ties as 250 mm ties: 1 packs of 250 mm ties = 1 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "20.00",
+     "20.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (1 inverters (1 OPX-009) + 1 DCDBs (1 OPX-002) + 2 ACDBs (1 OPX-040 + 1 OPX-050)) × 4 + 4 = 20 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "1.00",
+     "1.00",
+     "One fire extinguisher per inverter: 1 inverters (1 OPX-009) = 1 Nos",
+     false
+    ],
+    "OPX-198": [
+     "2.00",
+     "2.00",
+     "2 danger boards per fire extinguisher: 1 fire extinguishers × 2 = 2 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "1.00",
+     "1.00",
+     "One display board per fire extinguisher: 1 fire extinguishers = 1 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "20.48",
+     "20.48",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 32 Tin Shade structures × 0.64 = 20.48 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "1.00",
+     "1.00",
+     "One insulating mat per inverter: 1 inverters (1 OPX-009) = 1 Nos",
+     false
+    ],
+    "OPX-256": [
+     "7.00",
+     "7.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 70 m of 32/40 pipe × 0.1 = 7 Nos",
+     false
+    ],
+    "OPX-257": [
+     "7.00",
+     "7.00",
+     "Tees: 10% of the 32/40 pipe in metres: 70 m of 32/40 pipe × 0.1 = 7 Nos",
+     false
+    ],
+    "OPX-258": [
+     "7.00",
+     "7.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 70 m of 32/40 pipe × 0.1 = 7 Nos",
+     false
+    ],
+    "OPX-260": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-261": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-262": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "0.00",
+     "0.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 0 m of 50/63 pipe ÷ 150 = 0 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "32",
+    "OPX-002": "1",
+    "OPX-009": "1",
+    "OPX-038": "32",
+    "OPX-040": "1",
+    "OPX-050": "1",
+    "OPX-059": "31",
+    "OPX-060": "36",
+    "OPX-061": "35",
+    "OPX-062": "27",
+    "OPX-087": "32",
+    "OPX-088": "10",
+    "OPX-089": "5",
+    "OPX-101": "8",
+    "OPX-105": "96",
+    "OPX-108": "10",
+    "OPX-123": "2",
+    "OPX-130": "70",
+    "OPX-134": "7",
+    "OPX-135": "7",
+    "OPX-155": "1",
+    "OPX-168": "80",
+    "OPX-169": "40",
+    "OPX-170": "4",
+    "OPX-172": "4",
+    "OPX-173": "4",
+    "OPX-175": "2",
+    "OPX-177": "64",
+    "OPX-178": "1",
+    "OPX-180": "1",
+    "OPX-184": "1",
+    "OPX-185": "5",
+    "OPX-186": "1",
+    "OPX-188": "1",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "12",
+    "OPX-196": "1",
+    "OPX-197": "1",
+    "OPX-198": "2",
+    "OPX-199": "1",
+    "OPX-201": "14",
+    "OPX-202": "14",
+    "OPX-204": "20.48",
+    "OPX-206": "1"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "5.00",
+     "5.00",
+     "5 m of earthing cable per lightning arrester: 1 lightning arresters (1 OPX-176) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-148": [
+     "2.00",
+     "2.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 300 m of 32/40 pipe ÷ 150 = 2 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "4.00",
+     "4.00",
+     "2 packs of GI screws per pack of saddles: (2 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 4 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "4.00",
+     "4.00",
+     "2 packs of PVC gitti per pack of saddles: (2 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 4 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "10.00",
+     "10.00",
+     "5 m of PVC cable tray per inverter: 2 inverters (2 OPX-017) × 5 = 10 Meter",
+     false
+    ],
+    "OPX-169": [
+     "175.00",
+     "175.00",
+     "One M8 nut bolt set per 2 m of GI strip: 350 m of GI strip ÷ 2 = 175 Set",
+     false
+    ],
+    "OPX-172": [
+     "6.00",
+     "6.00",
+     "One earthing chamber per earthing electrode: 6 earthing electrodes (6 OPX-170) = 6 Set",
+     false
+    ],
+    "OPX-173": [
+     "6.00",
+     "6.00",
+     "One bag of earthing compound per earthing electrode: 6 earthing electrodes (6 OPX-170) = 6 Nos",
+     false
+    ],
+    "OPX-174": [
+     "94.00",
+     "94.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 350 m of GI strip × 0.4 ÷ 1.5 = 93.3333…, rounded up to 94 Nos",
+     false
+    ],
+    "OPX-177": [
+     "366.00",
+     "366.00",
+     "2 module earthing sets per module: 183 modules (183 OPX-001) × 2 = 366 Set",
+     false
+    ],
+    "OPX-184": [
+     "2.00",
+     "2.00",
+     "One data logger per inverter: 2 inverters (2 OPX-017) = 2 Nos",
+     false
+    ],
+    "OPX-185": [
+     "10.00",
+     "10.00",
+     "5 m of RS485 cable per data logger: 2 data loggers × 5 = 10 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "4.00",
+     "4.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (30 m of 32 mm flexible conduit + 450 m of DC red cable) ÷ 150 = 3.2, rounded up to 4 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "4.00",
+     "4.00",
+     "As many packs of 400 mm ties as 250 mm ties: 4 packs of 250 mm ties = 4 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "2.00",
+     "2.00",
+     "One cable route marker per 5 m of trench: 10 m of trench ÷ 5 = 2 Nos",
+     false
+    ],
+    "OPX-192": [
+     "30",
+     "16.00",
+     "16 PVC tapes per site: set by hand to 30 Nos; the rule gives 16 Nos",
+     true
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "36.00",
+     "36.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (2 inverters (2 OPX-017) + 2 DCDBs (2 OPX-004) + 4 ACDBs (2 OPX-044 + 2 OPX-054)) × 4 + 4 = 36 Nos",
+     false
+    ],
+    "OPX-195": [
+     "2",
+     "1.00",
+     "One set of ferrules per site: set by hand to 2 Nos; the rule gives 1 Nos",
+     true
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "2.00",
+     "2.00",
+     "One fire extinguisher per inverter: 2 inverters (2 OPX-017) = 2 Nos",
+     false
+    ],
+    "OPX-198": [
+     "4.00",
+     "4.00",
+     "2 danger boards per fire extinguisher: 2 fire extinguishers × 2 = 4 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "2.00",
+     "2.00",
+     "One display board per fire extinguisher: 2 fire extinguishers = 2 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "2",
+     "1.00",
+     "One CCTV per site: set by hand to 2 Nos; the rule gives 1 Nos",
+     true
+    ],
+    "OPX-204": [
+     "17.28",
+     "17.28",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 27 Tin Shade structures × 0.64 = 17.28 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "2.00",
+     "2.00",
+     "One insulating mat per inverter: 2 inverters (2 OPX-017) = 2 Nos",
+     false
+    ],
+    "OPX-256": [
+     "30.00",
+     "30.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 300 m of 32/40 pipe × 0.1 = 30 Nos",
+     false
+    ],
+    "OPX-257": [
+     "30.00",
+     "30.00",
+     "Tees: 10% of the 32/40 pipe in metres: 300 m of 32/40 pipe × 0.1 = 30 Nos",
+     false
+    ],
+    "OPX-258": [
+     "30.00",
+     "30.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 300 m of 32/40 pipe × 0.1 = 30 Nos",
+     false
+    ],
+    "OPX-260": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-261": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-262": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "0.00",
+     "0.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 0 m of 50/63 pipe ÷ 150 = 0 Pkt",
+     false
+    ]
+   },
+   "overrides": {
+    "OPX-192": "30",
+    "OPX-195": "2",
+    "OPX-200": "2"
+   },
+   "quantities": {
+    "OPX-001": "183",
+    "OPX-004": "2",
+    "OPX-017": "2",
+    "OPX-027": "1",
+    "OPX-028": "4",
+    "OPX-029": "1",
+    "OPX-030": "9",
+    "OPX-038": "27",
+    "OPX-044": "2",
+    "OPX-054": "2",
+    "OPX-059": "450",
+    "OPX-060": "400",
+    "OPX-061": "41",
+    "OPX-087": "75",
+    "OPX-088": "20",
+    "OPX-089": "5",
+    "OPX-092": "120",
+    "OPX-101": "16",
+    "OPX-105": "366",
+    "OPX-108": "20",
+    "OPX-120": "14",
+    "OPX-122": "36",
+    "OPX-130": "300",
+    "OPX-133": "30",
+    "OPX-134": "30",
+    "OPX-135": "30",
+    "OPX-143": "30",
+    "OPX-148": "2",
+    "OPX-154": "4",
+    "OPX-155": "4",
+    "OPX-164": "120",
+    "OPX-167": "10",
+    "OPX-168": "350",
+    "OPX-169": "175",
+    "OPX-170": "6",
+    "OPX-172": "6",
+    "OPX-173": "6",
+    "OPX-174": "94",
+    "OPX-176": "1",
+    "OPX-177": "366",
+    "OPX-179": "2",
+    "OPX-182": "2",
+    "OPX-184": "2",
+    "OPX-185": "10",
+    "OPX-186": "1",
+    "OPX-187": "10",
+    "OPX-188": "4",
+    "OPX-189": "4",
+    "OPX-190": "1",
+    "OPX-191": "2",
+    "OPX-192": "30",
+    "OPX-193": "1",
+    "OPX-194": "36",
+    "OPX-195": "2",
+    "OPX-196": "1",
+    "OPX-197": "2",
+    "OPX-198": "4",
+    "OPX-199": "2",
+    "OPX-200": "2",
+    "OPX-201": "30",
+    "OPX-202": "30",
+    "OPX-203": "99.84",
+    "OPX-204": "17.28",
+    "OPX-206": "2",
+    "OPX-256": "30",
+    "OPX-257": "30",
+    "OPX-258": "30"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "5.00",
+     "5.00",
+     "5 m of earthing cable per lightning arrester: 1 lightning arresters (1 OPX-176) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-148": [
+     "1.00",
+     "1.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 100 m of 32/40 pipe ÷ 150 = 0.6666…, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "2.00",
+     "2.00",
+     "2 packs of GI screws per pack of saddles: (1 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 2 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "2.00",
+     "2.00",
+     "2 packs of PVC gitti per pack of saddles: (1 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 2 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "5.00",
+     "5.00",
+     "5 m of PVC cable tray per inverter: 1 inverters (1 OPX-022) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-169": [
+     "50.00",
+     "50.00",
+     "One M8 nut bolt set per 2 m of GI strip: 100 m of GI strip ÷ 2 = 50 Set",
+     false
+    ],
+    "OPX-172": [
+     "6.00",
+     "6.00",
+     "One earthing chamber per earthing electrode: 6 earthing electrodes (6 OPX-170) = 6 Set",
+     false
+    ],
+    "OPX-173": [
+     "6.00",
+     "6.00",
+     "One bag of earthing compound per earthing electrode: 6 earthing electrodes (6 OPX-170) = 6 Nos",
+     false
+    ],
+    "OPX-174": [
+     "27.00",
+     "27.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 100 m of GI strip × 0.4 ÷ 1.5 = 26.6666…, rounded up to 27 Nos",
+     false
+    ],
+    "OPX-177": [
+     "504.00",
+     "504.00",
+     "2 module earthing sets per module: 252 modules (252 OPX-001) × 2 = 504 Set",
+     false
+    ],
+    "OPX-184": [
+     "1.00",
+     "1.00",
+     "One data logger per inverter: 1 inverters (1 OPX-022) = 1 Nos",
+     false
+    ],
+    "OPX-185": [
+     "5.00",
+     "5.00",
+     "5 m of RS485 cable per data logger: 1 data loggers × 5 = 5 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "3.00",
+     "3.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (50 m of 32 mm flexible conduit + 280 m of DC red cable) ÷ 150 = 2.2, rounded up to 3 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "3.00",
+     "3.00",
+     "As many packs of 400 mm ties as 250 mm ties: 3 packs of 250 mm ties = 3 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "24.00",
+     "24.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (1 inverters (1 OPX-022) + 2 DCDBs (1 OPX-003 + 1 OPX-004) + 2 ACDBs (1 OPX-048 + 1 OPX-058)) × 4 + 4 = 24 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "1.00",
+     "1.00",
+     "One fire extinguisher per inverter: 1 inverters (1 OPX-022) = 1 Nos",
+     false
+    ],
+    "OPX-198": [
+     "2.00",
+     "2.00",
+     "2 danger boards per fire extinguisher: 1 fire extinguishers × 2 = 2 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "1.00",
+     "1.00",
+     "One display board per fire extinguisher: 1 fire extinguishers = 1 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "161.28",
+     "161.28",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 252 Tin Shade structures × 0.64 = 161.28 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "1.00",
+     "1.00",
+     "One insulating mat per inverter: 1 inverters (1 OPX-022) = 1 Nos",
+     false
+    ],
+    "OPX-256": [
+     "10.00",
+     "10.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 100 m of 32/40 pipe × 0.1 = 10 Nos",
+     false
+    ],
+    "OPX-257": [
+     "10.00",
+     "10.00",
+     "Tees: 10% of the 32/40 pipe in metres: 100 m of 32/40 pipe × 0.1 = 10 Nos",
+     false
+    ],
+    "OPX-258": [
+     "10.00",
+     "10.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 100 m of 32/40 pipe × 0.1 = 10 Nos",
+     false
+    ],
+    "OPX-260": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-261": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-262": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "0.00",
+     "0.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 0 m of 50/63 pipe ÷ 150 = 0 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "252",
+    "OPX-003": "1",
+    "OPX-004": "1",
+    "OPX-022": "1",
+    "OPX-038": "252",
+    "OPX-048": "1",
+    "OPX-058": "1",
+    "OPX-059": "280",
+    "OPX-060": "640",
+    "OPX-061": "270",
+    "OPX-087": "252",
+    "OPX-088": "10",
+    "OPX-089": "5",
+    "OPX-096": "25",
+    "OPX-101": "8",
+    "OPX-105": "504",
+    "OPX-108": "8",
+    "OPX-123": "9",
+    "OPX-126": "21",
+    "OPX-130": "100",
+    "OPX-134": "10",
+    "OPX-135": "10",
+    "OPX-143": "50",
+    "OPX-148": "2",
+    "OPX-154": "4",
+    "OPX-155": "4",
+    "OPX-164": "30",
+    "OPX-165": "50",
+    "OPX-167": "5",
+    "OPX-168": "100",
+    "OPX-169": "50",
+    "OPX-170": "6",
+    "OPX-172": "6",
+    "OPX-173": "6",
+    "OPX-174": "27",
+    "OPX-176": "1",
+    "OPX-177": "504",
+    "OPX-179": "1",
+    "OPX-183": "1",
+    "OPX-184": "1",
+    "OPX-185": "5",
+    "OPX-186": "1",
+    "OPX-188": "3",
+    "OPX-189": "3",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "24",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "1",
+    "OPX-198": "2",
+    "OPX-199": "1",
+    "OPX-200": "1",
+    "OPX-201": "150",
+    "OPX-202": "150",
+    "OPX-204": "162",
+    "OPX-206": "1",
+    "OPX-213": "1",
+    "OPX-216": "3"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "0.00",
+     "0.00",
+     "5 m of earthing cable per lightning arrester: 0 lightning arresters × 5 = 0 Meter",
+     false
+    ],
+    "OPX-148": [
+     "0.00",
+     "0.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 0 m of 32/40 pipe ÷ 150 = 0 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "0.00",
+     "0.00",
+     "2 packs of GI screws per pack of saddles: (0 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 0 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "0.00",
+     "0.00",
+     "2 packs of PVC gitti per pack of saddles: (0 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 0 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "10.00",
+     "10.00",
+     "5 m of PVC cable tray per inverter: 2 inverters (1 OPX-018 + 1 OPX-020) × 5 = 10 Meter",
+     false
+    ],
+    "OPX-169": [
+     "0.00",
+     "0.00",
+     "One M8 nut bolt set per 2 m of GI strip: 0 m of GI strip ÷ 2 = 0 Set",
+     false
+    ],
+    "OPX-172": [
+     "0.00",
+     "0.00",
+     "One earthing chamber per earthing electrode: 0 earthing electrodes = 0 Set",
+     false
+    ],
+    "OPX-173": [
+     "0.00",
+     "0.00",
+     "One bag of earthing compound per earthing electrode: 0 earthing electrodes = 0 Nos",
+     false
+    ],
+    "OPX-174": [
+     "0.00",
+     "0.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 0 m of GI strip × 0.4 ÷ 1.5 = 0 Nos",
+     false
+    ],
+    "OPX-177": [
+     "696.00",
+     "696.00",
+     "2 module earthing sets per module: 348 modules (348 OPX-001) × 2 = 696 Set",
+     false
+    ],
+    "OPX-184": [
+     "2.00",
+     "2.00",
+     "One data logger per inverter: 2 inverters (1 OPX-018 + 1 OPX-020) = 2 Nos",
+     false
+    ],
+    "OPX-185": [
+     "10.00",
+     "10.00",
+     "5 m of RS485 cable per data logger: 2 data loggers × 5 = 10 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "0.00",
+     "0.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (0 m of 32 mm flexible conduit + 0 m of DC red cable) ÷ 150 = 0 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "0.00",
+     "0.00",
+     "As many packs of 400 mm ties as 250 mm ties: 0 packs of 250 mm ties = 0 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "24.00",
+     "24.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (2 inverters (1 OPX-018 + 1 OPX-020) + 3 DCDBs (1 OPX-003 + 1 OPX-004 + 1 OPX-005) + 0 ACDBs) × 4 + 4 = 24 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "2.00",
+     "2.00",
+     "One fire extinguisher per inverter: 2 inverters (1 OPX-018 + 1 OPX-020) = 2 Nos",
+     false
+    ],
+    "OPX-198": [
+     "4.00",
+     "4.00",
+     "2 danger boards per fire extinguisher: 2 fire extinguishers × 2 = 4 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "2.00",
+     "2.00",
+     "One display board per fire extinguisher: 2 fire extinguishers = 2 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "0.00",
+     "0.00",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 0 Tin Shade structures × 0.64 = 0 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "2.00",
+     "2.00",
+     "One insulating mat per inverter: 2 inverters (1 OPX-018 + 1 OPX-020) = 2 Nos",
+     false
+    ],
+    "OPX-256": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-257": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-258": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-260": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-261": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-262": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "0.00",
+     "0.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 0 m of 50/63 pipe ÷ 150 = 0 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "348",
+    "OPX-003": "1",
+    "OPX-004": "1",
+    "OPX-005": "1",
+    "OPX-018": "1",
+    "OPX-020": "1",
+    "OPX-167": "10",
+    "OPX-177": "696",
+    "OPX-184": "2",
+    "OPX-185": "10",
+    "OPX-186": "1",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "24",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "2",
+    "OPX-198": "4",
+    "OPX-199": "2",
+    "OPX-200": "1",
+    "OPX-206": "2"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "50.00",
+     "50.00",
+     "5 m of earthing cable per lightning arrester: 10 lightning arresters (10 OPX-176) × 5 = 50 Meter",
+     false
+    ],
+    "OPX-148": [
+     "0.00",
+     "0.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 0 m of 32/40 pipe ÷ 150 = 0 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "0.00",
+     "0.00",
+     "2 packs of GI screws per pack of saddles: (0 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 0 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "0.00",
+     "0.00",
+     "2 packs of PVC gitti per pack of saddles: (0 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 0 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "75.00",
+     "75.00",
+     "5 m of PVC cable tray per inverter: 15 inverters (1 OPX-009 + 4 OPX-011 + 1 OPX-012 + 3 OPX-013 + 1 OPX-017 + 4 OPX-020 + 1 OPX-208) × 5 = 75 Meter",
+     false
+    ],
+    "OPX-169": [
+     "565.00",
+     "565.00",
+     "One M8 nut bolt set per 2 m of GI strip: 1130 m of GI strip ÷ 2 = 565 Set",
+     false
+    ],
+    "OPX-172": [
+     "54.00",
+     "54.00",
+     "One earthing chamber per earthing electrode: 54 earthing electrodes (54 OPX-170) = 54 Set",
+     false
+    ],
+    "OPX-173": [
+     "54.00",
+     "54.00",
+     "One bag of earthing compound per earthing electrode: 54 earthing electrodes (54 OPX-170) = 54 Nos",
+     false
+    ],
+    "OPX-174": [
+     "302.00",
+     "302.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 1130 m of GI strip × 0.4 ÷ 1.5 = 301.3333…, rounded up to 302 Nos",
+     false
+    ],
+    "OPX-177": [
+     "3276.00",
+     "3276.00",
+     "2 module earthing sets per module: 1638 modules (1638 OPX-001) × 2 = 3276 Set",
+     false
+    ],
+    "OPX-184": [
+     "15.00",
+     "15.00",
+     "One data logger per inverter: 15 inverters (1 OPX-009 + 4 OPX-011 + 1 OPX-012 + 3 OPX-013 + 1 OPX-017 + 4 OPX-020 + 1 OPX-208) = 15 Nos",
+     false
+    ],
+    "OPX-185": [
+     "75.00",
+     "75.00",
+     "5 m of RS485 cable per data logger: 15 data loggers × 5 = 75 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "20.00",
+     "20.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (30 m of 32 mm flexible conduit + 2958 m of DC red cable) ÷ 150 = 19.92, rounded up to 20 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "20.00",
+     "20.00",
+     "As many packs of 400 mm ties as 250 mm ties: 20 packs of 250 mm ties = 20 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "274.00",
+     "274.00",
+     "One cable route marker per 5 m of trench: 1370 m of trench ÷ 5 = 274 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "152.00",
+     "152.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (15 inverters (1 OPX-009 + 4 OPX-011 + 1 OPX-012 + 3 OPX-013 + 1 OPX-017 + 4 OPX-020 + 1 OPX-208) + 16 DCDBs (8 OPX-002 + 2 OPX-003 + 6 OPX-006) + 6 ACDBs (4 OPX-041 + 2 OPX-042)) × 4 + 4 = 152 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "15.00",
+     "15.00",
+     "One fire extinguisher per inverter: 15 inverters (1 OPX-009 + 4 OPX-011 + 1 OPX-012 + 3 OPX-013 + 1 OPX-017 + 4 OPX-020 + 1 OPX-208) = 15 Nos",
+     false
+    ],
+    "OPX-198": [
+     "30.00",
+     "30.00",
+     "2 danger boards per fire extinguisher: 15 fire extinguishers × 2 = 30 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "15.00",
+     "15.00",
+     "One display board per fire extinguisher: 15 fire extinguishers = 15 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "0.00",
+     "0.00",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 0 Tin Shade structures × 0.64 = 0 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "15.00",
+     "15.00",
+     "One insulating mat per inverter: 15 inverters (1 OPX-009 + 4 OPX-011 + 1 OPX-012 + 3 OPX-013 + 1 OPX-017 + 4 OPX-020 + 1 OPX-208) = 15 Nos",
+     false
+    ],
+    "OPX-256": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-257": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-258": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-260": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-261": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-262": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "0.00",
+     "0.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 0 m of 50/63 pipe ÷ 150 = 0 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "1638",
+    "OPX-002": "8",
+    "OPX-003": "2",
+    "OPX-006": "6",
+    "OPX-009": "1",
+    "OPX-011": "4",
+    "OPX-012": "1",
+    "OPX-013": "3",
+    "OPX-017": "1",
+    "OPX-020": "4",
+    "OPX-041": "4",
+    "OPX-042": "2",
+    "OPX-059": "2958",
+    "OPX-060": "2958",
+    "OPX-061": "218",
+    "OPX-062": "66",
+    "OPX-063": "56",
+    "OPX-064": "87",
+    "OPX-065": "52",
+    "OPX-092": "55",
+    "OPX-094": "182",
+    "OPX-097": "201",
+    "OPX-098": "445",
+    "OPX-106": "56",
+    "OPX-108": "48",
+    "OPX-120": "2",
+    "OPX-122": "12",
+    "OPX-123": "15",
+    "OPX-124": "18",
+    "OPX-125": "20",
+    "OPX-126": "6",
+    "OPX-128": "6",
+    "OPX-133": "745",
+    "OPX-134": "121",
+    "OPX-135": "30",
+    "OPX-136": "80",
+    "OPX-137": "25",
+    "OPX-138": "25",
+    "OPX-143": "30",
+    "OPX-147": "5",
+    "OPX-148": "5",
+    "OPX-164": "720",
+    "OPX-168": "1130",
+    "OPX-170": "54",
+    "OPX-172": "54",
+    "OPX-173": "54",
+    "OPX-174": "110",
+    "OPX-176": "10",
+    "OPX-187": "1370",
+    "OPX-188": "30",
+    "OPX-189": "30",
+    "OPX-190": "30",
+    "OPX-191": "200",
+    "OPX-192": "500",
+    "OPX-193": "10",
+    "OPX-194": "60",
+    "OPX-195": "15",
+    "OPX-196": "15",
+    "OPX-197": "15",
+    "OPX-198": "15",
+    "OPX-199": "5",
+    "OPX-201": "90",
+    "OPX-202": "90",
+    "OPX-206": "10",
+    "OPX-208": "1"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "5.00",
+     "5.00",
+     "5 m of earthing cable per lightning arrester: 1 lightning arresters (1 OPX-176) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-148": [
+     "1.00",
+     "1.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 100 m of 32/40 pipe ÷ 150 = 0.6666…, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "4.00",
+     "4.00",
+     "2 packs of GI screws per pack of saddles: (1 packs of 40 mm saddles + 1 packs of 63 mm saddles) × 2 = 4 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "4.00",
+     "4.00",
+     "2 packs of PVC gitti per pack of saddles: (1 packs of 40 mm saddles + 1 packs of 63 mm saddles) × 2 = 4 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "10.00",
+     "10.00",
+     "5 m of PVC cable tray per inverter: 2 inverters (2 OPX-011) × 5 = 10 Meter",
+     false
+    ],
+    "OPX-169": [
+     "50.00",
+     "50.00",
+     "One M8 nut bolt set per 2 m of GI strip: 100 m of GI strip ÷ 2 = 50 Set",
+     false
+    ],
+    "OPX-172": [
+     "6.00",
+     "6.00",
+     "One earthing chamber per earthing electrode: 6 earthing electrodes (6 OPX-170) = 6 Set",
+     false
+    ],
+    "OPX-173": [
+     "6.00",
+     "6.00",
+     "One bag of earthing compound per earthing electrode: 6 earthing electrodes (6 OPX-170) = 6 Nos",
+     false
+    ],
+    "OPX-174": [
+     "27.00",
+     "27.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 100 m of GI strip × 0.4 ÷ 1.5 = 26.6666…, rounded up to 27 Nos",
+     false
+    ],
+    "OPX-177": [
+     "144.00",
+     "144.00",
+     "2 module earthing sets per module: 72 modules (72 OPX-001) × 2 = 144 Set",
+     false
+    ],
+    "OPX-184": [
+     "2.00",
+     "2.00",
+     "One data logger per inverter: 2 inverters (2 OPX-011) = 2 Nos",
+     false
+    ],
+    "OPX-185": [
+     "10.00",
+     "10.00",
+     "5 m of RS485 cable per data logger: 2 data loggers × 5 = 10 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "1.00",
+     "1.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (30 m of 32 mm flexible conduit + 85 m of DC red cable) ÷ 150 = 0.7666…, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "1.00",
+     "1.00",
+     "As many packs of 400 mm ties as 250 mm ties: 1 packs of 250 mm ties = 1 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "32.00",
+     "32.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (2 inverters (2 OPX-011) + 2 DCDBs (2 OPX-002) + 3 ACDBs (2 OPX-041 + 1 OPX-051)) × 4 + 4 = 32 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "2.00",
+     "2.00",
+     "One fire extinguisher per inverter: 2 inverters (2 OPX-011) = 2 Nos",
+     false
+    ],
+    "OPX-198": [
+     "4.00",
+     "4.00",
+     "2 danger boards per fire extinguisher: 2 fire extinguishers × 2 = 4 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "2.00",
+     "2.00",
+     "One display board per fire extinguisher: 2 fire extinguishers = 2 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "0.00",
+     "0.00",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 0 Tin Shade structures × 0.64 = 0 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "2.00",
+     "2.00",
+     "One insulating mat per inverter: 2 inverters (2 OPX-011) = 2 Nos",
+     false
+    ],
+    "OPX-256": [
+     "10.00",
+     "10.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 100 m of 32/40 pipe × 0.1 = 10 Nos",
+     false
+    ],
+    "OPX-257": [
+     "10.00",
+     "10.00",
+     "Tees: 10% of the 32/40 pipe in metres: 100 m of 32/40 pipe × 0.1 = 10 Nos",
+     false
+    ],
+    "OPX-258": [
+     "10.00",
+     "10.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 100 m of 32/40 pipe × 0.1 = 10 Nos",
+     false
+    ],
+    "OPX-260": [
+     "4.00",
+     "4.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 35 m of 50/63 pipe × 0.1 = 3.5, rounded up to 4 Nos",
+     false
+    ],
+    "OPX-261": [
+     "4.00",
+     "4.00",
+     "Tees: 10% of the 50/63 pipe in metres: 35 m of 50/63 pipe × 0.1 = 3.5, rounded up to 4 Nos",
+     false
+    ],
+    "OPX-262": [
+     "4.00",
+     "4.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 35 m of 50/63 pipe × 0.1 = 3.5, rounded up to 4 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "1.00",
+     "1.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 35 m of 50/63 pipe ÷ 150 = 0.2333…, rounded up to 1 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "72",
+    "OPX-002": "2",
+    "OPX-011": "2",
+    "OPX-027": "1",
+    "OPX-028": "1",
+    "OPX-029": "3",
+    "OPX-030": "2",
+    "OPX-041": "2",
+    "OPX-051": "1",
+    "OPX-059": "85",
+    "OPX-060": "80",
+    "OPX-061": "10",
+    "OPX-063": "10",
+    "OPX-087": "28.8",
+    "OPX-088": "20",
+    "OPX-089": "5",
+    "OPX-101": "72",
+    "OPX-102": "16",
+    "OPX-105": "144",
+    "OPX-108": "20",
+    "OPX-130": "100",
+    "OPX-143": "30",
+    "OPX-148": "1",
+    "OPX-154": "4",
+    "OPX-155": "4",
+    "OPX-167": "10",
+    "OPX-168": "100",
+    "OPX-169": "50",
+    "OPX-170": "6",
+    "OPX-172": "6",
+    "OPX-173": "6",
+    "OPX-174": "27",
+    "OPX-176": "1",
+    "OPX-177": "144",
+    "OPX-178": "2",
+    "OPX-184": "2",
+    "OPX-185": "10",
+    "OPX-186": "1",
+    "OPX-188": "1",
+    "OPX-189": "1",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "32",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "2",
+    "OPX-198": "4",
+    "OPX-199": "2",
+    "OPX-200": "1",
+    "OPX-203": "46.08",
+    "OPX-206": "2",
+    "OPX-225": "1",
+    "OPX-226": "1",
+    "OPX-255": "40",
+    "OPX-256": "10",
+    "OPX-257": "10",
+    "OPX-258": "10",
+    "OPX-259": "35",
+    "OPX-260": "4",
+    "OPX-261": "4",
+    "OPX-262": "4",
+    "OPX-267": "1",
+    "OPX-272": "1",
+    "OPX-274": "35"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "5.00",
+     "5.00",
+     "5 m of earthing cable per lightning arrester: 1 lightning arresters (1 OPX-176) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-148": [
+     "3.00",
+     "3.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 320 m of 32/40 pipe ÷ 150 = 2.1333…, rounded up to 3 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "8.00",
+     "8.00",
+     "2 packs of GI screws per pack of saddles: (3 packs of 40 mm saddles + 1 packs of 63 mm saddles) × 2 = 8 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "8.00",
+     "8.00",
+     "2 packs of PVC gitti per pack of saddles: (3 packs of 40 mm saddles + 1 packs of 63 mm saddles) × 2 = 8 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "25.00",
+     "25.00",
+     "5 m of PVC cable tray per inverter: 5 inverters (1 OPX-012 + 1 OPX-017 + 3 OPX-218) × 5 = 25 Meter",
+     false
+    ],
+    "OPX-169": [
+     "200.00",
+     "200.00",
+     "One M8 nut bolt set per 2 m of GI strip: 400 m of GI strip ÷ 2 = 200 Set",
+     false
+    ],
+    "OPX-172": [
+     "14.00",
+     "14.00",
+     "One earthing chamber per earthing electrode: 14 earthing electrodes (14 OPX-170) = 14 Set",
+     false
+    ],
+    "OPX-173": [
+     "14.00",
+     "14.00",
+     "One bag of earthing compound per earthing electrode: 14 earthing electrodes (14 OPX-170) = 14 Nos",
+     false
+    ],
+    "OPX-174": [
+     "107.00",
+     "107.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 400 m of GI strip × 0.4 ÷ 1.5 = 106.6666…, rounded up to 107 Nos",
+     false
+    ],
+    "OPX-177": [
+     "384.00",
+     "384.00",
+     "2 module earthing sets per module: 192 modules (192 OPX-001) × 2 = 384 Set",
+     false
+    ],
+    "OPX-184": [
+     "5.00",
+     "5.00",
+     "One data logger per inverter: 5 inverters (1 OPX-012 + 1 OPX-017 + 3 OPX-218) = 5 Nos",
+     false
+    ],
+    "OPX-185": [
+     "25.00",
+     "25.00",
+     "5 m of RS485 cable per data logger: 5 data loggers × 5 = 25 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "3.00",
+     "3.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (80 m of 32 mm flexible conduit + 330 m of DC red cable) ÷ 150 = 2.7333…, rounded up to 3 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "3.00",
+     "3.00",
+     "As many packs of 400 mm ties as 250 mm ties: 3 packs of 250 mm ties = 3 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "76.00",
+     "76.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (5 inverters (1 OPX-012 + 1 OPX-017 + 3 OPX-218) + 5 DCDBs (4 OPX-002 + 1 OPX-004) + 8 ACDBs (3 OPX-039 + 1 OPX-042 + 1 OPX-044 + 1 OPX-049 + 1 OPX-052 + 1 OPX-054)) × 4 + 4 = 76 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "5.00",
+     "5.00",
+     "One fire extinguisher per inverter: 5 inverters (1 OPX-012 + 1 OPX-017 + 3 OPX-218) = 5 Nos",
+     false
+    ],
+    "OPX-198": [
+     "10.00",
+     "10.00",
+     "2 danger boards per fire extinguisher: 5 fire extinguishers × 2 = 10 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "5.00",
+     "5.00",
+     "One display board per fire extinguisher: 5 fire extinguishers = 5 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "19.20",
+     "19.20",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 30 Tin Shade structures × 0.64 = 19.2 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "5.00",
+     "5.00",
+     "One insulating mat per inverter: 5 inverters (1 OPX-012 + 1 OPX-017 + 3 OPX-218) = 5 Nos",
+     false
+    ],
+    "OPX-256": [
+     "32.00",
+     "32.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 320 m of 32/40 pipe × 0.1 = 32 Nos",
+     false
+    ],
+    "OPX-257": [
+     "32.00",
+     "32.00",
+     "Tees: 10% of the 32/40 pipe in metres: 320 m of 32/40 pipe × 0.1 = 32 Nos",
+     false
+    ],
+    "OPX-258": [
+     "32.00",
+     "32.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 320 m of 32/40 pipe × 0.1 = 32 Nos",
+     false
+    ],
+    "OPX-260": [
+     "1.00",
+     "1.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 10 m of 50/63 pipe × 0.1 = 1 Nos",
+     false
+    ],
+    "OPX-261": [
+     "1.00",
+     "1.00",
+     "Tees: 10% of the 50/63 pipe in metres: 10 m of 50/63 pipe × 0.1 = 1 Nos",
+     false
+    ],
+    "OPX-262": [
+     "1.00",
+     "1.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 10 m of 50/63 pipe × 0.1 = 1 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "1.00",
+     "1.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 10 m of 50/63 pipe ÷ 150 = 0.0666…, rounded up to 1 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "192",
+    "OPX-002": "4",
+    "OPX-004": "1",
+    "OPX-012": "1",
+    "OPX-017": "1",
+    "OPX-027": "3",
+    "OPX-028": "5",
+    "OPX-029": "6",
+    "OPX-030": "5",
+    "OPX-038": "30",
+    "OPX-039": "3",
+    "OPX-042": "1",
+    "OPX-044": "1",
+    "OPX-049": "1",
+    "OPX-052": "1",
+    "OPX-054": "1",
+    "OPX-059": "330",
+    "OPX-060": "370",
+    "OPX-061": "60",
+    "OPX-062": "36",
+    "OPX-064": "4",
+    "OPX-078": "30",
+    "OPX-087": "94.8",
+    "OPX-088": "40",
+    "OPX-089": "5",
+    "OPX-101": "24",
+    "OPX-103": "10",
+    "OPX-105": "440",
+    "OPX-119": "16",
+    "OPX-120": "6",
+    "OPX-122": "18",
+    "OPX-130": "320",
+    "OPX-143": "80",
+    "OPX-148": "3",
+    "OPX-154": "8",
+    "OPX-155": "8",
+    "OPX-164": "30",
+    "OPX-167": "25",
+    "OPX-168": "400",
+    "OPX-169": "200",
+    "OPX-170": "14",
+    "OPX-172": "14",
+    "OPX-173": "14",
+    "OPX-174": "107",
+    "OPX-176": "1",
+    "OPX-177": "384",
+    "OPX-178": "3",
+    "OPX-179": "2",
+    "OPX-181": "1",
+    "OPX-182": "1",
+    "OPX-184": "5",
+    "OPX-185": "25",
+    "OPX-186": "1",
+    "OPX-188": "3",
+    "OPX-189": "3",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "76",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "5",
+    "OPX-198": "10",
+    "OPX-199": "5",
+    "OPX-200": "1",
+    "OPX-201": "26",
+    "OPX-202": "26",
+    "OPX-203": "103.68",
+    "OPX-204": "19.2",
+    "OPX-206": "5",
+    "OPX-209": "1",
+    "OPX-210": "3",
+    "OPX-218": "3",
+    "OPX-244": "6",
+    "OPX-256": "32",
+    "OPX-257": "32",
+    "OPX-258": "32",
+    "OPX-259": "10",
+    "OPX-260": "1",
+    "OPX-261": "1",
+    "OPX-262": "1",
+    "OPX-267": "1",
+    "OPX-271": "1",
+    "OPX-272": "1"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "5.00",
+     "5.00",
+     "5 m of earthing cable per lightning arrester: 1 lightning arresters (1 OPX-176) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-148": [
+     "1.00",
+     "1.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 130 m of 32/40 pipe ÷ 150 = 0.8666…, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "2.00",
+     "2.00",
+     "2 packs of GI screws per pack of saddles: (1 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 2 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "2.00",
+     "2.00",
+     "2 packs of PVC gitti per pack of saddles: (1 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 2 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "5.00",
+     "5.00",
+     "5 m of PVC cable tray per inverter: 1 inverters (1 OPX-016) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-169": [
+     "60.00",
+     "60.00",
+     "One M8 nut bolt set per 2 m of GI strip: 120 m of GI strip ÷ 2 = 60 Set",
+     false
+    ],
+    "OPX-172": [
+     "4.00",
+     "4.00",
+     "One earthing chamber per earthing electrode: 4 earthing electrodes (4 OPX-170) = 4 Set",
+     false
+    ],
+    "OPX-173": [
+     "4.00",
+     "4.00",
+     "One bag of earthing compound per earthing electrode: 4 earthing electrodes (4 OPX-170) = 4 Nos",
+     false
+    ],
+    "OPX-174": [
+     "32.00",
+     "32.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 120 m of GI strip × 0.4 ÷ 1.5 = 32 Nos",
+     false
+    ],
+    "OPX-177": [
+     "152.00",
+     "152.00",
+     "2 module earthing sets per module: 76 modules (76 OPX-001) × 2 = 152 Set",
+     false
+    ],
+    "OPX-184": [
+     "1.00",
+     "1.00",
+     "One data logger per inverter: 1 inverters (1 OPX-016) = 1 Nos",
+     false
+    ],
+    "OPX-185": [
+     "5.00",
+     "5.00",
+     "5 m of RS485 cable per data logger: 1 data loggers × 5 = 5 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "2.00",
+     "2.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (26 m of 32 mm flexible conduit + 220 m of DC red cable) ÷ 150 = 1.64, rounded up to 2 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "2.00",
+     "2.00",
+     "As many packs of 400 mm ties as 250 mm ties: 2 packs of 250 mm ties = 2 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "16.00",
+     "16.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (1 inverters (1 OPX-016) + 1 DCDBs (1 OPX-003) + 1 ACDBs (1 OPX-043)) × 4 + 4 = 16 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "1.00",
+     "1.00",
+     "One fire extinguisher per inverter: 1 inverters (1 OPX-016) = 1 Nos",
+     false
+    ],
+    "OPX-198": [
+     "2.00",
+     "2.00",
+     "2 danger boards per fire extinguisher: 1 fire extinguishers × 2 = 2 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "1.00",
+     "1.00",
+     "One display board per fire extinguisher: 1 fire extinguishers = 1 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "0.00",
+     "0.00",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 0 Tin Shade structures × 0.64 = 0 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "1.00",
+     "1.00",
+     "One insulating mat per inverter: 1 inverters (1 OPX-016) = 1 Nos",
+     false
+    ],
+    "OPX-256": [
+     "13.00",
+     "13.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 130 m of 32/40 pipe × 0.1 = 13 Nos",
+     false
+    ],
+    "OPX-257": [
+     "13.00",
+     "13.00",
+     "Tees: 10% of the 32/40 pipe in metres: 130 m of 32/40 pipe × 0.1 = 13 Nos",
+     false
+    ],
+    "OPX-258": [
+     "13.00",
+     "13.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 130 m of 32/40 pipe × 0.1 = 13 Nos",
+     false
+    ],
+    "OPX-260": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-261": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-262": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "0.00",
+     "0.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 0 m of 50/63 pipe ÷ 150 = 0 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "76",
+    "OPX-003": "1",
+    "OPX-016": "1",
+    "OPX-027": "2",
+    "OPX-028": "5",
+    "OPX-030": "2",
+    "OPX-043": "1",
+    "OPX-059": "220",
+    "OPX-060": "150",
+    "OPX-061": "16",
+    "OPX-076": "2",
+    "OPX-087": "35",
+    "OPX-088": "8",
+    "OPX-089": "5",
+    "OPX-090": "20",
+    "OPX-101": "8",
+    "OPX-105": "152",
+    "OPX-108": "10",
+    "OPX-109": "6",
+    "OPX-119": "6",
+    "OPX-120": "18",
+    "OPX-123": "2",
+    "OPX-130": "130",
+    "OPX-134": "13",
+    "OPX-135": "13",
+    "OPX-139": "25",
+    "OPX-140": "3",
+    "OPX-141": "3",
+    "OPX-143": "26",
+    "OPX-145": "5",
+    "OPX-148": "3",
+    "OPX-149": "1",
+    "OPX-154": "8",
+    "OPX-155": "8",
+    "OPX-167": "5",
+    "OPX-168": "120",
+    "OPX-169": "60",
+    "OPX-170": "4",
+    "OPX-172": "4",
+    "OPX-173": "4",
+    "OPX-174": "32",
+    "OPX-176": "1",
+    "OPX-177": "152",
+    "OPX-179": "1",
+    "OPX-181": "1",
+    "OPX-184": "1",
+    "OPX-185": "1",
+    "OPX-186": "1",
+    "OPX-188": "2",
+    "OPX-189": "2",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "16",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "1",
+    "OPX-198": "2",
+    "OPX-199": "1",
+    "OPX-200": "1",
+    "OPX-203": "48.64",
+    "OPX-206": "1"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "0.00",
+     "0.00",
+     "5 m of earthing cable per lightning arrester: 0 lightning arresters × 5 = 0 Meter",
+     false
+    ],
+    "OPX-148": [
+     "0.00",
+     "0.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 0 m of 32/40 pipe ÷ 150 = 0 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "0.00",
+     "0.00",
+     "2 packs of GI screws per pack of saddles: (0 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 0 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "0.00",
+     "0.00",
+     "2 packs of PVC gitti per pack of saddles: (0 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 0 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "55.00",
+     "55.00",
+     "5 m of PVC cable tray per inverter: 11 inverters (1 OPX-011 + 6 OPX-013 + 3 OPX-016 + 1 OPX-017) × 5 = 55 Meter",
+     false
+    ],
+    "OPX-169": [
+     "0.00",
+     "0.00",
+     "One M8 nut bolt set per 2 m of GI strip: 0 m of GI strip ÷ 2 = 0 Set",
+     false
+    ],
+    "OPX-172": [
+     "0.00",
+     "0.00",
+     "One earthing chamber per earthing electrode: 0 earthing electrodes = 0 Set",
+     false
+    ],
+    "OPX-173": [
+     "0.00",
+     "0.00",
+     "One bag of earthing compound per earthing electrode: 0 earthing electrodes = 0 Nos",
+     false
+    ],
+    "OPX-174": [
+     "0.00",
+     "0.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 0 m of GI strip × 0.4 ÷ 1.5 = 0 Nos",
+     false
+    ],
+    "OPX-177": [
+     "1480.00",
+     "1480.00",
+     "2 module earthing sets per module: 740 modules (740 OPX-001) × 2 = 1480 Set",
+     false
+    ],
+    "OPX-184": [
+     "11.00",
+     "11.00",
+     "One data logger per inverter: 11 inverters (1 OPX-011 + 6 OPX-013 + 3 OPX-016 + 1 OPX-017) = 11 Nos",
+     false
+    ],
+    "OPX-185": [
+     "55.00",
+     "55.00",
+     "5 m of RS485 cable per data logger: 11 data loggers × 5 = 55 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "0.00",
+     "0.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (0 m of 32 mm flexible conduit + 0 m of DC red cable) ÷ 150 = 0 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "0.00",
+     "0.00",
+     "As many packs of 400 mm ties as 250 mm ties: 0 packs of 250 mm ties = 0 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "92.00",
+     "92.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (11 inverters (1 OPX-011 + 6 OPX-013 + 3 OPX-016 + 1 OPX-017) + 11 DCDBs (3 OPX-002 + 5 OPX-003 + 3 OPX-004) + 0 ACDBs) × 4 + 4 = 92 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "11.00",
+     "11.00",
+     "One fire extinguisher per inverter: 11 inverters (1 OPX-011 + 6 OPX-013 + 3 OPX-016 + 1 OPX-017) = 11 Nos",
+     false
+    ],
+    "OPX-198": [
+     "22.00",
+     "22.00",
+     "2 danger boards per fire extinguisher: 11 fire extinguishers × 2 = 22 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "11.00",
+     "11.00",
+     "One display board per fire extinguisher: 11 fire extinguishers = 11 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "0.00",
+     "0.00",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 0 Tin Shade structures × 0.64 = 0 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "11.00",
+     "11.00",
+     "One insulating mat per inverter: 11 inverters (1 OPX-011 + 6 OPX-013 + 3 OPX-016 + 1 OPX-017) = 11 Nos",
+     false
+    ],
+    "OPX-256": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-257": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-258": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-260": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-261": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-262": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "0.00",
+     "0.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 0 m of 50/63 pipe ÷ 150 = 0 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "740",
+    "OPX-002": "3",
+    "OPX-003": "5",
+    "OPX-004": "3",
+    "OPX-011": "1",
+    "OPX-013": "6",
+    "OPX-016": "3",
+    "OPX-017": "1",
+    "OPX-167": "55",
+    "OPX-177": "1480",
+    "OPX-184": "11",
+    "OPX-185": "55",
+    "OPX-186": "1",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "92",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "11",
+    "OPX-198": "22",
+    "OPX-199": "11",
+    "OPX-200": "1",
+    "OPX-206": "11"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "5.00",
+     "5.00",
+     "5 m of earthing cable per lightning arrester: 1 lightning arresters (1 OPX-176) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-148": [
+     "2.00",
+     "2.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 300 m of 32/40 pipe ÷ 150 = 2 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "6.00",
+     "6.00",
+     "2 packs of GI screws per pack of saddles: (2 packs of 40 mm saddles + 1 packs of 63 mm saddles) × 2 = 6 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "6.00",
+     "6.00",
+     "2 packs of PVC gitti per pack of saddles: (2 packs of 40 mm saddles + 1 packs of 63 mm saddles) × 2 = 6 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "15.00",
+     "15.00",
+     "5 m of PVC cable tray per inverter: 3 inverters (1 OPX-008 + 1 OPX-012 + 1 OPX-017) × 5 = 15 Meter",
+     false
+    ],
+    "OPX-169": [
+     "100.00",
+     "100.00",
+     "One M8 nut bolt set per 2 m of GI strip: 200 m of GI strip ÷ 2 = 100 Set",
+     false
+    ],
+    "OPX-172": [
+     "8.00",
+     "8.00",
+     "One earthing chamber per earthing electrode: 8 earthing electrodes (8 OPX-170) = 8 Set",
+     false
+    ],
+    "OPX-173": [
+     "8.00",
+     "8.00",
+     "One bag of earthing compound per earthing electrode: 8 earthing electrodes (8 OPX-170) = 8 Nos",
+     false
+    ],
+    "OPX-174": [
+     "54.00",
+     "54.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 200 m of GI strip × 0.4 ÷ 1.5 = 53.3333…, rounded up to 54 Nos",
+     false
+    ],
+    "OPX-177": [
+     "316.00",
+     "316.00",
+     "2 module earthing sets per module: 158 modules (158 OPX-001) × 2 = 316 Set",
+     false
+    ],
+    "OPX-184": [
+     "2",
+     "3.00",
+     "One data logger per inverter: set by hand to 2 Nos; the rule gives 3 Nos",
+     true
+    ],
+    "OPX-185": [
+     "10.00",
+     "10.00",
+     "5 m of RS485 cable per data logger: 2 data loggers × 5 = 10 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "3.00",
+     "3.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (80 m of 32 mm flexible conduit + 350 m of DC red cable) ÷ 150 = 2.8666…, rounded up to 3 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "3.00",
+     "3.00",
+     "As many packs of 400 mm ties as 250 mm ties: 3 packs of 250 mm ties = 3 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "40.00",
+     "40.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (3 inverters (1 OPX-008 + 1 OPX-012 + 1 OPX-017) + 3 DCDBs (1 OPX-002 + 2 OPX-003) + 3 ACDBs (1 OPX-039 + 1 OPX-046 + 1 OPX-049)) × 4 + 4 = 40 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "3.00",
+     "3.00",
+     "One fire extinguisher per inverter: 3 inverters (1 OPX-008 + 1 OPX-012 + 1 OPX-017) = 3 Nos",
+     false
+    ],
+    "OPX-198": [
+     "6.00",
+     "6.00",
+     "2 danger boards per fire extinguisher: 3 fire extinguishers × 2 = 6 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "3.00",
+     "3.00",
+     "One display board per fire extinguisher: 3 fire extinguishers = 3 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "0.00",
+     "0.00",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 0 Tin Shade structures × 0.64 = 0 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "3.00",
+     "3.00",
+     "One insulating mat per inverter: 3 inverters (1 OPX-008 + 1 OPX-012 + 1 OPX-017) = 3 Nos",
+     false
+    ],
+    "OPX-256": [
+     "30.00",
+     "30.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 300 m of 32/40 pipe × 0.1 = 30 Nos",
+     false
+    ],
+    "OPX-257": [
+     "30.00",
+     "30.00",
+     "Tees: 10% of the 32/40 pipe in metres: 300 m of 32/40 pipe × 0.1 = 30 Nos",
+     false
+    ],
+    "OPX-258": [
+     "30.00",
+     "30.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 300 m of 32/40 pipe × 0.1 = 30 Nos",
+     false
+    ],
+    "OPX-260": [
+     "1.00",
+     "1.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 5 m of 50/63 pipe × 0.1 = 0.5, rounded up to 1 Nos",
+     false
+    ],
+    "OPX-261": [
+     "1.00",
+     "1.00",
+     "Tees: 10% of the 50/63 pipe in metres: 5 m of 50/63 pipe × 0.1 = 0.5, rounded up to 1 Nos",
+     false
+    ],
+    "OPX-262": [
+     "1.00",
+     "1.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 5 m of 50/63 pipe × 0.1 = 0.5, rounded up to 1 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "1.00",
+     "1.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 5 m of 50/63 pipe ÷ 150 = 0.0333…, rounded up to 1 Pkt",
+     false
+    ]
+   },
+   "overrides": {
+    "OPX-184": "2"
+   },
+   "quantities": {
+    "OPX-001": "158",
+    "OPX-002": "1",
+    "OPX-003": "2",
+    "OPX-008": "1",
+    "OPX-012": "1",
+    "OPX-017": "1",
+    "OPX-027": "2",
+    "OPX-028": "3",
+    "OPX-029": "5",
+    "OPX-030": "6",
+    "OPX-039": "1",
+    "OPX-046": "1",
+    "OPX-049": "1",
+    "OPX-059": "350",
+    "OPX-060": "320",
+    "OPX-061": "20",
+    "OPX-062": "25",
+    "OPX-064": "3",
+    "OPX-068": "3",
+    "OPX-087": "65",
+    "OPX-088": "25",
+    "OPX-089": "5",
+    "OPX-095": "30",
+    "OPX-101": "8",
+    "OPX-105": "348",
+    "OPX-108": "26",
+    "OPX-119": "2",
+    "OPX-123": "8",
+    "OPX-125": "18",
+    "OPX-130": "300",
+    "OPX-143": "80",
+    "OPX-148": "2",
+    "OPX-154": "6",
+    "OPX-155": "6",
+    "OPX-164": "40",
+    "OPX-167": "15",
+    "OPX-168": "200",
+    "OPX-169": "100",
+    "OPX-170": "8",
+    "OPX-172": "8",
+    "OPX-173": "8",
+    "OPX-174": "54",
+    "OPX-176": "1",
+    "OPX-177": "316",
+    "OPX-178": "1",
+    "OPX-179": "1",
+    "OPX-183": "1",
+    "OPX-184": "2",
+    "OPX-185": "10",
+    "OPX-186": "1",
+    "OPX-188": "3",
+    "OPX-189": "3",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "40",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "3",
+    "OPX-198": "6",
+    "OPX-199": "3",
+    "OPX-200": "1",
+    "OPX-203": "101.12",
+    "OPX-206": "3",
+    "OPX-209": "2",
+    "OPX-210": "6",
+    "OPX-256": "30",
+    "OPX-257": "30",
+    "OPX-258": "30",
+    "OPX-259": "5",
+    "OPX-260": "1",
+    "OPX-261": "1",
+    "OPX-262": "1",
+    "OPX-267": "1",
+    "OPX-273": "1"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "5.00",
+     "5.00",
+     "5 m of earthing cable per lightning arrester: 1 lightning arresters (1 OPX-175) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-148": [
+     "1.00",
+     "1.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 130 m of 32/40 pipe ÷ 150 = 0.8666…, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "2.00",
+     "2.00",
+     "2 packs of GI screws per pack of saddles: (1 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 2 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "2.00",
+     "2.00",
+     "2 packs of PVC gitti per pack of saddles: (1 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 2 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "5.00",
+     "5.00",
+     "5 m of PVC cable tray per inverter: 1 inverters (1 OPX-018) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-169": [
+     "50.00",
+     "50.00",
+     "One M8 nut bolt set per 2 m of GI strip: 100 m of GI strip ÷ 2 = 50 Set",
+     false
+    ],
+    "OPX-172": [
+     "6.00",
+     "6.00",
+     "One earthing chamber per earthing electrode: 6 earthing electrodes (6 OPX-171) = 6 Set",
+     false
+    ],
+    "OPX-173": [
+     "6.00",
+     "6.00",
+     "One bag of earthing compound per earthing electrode: 6 earthing electrodes (6 OPX-171) = 6 Nos",
+     false
+    ],
+    "OPX-174": [
+     "27.00",
+     "27.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 100 m of GI strip × 0.4 ÷ 1.5 = 26.6666…, rounded up to 27 Nos",
+     false
+    ],
+    "OPX-177": [
+     "230.00",
+     "230.00",
+     "2 module earthing sets per module: 115 modules (115 OPX-001) × 2 = 230 Set",
+     false
+    ],
+    "OPX-184": [
+     "1.00",
+     "1.00",
+     "One data logger per inverter: 1 inverters (1 OPX-018) = 1 Nos",
+     false
+    ],
+    "OPX-185": [
+     "5.00",
+     "5.00",
+     "5 m of RS485 cable per data logger: 1 data loggers × 5 = 5 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "2.00",
+     "2.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (0 m of 32 mm flexible conduit + 160 m of DC red cable) ÷ 150 = 1.0666…, rounded up to 2 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "2.00",
+     "2.00",
+     "As many packs of 400 mm ties as 250 mm ties: 2 packs of 250 mm ties = 2 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "16.00",
+     "16.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (1 inverters (1 OPX-018) + 1 DCDBs (1 OPX-004) + 1 ACDBs (1 OPX-055)) × 4 + 4 = 16 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "1.00",
+     "1.00",
+     "One fire extinguisher per inverter: 1 inverters (1 OPX-018) = 1 Nos",
+     false
+    ],
+    "OPX-198": [
+     "2.00",
+     "2.00",
+     "2 danger boards per fire extinguisher: 1 fire extinguishers × 2 = 2 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "1.00",
+     "1.00",
+     "One display board per fire extinguisher: 1 fire extinguishers = 1 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "24.58",
+     "24.58",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 38.4 Tin Shade structures × 0.64 = 24.576, rounded to 24.58 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "1.00",
+     "1.00",
+     "One insulating mat per inverter: 1 inverters (1 OPX-018) = 1 Nos",
+     false
+    ],
+    "OPX-256": [
+     "13.00",
+     "13.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 130 m of 32/40 pipe × 0.1 = 13 Nos",
+     false
+    ],
+    "OPX-257": [
+     "13.00",
+     "13.00",
+     "Tees: 10% of the 32/40 pipe in metres: 130 m of 32/40 pipe × 0.1 = 13 Nos",
+     false
+    ],
+    "OPX-258": [
+     "13.00",
+     "13.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 130 m of 32/40 pipe × 0.1 = 13 Nos",
+     false
+    ],
+    "OPX-260": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-261": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-262": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "0.00",
+     "0.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 0 m of 50/63 pipe ÷ 150 = 0 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "115",
+    "OPX-004": "1",
+    "OPX-018": "1",
+    "OPX-027": "3",
+    "OPX-030": "3",
+    "OPX-038": "38.4",
+    "OPX-045": "0",
+    "OPX-055": "1",
+    "OPX-059": "160",
+    "OPX-060": "150",
+    "OPX-062": "90",
+    "OPX-065": "10",
+    "OPX-067": "4",
+    "OPX-093": "40",
+    "OPX-101": "8",
+    "OPX-105": "230",
+    "OPX-108": "10",
+    "OPX-110": "6",
+    "OPX-123": "18",
+    "OPX-130": "130",
+    "OPX-131": "15",
+    "OPX-132": "30",
+    "OPX-139": "4",
+    "OPX-140": "3",
+    "OPX-146": "1",
+    "OPX-149": "1",
+    "OPX-150": "1",
+    "OPX-153": "1",
+    "OPX-154": "2",
+    "OPX-155": "2",
+    "OPX-164": "25",
+    "OPX-168": "100",
+    "OPX-169": "20",
+    "OPX-171": "6",
+    "OPX-172": "6",
+    "OPX-173": "6",
+    "OPX-174": "20",
+    "OPX-175": "1",
+    "OPX-177": "230",
+    "OPX-182": "1",
+    "OPX-186": "1",
+    "OPX-192": "8",
+    "OPX-193": "1",
+    "OPX-194": "20",
+    "OPX-195": "1",
+    "OPX-197": "1",
+    "OPX-198": "2",
+    "OPX-199": "1",
+    "OPX-201": "3",
+    "OPX-202": "3",
+    "OPX-203": "32.9",
+    "OPX-204": "38.4"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "5.00",
+     "5.00",
+     "5 m of earthing cable per lightning arrester: 1 lightning arresters (1 OPX-175) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-148": [
+     "0.00",
+     "0.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 0 m of 32/40 pipe ÷ 150 = 0 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "0.00",
+     "0.00",
+     "2 packs of GI screws per pack of saddles: (0 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 0 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "0.00",
+     "0.00",
+     "2 packs of PVC gitti per pack of saddles: (0 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 0 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "5.00",
+     "5.00",
+     "5 m of PVC cable tray per inverter: 1 inverters (1 OPX-011) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-169": [
+     "41.00",
+     "41.00",
+     "One M8 nut bolt set per 2 m of GI strip: 82 m of GI strip ÷ 2 = 41 Set",
+     false
+    ],
+    "OPX-172": [
+     "4.00",
+     "4.00",
+     "One earthing chamber per earthing electrode: 4 earthing electrodes (4 OPX-170) = 4 Set",
+     false
+    ],
+    "OPX-173": [
+     "4.00",
+     "4.00",
+     "One bag of earthing compound per earthing electrode: 4 earthing electrodes (4 OPX-170) = 4 Nos",
+     false
+    ],
+    "OPX-174": [
+     "22.00",
+     "22.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 82 m of GI strip × 0.4 ÷ 1.5 = 21.8666…, rounded up to 22 Nos",
+     false
+    ],
+    "OPX-177": [
+     "80.00",
+     "80.00",
+     "2 module earthing sets per module: 40 modules (40 OPX-001) × 2 = 80 Set",
+     false
+    ],
+    "OPX-184": [
+     "1.00",
+     "1.00",
+     "One data logger per inverter: 1 inverters (1 OPX-011) = 1 Nos",
+     false
+    ],
+    "OPX-185": [
+     "5.00",
+     "5.00",
+     "5 m of RS485 cable per data logger: 1 data loggers × 5 = 5 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "1.00",
+     "1.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (20 m of 32 mm flexible conduit + 65 m of DC red cable) ÷ 150 = 0.5666…, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "1.00",
+     "1.00",
+     "As many packs of 400 mm ties as 250 mm ties: 1 packs of 250 mm ties = 1 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "10.00",
+     "10.00",
+     "One cable route marker per 5 m of trench: 50 m of trench ÷ 5 = 10 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "20.00",
+     "20.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (1 inverters (1 OPX-011) + 1 DCDBs (1 OPX-002) + 2 ACDBs (1 OPX-041 + 1 OPX-051)) × 4 + 4 = 20 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "1.00",
+     "1.00",
+     "One fire extinguisher per inverter: 1 inverters (1 OPX-011) = 1 Nos",
+     false
+    ],
+    "OPX-198": [
+     "2.00",
+     "2.00",
+     "2 danger boards per fire extinguisher: 1 fire extinguishers × 2 = 2 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "1.00",
+     "1.00",
+     "One display board per fire extinguisher: 1 fire extinguishers = 1 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "25.60",
+     "25.60",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 40 Tin Shade structures × 0.64 = 25.6 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "1.00",
+     "1.00",
+     "One insulating mat per inverter: 1 inverters (1 OPX-011) = 1 Nos",
+     false
+    ],
+    "OPX-256": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-257": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-258": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-260": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-261": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-262": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "0.00",
+     "0.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 0 m of 50/63 pipe ÷ 150 = 0 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "40",
+    "OPX-002": "1",
+    "OPX-011": "1",
+    "OPX-038": "40",
+    "OPX-041": "1",
+    "OPX-051": "1",
+    "OPX-059": "65",
+    "OPX-060": "30",
+    "OPX-061": "57",
+    "OPX-062": "16",
+    "OPX-063": "75",
+    "OPX-065": "10",
+    "OPX-101": "8",
+    "OPX-102": "40",
+    "OPX-105": "80",
+    "OPX-108": "12",
+    "OPX-133": "70",
+    "OPX-134": "15",
+    "OPX-135": "8",
+    "OPX-143": "20",
+    "OPX-147": "1",
+    "OPX-154": "2",
+    "OPX-155": "2",
+    "OPX-156": "70",
+    "OPX-168": "82",
+    "OPX-169": "27",
+    "OPX-170": "4",
+    "OPX-172": "4",
+    "OPX-173": "4",
+    "OPX-174": "32",
+    "OPX-175": "1",
+    "OPX-177": "80",
+    "OPX-179": "1",
+    "OPX-180": "1",
+    "OPX-184": "1",
+    "OPX-185": "2",
+    "OPX-186": "1",
+    "OPX-187": "50",
+    "OPX-188": "2",
+    "OPX-189": "1",
+    "OPX-190": "1",
+    "OPX-191": "5",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "16",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "1",
+    "OPX-198": "2",
+    "OPX-199": "1",
+    "OPX-200": "1",
+    "OPX-201": "20",
+    "OPX-202": "20",
+    "OPX-204": "24.8",
+    "OPX-206": "1"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "5.00",
+     "5.00",
+     "5 m of earthing cable per lightning arrester: 1 lightning arresters (1 OPX-176) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-148": [
+     "1.00",
+     "1.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 130 m of 32/40 pipe ÷ 150 = 0.8666…, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "2.00",
+     "2.00",
+     "2 packs of GI screws per pack of saddles: (1 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 2 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "2.00",
+     "2.00",
+     "2 packs of PVC gitti per pack of saddles: (1 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 2 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "5.00",
+     "5.00",
+     "5 m of PVC cable tray per inverter: 1 inverters (1 OPX-017) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-169": [
+     "60.00",
+     "60.00",
+     "One M8 nut bolt set per 2 m of GI strip: 120 m of GI strip ÷ 2 = 60 Set",
+     false
+    ],
+    "OPX-172": [
+     "6.00",
+     "6.00",
+     "One earthing chamber per earthing electrode: 6 earthing electrodes (6 OPX-170) = 6 Set",
+     false
+    ],
+    "OPX-173": [
+     "6.00",
+     "6.00",
+     "One bag of earthing compound per earthing electrode: 6 earthing electrodes (6 OPX-170) = 6 Nos",
+     false
+    ],
+    "OPX-174": [
+     "32.00",
+     "32.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 120 m of GI strip × 0.4 ÷ 1.5 = 32 Nos",
+     false
+    ],
+    "OPX-177": [
+     "176.00",
+     "176.00",
+     "2 module earthing sets per module: 88 modules (88 OPX-001) × 2 = 176 Set",
+     false
+    ],
+    "OPX-184": [
+     "1.00",
+     "1.00",
+     "One data logger per inverter: 1 inverters (1 OPX-017) = 1 Nos",
+     false
+    ],
+    "OPX-185": [
+     "5.00",
+     "5.00",
+     "5 m of RS485 cable per data logger: 1 data loggers × 5 = 5 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "2.00",
+     "2.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (25 m of 32 mm flexible conduit + 220 m of DC red cable) ÷ 150 = 1.6333…, rounded up to 2 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "2.00",
+     "2.00",
+     "As many packs of 400 mm ties as 250 mm ties: 2 packs of 250 mm ties = 2 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "20.00",
+     "20.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (1 inverters (1 OPX-017) + 1 DCDBs (1 OPX-004) + 2 ACDBs (1 OPX-044 + 1 OPX-054)) × 4 + 4 = 20 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "1.00",
+     "1.00",
+     "One fire extinguisher per inverter: 1 inverters (1 OPX-017) = 1 Nos",
+     false
+    ],
+    "OPX-198": [
+     "2.00",
+     "2.00",
+     "2 danger boards per fire extinguisher: 1 fire extinguishers × 2 = 2 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "1.00",
+     "1.00",
+     "One display board per fire extinguisher: 1 fire extinguishers = 1 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "0.00",
+     "0.00",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 0 Tin Shade structures × 0.64 = 0 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "1.00",
+     "1.00",
+     "One insulating mat per inverter: 1 inverters (1 OPX-017) = 1 Nos",
+     false
+    ],
+    "OPX-256": [
+     "13.00",
+     "13.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 130 m of 32/40 pipe × 0.1 = 13 Nos",
+     false
+    ],
+    "OPX-257": [
+     "13.00",
+     "13.00",
+     "Tees: 10% of the 32/40 pipe in metres: 130 m of 32/40 pipe × 0.1 = 13 Nos",
+     false
+    ],
+    "OPX-258": [
+     "13.00",
+     "13.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 130 m of 32/40 pipe × 0.1 = 13 Nos",
+     false
+    ],
+    "OPX-260": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-261": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-262": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "0.00",
+     "0.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 0 m of 50/63 pipe ÷ 150 = 0 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "88",
+    "OPX-004": "1",
+    "OPX-017": "1",
+    "OPX-027": "2",
+    "OPX-028": "2",
+    "OPX-030": "5",
+    "OPX-044": "1",
+    "OPX-054": "1",
+    "OPX-059": "220",
+    "OPX-060": "250",
+    "OPX-061": "10",
+    "OPX-087": "36",
+    "OPX-088": "10",
+    "OPX-089": "5",
+    "OPX-092": "30",
+    "OPX-101": "8",
+    "OPX-105": "176",
+    "OPX-108": "10",
+    "OPX-120": "7",
+    "OPX-122": "21",
+    "OPX-130": "130",
+    "OPX-134": "13",
+    "OPX-135": "13",
+    "OPX-143": "25",
+    "OPX-148": "1",
+    "OPX-154": "2",
+    "OPX-155": "2",
+    "OPX-164": "30",
+    "OPX-167": "5",
+    "OPX-168": "120",
+    "OPX-169": "60",
+    "OPX-170": "6",
+    "OPX-172": "6",
+    "OPX-173": "6",
+    "OPX-174": "32",
+    "OPX-176": "1",
+    "OPX-177": "176",
+    "OPX-179": "1",
+    "OPX-182": "1",
+    "OPX-184": "1",
+    "OPX-185": "5",
+    "OPX-186": "1",
+    "OPX-188": "2",
+    "OPX-189": "2",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "20",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "1",
+    "OPX-198": "2",
+    "OPX-199": "1",
+    "OPX-200": "1",
+    "OPX-203": "56.32",
+    "OPX-206": "1",
+    "OPX-209": "1",
+    "OPX-210": "3",
+    "OPX-256": "13",
+    "OPX-257": "13",
+    "OPX-258": "13",
+    "OPX-271": "1"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "0",
+     "20.00",
+     "5 m of earthing cable per lightning arrester: set by hand to 0 Meter; the rule gives 20 Meter",
+     true
+    ],
+    "OPX-148": [
+     "1.00",
+     "1.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 80 m of 32/40 pipe ÷ 150 = 0.5333…, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "4.00",
+     "4.00",
+     "2 packs of GI screws per pack of saddles: (1 packs of 40 mm saddles + 1 packs of 63 mm saddles) × 2 = 4 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "4.00",
+     "4.00",
+     "2 packs of PVC gitti per pack of saddles: (1 packs of 40 mm saddles + 1 packs of 63 mm saddles) × 2 = 4 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "5.00",
+     "5.00",
+     "5 m of PVC cable tray per inverter: 1 inverters (1 OPX-012) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-169": [
+     "60.00",
+     "60.00",
+     "One M8 nut bolt set per 2 m of GI strip: 120 m of GI strip ÷ 2 = 60 Set",
+     false
+    ],
+    "OPX-172": [
+     "4.00",
+     "4.00",
+     "One earthing chamber per earthing electrode: 4 earthing electrodes (4 OPX-170) = 4 Set",
+     false
+    ],
+    "OPX-173": [
+     "4.00",
+     "4.00",
+     "One bag of earthing compound per earthing electrode: 4 earthing electrodes (4 OPX-170) = 4 Nos",
+     false
+    ],
+    "OPX-174": [
+     "32.00",
+     "32.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 120 m of GI strip × 0.4 ÷ 1.5 = 32 Nos",
+     false
+    ],
+    "OPX-177": [
+     "88.00",
+     "88.00",
+     "2 module earthing sets per module: 44 modules (44 OPX-001) × 2 = 88 Set",
+     false
+    ],
+    "OPX-184": [
+     "1.00",
+     "1.00",
+     "One data logger per inverter: 1 inverters (1 OPX-012) = 1 Nos",
+     false
+    ],
+    "OPX-185": [
+     "5.00",
+     "5.00",
+     "5 m of RS485 cable per data logger: 1 data loggers × 5 = 5 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "1.00",
+     "1.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (20 m of 32 mm flexible conduit + 95 m of DC red cable) ÷ 150 = 0.7666…, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "1.00",
+     "1.00",
+     "As many packs of 400 mm ties as 250 mm ties: 1 packs of 250 mm ties = 1 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "20.00",
+     "20.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (1 inverters (1 OPX-012) + 1 DCDBs (1 OPX-002) + 2 ACDBs (1 OPX-042 + 1 OPX-052)) × 4 + 4 = 20 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "1.00",
+     "1.00",
+     "One fire extinguisher per inverter: 1 inverters (1 OPX-012) = 1 Nos",
+     false
+    ],
+    "OPX-198": [
+     "2.00",
+     "2.00",
+     "2 danger boards per fire extinguisher: 1 fire extinguishers × 2 = 2 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "1.00",
+     "1.00",
+     "One display board per fire extinguisher: 1 fire extinguishers = 1 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "0.00",
+     "0.00",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 0 Tin Shade structures × 0.64 = 0 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "1.00",
+     "1.00",
+     "One insulating mat per inverter: 1 inverters (1 OPX-012) = 1 Nos",
+     false
+    ],
+    "OPX-256": [
+     "8.00",
+     "8.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 80 m of 32/40 pipe × 0.1 = 8 Nos",
+     false
+    ],
+    "OPX-257": [
+     "8.00",
+     "8.00",
+     "Tees: 10% of the 32/40 pipe in metres: 80 m of 32/40 pipe × 0.1 = 8 Nos",
+     false
+    ],
+    "OPX-258": [
+     "8.00",
+     "8.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 80 m of 32/40 pipe × 0.1 = 8 Nos",
+     false
+    ],
+    "OPX-260": [
+     "4.00",
+     "4.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 35 m of 50/63 pipe × 0.1 = 3.5, rounded up to 4 Nos",
+     false
+    ],
+    "OPX-261": [
+     "4.00",
+     "4.00",
+     "Tees: 10% of the 50/63 pipe in metres: 35 m of 50/63 pipe × 0.1 = 3.5, rounded up to 4 Nos",
+     false
+    ],
+    "OPX-262": [
+     "4.00",
+     "4.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 35 m of 50/63 pipe × 0.1 = 3.5, rounded up to 4 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "1.00",
+     "1.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 35 m of 50/63 pipe ÷ 150 = 0.2333…, rounded up to 1 Pkt",
+     false
+    ]
+   },
+   "overrides": {
+    "OPX-089": "0"
+   },
+   "quantities": {
+    "OPX-001": "44",
+    "OPX-002": "1",
+    "OPX-012": "1",
+    "OPX-028": "1",
+    "OPX-030": "3",
+    "OPX-042": "1",
+    "OPX-052": "1",
+    "OPX-059": "95",
+    "OPX-060": "95",
+    "OPX-061": "8",
+    "OPX-064": "3",
+    "OPX-087": "17.6",
+    "OPX-088": "30",
+    "OPX-089": "0",
+    "OPX-101": "8",
+    "OPX-103": "8",
+    "OPX-105": "88",
+    "OPX-108": "16",
+    "OPX-119": "24",
+    "OPX-130": "80",
+    "OPX-143": "20",
+    "OPX-148": "1",
+    "OPX-154": "4",
+    "OPX-155": "4",
+    "OPX-167": "5",
+    "OPX-168": "120",
+    "OPX-169": "60",
+    "OPX-170": "4",
+    "OPX-172": "4",
+    "OPX-173": "4",
+    "OPX-174": "32",
+    "OPX-175": "4",
+    "OPX-177": "88",
+    "OPX-179": "1",
+    "OPX-181": "1",
+    "OPX-184": "1",
+    "OPX-185": "5",
+    "OPX-186": "1",
+    "OPX-188": "1",
+    "OPX-189": "1",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "20",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "1",
+    "OPX-198": "2",
+    "OPX-199": "1",
+    "OPX-200": "1",
+    "OPX-203": "28.16",
+    "OPX-206": "1",
+    "OPX-244": "30",
+    "OPX-256": "8",
+    "OPX-257": "8",
+    "OPX-258": "8",
+    "OPX-259": "35",
+    "OPX-260": "4",
+    "OPX-261": "4",
+    "OPX-262": "4",
+    "OPX-267": "1",
+    "OPX-272": "1"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "15.00",
+     "15.00",
+     "5 m of earthing cable per lightning arrester: 3 lightning arresters (3 OPX-175) × 5 = 15 Meter",
+     false
+    ],
+    "OPX-148": [
+     "1.00",
+     "1.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 60 m of 32/40 pipe ÷ 150 = 0.4, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "2.00",
+     "2.00",
+     "2 packs of GI screws per pack of saddles: (1 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 2 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "2.00",
+     "2.00",
+     "2 packs of PVC gitti per pack of saddles: (1 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 2 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "5.00",
+     "5.00",
+     "5 m of PVC cable tray per inverter: 1 inverters (1 OPX-009) × 5 = 5 Meter",
+     false
+    ],
+    "OPX-169": [
+     "25.00",
+     "25.00",
+     "One M8 nut bolt set per 2 m of GI strip: 50 m of GI strip ÷ 2 = 25 Set",
+     false
+    ],
+    "OPX-172": [
+     "4.00",
+     "4.00",
+     "One earthing chamber per earthing electrode: 4 earthing electrodes (4 OPX-170) = 4 Set",
+     false
+    ],
+    "OPX-173": [
+     "4.00",
+     "4.00",
+     "One bag of earthing compound per earthing electrode: 4 earthing electrodes (4 OPX-170) = 4 Nos",
+     false
+    ],
+    "OPX-174": [
+     "14.00",
+     "14.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 50 m of GI strip × 0.4 ÷ 1.5 = 13.3333…, rounded up to 14 Nos",
+     false
+    ],
+    "OPX-177": [
+     "54.00",
+     "54.00",
+     "2 module earthing sets per module: 27 modules (27 OPX-001) × 2 = 54 Set",
+     false
+    ],
+    "OPX-184": [
+     "1.00",
+     "1.00",
+     "One data logger per inverter: 1 inverters (1 OPX-009) = 1 Nos",
+     false
+    ],
+    "OPX-185": [
+     "5.00",
+     "5.00",
+     "5 m of RS485 cable per data logger: 1 data loggers × 5 = 5 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "1.00",
+     "1.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (10 m of 32 mm flexible conduit + 40 m of DC red cable) ÷ 150 = 0.3333…, rounded up to 1 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "1.00",
+     "1.00",
+     "As many packs of 400 mm ties as 250 mm ties: 1 packs of 250 mm ties = 1 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1.00",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: a fixed 1 Pkt",
+     false
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "16.00",
+     "16.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (1 inverters (1 OPX-009) + 1 DCDBs (1 OPX-002) + 1 ACDBs (1 OPX-040)) × 4 + 4 = 16 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "1.00",
+     "1.00",
+     "One fire extinguisher per inverter: 1 inverters (1 OPX-009) = 1 Nos",
+     false
+    ],
+    "OPX-198": [
+     "2.00",
+     "2.00",
+     "2 danger boards per fire extinguisher: 1 fire extinguishers × 2 = 2 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "1.00",
+     "1.00",
+     "One display board per fire extinguisher: 1 fire extinguishers = 1 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "17.28",
+     "17.28",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 27 Tin Shade structures × 0.64 = 17.28 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "1.00",
+     "1.00",
+     "One insulating mat per inverter: 1 inverters (1 OPX-009) = 1 Nos",
+     false
+    ],
+    "OPX-256": [
+     "6.00",
+     "6.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 60 m of 32/40 pipe × 0.1 = 6 Nos",
+     false
+    ],
+    "OPX-257": [
+     "6.00",
+     "6.00",
+     "Tees: 10% of the 32/40 pipe in metres: 60 m of 32/40 pipe × 0.1 = 6 Nos",
+     false
+    ],
+    "OPX-258": [
+     "6.00",
+     "6.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 60 m of 32/40 pipe × 0.1 = 6 Nos",
+     false
+    ],
+    "OPX-260": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-261": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-262": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "0.00",
+     "0.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 0 m of 50/63 pipe ÷ 150 = 0 Pkt",
+     false
+    ]
+   },
+   "overrides": {},
+   "quantities": {
+    "OPX-001": "27",
+    "OPX-002": "1",
+    "OPX-009": "1",
+    "OPX-038": "27",
+    "OPX-040": "1",
+    "OPX-059": "40",
+    "OPX-060": "30",
+    "OPX-061": "30",
+    "OPX-062": "9",
+    "OPX-087": "27",
+    "OPX-088": "20",
+    "OPX-101": "4",
+    "OPX-105": "74",
+    "OPX-108": "12",
+    "OPX-130": "60",
+    "OPX-134": "6",
+    "OPX-135": "6",
+    "OPX-143": "10",
+    "OPX-154": "1",
+    "OPX-155": "1",
+    "OPX-167": "5",
+    "OPX-168": "50",
+    "OPX-169": "25",
+    "OPX-170": "4",
+    "OPX-172": "4",
+    "OPX-173": "4",
+    "OPX-174": "15",
+    "OPX-175": "3",
+    "OPX-177": "54",
+    "OPX-178": "1",
+    "OPX-184": "1",
+    "OPX-185": "2",
+    "OPX-186": "1",
+    "OPX-188": "1",
+    "OPX-190": "0",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "12",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-197": "1",
+    "OPX-198": "2",
+    "OPX-199": "1",
+    "OPX-200": "1",
+    "OPX-201": "25",
+    "OPX-202": "25",
+    "OPX-204": "16.74",
+    "OPX-206": "1"
+   }
+  },
+  {
+   "before": {
+    "OPX-089": [
+     "0.00",
+     "0.00",
+     "5 m of earthing cable per lightning arrester: 0 lightning arresters × 5 = 0 Meter",
+     false
+    ],
+    "OPX-148": [
+     "0.00",
+     "0.00",
+     "One 40 mm saddle per 1.5 m of 32/40 pipe, in packs of 100: 0 m of 32/40 pipe ÷ 150 = 0 Pkt",
+     false
+    ],
+    "OPX-154": [
+     "0.00",
+     "0.00",
+     "2 packs of GI screws per pack of saddles: (0 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 0 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-155": [
+     "0.00",
+     "0.00",
+     "2 packs of PVC gitti per pack of saddles: (0 packs of 40 mm saddles + 0 packs of 63 mm saddles) × 2 = 0 Pkt (packs of 40 mm saddles, packs of 63 mm saddles are computed lines; the rounded quantity is used)",
+     false
+    ],
+    "OPX-167": [
+     "0.00",
+     "0.00",
+     "5 m of PVC cable tray per inverter: 0 inverters × 5 = 0 Meter",
+     false
+    ],
+    "OPX-169": [
+     "0.00",
+     "0.00",
+     "One M8 nut bolt set per 2 m of GI strip: 0 m of GI strip ÷ 2 = 0 Set",
+     false
+    ],
+    "OPX-172": [
+     "0.00",
+     "0.00",
+     "One earthing chamber per earthing electrode: 0 earthing electrodes = 0 Set",
+     false
+    ],
+    "OPX-173": [
+     "0.00",
+     "0.00",
+     "One bag of earthing compound per earthing electrode: 0 earthing electrodes = 0 Nos",
+     false
+    ],
+    "OPX-174": [
+     "0.00",
+     "0.00",
+     "Epoxy insulators: 40% of the GI strip, one per 1.5 m: 0 m of GI strip × 0.4 ÷ 1.5 = 0 Nos",
+     false
+    ],
+    "OPX-177": [
+     "136.00",
+     "136.00",
+     "2 module earthing sets per module: 68 modules (68 OPX-001) × 2 = 136 Set",
+     false
+    ],
+    "OPX-184": [
+     "0.00",
+     "0.00",
+     "One data logger per inverter: 0 inverters = 0 Nos",
+     false
+    ],
+    "OPX-185": [
+     "0.00",
+     "0.00",
+     "5 m of RS485 cable per data logger: 0 data loggers × 5 = 0 Meter (data loggers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-186": [
+     "1.00",
+     "1.00",
+     "One WMS per site: a fixed 1 Set",
+     false
+    ],
+    "OPX-188": [
+     "0.00",
+     "0.00",
+     "One 250 mm cable tie per 1.5 m of flexible conduit and DC red cable, in packs of 100: (0 m of 32 mm flexible conduit + 0 m of DC red cable) ÷ 150 = 0 Pkt",
+     false
+    ],
+    "OPX-189": [
+     "0.00",
+     "0.00",
+     "As many packs of 400 mm ties as 250 mm ties: 0 packs of 250 mm ties = 0 Pkt (packs of 250 mm ties is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-190": [
+     "1",
+     "1.00",
+     "One pack of 500 mm SS cable ties per site: set by hand to 1 Pkt; the rule gives 1 Pkt",
+     true
+    ],
+    "OPX-191": [
+     "0.00",
+     "0.00",
+     "One cable route marker per 5 m of trench: 0 m of trench ÷ 5 = 0 Nos",
+     false
+    ],
+    "OPX-192": [
+     "16.00",
+     "16.00",
+     "16 PVC tapes per site: a fixed 16 Nos",
+     false
+    ],
+    "OPX-193": [
+     "1.00",
+     "1.00",
+     "1 kg of silver spray paint per site: a fixed 1 Kg",
+     false
+    ],
+    "OPX-194": [
+     "4.00",
+     "4.00",
+     "4 fasteners per inverter, DCDB and ACDB, plus 4: (0 inverters + 0 DCDBs + 0 ACDBs) × 4 + 4 = 4 Nos",
+     false
+    ],
+    "OPX-195": [
+     "1.00",
+     "1.00",
+     "One set of ferrules per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-196": [
+     "1.00",
+     "1.00",
+     "One can of PU foam per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-197": [
+     "0.00",
+     "0.00",
+     "One fire extinguisher per inverter: 0 inverters = 0 Nos",
+     false
+    ],
+    "OPX-198": [
+     "0.00",
+     "0.00",
+     "2 danger boards per fire extinguisher: 0 fire extinguishers × 2 = 0 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-199": [
+     "0.00",
+     "0.00",
+     "One display board per fire extinguisher: 0 fire extinguishers = 0 Nos (fire extinguishers is a computed line; the rounded quantity is used)",
+     false
+    ],
+    "OPX-200": [
+     "1.00",
+     "1.00",
+     "One CCTV per site: a fixed 1 Nos",
+     false
+    ],
+    "OPX-204": [
+     "0.00",
+     "0.00",
+     "INC work Tin Shade: 0.64 kWp per Tin Shade structure: 0 Tin Shade structures × 0.64 = 0 KWp",
+     false
+    ],
+    "OPX-205": [
+     "0.00",
+     "0.00",
+     "INC work Ballast: 0.62 kWp per Ballast structure: 0 Ballast structures × 0.62 = 0 KWp",
+     false
+    ],
+    "OPX-206": [
+     "0.00",
+     "0.00",
+     "One insulating mat per inverter: 0 inverters = 0 Nos",
+     false
+    ],
+    "OPX-256": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-257": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-258": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 32/40 pipe in metres: 0 m of 32/40 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-260": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-261": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-262": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 50/63 pipe in metres: 0 m of 50/63 pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-264": [
+     "0.00",
+     "0.00",
+     "Elbows: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-265": [
+     "0.00",
+     "0.00",
+     "Tees: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-266": [
+     "0.00",
+     "0.00",
+     "Couplers: 10% of the 100 mm pipe in metres: 0 m of 100 mm pipe × 0.1 = 0 Nos",
+     false
+    ],
+    "OPX-267": [
+     "0.00",
+     "0.00",
+     "One 63 mm saddle per 1.5 m of 50/63 pipe, in packs of 100: 0 m of 50/63 pipe ÷ 150 = 0 Pkt",
+     false
+    ]
+   },
+   "overrides": {
+    "OPX-190": "1"
+   },
+   "quantities": {
+    "OPX-001": "68",
+    "OPX-177": "136",
+    "OPX-186": "1",
+    "OPX-190": "1",
+    "OPX-192": "16",
+    "OPX-193": "1",
+    "OPX-194": "4",
+    "OPX-195": "1",
+    "OPX-196": "1",
+    "OPX-200": "1",
+    "OPX-273": "1"
+   }
+  }
+ ]
+}

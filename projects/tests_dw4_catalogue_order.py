@@ -484,8 +484,8 @@ QUERY_PINS = {
     'QC review (QC)':               34,
     'site card rows':               1,
     'raise form, Residential (SCM)': 13,
-    'design group screen (Head)':   16,
-    'design group Excel (Head)':    11,
+    'design group screen (Head)':   17,   # DW-6: +1 the rules that raise warnings
+    'design group Excel (Head)':    12,   # DW-6: +1 the rules that raise warnings
     'Head catalogue':               7,
     'Admin catalogue':              10,
 }

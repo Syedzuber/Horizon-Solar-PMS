@@ -142,6 +142,8 @@ from .boq_formulas import (
     # DW-3 - Remove (an override to 0): its marker, its refusal test and its pop-up list.
     REMOVED_MARKER, formula_line_blocked, is_removed, removal_previews, removed_label,
     sheet_line,
+    # DW-6 - the rule warnings alone, for this page (one query, Design users only).
+    read_warning_rules, rule_warning_text, sheet_warnings,
     # B-2e - the line's joined override, read by the shared override helper.
     _override_of,
 )
@@ -9894,6 +9896,21 @@ def boq_detail(request, project_id):
             item.removed_marker = (f'{removed_label(override)}: {override.note}'
                                    if show_removed_detail else REMOVED_MARKER)
 
+    # DW-6 (I5) — the formula rules' warnings ("INC 2P counts X modules; ..."), for Design
+    # users only, like the Removed detail above: SCM, the PM and everyone else see the
+    # figures alone. Information only; nothing on this page is refused over one.
+    # One query (read_warning_rules), and none for anyone else or for a Residential site;
+    # the quantities are the lines already loaded above, summed per catalogue item.
+    rule_warnings_shown = []
+    if show_removed_detail and project.project_type == 'OPEX' and items:
+        quantities = {}
+        for item in items:
+            if item.item_master_id is not None and item.boq_quantity is not None:
+                quantities[item.item_master_id] = (quantities.get(item.item_master_id, 0)
+                                                   + item.boq_quantity)
+        rule_warnings_shown = [(w.code, rule_warning_text(w)) for w in sheet_warnings(
+            read_warning_rules(project.project_type), quantities)]
+
     # Annotate each item with make_brand_display: the brand label shown in the static
     # (non-editable) Make/Preference cell. Resolved from VendorBrand in one batch query.
     _vendor_ids = {i.make_preference_id for i in items if i.make_preference_id}
@@ -9992,6 +10009,7 @@ def boq_detail(request, project_id):
         'items':               items,
         'items_by_category':   items_by_category.items(),
         'role':                role,
+        'rule_warnings':       rule_warnings_shown,
         'boq_group_locked':    boq_group_locked,
         'locked_group':        locked_group,
         'design_form_open':    design_form_open,
@@ -10377,6 +10395,10 @@ def opex_boq_entry(request, project_id):
         else:
             single_on.append(row)
     multi_messages = list(dict.fromkeys(row.formula_info.explanation for row in multi_rows))
+    # DW-6 (answer 7): an item on 2+ lines is not calculated, but its rule's warnings (from
+    # the drivers) are still shown, under the same heading.
+    multi_messages += list(dict.fromkeys(text for row in multi_rows
+                                         for text in row.formula_info.warnings))
 
     # The catalogue, as the picker's JS consumes it. Items already on the sheet are still
     # sent — the JS filters them out of the results and needs them to render the sheet
@@ -10436,6 +10458,9 @@ def opex_boq_entry(request, project_id):
             # `rm` is the Removed marker (R4); `follow` and `also` fill the Remove pop-up.
             if info.is_removed:
                 entry['rm'] = info.removed_by
+            # DW-6: `warn` only where the rule raised one, so every other row is as before.
+            if info.warnings:
+                entry['warn'] = list(info.warnings)
             preview = previews.get(row.item_master_id)
             if preview is not None and preview.follow:
                 entry['follow'] = list(preview.follow)
@@ -10541,6 +10566,8 @@ def opex_boq_entry(request, project_id):
         'calc_multi_rows':   multi_rows,
         'calc_multi_messages': multi_messages,
         'calculated_absent': calculated_absent,
+        # DW-6: the block opens by itself when a row in it carries a rule warning.
+        'calculated_absent_warned': any(row.get('warnings') for row in calculated_absent),
         'category_order':   category_order,
         'empty_categories': empty_categories,
         'can_edit':         can_edit,
@@ -10990,7 +11017,11 @@ def _calculated_absent_rows(formulas, catalogue_by_id):
         rows.append({
             'master_id': item_id, 'code': master.code, 'description': master.description,
             'unit': master.unit, 'explanation': result.explanation if result else '',
-            'stale': stale})
+            'stale': stale,
+            # DW-6: a clamped INC 2P has no line on the designer's path (D1), so this block
+            # is where its warnings show. The key only where there is one, so every other
+            # row is exactly what it was.
+            **({'warnings': result.warning_texts} if result and result.warnings else {})})
     return rows
 
 
@@ -13913,6 +13944,8 @@ def boq_correct(request, project_id):
         # line (E5); DW-3 — Remove and Restore on the same rows. Worked out above.
         'can_override':    can_override,
         'calculated_absent': calculated_absent,
+        # DW-6: the block opens by itself when a row in it carries a rule warning.
+        'calculated_absent_warned': any(row.get('warnings') for row in calculated_absent),
         # Opens the "calculated items not on this BOQ" block when its form has the error.
         'calculated_absent_error': any('override_error' in item for item in calculated_absent),
     })

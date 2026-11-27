@@ -51,6 +51,9 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 
 from .accb import ACCB_CONFIGURED_CODE
+# DW-6: the formula rules' warnings, read in one query and decided by the engine's own
+# function (rule_warnings, through sheet_warnings), so a group says what the picker says.
+from .boq_formulas import read_warning_rules, sheet_warnings, warning_text
 from .design_views import aggregate_group_boq
 from .design_nav import DesignNav  # DW-8: "← My queue" on the group screens
 from .models import (
@@ -273,8 +276,36 @@ def _content_gaps(counted_codes, agg):
     return out
 
 
+def _rule_warnings(counted_codes, agg):
+    """DW-6 (I5): [{'site', 'code', 'check', 'kind', 'modules', 'structure_modules'}] for
+    each formula-rule warning on a counted site (INC 2P below 0, or its cross-check), in
+    member order then the rules' target-code order.
+
+    FROM THE LINES aggregate_group_boq() ALREADY LOADED, like _content_gaps(): its catalogue
+    `contributions` are the lines with a quantity above 0, and a blank or 0 line adds
+    nothing to a driver sum anyway. The rules cost ONE query (read_warning_rules), and none
+    when nothing is counted: never a query per site or per line.
+    """
+    if not counted_codes:
+        return []
+    specs = read_warning_rules('OPEX')
+    if not specs:
+        return []
+    quantities = {code: {} for code in counted_codes}
+    for line in agg['lines']:
+        for site, qty in line['contributions']:
+            per_item = quantities.setdefault(site, {})
+            per_item[line['item_master']] = per_item.get(line['item_master'], Decimal('0')) + qty
+    out = []
+    for code in counted_codes:
+        for w in sheet_warnings(specs, quantities[code]):
+            out.append({'site': code, 'code': w.code, 'check': w.check, 'kind': w.kind,
+                        'modules': w.modules, 'structure_modules': w.structure_modules})
+    return out
+
+
 def consolidate(member_rows):
-    """The live consolidated BOQ of the counted members. 5 queries, whatever the size (4
+    """The live consolidated BOQ of the counted members. 6 queries, whatever the size (4
     when nothing is counted).
 
     aggregate_group_boq() supplies the catalogue lines, the ACCB configurations and the
@@ -289,6 +320,9 @@ def consolidate(member_rows):
 
     DW-1b adds the fifth: the formula groups for `content_gaps`, each counted site missing an
     inverter or a DCDB, ACDB or ACCB (_content_gaps). Warned about, still counted.
+
+    DW-6 adds the sixth: the formula rules that raise warnings, for `rule_warnings`
+    (_rule_warnings). Warned about, still counted.
     """
     counted_ids = [r['project'].pk for r in member_rows if r['counted']]
     agg = aggregate_group_boq(counted_ids)
@@ -362,6 +396,7 @@ def consolidate(member_rows):
         'blanks':         blanks,
         'unit_warnings':  unit_warnings,
         'content_gaps':   _content_gaps(counted_codes, agg),
+        'rule_warnings':  _rule_warnings(counted_codes, agg),
     }
 
 
@@ -373,17 +408,20 @@ def consolidate(member_rows):
 #: old snapshot can never be silently misread by newer code.
 #: 2 — DW-1b (Zuber, DW-1 Q4): adds `content_gaps`. A version-1 snapshot predates the check,
 #: so it is read as having none, and shows no content-gap line and no "checked" wording.
-GROUP_BOQ_DATA_VERSION = 2
+#: 3 — DW-6 (I5): adds `rule_warnings`, the formula rules' warnings per counted site, stored
+#: as facts (numbers and kinds) and worded when shown. Versions 1 and 2 predate them, so they
+#: are read as having none and open exactly as before.
+GROUP_BOQ_DATA_VERSION = 3
 
 #: Every version hydrate() can read. Each older one is named here and handled explicitly in
 #: hydrate(), never guessed at (Zuber A1).
-GROUP_BOQ_DATA_READABLE = (1, 2)
+GROUP_BOQ_DATA_READABLE = (1, 2, 3)
 
 #: Every key group_boq_data() writes, per level. NO PRICES (S1): a snapshot stores these and
 #: nothing else. tests_design_boq_group_snapshots pins this list by hand.
 GROUP_BOQ_DATA_KEYS = {
     'top':          ('version', 'group_name', 'sites', 'lines', 'accb_lines', 'unlinked',
-                     'blanks', 'unit_warnings', 'content_gaps'),
+                     'blanks', 'unit_warnings', 'content_gaps', 'rule_warnings'),
     'site':         ('id', 'code', 'name', 'tender', 'designer', 'status', 'counted'),
     'line':         ('code', 'description', 'unit', 'site_count', 'total', 'retired', 'per_site'),
     'accb':         ('config_key', 'description', 'unit', 'site_count', 'total', 'retired',
@@ -393,6 +431,8 @@ GROUP_BOQ_DATA_KEYS = {
     'unit_warning': ('site', 'code', 'quantity', 'line_unit', 'catalogue_unit', 'reasons'),
     # DW-1b: the gap KEYS (e.g. 'no_inverter'), worded by BOQ_GAP_WORDS when shown (A9).
     'content_gap':  ('site', 'gaps'),
+    # DW-6: the facts of one rule warning, worded by boq_formulas.warning_text() when shown.
+    'rule_warning': ('site', 'code', 'check', 'kind', 'modules', 'structure_modules'),
 }
 
 #: What group_boq_data() reads from consolidate() and _member_rows(), per level. With
@@ -402,7 +442,7 @@ GROUP_BOQ_DATA_KEYS = {
 #: in group_boq_data() and pinned by the round-trip test instead.
 GROUP_BOQ_KEYS_READ = {
     'boq':          {'lines', 'accb_lines', 'unlinked', 'blanks', 'unit_warnings',
-                     'content_gaps'},
+                     'content_gaps', 'rule_warnings'},
     'line':         {'item_master__code', 'item_master__description', 'item_master__unit',
                      'site_count', 'total_quantity', 'retired', 'per_site_list'},
     'accb':         {'config_key', 'description', 'unit', 'site_count', 'total_quantity',
@@ -410,6 +450,7 @@ GROUP_BOQ_KEYS_READ = {
     'blank':        {'site', 'code', 'description'},
     'unit_warning': {'site', 'code', 'quantity', 'line_unit', 'catalogue_unit', 'reasons'},
     'content_gap':  {'site', 'gaps'},
+    'rule_warning': {'site', 'code', 'check', 'kind', 'modules', 'structure_modules'},
     'member_row':   {'project', 'code', 'tender', 'designer', 'status', 'counted'},
 }
 
@@ -427,6 +468,7 @@ GROUP_BOQ_KEYS_IGNORED = {
     'blank':        {},
     'unit_warning': {},
     'content_gap':  {},
+    'rule_warning': {},
     'member_row': {'membership': 'live only: the Sites tab Remove button'},
 }
 
@@ -513,6 +555,16 @@ def group_boq_data(group_name, member_rows, boq):
         'content_gaps': [{
             'site': g['site'], 'gaps': list(g['gaps']),
         } for g in boq['content_gaps']],
+        # DW-6: numbers as _canon() strings, like every quantity here (a JSON number comes
+        # back as a float).
+        'rule_warnings': [{
+            'site':              w['site'],
+            'code':              w['code'],
+            'check':             w['check'],
+            'kind':              w['kind'],
+            'modules':           _canon(w['modules']),
+            'structure_modules': _canon(w['structure_modules']),
+        } for w in boq['rule_warnings']],
     }
 
 
@@ -586,6 +638,12 @@ def hydrate(data):
             # the key, so it is read directly and a damaged one raises.
             'content_gaps':  ([] if data['version'] == 1 else
                               [dict(g, gaps=list(g['gaps'])) for g in data['content_gaps']]),
+            # DW-6: versions 1 and 2 predate the rule warnings and show none; version 3
+            # always carries the key, so it is read directly and a damaged one raises.
+            'rule_warnings': ([] if data['version'] < 3 else
+                              [dict(w, modules=_dec(w['modules']),
+                                    structure_modules=_dec(w['structure_modules']))
+                               for w in data['rule_warnings']]),
         },
     }
 
@@ -1323,6 +1381,12 @@ def warning_lines(boq):
     for g in boq['content_gaps']:
         lines.append(f"{g['site']}: " + '; '.join(BOQ_GAP_WORDS.get(k, k) for k in g['gaps'])
                      + '. Still counted in the totals.')
+    # DW-6: one line per formula-rule warning, in the engine's own words (warning_text), so
+    # the group, the picker and the review screens say the same thing.
+    for w in boq['rule_warnings']:
+        lines.append(f"{w['site']} {w['code']}: "
+                     + warning_text(w['kind'], w['code'], w['check'], w['modules'],
+                                    w['structure_modules']))
     return lines
 
 

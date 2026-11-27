@@ -13,7 +13,7 @@ with the items but not the rules, earthing sets ignore the new lines. So, all at
      unit Nos, positions 12 / 14 / 16 / 18, `is_module`, each logged like a catalogue create;
   2. OPX-001 marked `is_module` (its wattage stays not recorded), logged;
   3. the design settings row at 640 Wp (M8, Q14), logged;
-  4. the rules file (load_formula_rules' own plan and write, on DEFAULT_FILE, the DW-5 file):
+  4. the rules file (load_formula_rules' own plan and write, on DW5_FILE, the DW-5 file):
      creates the open group "all modules" and replaces R12 so OPX-177 reads the group (M4).
      REFUSED if the file would write anything else: no other rule may change (stop rule);
   5. OPX-001's mandatory flag cleared and the item retired (M5, M6), logged.
@@ -40,6 +40,11 @@ from .load_formula_rules import (
     DEFAULT_FILE, LOADED_ACTION_CODE, REPLACE, CREATE, WRITES, G_SAME,
     plan_load, read_file, write_plan,
 )
+
+# DW-6: pinned to the DW-5 file. load_formula_rules' default moved on to the DW-6 file, which
+# adds INC2P; this command's own check refuses any rule write but R12's, and the INC 2P rule
+# is loaded by load_formula_rules only (and on production only after Praveen's answer).
+DW5_FILE = DEFAULT_FILE.parent / 'dw5_formula_rules_27nov.json'
 
 ACTOR = 'apply_dw5_modules (system)'
 ACTION_CODE = 'dw5_modules_applied'
@@ -73,7 +78,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--apply', action='store_true',
                             help='Write. Without it everything is worked out and rolled back.')
-        parser.add_argument('--file', default=str(DEFAULT_FILE),
+        parser.add_argument('--file', default=str(DW5_FILE),
                             help='The rules file (default: the DW-5 file in projects/data).')
 
     def _say(self, text=''):

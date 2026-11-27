@@ -199,6 +199,9 @@ EXAMPLES = [
     ('R22',  {'OPX-218': 3}, '6'), ('R23', {'OPX-218': 3}, '3'),
     ('R24',  {'OPX-038': 3}, '1.92'),
     ('R25',  {'OPX-037': 1}, '0.62'),
+    # DW-6: (100 modules - 10 Tin Shade) x 640 Wp / 1000. This catalogue marks no item as a
+    # module, so the wattage is the default (640); tests_dw6_inc2p covers the wattage rules.
+    ('INC2P', {'OPX-001': 100, 'OPX-038': 10}, '57.6'),
 ]
 
 
@@ -303,14 +306,15 @@ class LoaderTests(B2cBase):
     def test_the_dry_run_writes_nothing(self):
         out = self.load()
         self.assertIn('DRY RUN', out)
-        # DW-5: six groups — the DW-5 file (now the default) adds "all modules".
-        self.assertIn('Summary: rules create 39; groups create 6', out)
+        # DW-5: six groups — the DW-5 file adds "all modules". DW-6: 40 rules — the DW-6
+        # file (now the default) adds INC2P.
+        self.assertIn('Summary: rules create 40; groups create 6', out)
         self.assertEqual(_rows(), ([], [], [], []))
 
     def test_every_rule_in_the_file_is_active_including_r24_and_r25(self):
         # Q3 (Zuber, 24 Nov): R24/R25 switched on; B-2c first shipped them off.
         rules = {r['key']: r['active'] for r in rules_data()['rules']}
-        self.assertEqual(len(rules), 39)
+        self.assertEqual(len(rules), 40)      # DW-6: + INC2P
         self.assertTrue(all(rules.values()))
         self.assertTrue(rules['R24'] and rules['R25'])
 
@@ -333,7 +337,7 @@ class LoaderTests(B2cBase):
                     self.assertEqual(_db_definition(rule), _file_definition(entry))
                 else:
                     self.assertIsNone(rule)
-        self.assertIn('Written: 6 group create, 39 create', out)   # DW-5: + "all modules"
+        self.assertIn('Written: 6 group create, 40 create', out)   # DW-5: + "all modules"; DW-6: + INC2P
         self.assertEqual(ActivityLog.objects.filter(
             action_code='boq_formula_rules_loaded').count(), 1)
 
@@ -346,7 +350,7 @@ class LoaderTests(B2cBase):
                   if q['sql'].lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))]
         self.assertEqual(writes, [])
         self.assertEqual((_rows(), ActivityLog.objects.count()), (before, logs))
-        self.assertIn('Summary: rules same 39; groups same 6', out)   # DW-5: + "all modules"
+        self.assertIn('Summary: rules same 40; groups same 6', out)   # DW-5: + "all modules"; DW-6: + INC2P
         self.assertIn('Written: nothing (the database already matches the file)', out)
 
     def _refused(self, data=None, contains=''):

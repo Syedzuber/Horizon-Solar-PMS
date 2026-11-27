@@ -70,6 +70,14 @@ from .tests_boq_formula_apply import D, FormulaBase, _profile
 from .views import BOQ_DOWNLOAD_OFF_SHEET, BOQ_DOWNLOAD_SHEET
 
 B2C_FILE = Path(DEFAULT_FILE).parent / 'b2c_formula_rules_24nov.json'
+# DW-6: the loader's default moved on to the DW-6 file (INC2P); the command these tests
+# drive, apply_dw5_modules, is pinned to the DW-5 file, so they read that one.
+DW5_FILE = Path(DEFAULT_FILE).parent / 'dw5_formula_rules_27nov.json'
+
+
+def dw5_data():
+    """The DW-5 rules file, parsed as JSON (a fresh copy each call, safe to edit)."""
+    return json.loads(DW5_FILE.read_text(encoding='utf-8'))
 WP = {wp: code for code, wp, _position in MODULE_ITEMS}      # 550 -> 'OPX-275', ...
 REQUIRED_COL = 6    # Code, Category, Description, Unit, Quantity, Calculated, Required
 
@@ -174,7 +182,7 @@ class CommandTests(FormulaBase):
 
     def setUp(self):
         super().setUp()
-        data = rules_data()
+        data = dw5_data()
         make_catalogue(json.loads(B2C_FILE.read_text(encoding='utf-8')))
         # Positions in steps of 10, as DW-4 left production (OPX-001 at 10, OPX-002 at 20).
         for item in BOQItemMaster.objects.filter(code__startswith='OPX-').exclude(code='OPX-273'):
@@ -262,13 +270,13 @@ class CommandTests(FormulaBase):
         self.assertIn('Nothing to do', out)
         self.assertEqual(self.state(), before)
         loader = StringIO()
-        call_command('load_formula_rules', stdout=loader)
+        call_command('load_formula_rules', '--file', str(DW5_FILE), stdout=loader)
         self.assertIn('Summary: rules same 39; groups same 6', loader.getvalue())
 
     def test_a_file_that_would_change_another_rule_is_refused_whole(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
-        data = rules_data()
+        data = dw5_data()
         next(r for r in data['rules'] if r['key'] == 'R1')['multiplier'] = '6'
         path = os.path.join(tmp, 'rules.json')
         Path(path).write_text(json.dumps(data), encoding='utf-8')
@@ -876,8 +884,8 @@ DW5_PINS = {
     'download (designer)':               18,
     'upload preview (designer)':         19,
     'mark complete, refused (designer)': 11,
-    'design group screen (Head)':        16,
-    'design group Excel (Head)':         11,
+    'design group screen (Head)':        17,   # DW-6: +1 the rules that raise warnings
+    'design group Excel (Head)':         12,   # DW-6: +1 the rules that raise warnings
     'Head catalogue':                    7,
     'design settings (Head)':            6,
 }

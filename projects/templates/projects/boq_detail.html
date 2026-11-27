@@ -152,6 +152,16 @@ same fact into the seven Design input gates below.
 </p>
 {% endif %}
 
+{% comment %}
+DW-6 (I5) — the formula rules' warnings, for Design users only (the view leaves the list
+empty for everyone else). Information, not errors: nothing on this page is refused over one.
+{% endcomment %}
+{% if rule_warnings %}
+<div class="alert alert-warning small py-2 mb-3 boq-rule-warnings">
+  {% for code, warning in rule_warnings %}<div class="boq-rule-warning">{{ code }}: {{ warning }}</div>{% endfor %}
+</div>
+{% endif %}
+
 {# ── Items grouped by category ── #}
 {% for category_name, category_items in items_by_category %}
 <div class="card shadow-sm mb-3">

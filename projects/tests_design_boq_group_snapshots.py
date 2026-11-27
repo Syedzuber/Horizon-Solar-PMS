@@ -56,7 +56,7 @@ from .tests_design_boq_groups import (
 #: S1, written out by hand so a change to GROUP_BOQ_DATA_KEYS fails here rather than passing.
 STORED_KEYS = {
     'top':          {'version', 'group_name', 'sites', 'lines', 'accb_lines', 'unlinked',
-                     'blanks', 'unit_warnings', 'content_gaps'},
+                     'blanks', 'unit_warnings', 'content_gaps', 'rule_warnings'},
     'site':         {'id', 'code', 'name', 'tender', 'designer', 'status', 'counted'},
     'line':         {'code', 'description', 'unit', 'site_count', 'total', 'retired', 'per_site'},
     'accb':         {'config_key', 'description', 'unit', 'site_count', 'total', 'retired',
@@ -65,6 +65,7 @@ STORED_KEYS = {
     'blank':        {'site', 'code', 'description'},
     'unit_warning': {'site', 'code', 'quantity', 'line_unit', 'catalogue_unit', 'reasons'},
     'content_gap':  {'site', 'gaps'},
+    'rule_warning': {'site', 'code', 'check', 'kind', 'modules', 'structure_modules'},   # DW-6
 }
 
 #: Measured at build time and pinned, for a PLAIN DESIGNER (the costliest reader: the
@@ -77,9 +78,12 @@ STORED_KEYS = {
 #: warning reads (one query, whatever the number of sites). Snapshot view/Excel unchanged.
 #: DW-8: +1 on the group screen and the snapshot view for "← My queue" (a designer's deputy
 #: lookup). The take and both Excel files are unchanged.
-DETAIL_NO_SNAPSHOTS = 19
-DETAIL_WITH_SNAPSHOTS = 21
-TAKE_QUERIES = 19
+#: DW-6: +1 on the group screen and the take (and the live Excel, tests_design_boq_groups)
+#: for the formula rules that raise warnings (read_warning_rules: one query, whatever the
+#: number of sites). The snapshot view and its Excel read stored data: unchanged.
+DETAIL_NO_SNAPSHOTS = 20
+DETAIL_WITH_SNAPSHOTS = 22
+TAKE_QUERIES = 20
 SNAPSHOT_VIEW_QUERIES = 9
 SNAPSHOT_EXCEL_QUERIES = 6
 
@@ -215,6 +219,7 @@ class PlainDataTests(SnapshotFixture):
             'blank':        boq['blanks'],
             'unit_warning': boq['unit_warnings'],
             'content_gap':  boq['content_gaps'],
+            'rule_warning': boq['rule_warnings'],
             'member_row':   rows,
         }
         for level, dicts in levels.items():
@@ -225,7 +230,7 @@ class PlainDataTests(SnapshotFixture):
 
     def test_hydrate_refuses_an_unknown_version(self):
         data = self.live_data(self.group('G', [self.a1]))
-        for bad in (0, 3, None, '1', '2', True):
+        for bad in (0, 4, None, '1', '2', '3', True):      # DW-6: 3 is now readable
             with self.subTest(version=bad):
                 data['version'] = bad
                 with self.assertRaisesRegex(ValueError, 'is not one this code can read'):
@@ -801,7 +806,7 @@ class ContentGapTests(SnapshotFixture):
         group = self.group('G', [self.a1, self.a4])
         self.take(self.head, group)
         snap = DesignBOQGroupSnapshot.objects.get()
-        self.assertEqual(snap.data['version'], 2)
+        self.assertEqual(snap.data['version'], 3)      # DW-6: + rule_warnings
         self.assertEqual(snap.data['content_gaps'], [{'site': 'B5A-A1', 'gaps': BOTH_KEYS},
                                                      {'site': 'B5A-A4', 'gaps': BOTH_KEYS}])
         expected = [f'B5A-A1: {BOTH_GAPS}', f'B5A-A4: {BOTH_GAPS}']
@@ -823,9 +828,9 @@ class ContentGapTests(SnapshotFixture):
         group = self.group('G', [self.a1, self.a4])
         data = self.live_data(group)
         self.assertTrue(data['content_gaps'])
-        old = {k: v for k, v in data.items() if k != 'content_gaps'}
+        old = {k: v for k, v in data.items() if k not in ('content_gaps', 'rule_warnings')}
         old['version'] = 1                                           # B-5b's shape exactly
-        self.assertEqual(set(old), STORED_KEYS['top'] - {'content_gaps'})
+        self.assertEqual(set(old), STORED_KEYS['top'] - {'content_gaps', 'rule_warnings'})
         counted = sum(1 for s in old['sites'] if s['counted'])
         snap = DesignBOQGroupSnapshot.objects.create(
             group=group, taken_by=self.head, taken_by_name='Head', data=old,

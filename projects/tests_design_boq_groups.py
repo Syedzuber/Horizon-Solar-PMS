@@ -713,8 +713,8 @@ class ExcelTests(DesignGroupFixture):
 #: their read gate needs the deputy lookup (once per request, design_boq_group_views.
 #: _readable_q) and base.html adds its own. Each is the same at 5 and at 20 sites. Counts
 #: include the session, user and profile loads; the add POST includes its savepoints.
-DETAIL_QUERIES = 19     # B-5b: +1 for the Snapshots tab's list (Zuber, 24 Nov); DW-1b: +1 formula groups; DW-8: +1 "← My queue" (a designer's deputy lookup)
-EXCEL_QUERIES = 12      # DW-1b: +1 for the formula groups the content-gap warning reads
+DETAIL_QUERIES = 20     # B-5b: +1 for the Snapshots tab's list (Zuber, 24 Nov); DW-1b: +1 formula groups; DW-8: +1 "← My queue" (a designer's deputy lookup); DW-6: +1 warning rules
+EXCEL_QUERIES = 13      # DW-1b: +1 for the formula groups the content-gap warning reads; DW-6: +1 for the rules that raise warnings
 LIST_QUERIES = 10       # DW-8: +1 "← My queue" (a designer's deputy lookup)
 ADD_QUERIES = 15
 

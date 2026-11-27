@@ -314,7 +314,7 @@ screen's ACCB pop-up, so both pages draw the same card.
           Collapsed: with the full rule set most sites will have several. Each says why it
           is 0, and the designer can put it on with an override (quantity and a note).
           {% endcomment %}
-          <details class="border-top mt-2 pt-2 px-1" id="boqCalcAbsent">
+          <details class="border-top mt-2 pt-2 px-1" id="boqCalcAbsent"{% if calculated_absent_warned %} open{% endif %}>
             <summary class="small fw-semibold">
               Calculated items not on this BOQ ({{ calculated_absent|length }})
             </summary>
@@ -328,6 +328,7 @@ screen's ACCB pop-up, so both pages draw the same card.
                       <span class="boq-chip boq-chip-calc">Calculated</span>
                       {% if item.explanation %}<div class="boq-muted">{{ item.explanation }}</div>{% endif %}
                       {% if item.stale %}<div class="boq-muted text-warning-emphasis">{{ item.stale }}</div>{% endif %}
+                      {% for warning in item.warnings %}<div class="boq-muted text-warning-emphasis boq-rule-warning">{{ warning }}</div>{% endfor %}
                     </td>
                     <td class="boq-muted" style="width:60px">{{ item.unit }}</td>
                     <td style="width:112px">
@@ -826,6 +827,10 @@ with unsaved edits, so nothing typed is lost without a warning.
                      ': ' + esc(calc.note) + '</div>' : '')) +
       (calc.stale ? '<div class="boq-muted text-warning-emphasis">' + esc(calc.stale) +
                     '</div>' : '') +
+      // DW-6: the rule's warnings (information, never a refusal), one line each.
+      (calc.warn || []).map(function (w) {
+        return '<div class="boq-muted text-warning-emphasis boq-rule-warning">' + esc(w) + '</div>';
+      }).join('') +
       '</td><td class="boq-muted" style="width:60px">' + esc(item.unit) + '</td>' +
       '<td style="width:112px"><span class="small fw-semibold">' +
       esc(chosen[item.id] || '—') + '</span>' +

@@ -6,10 +6,12 @@ load_formula_rules — make the BOQ formula rules match the rules file (B-2c, 24
     python manage.py load_formula_rules --deactivate R15      # dry run of a switch-off
     python manage.py load_formula_rules --deactivate R15 --apply
 
-THE FILE IS THE SOURCE OF TRUTH (Zuber, B-2c Q6). projects/data/dw5_formula_rules_27nov.json
-(DW-5: the B-2c file of 24 Nov with R12 reading the "all modules" group) holds Praveen's
-Master BOQ Excel formulas, one entry per rule with a stable key (R1 ... R25,
-a letter for a rule with several targets: R7a/R7b). --apply makes the active rules match it:
+THE FILE IS THE SOURCE OF TRUTH (Zuber, B-2c Q6). projects/data/dw6_formula_rules_27nov.json
+(DW-6: the DW-5 file plus INC2P, the design team's INC 2P rule for OPX-203; DW-5 was the
+B-2c file of 24 Nov with R12 reading the "all modules" group) holds Praveen's Master BOQ
+Excel formulas, one entry per rule with a stable key (R1 ... R25, a letter for a rule with
+several targets: R7a/R7b; since DW-6 also a plain name such as INC2P, which cannot be read
+as R12, the earthing rule). --apply makes the active rules match it:
 
     create      no rule on the target: a new rule
     same        the active rule already says what the file says: nothing written
@@ -28,6 +30,14 @@ each new module item to it (sync_module_group_membership); a closed group would 
 item on the next --apply. Every other group is closed: the file's list is the whole list.
 REACTIVATE lines are printed in their own section, above the rest (Q6), because they undo
 a switch-off someone made on purpose.
+
+DW-6 RULE KEYS, all optional, each stored in the parsed rules only when it is not the
+default, so a file without them parses (and checksums) exactly as before:
+    "site_factor": "module_wp"            multiply by the site's module wattage
+    "clamp_at_zero": true                 below 0 is written as 0 with a warning
+    "warning_check": "inc_2p_structures"  the named check (needs cross-check lines)
+    driver "role": "check"                a cross-check line: read by the check, never summed;
+                                          its weight is the modules one structure holds
 
 THE KEY IS NOT STORED IN THE DATABASE. A rule row has a target, not a key; each target
 belongs to exactly one key in the file, so the key is found through the file (this command,
@@ -68,7 +78,9 @@ from django.db import transaction
 
 from projects.accb import ACCB_CONFIGURED_CODE
 from projects.boq_formulas import (
-    ROUND_NONE, ROUND_UP, DriverSpec, FormulaError, RuleSpec, build_rule_set,
+    DRIVER_ROLE_CHECK, DRIVER_ROLE_SUM, ROUND_NONE, ROUND_UP, SITE_FACTOR_CHOICES,
+    SITE_FACTOR_MODULE_WP, WARNING_CHECK_CHOICES, DriverSpec, FormulaError, RuleSpec,
+    build_rule_set,
 )
 from projects.models import (
     BOQFormulaDriver, BOQFormulaRule, BOQItem, BOQItemGroup, BOQItemGroupMember,
@@ -78,15 +90,22 @@ from projects.models import (
 from ._demo_support import print_db_banner
 from .seed_formula_demo import DEMO_GROUP_PREFIX, DEMO_SUMMARY_PREFIX
 
-# DW-5 (Q9): the DW-5 file. The B-2c file stays for the record; loading it now would point
-# R12 back at OPX-001 alone.
-DEFAULT_FILE = Path(settings.BASE_DIR) / 'projects' / 'data' / 'dw5_formula_rules_27nov.json'
+# DW-6 (I7): the DW-6 file. The B-2c and DW-5 files stay for the record; loading the DW-5
+# one now would switch nothing off (the loader never touches a rule the file does not name)
+# but would no longer be the source of truth.
+DEFAULT_FILE = Path(settings.BASE_DIR) / 'projects' / 'data' / 'dw6_formula_rules_27nov.json'
 
 ACTOR = 'load_formula_rules (system)'
 LOADED_ACTION_CODE = 'boq_formula_rules_loaded'
 SWITCHED_OFF_ACTION_CODE = 'boq_formula_rule_switched_off'
 
-KEY_RE = re.compile(r'R\d+[a-z]?')
+#: R, a number and at most one letter (R7a), or since DW-6 (answer 4) a plain name of capital
+#: letters and digits starting with a letter (INC2P), so the INC 2P rule cannot be confused
+#: with R12 (OPX-177, earthing).
+KEY_RE = re.compile(r'R\d+[a-z]?|[A-Z][A-Z0-9]{1,15}')
+
+_SITE_FACTORS = {value for value, _ in SITE_FACTOR_CHOICES if value}
+_WARNING_CHECKS = {value for value, _ in WARNING_CHECK_CHOICES if value}
 
 #: The model's decimal places, so a value the column would round is refused, not changed.
 _PLACES = {'multiplier': 6, 'divisor': 6, 'constant': 4, 'weight': 6}
@@ -176,7 +195,7 @@ def parse_rules(raw):
         where = f'rule {key}'
         if not KEY_RE.fullmatch(key):
             raise RulesFileError(f'{where}: a key is R, a number and at most one letter '
-                                 f'(R7a).')
+                                 f'(R7a), or capital letters and digits (INC2P).')
         if key in keys:
             raise RulesFileError(f'{where} is listed twice.')
         keys.add(key)
@@ -203,14 +222,24 @@ def parse_rules(raw):
                 raise RulesFileError(f'{where}: a driver names exactly one of "item" and '
                                      f'"group".')
             if 'item' in d:
-                drivers.append({'item': _text(d['item'], 'item', where).upper(),
-                                'unit': _text(d.get('unit'), 'driver unit', where),
-                                'weight': weight, 'label': label})
+                driver = {'item': _text(d['item'], 'item', where).upper(),
+                          'unit': _text(d.get('unit'), 'driver unit', where),
+                          'weight': weight, 'label': label}
             else:
                 name = _text(d['group'], 'group', where)
                 if name not in group_names:
                     raise RulesFileError(f'{where}: group {name!r} is not in "groups".')
-                drivers.append({'group': name, 'weight': weight, 'label': label})
+                driver = {'group': name, 'weight': weight, 'label': label}
+            # DW-6: "role" stored only for a cross-check line, so a file without it parses
+            # (and checksums) exactly as before.
+            role = d.get('role', DRIVER_ROLE_SUM)
+            if role not in (DRIVER_ROLE_SUM, DRIVER_ROLE_CHECK):
+                raise RulesFileError(f'{where}: a driver role is "{DRIVER_ROLE_SUM}" or '
+                                     f'"{DRIVER_ROLE_CHECK}".')
+            if role == DRIVER_ROLE_CHECK:
+                driver['role'] = DRIVER_ROLE_CHECK
+            drivers.append(driver)
+        extras = _rule_extras(entry, where, drivers)
         excel = entry.get('excel') or {}
         rules.append({
             'key': key, 'target': target,
@@ -226,9 +255,39 @@ def parse_rules(raw):
             'floor_one_when_driven': entry['floor_one_when_driven'],
             'active': entry['active'],
             'excel': {'row': excel.get('row'), 'formula': excel.get('formula', '')},
+            **extras,
         })
     return groups, rules
 
+
+def _rule_extras(entry, where, drivers):
+    """DW-6's optional rule keys, each returned only when it is not the default (so the
+    parsed form, and the checksum, of a file without them is unchanged)."""
+    extras = {}
+    factor = entry.get('site_factor', '')
+    if factor not in _SITE_FACTORS | {''}:
+        raise RulesFileError(f'{where}: site_factor is "" or "{SITE_FACTOR_MODULE_WP}".')
+    if factor:
+        extras['site_factor'] = factor
+    clamp = entry.get('clamp_at_zero', False)
+    if not isinstance(clamp, bool):
+        raise RulesFileError(f'{where}: clamp_at_zero must be true or false.')
+    if clamp:
+        extras['clamp_at_zero'] = True
+    check = entry.get('warning_check', '')
+    if check not in _WARNING_CHECKS | {''}:
+        raise RulesFileError(f'{where}: warning_check is "" or one of '
+                             f'{", ".join(sorted(_WARNING_CHECKS))}.')
+    has_check_lines = any(d.get('role') == DRIVER_ROLE_CHECK for d in drivers)
+    if check and not has_check_lines:
+        raise RulesFileError(f'{where}: warning_check needs at least one driver with '
+                             f'"role": "check" (the lines it compares against).')
+    if has_check_lines and not check:
+        raise RulesFileError(f'{where}: a "role": "check" driver is read only by a '
+                             f'warning_check; this rule has none.')
+    if check:
+        extras['warning_check'] = check
+    return extras
 
 def checksum(groups, rules):
     """sha256 of the parsed rules in a fixed form: line endings and spacing in the file do
@@ -266,29 +325,34 @@ def keys_by_target(path=DEFAULT_FILE):
 # ---------------------------------------------------------------------------
 
 def _file_definition(entry):
-    """What a rule says, in a form a stored rule can be compared with."""
+    """What a rule says, in a form a stored rule can be compared with. DW-6's fields come
+    last, with the defaults a rule without them has, so a pre-DW-6 rule compares "same"."""
     drivers = frozenset(
-        ('item', d['item'], d['weight'], d['label']) if 'item' in d
-        else ('group', d['group'], d['weight'], d['label'])
+        ('item', d['item'], d['weight'], d['label'], d.get('role', DRIVER_ROLE_SUM))
+        if 'item' in d
+        else ('group', d['group'], d['weight'], d['label'], d.get('role', DRIVER_ROLE_SUM))
         for d in entry['drivers'])
     return (entry['summary'], entry['multiplier'], entry['divisor'], entry['constant'],
-            entry['rounding'], entry['floor_one_when_driven'], None, drivers)
+            entry['rounding'], entry['floor_one_when_driven'], None, drivers,
+            entry.get('site_factor', ''), entry.get('clamp_at_zero', False),
+            entry.get('warning_check', ''))
 
 
 def _db_definition(rule):
     """The same tuple for a stored rule. Its drivers must already be prefetched (with their
     item and group), so this costs no query. Decimals compare by value: 5 == 5.000000."""
     drivers = frozenset(
-        ('item', d.item.code, _plain(d.weight), d.label) if d.item_id
-        else ('group', d.group.name, _plain(d.weight), d.label)
+        ('item', d.item.code, _plain(d.weight), d.label, d.role) if d.item_id
+        else ('group', d.group.name, _plain(d.weight), d.label, d.role)
         for d in rule.drivers.all())
     return (rule.summary, _plain(rule.multiplier), _plain(rule.divisor),
             _plain(rule.constant), rule.rounding, rule.floor_one_when_driven,
-            rule.requires_group.name if rule.requires_group_id else None, drivers)
+            rule.requires_group.name if rule.requires_group_id else None, drivers,
+            rule.site_factor, rule.clamp_at_zero, rule.warning_check)
 
 
 _FIELD_NAMES = ('summary', 'multiplier', 'divisor', 'constant', 'rounding', 'at least 1',
-                'required group', 'drivers')
+                'required group', 'drivers', 'site factor', 'clamp at 0', 'warning check')
 
 
 def _differences(old, new):
@@ -305,22 +369,40 @@ def _differences(old, new):
 
 def formula_text(entry):
     """The rule in one ASCII line, e.g. '= 5 x (lightning arresters), round up'. ASCII
-    because a piped Windows console is cp1252 (see fix_tin_shade_ballast)."""
-    terms = []
-    for d in entry['drivers']:
+    because a piped Windows console is cp1252 (see fix_tin_shade_ballast).
+
+    DW-6: a negative weight is written with a minus ('modules - Tin Shade'), the wattage
+    factor as 'x module Wp', and a clamp and a check are named after the rounding. With
+    none of them the line is exactly what it was."""
+    joined = ''
+    summed = [d for d in entry['drivers'] if d.get('role') != DRIVER_ROLE_CHECK]
+    for n, d in enumerate(summed):
         name = d['label'] or d.get('group') or d.get('item')
-        terms.append(name if d['weight'] == 1 else f"{d['weight']} x {name}")
-    if not terms:
+        weight = d['weight']
+        size = -weight if weight < 0 else weight
+        term = name if size == 1 else f"{size} x {name}"
+        if n == 0:
+            joined = ('- ' + term) if weight < 0 else term
+        else:
+            joined += (' - ' if weight < 0 else ' + ') + term
+    if not summed:
         text = f"= {entry['constant']} (fixed)"
     else:
-        text = '= ' + (terms[0] if len(terms) == 1 else '(' + ' + '.join(terms) + ')')
+        text = '= ' + (joined if len(summed) == 1 else '(' + joined + ')')
         if entry['multiplier'] != 1:
             text += f" x {entry['multiplier']}"
+        if entry.get('site_factor') == SITE_FACTOR_MODULE_WP:
+            text += " x module Wp"
         if entry['divisor'] != 1:
             text += f" / {entry['divisor']}"
         if entry['constant']:
             text += f" + {entry['constant']}"
         text += ', round up' if entry['rounding'] == ROUND_UP else ', exact to 0.01'
+        if entry.get('clamp_at_zero'):
+            text += ', below 0 -> 0 with a warning'
+        if entry.get('warning_check'):
+            checks = len(entry['drivers']) - len(summed)
+            text += f", check {entry['warning_check']} ({checks} lines)"
     return text
 
 
@@ -470,18 +552,35 @@ def _check_loop(plan, groups, rules, items):
     group_ids = {g['name']: n for n, g in enumerate(groups, start=1)}   # stand-in ids
     specs = []
     for n, r in enumerate(x for x in rules if x['active']):
-        drivers = tuple(
-            DriverSpec(weight=d['weight'], label=d['label'] or d['item'],
-                       item_id=items[d['item']].pk) if 'item' in d
-            else DriverSpec(weight=d['weight'], label=d['label'] or labels[d['group']],
-                            group_id=group_ids[d['group']], member_ids=members[d['group']])
-            for d in r['drivers'])
-        specs.append(RuleSpec(rule_id=n, target_id=items[r['target']].pk,
-                              summary=r['summary'], drivers=drivers))
+        def spec(d):
+            if 'item' in d:
+                return DriverSpec(weight=d['weight'], label=d['label'] or d['item'],
+                                  item_id=items[d['item']].pk)
+            return DriverSpec(weight=d['weight'], label=d['label'] or labels[d['group']],
+                              group_id=group_ids[d['group']], member_ids=members[d['group']])
+        specs.append(RuleSpec(
+            rule_id=n, target_id=items[r['target']].pk, summary=r['summary'],
+            drivers=tuple(spec(d) for d in r['drivers'] if d.get('role') != DRIVER_ROLE_CHECK),
+            # DW-6: cross-check lines are read too, so a loop through one is refused.
+            check_drivers=tuple(spec(d) for d in r['drivers']
+                                if d.get('role') == DRIVER_ROLE_CHECK),
+            clamp_at_zero=r.get('clamp_at_zero', False),
+            warning_check=r.get('warning_check', '')))
     try:
         build_rule_set(specs, {m.pk: m.code for m in items.values()}, {})
     except FormulaError as exc:
         plan.problems.append(str(exc))
+        return
+    # DW-6: a rule that raises warnings reads only hand-entered lines (the save-time check
+    # in validate_formula_rules() says the same); refused here first, with nothing written.
+    targets = {s.target_id for s in specs}
+    codes = {m.pk: m.code for m in items.values()}
+    for s in specs:
+        if s.raises_warnings and s.dependency_ids() & targets:
+            plan.problems.append(
+                f'{codes[s.target_id]}: a rule that raises warnings may read only lines '
+                f'entered by hand, not ' + ', '.join(sorted(codes[i] for i in
+                                                          s.dependency_ids() & targets)) + '.')
 
 
 # ---------------------------------------------------------------------------
@@ -493,15 +592,19 @@ def _create_rule(entry, items, groups_by_name):
         target=items[entry['target']], summary=entry['summary'],
         multiplier=entry['multiplier'], divisor=entry['divisor'],
         constant=entry['constant'], rounding=entry['rounding'],
-        floor_one_when_driven=entry['floor_one_when_driven'])
+        floor_one_when_driven=entry['floor_one_when_driven'],
+        site_factor=entry.get('site_factor', ''),
+        clamp_at_zero=entry.get('clamp_at_zero', False),
+        warning_check=entry.get('warning_check', ''))
     rule.save()
     for d in entry['drivers']:
+        role = d.get('role', DRIVER_ROLE_SUM)
         if 'item' in d:
             BOQFormulaDriver(rule=rule, item=items[d['item']], weight=d['weight'],
-                             label=d['label']).save()
+                             label=d['label'], role=role).save()
         else:
             BOQFormulaDriver(rule=rule, group=groups_by_name[d['group']], weight=d['weight'],
-                             label=d['label']).save()
+                             label=d['label'], role=role).save()
     return rule
 
 
@@ -566,7 +669,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('--file', default=str(DEFAULT_FILE),
-                            help='The rules file (default: the DW-5 file in projects/data).')
+                            help='The rules file (default: the DW-6 file in projects/data).')
         parser.add_argument('--apply', action='store_true',
                             help='Write. Without it nothing is written.')
         parser.add_argument('--deactivate', action='append', metavar='KEY', default=[],

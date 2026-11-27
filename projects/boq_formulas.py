@@ -49,6 +49,56 @@ ROUNDING_CHOICES = [
     (ROUND_NONE, 'Exact (to 0.01)'),
 ]
 
+# ---------------------------------------------------------------------------
+# DW-6 (ruling DW-R12, INC 2P) — the three things a rule could not say before, each a plain
+# field on the rule, never an expression:
+#
+#   * a PER-SITE FACTOR (site_factor). 'module_wp' multiplies by the site's module wattage
+#     (site_module_wp(), DW-R14), after the multiplier and before the divisor.
+#   * CLAMP AT 0 (clamp_at_zero). A result below 0 is written as 0 with a "below 0"
+#     warning, instead of the refusal every other rule keeps.
+#   * A NAMED CHECK (warning_check). 'inc_2p_structures' compares the rule's driver sum with
+#     the modules its CROSS-CHECK LINES hold (drivers whose role is 'check', each weighted
+#     by the modules one structure holds) and warns when they differ.
+#
+# WARNINGS ARE COMPUTED, NEVER STORED, and never refuse anything: they ride on each Result
+# and are worded when shown (warning_text()), so a design-group snapshot can store the
+# facts and word them later.
+# ---------------------------------------------------------------------------
+
+#: BOQFormulaRule.site_factor: '' = none (every rule before DW-6).
+SITE_FACTOR_MODULE_WP = 'module_wp'
+SITE_FACTOR_CHOICES = [
+    ('',                    'None'),
+    (SITE_FACTOR_MODULE_WP, "The site's module wattage (Wp)"),
+]
+
+#: BOQFormulaRule.warning_check: '' = none.
+CHECK_INC_2P = 'inc_2p_structures'
+WARNING_CHECK_CHOICES = [
+    ('',           'None'),
+    (CHECK_INC_2P, 'INC 2P modules against the 2P structure lines'),
+]
+
+#: BOQFormulaDriver.role: 'sum' is summed into the rule (every driver before DW-6); 'check'
+#: is read only by the rule's named check, never summed.
+DRIVER_ROLE_SUM = 'sum'
+DRIVER_ROLE_CHECK = 'check'
+DRIVER_ROLE_CHOICES = [
+    (DRIVER_ROLE_SUM,   'Summed into the rule'),
+    (DRIVER_ROLE_CHECK, 'Cross-check line only'),
+]
+
+#: RuleWarning.kind
+WARNING_BELOW_ZERO = 'below_zero'          # clamp_at_zero: the rule worked out below 0
+WARNING_CROSS_CHECK = 'cross_check'        # the check lines hold a different number
+WARNING_NO_STRUCTURES = 'no_structures'    # the check lines hold nothing (Zuber, DW-6 answer 1)
+
+#: The model default of DesignSettings.default_module_wp, used when the row does not exist
+#: (DesignSettings.current() returns an unsaved row holding it). Written out because this
+#: module imports no models; tests_dw6_inc2p pins it equal to the model field's default.
+DEFAULT_MODULE_WP_FALLBACK = 640
+
 #: The largest value BOQItem.boq_quantity (numeric(10,2)) can hold. Written out rather than
 #: read from the model because this module imports no models; tests_boq_formulas pins it
 #: equal to number_input.decimal_field_max(BOQItem, 'boq_quantity').
@@ -96,11 +146,23 @@ class RuleSpec:
     floor_one_when_driven: bool = False
     requires_member_ids: tuple | None = None   # None = always applies; else the gate group's items
     requires_label: str = ''
+    # DW-6. The defaults are what every rule before DW-6 is, so its result is unchanged.
+    site_factor: str = ''                      # '' or SITE_FACTOR_MODULE_WP
+    clamp_at_zero: bool = False                # below 0 -> 0 with a warning, instead of refusing
+    warning_check: str = ''                    # '' or CHECK_INC_2P
+    check_drivers: tuple = ()                  # DriverSpecs with role 'check': read by the check, never summed
+    target_code: str = ''                      # For the warnings, which are worded from facts alone
+
+    @property
+    def raises_warnings(self):
+        """True if this rule can raise a warning (DW-6): only these need read_warning_rules()."""
+        return self.clamp_at_zero or bool(self.warning_check)
 
     def dependency_ids(self):
-        """Every item this rule reads: item drivers, group members and the gate group."""
+        """Every item this rule reads: item drivers, group members, the gate group and (DW-6)
+        the cross-check lines, so ordering and loop checks see everything it reads."""
         ids = set()
-        for driver in self.drivers:
+        for driver in self.drivers + self.check_drivers:
             if driver.item_id is not None:
                 ids.add(driver.item_id)
             ids.update(driver.member_ids)
@@ -111,10 +173,156 @@ class RuleSpec:
 
 @dataclass(frozen=True)
 class RuleSet:
-    """Rules in evaluation (dependency) order, plus each referenced item's code and unit."""
+    """Rules in evaluation (dependency) order, plus each referenced item's code and unit.
+
+    DW-6: `module_wp` maps every MODULE item the rules reference (in practice the "all
+    modules" group, which the Head's catalogue form keeps complete) to its wattage, None for
+    one that records none (OPX-001). `default_module_wp` is the Head's default (DW-R14).
+    Both are read only by a rule whose site_factor is 'module_wp'."""
     rules: tuple
     codes: Mapping
     units: Mapping
+    module_wp: Mapping = field(default_factory=dict)
+    default_module_wp: int = DEFAULT_MODULE_WP_FALLBACK
+
+
+@dataclass(frozen=True)
+class RuleWarning:
+    """One warning a rule raised on one sheet: facts only, worded by warning_text().
+
+    `modules` is the rule's driver sum (for INC 2P: the formula's INC 2P module count);
+    `structure_modules` is what the cross-check lines hold (None for a below-0 warning)."""
+    kind: str                      # WARNING_BELOW_ZERO, WARNING_CROSS_CHECK or WARNING_NO_STRUCTURES
+    code: str                      # The target item's code, e.g. OPX-203
+    check: str                     # The rule's warning_check ('' for a plain clamp)
+    modules: Decimal
+    structure_modules: Decimal | None = None
+
+
+def _signed(value):
+    """'−8' (a true minus sign) for a negative number, as I3's wording writes it."""
+    text = _num(value)
+    return '−' + text[1:] if text.startswith('-') else text
+
+
+def warning_text(kind, code, check, modules, structure_modules=None):
+    """The sentence for one warning (rulings DW-R12 (a)/(b), I3, I4, DW-6 answer 1). Pure.
+
+    Takes the facts rather than a RuleWarning so a design-group snapshot, which stores them
+    as plain values, is worded by exactly this function."""
+    if check == CHECK_INC_2P:
+        if kind == WARNING_BELOW_ZERO:
+            return (f'INC 2P works out below 0 ({_signed(modules)} modules); set to 0. Check '
+                    f'the 3P, Other, Ballast and Tin Shade lines.')
+        if kind == WARNING_NO_STRUCTURES:
+            return (f'This BOQ has no 2P structure lines; INC 2P counts {_signed(modules)} '
+                    f'modules.')
+        if kind == WARNING_CROSS_CHECK:
+            return (f'INC 2P counts {_signed(modules)} modules; the 2P structure lines hold '
+                    f'{_signed(structure_modules)}.')
+    if kind == WARNING_BELOW_ZERO:
+        return f'{code} works out below 0 ({_signed(modules)}); set to 0.'
+    # A kind this code does not know (a snapshot taken under a later rule): shown, not dropped.
+    return f'{code}: {kind}'
+
+
+def rule_warning_text(warning):
+    """warning_text() for a RuleWarning."""
+    return warning_text(warning.kind, warning.code, warning.check, warning.modules,
+                        warning.structure_modules)
+
+
+def _driver_sum(drivers, values):
+    """Sum of weight x quantity over `drivers` against the working values. Pure."""
+    total = ZERO
+    for driver in drivers:
+        if driver.item_id is not None:
+            quantity = values.get(driver.item_id, ZERO)
+        else:
+            quantity = sum((values.get(m, ZERO) for m in driver.member_ids), ZERO)
+        total += driver.weight * quantity
+    return total
+
+
+def rule_warnings(rule, values):
+    """The warnings `rule` raises on a sheet, as RuleWarnings. Pure: no query.
+
+    THE ONE PLACE A WARNING IS DECIDED. evaluate() calls it for each rule as it works the
+    rule out, and sheet_warnings() calls it for the BOQ view and the design groups, which
+    read the rules through read_warning_rules() instead of load_rules(). Both give the same
+    answer because a rule that raises warnings may read only hand-entered lines (refused
+    otherwise by validate_formula_rules()), so `values` are the sheet's own quantities on
+    either path.
+
+    Depends on the drivers only, never on an override of the target (DW-R12 (d): an
+    override suppresses neither warning) and never on the wattage (a wattage is above 0, so
+    the sign of the result is the sign of the driver sum).
+
+      * below 0 (clamp_at_zero): the driver sum is below 0.
+      * inc_2p_structures: the driver sum differs from what the check lines hold. Nothing
+        when both are 0. When the check lines hold nothing, the "no 2P structure lines"
+        wording (Zuber, DW-6 answer 1).
+    """
+    if not rule.raises_warnings:
+        return ()
+    with localcontext() as ctx:
+        ctx.prec = _PRECISION
+        modules = _driver_sum(rule.drivers, values)
+        warnings = []
+        if rule.clamp_at_zero and modules < 0:
+            warnings.append(RuleWarning(WARNING_BELOW_ZERO, rule.target_code,
+                                        rule.warning_check, modules))
+        if rule.warning_check == CHECK_INC_2P:
+            held = _driver_sum(rule.check_drivers, values)
+            if modules != held:
+                kind = WARNING_NO_STRUCTURES if held == 0 else WARNING_CROSS_CHECK
+                warnings.append(RuleWarning(kind, rule.target_code, rule.warning_check,
+                                            modules, held))
+    return tuple(warnings)
+
+
+def site_module_wp(values, module_wp, default):
+    """(wattage, how) — the site's module wattage for a 'module_wp' rule (DW-R14, I1). Pure.
+
+    The wattages of the site's module lines with a quantity above 0, an OPX-001 line (no
+    wattage recorded) counting as the default. All the same: that wattage. Otherwise, or
+    with no module line at all: the default. `how` is what the explanation says:
+
+        'site'          one wattage            "640 Wp is the site's module wattage"
+        'not_recorded'  only OPX-001 lines     "... the default wattage, because the site's
+                                                module lines record no wattage"
+        'mixed'         two or more            "... the default wattage, because the site's
+                                                modules are mixed (550 Wp, 640 Wp)"
+        'none'          no module line         "... the default wattage; the site has no
+                                                module lines"
+    Returns a third element: the wattages found (sorted, None for "not recorded"), for the
+    'mixed' wording.
+    """
+    found = {module_wp[item_id] for item_id in module_wp
+             if values.get(item_id, ZERO) > 0}
+    if not found:
+        return default, 'none', ()
+    effective = {default if wp is None else wp for wp in found}
+    listed = tuple(sorted(found, key=lambda wp: (wp is None, wp or 0)))
+    if len(effective) > 1:
+        return default, 'mixed', listed
+    if found == {None}:
+        return default, 'not_recorded', listed
+    return effective.pop(), 'site', listed
+
+
+def _wattage_words(wp, how, listed):
+    """The explanation's closing words about the wattage it used (DW-R12 (c))."""
+    if how == 'site':
+        return f"{wp} Wp is the site's module wattage"
+    if how == 'mixed':
+        names = ', '.join('wattage not recorded' if w is None else f'{w} Wp' for w in listed)
+        return (f"{wp} Wp is the default wattage, because the site's modules are mixed "
+                f"({names})")
+    if how == 'not_recorded':
+        return (f"{wp} Wp is the default wattage, because the site's module lines record no "
+                f"wattage")
+    return f'{wp} Wp is the default wattage; the site has no module lines'
 
 
 @dataclass(frozen=True)
@@ -135,14 +343,24 @@ class Result:
     chain: tuple              # Computed items this rests on, directly or through them, in evaluation order
     entered: Decimal | None
     overridden: bool
+    warnings: tuple = ()      # DW-6: RuleWarnings (rule_warnings()); () for every rule that raises none
+
+    @property
+    def warning_texts(self):
+        """The warnings as sentences (warning_text()), in the order raised."""
+        return [rule_warning_text(w) for w in self.warnings]
 
 
 # ---------------------------------------------------------------------------
 # Ordering
 # ---------------------------------------------------------------------------
 
-def build_rule_set(specs, codes, units):
+def build_rule_set(specs, codes, units, module_wp=None,
+                   default_module_wp=DEFAULT_MODULE_WP_FALLBACK):
     """Order `specs` so every computed driver is evaluated before the rules that read it.
+
+    DW-6: `module_wp` and `default_module_wp` are carried onto the RuleSet unchanged (see
+    RuleSet); a caller with no module rule leaves them out.
 
     Kahn's algorithm. Among rules that are ready at the same time the one whose target code
     sorts first goes first, so the order (and every explanation) never depends on the order
@@ -184,7 +402,8 @@ def build_rule_set(specs, codes, units):
         raise FormulaCycleError(
             'Formula rules form a loop; none of these can be worked out first: '
             + ', '.join(str(codes.get(t, t)) for t in stuck) + '.')
-    return RuleSet(rules=tuple(ordered), codes=dict(codes), units=dict(units))
+    return RuleSet(rules=tuple(ordered), codes=dict(codes), units=dict(units),
+                   module_wp=dict(module_wp or {}), default_module_wp=default_module_wp)
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +423,11 @@ def _raw_text(raw):
 
 
 def _driver_term(driver, values, codes):
-    """(quantity, text) for one driver, e.g. (3, '3 lightning arresters (2 X + 1 Y)')."""
+    """(quantity, text) for one driver, e.g. (3, '3 lightning arresters (2 X + 1 Y)').
+
+    DW-6: a NEGATIVE weight's text carries no sign ('12 Tin Shade', or '2 × 12 Tin Shade'
+    for -2); _join_terms() writes it with a minus between terms. No rule before DW-6 has a
+    negative weight, so their text is unchanged."""
     if driver.item_id is not None:
         quantity = values.get(driver.item_id, ZERO)
         text = f'{_num(quantity)} {driver.label}'
@@ -215,9 +438,24 @@ def _driver_term(driver, values, codes):
         text = f'{_num(quantity)} {driver.label}'
         if shown:
             text += ' (' + ' + '.join(shown) + ')'
-    if driver.weight != ONE:
+    if driver.weight < 0:
+        if driver.weight != -ONE:
+            text = f'{_num(-driver.weight)} × {text}'
+    elif driver.weight != ONE:
         text = f'{_num(driver.weight)} × {text}'
     return quantity, text
+
+
+def _join_terms(drivers, terms):
+    """'a + b − c': each term after the first with a plus, or a minus for a negative weight
+    (DW-6). With only positive weights this is exactly ' + '.join(terms), as before DW-6."""
+    out = ''
+    for n, (driver, text) in enumerate(zip(drivers, terms)):
+        if n == 0:
+            out = ('− ' + text) if driver.weight < 0 else text
+        else:
+            out += (' − ' if driver.weight < 0 else ' + ') + text
+    return out
 
 
 def evaluate(quantities, rules, overrides=None):
@@ -262,7 +500,10 @@ def evaluate(quantities, rules, overrides=None):
 
         unit = units.get(rule.target_id, '')
         computed, raw, driver_sum, explanation = _compute(rule, values, codes, unit,
-                                                          set(results))
+                                                          set(results), rules)
+        # DW-6: decided from the drivers alone (rule_warnings()), so an override of this
+        # item suppresses neither warning (DW-R12 (d)).
+        warnings = rule_warnings(rule, values)
 
         # The chain: computed items this rule reads, and everything they rest on in turn,
         # listed in evaluation order.
@@ -284,18 +525,21 @@ def evaluate(quantities, rules, overrides=None):
             item_id=rule.target_id, rule_id=rule.rule_id, quantity=quantity,
             computed=computed, raw=raw, driver_sum=driver_sum, explanation=explanation,
             chain=tuple(chain), entered=None if entered is None else Decimal(entered),
-            overridden=overridden)
+            overridden=overridden, warnings=warnings)
         values[rule.target_id] = quantity
 
     return results
 
 
-def _compute(rule, values, codes, unit, computed_ids):
+def _compute(rule, values, codes, unit, computed_ids, rules=None):
     """(quantity, raw, driver_sum, explanation) for one rule against the working values.
 
     `computed_ids` are the items already worked out by earlier rules in this evaluation;
-    used only to say so in the explanation."""
+    used only to say so in the explanation. `rules` (the RuleSet) is read only for a
+    'module_wp' rule's wattages (DW-6)."""
     summary = rule.summary
+    wattage = None      # DW-6: (wp, how, listed) for a 'module_wp' rule
+    clamped = False     # DW-6: a clamp_at_zero rule that worked out below 0
 
     with localcontext() as ctx:
         ctx.prec = _PRECISION
@@ -319,7 +563,18 @@ def _compute(rule, values, codes, unit, computed_ids):
         # Multiply before dividing, so a terminating result stays exact (150 x 0.4 / 1.5
         # is exactly 40). Decimal throughout: a float here gives 0.62 x 0.25 = 0.15 instead
         # of 0.155 -> 0.16 (pinned in tests_boq_formulas).
-        raw = driver_sum * rule.multiplier / rule.divisor + rule.constant
+        if rule.site_factor == SITE_FACTOR_MODULE_WP:
+            # DW-6 (DW-R12, I1): the site's module wattage, multiplied in before the
+            # divisor like the multiplier, so 52 modules x 640 / 1000 stays exact.
+            wattage = site_module_wp(values, rules.module_wp if rules else {},
+                                     rules.default_module_wp if rules
+                                     else DEFAULT_MODULE_WP_FALLBACK)
+            raw = driver_sum * rule.multiplier * wattage[0] / rule.divisor + rule.constant
+        elif rule.site_factor:
+            raise FormulaError(f'Unknown site factor {rule.site_factor!r} on the rule for '
+                               f'{codes.get(rule.target_id, rule.target_id)}.')
+        else:
+            raw = driver_sum * rule.multiplier / rule.divisor + rule.constant
 
         if rule.rounding == ROUND_UP:
             quantity = raw.to_integral_value(rounding=ROUND_CEILING)
@@ -336,6 +591,12 @@ def _compute(rule, values, codes, unit, computed_ids):
         if floored:
             quantity = ONE
 
+        # DW-6 (DW-R12 (a)): a clamped rule below 0 is written as 0, and rule_warnings()
+        # raises the "below 0" warning; every other rule below 0 is still refused below.
+        if rule.clamp_at_zero and raw < 0:
+            clamped = True
+            quantity = ZERO
+
     quantity = quantity.quantize(CENT)
     if quantity < 0 or quantity > QUANTITY_MAX:
         raise FormulaError(
@@ -346,9 +607,12 @@ def _compute(rule, values, codes, unit, computed_ids):
     if not rule.drivers:
         expression = None
     else:
-        expression = terms[0] if len(terms) == 1 else '(' + ' + '.join(terms) + ')'
+        joined = _join_terms(rule.drivers, terms)
+        expression = joined if len(terms) == 1 else '(' + joined + ')'
         if rule.multiplier != ONE:
             expression += f' × {_num(rule.multiplier)}'
+        if wattage is not None:
+            expression += f' × {wattage[0]} Wp'
         if rule.divisor != ONE:
             expression += f' ÷ {_num(rule.divisor)}'
         if rule.constant:
@@ -356,6 +620,9 @@ def _compute(rule, values, codes, unit, computed_ids):
 
     if expression is None:
         explanation = f'{summary}: a fixed {_num(quantity)} {unit}'
+    elif clamped:
+        explanation = (f'{summary}: {expression} = {_signed_raw(raw)}, below 0, so set to '
+                       f'0 {unit}')
     elif floored:
         explanation = (f'{summary}: {expression} = {_raw_text(raw)}, raised to the minimum '
                        f'of 1 {unit} because the drivers are above 0')
@@ -372,7 +639,16 @@ def _compute(rule, values, codes, unit, computed_ids):
         explanation += (f' ({", ".join(chained)} '
                         f'{"is a computed line" if len(chained) == 1 else "are computed lines"}'
                         f'; the rounded quantity is used)')
+    if wattage is not None:
+        # DW-R12 (c): which wattage was used, and why ("mixed" when it is).
+        explanation = explanation.rstrip() + '; ' + _wattage_words(*wattage)
     return quantity, raw, driver_sum, explanation.rstrip()
+
+
+def _signed_raw(raw):
+    """_raw_text() with a true minus sign: '−8', '−0.3333…'."""
+    text = _raw_text(raw)
+    return '−' + text[1:] if text.startswith('-') else text
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +656,13 @@ def _compute(rule, values, codes, unit, computed_ids):
 # ---------------------------------------------------------------------------
 
 def _load_specs(include_retired_targets, project_type=None):
-    """(specs, codes, units, types) from the rule tables in three queries, always three.
+    """(specs, codes, units, types, module_wp, default_module_wp) from the rule tables in
+    three queries, always three.
+
+    DW-6: the Head's default module wattage rides on query 1 as a subquery, so a 'module_wp'
+    rule costs no query of its own; each referenced module item's wattage comes with the
+    item rows already joined. A driver whose role is 'check' goes into the rule's
+    check_drivers, never its sum.
 
     include_retired_targets=False is load_rules(): a rule whose target item is retired is
     skipped (Q8). Retired items still count as drivers and group members, because a retired
@@ -393,8 +675,8 @@ def _load_specs(include_retired_targets, project_type=None):
     """
     # Lazy import: models.py imports ROUNDING_CHOICES and validate_formula_rules from this
     # module, so importing models at module level here would be circular.
-    from django.db.models import Q
-    from .models import BOQFormulaDriver, BOQFormulaRule, BOQItemGroupMember
+    from django.db.models import Q, Subquery
+    from .models import BOQFormulaDriver, BOQFormulaRule, BOQItemGroupMember, DesignSettings
 
     rule_q = Q(is_active=True)
     driver_q = Q(rule__is_active=True)
@@ -406,8 +688,12 @@ def _load_specs(include_retired_targets, project_type=None):
         driver_q &= Q(rule__target__project_type=project_type)
 
     # 1. Active rules with their target (code, unit, type) and gate group label.
+    #    DW-6: with the default module wattage (DesignSettings' one row) as a subquery.
     rules = list(BOQFormulaRule.objects.filter(rule_q)
-                 .select_related('target', 'requires_group').order_by('pk'))
+                 .select_related('target', 'requires_group')
+                 .annotate(default_module_wp=Subquery(
+                     DesignSettings.objects.filter(pk=1).values('default_module_wp')[:1]))
+                 .order_by('pk'))
     # 2. Those rules' drivers, filtered by the same terms through the join rather than by a
     #    list of rule ids, so the query count does not depend on how many rules exist.
     drivers = list(BOQFormulaDriver.objects.filter(driver_q)
@@ -417,17 +703,19 @@ def _load_specs(include_retired_targets, project_type=None):
     members = list(BOQItemGroupMember.objects.select_related('item')
                    .order_by('item__code', 'pk'))
 
-    codes, units, types = {}, {}, {}
+    codes, units, types, module_wp = {}, {}, {}, {}
 
     def note(item):
         codes[item.pk], units[item.pk], types[item.pk] = item.code, item.unit, item.project_type
+        if item.is_module:
+            module_wp[item.pk] = item.module_wp      # None for OPX-001 (no wattage recorded)
 
     members_of = {}
     for member in members:
         members_of.setdefault(member.group_id, []).append(member.item_id)
         note(member.item)
 
-    drivers_of = {}
+    drivers_of, checks_of = {}, {}
     for driver in drivers:
         if driver.item_id is not None:
             note(driver.item)
@@ -437,7 +725,8 @@ def _load_specs(include_retired_targets, project_type=None):
             spec = DriverSpec(weight=driver.weight, label=driver.label or driver.group.label,
                               group_id=driver.group_id,
                               member_ids=tuple(members_of.get(driver.group_id, ())))
-        drivers_of.setdefault(driver.rule_id, []).append(spec)
+        bucket = checks_of if driver.role == DRIVER_ROLE_CHECK else drivers_of
+        bucket.setdefault(driver.rule_id, []).append(spec)
 
     specs = []
     for rule in rules:
@@ -453,8 +742,16 @@ def _load_specs(include_retired_targets, project_type=None):
             requires_member_ids=(None if gate is None
                                  else tuple(members_of.get(gate.pk, ()))),
             requires_label='' if gate is None else gate.label,
+            site_factor=rule.site_factor, clamp_at_zero=rule.clamp_at_zero,
+            warning_check=rule.warning_check,
+            check_drivers=tuple(checks_of.get(rule.pk, ())),
+            target_code=rule.target.code,
         ))
-    return specs, codes, units, types
+    # Every rule row carries the same subquery value; None when the settings row does not
+    # exist yet, which DesignSettings.current() reads as the model default.
+    default = next((r.default_module_wp for r in rules if r.default_module_wp), None)
+    return (specs, codes, units, types, module_wp,
+            default or DEFAULT_MODULE_WP_FALLBACK)
 
 
 def load_rules(project_type=None):
@@ -464,9 +761,9 @@ def load_rules(project_type=None):
     site's type: without it a Residential constant rule would put a Residential catalogue
     line on every RESCO BOQ it saved. None (the default) is every type, as before.
     """
-    specs, codes, units, _types = _load_specs(include_retired_targets=False,
-                                              project_type=project_type)
-    return build_rule_set(specs, codes, units)
+    specs, codes, units, _types, module_wp, default = _load_specs(
+        include_retired_targets=False, project_type=project_type)
+    return build_rule_set(specs, codes, units, module_wp, default)
 
 
 def validate_formula_rules():
@@ -478,11 +775,24 @@ def validate_formula_rules():
     group member: adding an item to "all inverters" can close a loop through any rule that
     reads that group.
     """
-    specs, codes, units, types = _load_specs(include_retired_targets=True)
+    specs, codes, units, types, _module_wp, _default = _load_specs(
+        include_retired_targets=True)
     try:
         build_rule_set(specs, codes, units)
     except FormulaError as exc:
         raise ValidationError(str(exc))
+
+    # DW-6: a rule that raises warnings reads only hand-entered lines. The BOQ view and the
+    # design groups decide its warnings from the stored quantities (sheet_warnings()), not
+    # from a full evaluation; a computed driver would make them disagree with the picker.
+    targets = {spec.target_id for spec in specs}
+    for spec in specs:
+        if spec.raises_warnings and spec.dependency_ids() & targets:
+            computed = sorted(codes[i] for i in spec.dependency_ids() & targets)
+            raise ValidationError(
+                f'The rule for {codes[spec.target_id]} raises warnings, so it may read only '
+                f'lines entered by hand; {", ".join(computed)} '
+                f'{"is" if len(computed) == 1 else "are"} calculated.')
 
     # Q9: one project type per rule: the target, item drivers, group members and the gate.
     for spec in specs:
@@ -973,6 +1283,7 @@ class LineFormula:
     note: str = ''                  # The override's note
     override_by: str = ''           # B-2e: "Overridden by QC (name)" (override_label())
     removed_by: str = ''            # DW-3: "Removed (0) by QC (name)"; '' unless overridden to 0
+    warnings: tuple = ()            # DW-6: the rule's warnings as sentences; shown on every kind of line
 
     @property
     def is_removed(self):
@@ -1035,20 +1346,25 @@ class FormulaView:
         if line.item_master_id not in self.targets:
             return None
         own = self.lines_of.get(line.item_master_id, [])
+        result = self.results.get(line.item_master_id)
+        # DW-6: the warnings come from the drivers, so they are shown on an overridden line
+        # (DW-R12 (d)) and on an item on 2+ lines (Zuber, DW-6 answer 7) alike.
+        warnings = tuple(result.warning_texts) if result else ()
         if len(own) > 1:
             return LineFormula(kind=LINE_MULTIPLE,
-                               explanation=multiple_lines_message(self.code(line.item_master_id)))
+                               explanation=multiple_lines_message(self.code(line.item_master_id)),
+                               warnings=warnings)
         stored = next((s for s in own if s.pk == line.pk), None)
-        result = self.results.get(line.item_master_id)
         explanation = result.explanation if result else ''
         computed = result.computed if result else None
         if stored is not None and stored.overridden:
             return LineFormula(kind=LINE_OVERRIDDEN, explanation=explanation,
                                computed=computed, note=stored.override_note,
                                override_by=stored.override_label,
-                               removed_by=stored.removed_label)
+                               removed_by=stored.removed_label, warnings=warnings)
         return LineFormula(kind=LINE_CALCULATED, explanation=explanation, computed=computed,
-                           stale=(computed is not None and line.boq_quantity != computed))
+                           stale=(computed is not None and line.boq_quantity != computed),
+                           warnings=warnings)
 
     def absent(self):
         """[(item id, Result or None)] for computed items with no line, in evaluation order:
@@ -1057,6 +1373,78 @@ class FormulaView:
             return []
         return [(rule.target_id, self.results.get(rule.target_id))
                 for rule in self.rules.rules if not self.lines_of.get(rule.target_id)]
+
+    def absent_warnings(self):
+        """DW-6: [(code, sentence)] for the warnings of calculated items with NO line (a
+        clamped INC 2P on the designer's path, or a rule loaded since the last save), for a
+        screen that has no "not on this BOQ" block of its own (the QC/Head panel). No
+        query."""
+        return [(self.code(item_id), text) for item_id, result in self.absent()
+                if result is not None for text in result.warning_texts]
+
+
+# ---------------------------------------------------------------------------
+# DW-6 — the warnings alone, for the screens that do not evaluate the rules: the BOQ view
+# (boq_detail, Design users) and the design groups (their screen, Excel and snapshots).
+#
+# ONE QUERY, whatever the number of rules or sites (Zuber, DW-6 answer 5): only the rules
+# that can raise a warning, with their drivers and each group driver's members, in one
+# joined read. The warning itself is rule_warnings(), the function evaluate() calls, on the
+# same RuleSpec shape, so these screens can only say what the picker says.
+# ---------------------------------------------------------------------------
+
+def read_warning_rules(project_type):
+    """[RuleSpec] for the active rules of `project_type` that can raise a warning, in target
+    code order. ONE query; nothing is computed or written.
+
+    Each spec carries exactly what rule_warnings() reads: the target's code, the clamp and
+    the named check, and the drivers split into summed and cross-check ones. No labels and
+    no rounding: nothing here is explained or worked out."""
+    # Lazy import: models.py imports this module, so importing models at the top would be
+    # circular.
+    from django.db.models import Q
+    from .models import BOQFormulaDriver
+    # One row per driver, or per member for a group driver (a LEFT JOIN through the group's
+    # members; an item driver's member column is NULL). Same terms as load_rules(), plus
+    # "can raise a warning".
+    rows = (BOQFormulaDriver.objects
+            .filter(rule__is_active=True, rule__target__is_active=True,
+                    rule__target__project_type=project_type)
+            .filter(Q(rule__clamp_at_zero=True) | ~Q(rule__warning_check=''))
+            .values_list('rule_id', 'rule__target_id', 'rule__target__code',
+                         'rule__clamp_at_zero', 'rule__warning_check',
+                         'pk', 'role', 'weight', 'item_id', 'group_id', 'group__members__item')
+            .order_by('rule__target__code', 'rule_id', 'pk'))
+    rules, drivers = {}, {}
+    for (rule_id, target_id, code, clamp, check,
+         driver_id, role, weight, item_id, group_id, member_id) in rows:
+        rules.setdefault(rule_id, (target_id, code, clamp, check))
+        driver = drivers.setdefault((rule_id, driver_id),
+                                    {'role': role, 'weight': weight, 'item_id': item_id,
+                                     'group_id': group_id, 'members': []})
+        if member_id is not None:
+            driver['members'].append(member_id)
+    specs = []
+    for rule_id, (target_id, code, clamp, check) in rules.items():
+        summed, checks = [], []
+        for (owner, _pk), d in drivers.items():
+            if owner != rule_id:
+                continue
+            spec = DriverSpec(weight=d['weight'], label='', item_id=d['item_id'],
+                              group_id=d['group_id'], member_ids=tuple(d['members']))
+            (checks if d['role'] == DRIVER_ROLE_CHECK else summed).append(spec)
+        specs.append(RuleSpec(rule_id=rule_id, target_id=target_id, summary='',
+                              drivers=tuple(summed), clamp_at_zero=clamp,
+                              warning_check=check, check_drivers=tuple(checks),
+                              target_code=code))
+    return specs
+
+
+def sheet_warnings(specs, quantities):
+    """[RuleWarning] for one sheet: `quantities` maps item id -> quantity (lines summed per
+    item; a blank counts as nothing). Pure: no query. In the specs' (target code) order."""
+    values = {item_id: Decimal(q) for item_id, q in quantities.items() if q is not None}
+    return [w for spec in specs for w in rule_warnings(spec, values)]
 
 
 def formula_view(boq, project_type):

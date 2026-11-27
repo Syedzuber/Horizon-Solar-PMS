@@ -716,15 +716,18 @@ class DashboardChipTests(DW8Base):
 #: is the same request on the parent commit (69d93f4), same fixture, so each row shows what
 #: DW-8 added. Budget (P7, answer 5): +1 per screen, +2 on the BOQ view. The one row over it
 #: (`pool` at arka_submitted, +3) is reported as a stop question, not hidden.
+#: DW-6: +1 on the BOQ view for Design users (qc, pool, head): the formula rules that raise
+#: warnings (read_warning_rules, one query), and on the design group screen for anyone (the
+#: same query, whatever the number of sites). SCM and the PM see no warnings: unchanged.
 QUERY_PINS = [
-    ('boq_detail', 'qc', DESIGN_IN_QC, 21),                    # before DW-8: 19
-    ('boq_detail', 'pool', DESIGN_IN_QC, 20),                  # before DW-8: 18
-    ('boq_detail', 'head', DESIGN_IN_QC, 19),                  # before DW-8: 17
+    ('boq_detail', 'qc', DESIGN_IN_QC, 22),                    # before DW-8: 19; DW-6 +1
+    ('boq_detail', 'pool', DESIGN_IN_QC, 21),                  # before DW-8: 18; DW-6 +1
+    ('boq_detail', 'head', DESIGN_IN_QC, 20),                  # before DW-8: 17; DW-6 +1
     ('boq_detail', 'scm', DESIGN_IN_QC, 17),                   # before DW-8: 16
     ('boq_detail', 'pm', DESIGN_IN_QC, 15),                    # before DW-8: 15
-    ('boq_detail', 'qc', DESIGN_ARKA_SUBMITTED, 21),           # before DW-8: 19
-    ('boq_detail', 'pool', DESIGN_ARKA_SUBMITTED, 21),         # before DW-8: 18
-    ('boq_detail', 'head', DESIGN_ARKA_SUBMITTED, 19),         # before DW-8: 17
+    ('boq_detail', 'qc', DESIGN_ARKA_SUBMITTED, 22),           # before DW-8: 19; DW-6 +1
+    ('boq_detail', 'pool', DESIGN_ARKA_SUBMITTED, 22),         # before DW-8: 18; DW-6 +1
+    ('boq_detail', 'head', DESIGN_ARKA_SUBMITTED, 20),         # before DW-8: 17; DW-6 +1
     ('boq_detail', 'scm', DESIGN_ARKA_SUBMITTED, 18),          # before DW-8: 16
     ('boq_detail', 'pm', DESIGN_ARKA_SUBMITTED, 16),           # before DW-8: 15
     ('opex_boq_entry', 'designer', DESIGN_IN_QC, 20),          # before DW-8: 20
@@ -747,8 +750,8 @@ QUERY_PINS = [
     ('design_boq_group_list', 'designer', DESIGN_IN_QC, 10),   # before DW-8: 9
     ('design_boq_group_list', 'pool', DESIGN_IN_QC, 10),       # before DW-8: 9
     ('design_boq_group_list', 'head', DESIGN_IN_QC, 7),       # before DW-8: 7
-    ('design_boq_group_detail', 'designer', DESIGN_IN_QC, 21), # before DW-8: 20
-    ('design_boq_group_detail', 'head', DESIGN_IN_QC, 18),     # before DW-8: 18
+    ('design_boq_group_detail', 'designer', DESIGN_IN_QC, 22), # before DW-8: 20; DW-6 +1
+    ('design_boq_group_detail', 'head', DESIGN_IN_QC, 19),     # before DW-8: 18; DW-6 +1
     ('design_boq_group_snapshot_detail', 'designer', DESIGN_IN_QC, 9), # before DW-8: 8
     ('design_boq_group_snapshot_detail', 'head', DESIGN_IN_QC, 6), # before DW-8: 6
     ('design_head_sites', 'head', DESIGN_IN_QC, 13),           # before DW-8: 13

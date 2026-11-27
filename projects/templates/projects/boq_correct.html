@@ -181,6 +181,8 @@ DCDB, ACDB or ACCB, whatever this page shows.
                         {% if f.explanation %}<div class="text-muted" style="font-size:.75rem">{{ f.explanation }}</div>{% endif %}
                         {% if f.stale_text %}<div class="text-warning-emphasis" style="font-size:.75rem">{{ f.stale_text }}</div>{% endif %}
                       {% endif %}
+                      {# DW-6: the rule's warnings, on every kind of calculated line (DW-R12 (d), answer 7). #}
+                      {% for warning in f.warnings %}<div class="text-warning-emphasis boq-rule-warning" style="font-size:.75rem">{{ warning }}</div>{% endfor %}
                     {% endif %}
                   {% endwith %}
                 </td>
@@ -365,7 +367,7 @@ DCDB, ACDB or ACCB, whatever this page shows.
       block). Each says why it is 0; in the review statuses a reviewer may put one on with an
       override (quantity and a note), which creates the line under the BOQ lock.
       {% endcomment %}
-      <details class="border-top px-2 py-2" id="boqCalcAbsent"{% if calculated_absent_error %} open{% endif %}>
+      <details class="border-top px-2 py-2" id="boqCalcAbsent"{% if calculated_absent_error or calculated_absent_warned %} open{% endif %}>
         <summary class="small fw-semibold">
           Calculated items not on this BOQ ({{ calculated_absent|length }})
         </summary>
@@ -379,6 +381,7 @@ DCDB, ACDB or ACCB, whatever this page shows.
                   <span class="badge rounded-pill text-bg-info ms-1 boq-formula-marker">Calculated</span>
                   {% if item.explanation %}<div class="text-muted" style="font-size:.75rem">{{ item.explanation }}</div>{% endif %}
                   {% if item.stale %}<div class="text-warning-emphasis" style="font-size:.75rem">{{ item.stale }}</div>{% endif %}
+                  {% for warning in item.warnings %}<div class="text-warning-emphasis boq-rule-warning" style="font-size:.75rem">{{ warning }}</div>{% endfor %}
                 </td>
                 <td class="text-muted" style="width:70px">{{ item.unit }}</td>
                 <td style="width:230px">
