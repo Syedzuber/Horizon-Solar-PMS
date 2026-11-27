@@ -1095,7 +1095,7 @@ class BOQItemMaster(models.Model):
     #
     # INERT AS OF THIS COMMIT. Nothing reads it but the two catalogue list templates.
     is_mandatory = models.BooleanField(default=False)
-    sort_order  = models.PositiveIntegerField(default=0)         # Also becomes BOQItem.serial_no on creation
+    sort_order  = models.PositiveIntegerField(default=0)         # The item's position: every BOQ screen orders lines by it, read live (DW-4); also copied to BOQItem.serial_no when a line is made
     created_at  = models.DateTimeField(auto_now_add=True)
     updated_at  = models.DateTimeField(auto_now=True)
 
@@ -1345,6 +1345,43 @@ def opex_catalogue_category_order():
     return seen
 
 
+def boq_line_order():
+    """The ORDER BY every screen and download that lists BOQ lines uses (DW-4, answer 8).
+
+    The catalogue's position, then its code, then the line's own serial_no, then its id:
+    one order everywhere, read LIVE from the catalogue, so a Head reorder applies to BOQs
+    that already exist. serial_no is the line's copy of the position taken when it was made
+    (never rewritten); it only breaks ties between several lines on one item (two ACCBs on
+    OPX-273, a calculated item on two lines), which keeps them together in the order they
+    were added.
+
+    NULLS LAST IS SPELLED OUT, NOT LEFT TO THE DATABASE. A line with no catalogue item goes
+    last (O6). Postgres puts NULL last for ASC by default but SQLite, which the test suite
+    runs on, puts it first; the explicit nulls_last makes both agree.
+
+    Every caller already joins item_master in the same query (select_related or values on
+    item_master__*), so ordering on it adds a JOIN term, not a query.
+    """
+    return (models.F('item_master__sort_order').asc(nulls_last=True),
+            models.F('item_master__code').asc(nulls_last=True),
+            'serial_no', 'pk')
+
+
+def boq_line_sort_key(row):
+    """boq_line_order() in Python, for a list built in memory.
+
+    Takes a BOQItem (its item_master must already be loaded) OR a BOQItemMaster: the
+    download and the picker compose the mandatory items a sheet does not carry yet in
+    among its lines, and they must land in their place, not after the saved lines.
+    """
+    if isinstance(row, BOQItemMaster):
+        return (0, row.sort_order, row.code, 0, 0)
+    master = row.item_master
+    if master is None:
+        return (1, 0, '', row.serial_no, row.pk)
+    return (0, master.sort_order, master.code, row.serial_no, row.pk)
+
+
 def split_opex_boq_rows(boq, catalogue_ids):
     """Split a BOQ's rows into (catalogue rows, off-catalogue rows).
 
@@ -1365,13 +1402,18 @@ def split_opex_boq_rows(boq, catalogue_ids):
     what this returns, so a line with an ACCBConfig cannot be deleted, recreated or
     re-quantified by either of them. Screens that show ACCB lines ask accb_rows() for them
     explicitly and render them read-only.
+
+    DW-4: BOTH LISTS ARE IN CATALOGUE POSITION ORDER (boq_line_order()), so the picker, the
+    download, the correction screen and the review panel, which all read this, list a
+    sheet the way the catalogue does.
     """
     on, off = [], []
     if boq is None:
         return on, off
-    # LEFT JOIN on the reverse one-to-one: lines with no ACCBConfig row only.
+    # LEFT JOIN on the reverse one-to-one: lines with no ACCBConfig row only. The
+    # item_master join the select_related already makes is what the order reads.
     for item in (boq.items.filter(accb_config__isnull=True)
-                 .select_related('item_master').order_by('serial_no', 'pk')):
+                 .select_related('item_master').order_by(*boq_line_order())):
         (on if item.item_master_id in catalogue_ids else off).append(item)
     return on, off
 

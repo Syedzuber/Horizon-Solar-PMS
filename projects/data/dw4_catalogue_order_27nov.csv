@@ -1,0 +1,274 @@
+code,sort_order,master_row,category,was_sort_order,description
+OPX-001,10,1,Module,1,Solar PV Module
+OPX-002,20,2,DCDB,2,"5 In/ 5 Out DCBDB with DC SPD type-2, 1000 DC Volt and 16Amp MCB protection in +ve and -ve, with MC4 connector for String Termination"
+OPX-003,30,3,DCDB,3,"7 In/ 7 Out DCBDB with DC SPD type-2, 1000 DC Volt and 16Amp MCB protection in +ve and -ve, with MC4 connector for String Termination"
+OPX-004,40,4,DCDB,4,"10 In/ 10 Out DCBDB with DC SPD type-2, 1000 DC Volt and 16Amp MCB protection in +ve and -ve, with MC4 connector for String Termination"
+OPX-005,50,5,DCDB,5,"12 In/ 12 Out DCBDB with DC SPD type-2, 1000 DC Volt and 16Amp MCB protection in +ve and -ve, with MC4 connector for String Termination"
+OPX-006,60,6,DCDB,6,"15 In/ 15 Out DCBDB with DC SPD type-2, 1000 DC Volt and 16Amp MCB protection in +ve and -ve, with MC4 connector for String Termination"
+OPX-007,70,7,DCDB,7,"20 In/ 20 Out DCBDB with DC SPD type-2, 1000 DC Volt and 16Amp MCB protection in +ve and -ve, with MC4 connector for String Termination"
+OPX-218,80,8,Inverter,218,10 kW Grid -Tie Inverter @3P
+OPX-008,90,9,Inverter,8,12 kW Grid -Tie Inverter @3P
+OPX-009,100,10,Inverter,9,15 kW Grid -Tie Inverter @3P
+OPX-010,110,11,Inverter,10,17 kW Grid -Tie Inverter @3P
+OPX-011,120,12,Inverter,11,20 kW Grid -Tie Inverter @3P
+OPX-012,130,13,Inverter,12,25 kW Grid -Tie Inverter @3P
+OPX-013,140,14,Inverter,13,30 kW Grid -Tie Inverter @3P
+OPX-014,150,15,Inverter,14,33 kW Grid -Tie Inverter @3P
+OPX-015,160,16,Inverter,15,36 kW Grid -Tie Inverter @3P
+OPX-016,170,17,Inverter,16,40 kW Grid -Tie Inverter @3P
+OPX-017,180,18,Inverter,17,50 kW Grid -Tie Inverter @3P
+OPX-018,190,19,Inverter,18,60 kW Grid -Tie Inverter @3P
+OPX-019,200,20,Inverter,19,75 kW Grid -Tie Inverter @3P
+OPX-219,210,21,Inverter,219,80 kW Grid -Tie Inverter @3P
+OPX-020,220,22,Inverter,20,100 kW Grid -Tie Inverter @3P
+OPX-021,230,23,Inverter,21,110 kW Grid -Tie Inverter @3P
+OPX-022,240,24,Inverter,22,125 kW Grid -Tie Inverter @3P
+OPX-208,250,,Inverter,22,150 kW Grid Tie Inverter @3P
+OPX-220,260,25,MMS,220,1P*3*1000mm height
+OPX-221,270,26,MMS,221,1P*4*1000mm height
+OPX-222,280,27,MMS,222,1P*5*1000mm height
+OPX-223,290,28,MMS,223,1P*6*1000mm height
+OPX-023,300,29,MMS,23,2P*3*500mm height
+OPX-024,310,30,MMS,24,2P*4*500mm height
+OPX-025,320,31,MMS,25,2P*5*500mm height
+OPX-026,330,32,MMS,26,2P*6*500mm height
+OPX-027,340,33,MMS,27,2P*3*1000mm height
+OPX-028,350,34,MMS,28,2P*4*1000mm height
+OPX-029,360,35,MMS,29,2P*5*1000mm height
+OPX-030,370,36,MMS,30,2P*6*1000mm height
+OPX-031,380,37,MMS,31,2P*3*1500mm height
+OPX-032,390,38,MMS,32,2P*4*1500mm height
+OPX-033,400,39,MMS,33,2P*5*1500mm height
+OPX-034,410,40,MMS,34,2P*6*1500mm height
+OPX-224,420,41,MMS,224,2P*3*1700mm height
+OPX-225,430,42,MMS,225,2P*4*1700mm height
+OPX-226,440,43,MMS,226,2P*5*1700mm height
+OPX-227,450,44,MMS,227,2P*6*1700mm height
+OPX-228,460,45,MMS,228,2P*4*2400mm height
+OPX-229,470,46,MMS,229,2P*5*2400mm height
+OPX-230,480,47,MMS,230,2P*6*2400mm height
+OPX-231,490,48,MMS,231,2P*3*3100mm height
+OPX-232,500,49,MMS,232,2P*4*3100mm height
+OPX-233,510,50,MMS,233,2P*5*3100mm height
+OPX-234,520,51,MMS,234,2P*5*3800mm height
+OPX-235,530,52,MMS,235,2P*6*3800mm height
+OPX-236,540,53,MMS,236,2P*3*3800mm height
+OPX-035,550,54,MMS,35,3P Structure
+OPX-036,560,55,MMS,36,Other Structure
+OPX-037,570,56,MMS,37,Ballast Type Structure
+OPX-038,580,57,MMS,38,Tin Shade
+OPX-237,590,58,ACDB,237,"ACDB Type-1 (For 10KW INV), 1 Nos. with MCB: 4P 415V, 20A. With LSIG with Earth fault protection,SPD"
+OPX-039,600,59,ACDB,39,"ACDB Type-1 (For 12KW INV), 1 Nos. with MCB: 4P 415V, 25A. With LSIG with Earth fault protection,SPD"
+OPX-040,610,60,ACDB,40,"ACDB Type-1 (For 15KW INV), 1 Nos. with MCB: 4P 415V, 30A. With LSIG with Earth fault protection,SPD"
+OPX-041,620,61,ACDB,41,"ACDB Type-1 (For 17/20KW INV), 1 Nos. with MCB: 4P 415V, 40A. With LSIG with Earth fault protection,SPD"
+OPX-042,630,62,ACDB,42,"ACDB Type-1 (For 25/30KW INV), 1 Nos. with MCCB: 4P 415V, 63A.With LSIG with Earth fault protection,SPD"
+OPX-043,640,63,ACDB,43,"ACDB Type-1 (For 33/36/40KW INV), 1 Nos. with MCCB: 4P 415V, 100A. With LSIG with Earth fault protection,SPD"
+OPX-044,650,64,ACDB,44,"ACDB Type-1 (For 50KW INV), 1 Nos. with MCCB: 4P 415V, 110A. With LSIG with Earth fault protection,SPD"
+OPX-045,660,65,ACDB,45,"ACDB Type-1 (For 60/75KW INV), 1 Nos. with MCCB: 4P 415V, 150A. With LSIG with Earth fault protection,SPD"
+OPX-046,670,66,ACDB,46,"ACDB Type-1 (For 100KW INV), 1 Nos. with MCB: 4P 415V, 200A. With LSIG with Earth fault protection,SPD"
+OPX-047,680,67,ACDB,47,"ACDB Type-1 (For 110KW INV), 1 Nos. with MCB: 4P 415V, 225A. With LSIG with Earth fault protection,SPD"
+OPX-048,690,68,ACDB,48,"ACDB Type-1 (For 125KW INV), 1 Nos. with MCB: 4P 415V, 250A. With LSIG with Earth fault protection,SPD"
+OPX-238,700,69,ACDB,238,"ACDB Type-1, 1 Nos. with MCB: 4P 415V, 315A. With LSIG with Earth fault protection,SPD"
+OPX-239,710,70,ACDB,239,"ACDB Type-1, 1 Nos. with MCB: 4P 415V, 400A. With LSIG with Earth fault protection,SPD"
+OPX-240,720,71,ACDB,240,"ACDB Type-2 (For 10KW INV), 1 Nos. with MCB: 4P 415V, 20A. TM base"
+OPX-049,730,72,ACDB,49,"ACDB Type-2 (For 12KW INV), 1 Nos. with MCB: 4P 415V, 25A. TM base"
+OPX-050,740,73,ACDB,50,"ACDB Type-2 (For 15KW INV), 1 Nos. with MCB: 4P 415V, 30A. TM base"
+OPX-051,750,74,ACDB,51,"ACDB Type-2 (For 17/20KW INV), 1 Nos. with MCB: 4P 415V, 40A. TM base"
+OPX-052,760,75,ACDB,52,"ACDB Type-2 (For 25/30KW INV), 1 Nos. with MCCB: 4P 415V, 63A. TM base"
+OPX-053,770,76,ACDB,53,"ACDB Type-2 (For 33/36/40KW INV), 1 Nos. with MCCB: 4P 415V, 100A. TM base"
+OPX-054,780,77,ACDB,54,"ACDB Type-2 (For 50KW INV), 1 Nos. with MCCB: 4P 415V, 110A. TM base"
+OPX-055,790,78,ACDB,55,"ACDB Type-2 (For 60/75KW INV), 1 Nos. with MCCB: 4P 415V, 150A. TM base"
+OPX-056,800,79,ACDB,56,"ACDB Type-2 (For 100KW INV), 1 Nos. with MCB: 4P 415V, 200A. TM base"
+OPX-057,810,80,ACDB,57,"ACDB Type-2 (For 110KW INV), 1 Nos. with MCB: 4P 415V, 225A. TM base"
+OPX-058,820,81,ACDB,58,"ACDB Type-2 (For 125KW INV), 1 Nos. with MCB: 4P 415V, 250A. TM base"
+OPX-241,830,82,ACDB,241,"ACDB Type-2 , 1 Nos. with MCB: 4P 415V, 315A. TM base"
+OPX-242,840,83,ACDB,242,"ACDB Type-2, 1 Nos. with MCB: 4P 415V, 400A. TM base"
+OPX-273,850,,ACCB,273,ACCB (configured)
+OPX-059,860,85,DC Cable,59,"1C x 4 Sq.mm 1.8KV DC Red , XLPO, CU Cable, TUV Approved, Solar grade cables-IEC 60189-1, IEC 60189-2, EBXL, UV protected, FRLS & anti rodent"
+OPX-060,870,86,DC Cable,60,"1C x 4 Sq.mm 1.8KV DC Black , XLPO, CU Cable, TUV Approved, Solar grade cables-IEC 60189-1, IEC 60189-2 EBXL, UV protected, FRLS & anti rodent"
+OPX-061,880,87,DC Cable,61,Multicontact MC4 Connectors suitable for terminating 4/6 Sq. mm Copper cables (Male + Female Connector)
+OPX-062,890,88,AC Cable,62,1.1kV*4C*4Sqmm*Cu*XLPE*Cable
+OPX-063,900,89,AC Cable,63,1.1kV*4C*6Sqmm*Cu*XLPE*cable
+OPX-064,910,90,AC Cable,64,1.1kV*4C*10Sqmm*Cu*XLPE*cable
+OPX-065,920,91,AC Cable,65,1.1kV*4C*16Sqmm*Cu*XLPE*cable
+OPX-066,930,92,AC Cable,66,1.1kV*4C*25Sqmm*Cu*XLPE*cable
+OPX-067,940,93,AC Cable,67,1.1kV*4C*35Sqmm*Cu*XLPE*cable
+OPX-068,950,94,AC Cable,68,1.1kV*4C*50Sqmm*Cu*XLPE*cable
+OPX-069,960,95,AC Cable,69,1.1kV*4C*70Sqmm*Cu*XLPE*cable
+OPX-070,970,96,AC Cable,70,1.1kV*4C*95Sqmm*Cu*XLPE*cable
+OPX-071,980,97,AC Cable,71,1.1kV*4C*120Sqmm*Cu*XLPE*cable
+OPX-072,990,98,AC Cable,72,1.1kV*4C*150Sqmm*Cu*XLPE*cable
+OPX-073,1000,99,AC Cable,73,1.1kV*4C*185Sqmm*Cu*XLPE*cable
+OPX-074,1010,100,AC Cable,74,1.1kV*4C*240Sqmm*Cu*XLPE*cable
+OPX-075,1020,,AC Cable,75,1.1kV*4C*300Sqmm*Cu*XLPE*cable
+OPX-086,1030,101,AC Cable,86,1.1kV*1C*300Sqmm*Cu*XLPE*cable
+OPX-076,1040,102,AC Cable,76,1.1kV*3.5C*25Sqmm*Cu*XLPE*cable
+OPX-077,1050,103,AC Cable,77,1.1kV*3.5C*35Sqmm*Cu*XLPE*cable
+OPX-078,1060,104,AC Cable,78,1.1kV*3.5C*50Sqmm*Cu*XLPE*cable
+OPX-079,1070,105,AC Cable,79,1.1kV*3.5C*70Sqmm*Cu*XLPE*cable
+OPX-080,1080,106,AC Cable,80,1.1kV*3.5C*95Sqmm*Cu*XLPE*cable
+OPX-081,1090,107,AC Cable,81,1.1kV*3.5C*120Sqmm*Cu*XLPE*cable
+OPX-082,1100,108,AC Cable,82,1.1kV*3.5C*150Sqmm*Cu*XLPE*cable
+OPX-083,1110,109,AC Cable,83,1.1kV*3.5C*185Sqmm*Cu*XLPE*cable
+OPX-084,1120,110,AC Cable,84,1.1kV*3.5C*240Sqmm*Cu*XLPE*cable
+OPX-085,1130,,AC Cable,85,1.1kV*3.5C*300Sqmm*Cu*XLPE*cable
+OPX-090,1140,116,AC Cable,90,1.1kV*3.5C*25Sqmm*AL*XLPE*cable
+OPX-091,1150,117,AC Cable,91,1.1kV*3.5C*35Sqmm*AL*XLPE*Cable
+OPX-092,1160,118,AC Cable,92,1.1kV*3.5C*50Sqmm*AL*XLPE*Cable
+OPX-093,1170,119,AC Cable,93,1.1kV*3.5C*70Sqmm*AL*XLPE*Cable
+OPX-094,1180,120,AC Cable,94,1.1kV*3.5C*95Sqmm*AL*XLPE*Cable
+OPX-095,1190,121,AC Cable,95,1.1kV*3.5C*120Sqmm*AL*XLPE*Cable
+OPX-096,1200,122,AC Cable,96,1.1kV*3.5C*150Sqmm*AL*XLPE*Cable
+OPX-097,1210,123,AC Cable,97,1.1kV*3.5C*185Sqmm*AL*XLPE*Cable
+OPX-098,1220,124,AC Cable,98,1.1kV*3.5C*240Sqmm*AL*XLPE*Cable
+OPX-099,1230,125,AC Cable,99,1.1kV*3.5C*300Sqmm*AL*XLPE*Cable
+OPX-274,1240,,AC Cable,274,1.1kV*4C*10Sqmm*AL*XLPE*cable
+OPX-244,1250,126,AC Cable,244,1.1kV*4C*16Sqmm*AL*XLPE*cable
+OPX-245,1260,127,AC Cable,245,1.1kV*4C*25Sqmm*AL*XLPE*cable
+OPX-246,1270,128,AC Cable,246,1.1kV*4C*35Sqmm*AL*XLPE*Cable
+OPX-247,1280,129,AC Cable,247,1.1kV*4C*50Sqmm*AL*XLPE*Cable
+OPX-248,1290,130,AC Cable,248,1.1kV*4C*70Sqmm*AL*XLPE*Cable
+OPX-249,1300,131,AC Cable,249,1.1kV*4C*95Sqmm*AL*XLPE*Cable
+OPX-250,1310,132,AC Cable,250,1.1kV*4C*120Sqmm*AL*XLPE*Cable
+OPX-251,1320,133,AC Cable,251,1.1kV*4C*150Sqmm*AL*XLPE*Cable
+OPX-252,1330,134,AC Cable,252,1.1kV*4C*185Sqmm*AL*XLPE*Cable
+OPX-253,1340,135,AC Cable,253,1.1kV*4C*240Sqmm*AL*XLPE*Cable
+OPX-254,1350,136,AC Cable,254,1.1kV*4C*300Sqmm*AL*XLPE*Cable
+OPX-100,1360,137,AC Cable,100,1.1kV*1C*300Sqmm*AL*XLPE*Cable
+OPX-087,1370,113,Earthing Cable,87,1.1kV*1C*4Sqmm*Cu*XLPE*Wire For Earthing cable
+OPX-088,1380,114,Earthing Cable,88,1.1kV*1C*16Sqmm*Cu*XLPE*Wire For Earthing cable
+OPX-089,1390,115,Earthing Cable,89,1.1kV*1C*70Sqmm*Al*XLPE*Wire For Earthing cable
+OPX-105,1400,138,Ring Type Lug,105,4Sqmm*Cu
+OPX-106,1410,139,Ring Type Lug,106,6Sqmm*Cu
+OPX-107,1420,140,Ring Type Lug,107,10Sqmm*Cu
+OPX-108,1430,141,Ring Type Lug,108,16Sqmm*Cu
+OPX-109,1440,142,Ring Type Lug,109,25Sqmm*Cu
+OPX-110,1450,143,Ring Type Lug,110,35Sqmm*Cu
+OPX-111,1460,144,Ring Type Lug,111,50Sqmm*Cu
+OPX-112,1470,145,Ring Type Lug,112,70Sqmm*Cu
+OPX-113,1480,146,Ring Type Lug,113,95Sqmm*Cu
+OPX-114,1490,147,Ring Type Lug,114,120Sqmm*Cu
+OPX-115,1500,148,Ring Type Lug,115,150Sqmm*Cu
+OPX-116,1510,149,Ring Type Lug,116,185Sqmm*Cu
+OPX-117,1520,150,Ring Type Lug,117,240Sqmm*Cu
+OPX-118,1530,151,Ring Type Lug,118,300Sqmm*Cu
+OPX-255,1540,160,Ring Type Lug,255,10Sqmm*AL
+OPX-119,1550,161,Ring Type Lug,119,16Sqmm*AL
+OPX-120,1560,162,Ring Type Lug,120,25Sqmm*AL
+OPX-121,1570,163,Ring Type Lug,121,35Sqmm*AL
+OPX-122,1580,164,Ring Type Lug,122,50Sqmm*AL
+OPX-123,1590,165,Ring Type Lug,123,70Sqmm*AL
+OPX-124,1600,166,Ring Type Lug,124,95Sqmm*AL
+OPX-125,1610,167,Ring Type Lug,125,120Sqmm*AL
+OPX-126,1620,168,Ring Type Lug,126,150Sqmm*AL
+OPX-127,1630,169,Ring Type Lug,127,185Sqmm*AL
+OPX-128,1640,170,Ring Type Lug,128,240Sqmm*AL
+OPX-129,1650,171,Ring Type Lug,129,300Sqmm*AL
+OPX-209,1660,152,Bimetallic Lugs,208,25Sqmm Bimetallic Lugs
+OPX-211,1670,153,Bimetallic Lugs,210,35Sqmm Bimetallic Lugs
+OPX-212,1680,,Bimetallic Lugs,211,50Sqmm Bimetallic Lugs
+OPX-210,1690,154,Bimetallic Lugs,209,50Sqmm Bimetallic Lugs
+OPX-213,1700,155,Bimetallic Lugs,212,70Sqmm Bimetallic Lugs
+OPX-214,1710,156,Bimetallic Lugs,213,95Sqmm Bimetallic Lugs
+OPX-215,1720,157,Bimetallic Lugs,214,120Sqmm Bimetallic Lugs
+OPX-216,1730,158,Bimetallic Lugs,215,150Sqmm Bimetallic Lugs
+OPX-217,1740,159,Bimetallic Lugs,216,185Sqmm Bimetallic Lugs
+OPX-101,1750,172,Pin Type Lug,101,4Sqmm*Cu
+OPX-102,1760,173,Pin Type Lug,102,6Sqmm*Cu
+OPX-103,1770,174,Pin Type Lug,103,10Sqmm*Cu
+OPX-104,1780,175,Pin Type Lug,104,16Sqmm*Cu
+OPX-130,1790,176,Conduit,130,32/40 DWC HDPE Conduit Pipe
+OPX-256,1800,177,Conduit,256,Elbow for 32/40 DWC HDPE conduit
+OPX-257,1810,178,Conduit,257,Tee for 32/40 DWC HDPE conduit
+OPX-258,1820,179,Conduit,258,Coupler for 32/40 DWC HDPE conduit
+OPX-259,1830,180,Conduit,259,50/63 DWC HDPE Conduit Pipe
+OPX-260,1840,181,Conduit,260,Elbow for 50/63 DWC HDPE conduit
+OPX-261,1850,182,Conduit,261,Tee for 50/63 DWC HDPE conduit
+OPX-262,1860,183,Conduit,262,Coupler for 50/63 DWC HDPE conduit
+OPX-263,1870,184,Conduit,263,100 DWC HDPE Conduit Pipe
+OPX-264,1880,185,Conduit,264,Elbow for 100 DWC HDPE conduit
+OPX-265,1890,186,Conduit,265,Tee for 100 DWC HDPE conduit
+OPX-266,1900,187,Conduit,266,Coupler for 100 DWC HDPE conduit
+OPX-131,1910,,Conduit,131,PVC Elbow 25MM
+OPX-132,1920,,Conduit,132,PVC Tee 25MM
+OPX-133,1930,,Conduit,133,32 MM PVC Conduit Pipe UV proctected and FRLS Grade
+OPX-134,1940,,Conduit,134,PVC Elbow 32 MM
+OPX-135,1950,,Conduit,135,PVC Tee 32 MM
+OPX-136,1960,,Conduit,136,40 MM PVC Conduit Pipe UV proctected and FRLS Grade
+OPX-137,1970,,Conduit,137,PVC Elbow 40MM
+OPX-138,1980,,Conduit,138,PVC Tee 40MM
+OPX-139,1990,,Conduit,139,50 MM PVC Conduit Pipe UV proctected and FRLS Grade
+OPX-140,2000,,Conduit,140,PVC Elbow 50MM
+OPX-141,2010,,Conduit,141,PVC Tee 50MM
+OPX-142,2020,,Conduit,142,Flexible conduit 25mm PVC UV proctected and FRLS Grade
+OPX-143,2030,188,Conduit,143,Flexible conduit 32mm PVC UV proctected and FRLS Grade
+OPX-144,2040,,Conduit,144,Flexible conduit 40mm PVC UV proctected and FRLS Grade
+OPX-145,2050,,Conduit,145,Flexible conduit 50mm PVC UV proctected and FRLS Grade
+OPX-146,2060,,Conduit,146,SS Saddle for 25MM conduit (100PCS)
+OPX-147,2070,,Conduit,147,SS Saddle for 32MM conduit (100PCS)
+OPX-148,2080,189,Conduit,148,SS Saddle for 40MM conduit (100PCS)
+OPX-149,2090,,Conduit,149,SS Saddle for 50MM conduit (100PCS)
+OPX-267,2100,190,Conduit,267,SS Saddle for 63MM conduit (100PCS)
+OPX-150,2110,,Conduit,150,PVC Clamp for 25MM conduit (100PCS)
+OPX-151,2120,,Conduit,151,PVC Clamp for 32MM conduit (100PCS)
+OPX-152,2130,,Conduit,152,PVC Clamp for 40MM conduit (100PCS)
+OPX-153,2140,,Conduit,153,PVC Clamp for 50MM conduit (100PCS)
+OPX-154,2150,191,Conduit,154,GI screw for saddle fixing (100PCS)
+OPX-155,2160,192,Conduit,155,PVC gitti for saddle fixing (100PCS)
+OPX-156,2170,,Conduit,156,50MM Flexible DWC pipe for underground cable
+OPX-157,2180,,Conduit,157,100MM Flexible DWC pipe for underground cable
+OPX-158,2190,,Conduit,158,150MM Flexible DWC pipe for underground cable
+OPX-159,2200,,Conduit,159,200MM Flexible DWC pipe for underground cable
+OPX-160,2210,,Conduit,160,HDPE PIPE 50 MM WITH 2 END CAP With Clamps for Fixing
+OPX-161,2220,,Conduit,161,HDPE PIPE 75 MM WITH 2 END CAP With Clamps for Fixing
+OPX-162,2230,,Conduit,162,HDPE PIPE 100 MM WITH 2 END CAP With Clamps for Fixing
+OPX-163,2240,193,Cable Tray,163,"FRP/HDGI/ZAM, Perforated type, Cable Tray 50mm wide, 50mm Hight,1.6mm Thick with cover and connecting plate & nutbolt & other installation item."
+OPX-164,2250,194,Cable Tray,164,"FRP/HDGI/ZAM, Perforated type, Cable Tray 100mm wide, 50mm Hight,1.6mm Thick with cover and connecting plate & nutbolt & other installation item."
+OPX-165,2260,195,Cable Tray,165,"FRP/HDGI/ZAM, Perforated type, Cable Tray 150mm wide, 50mm Hight,1.6mm Thick with cover and connecting plate & nutbolt & other installation item."
+OPX-166,2270,196,Cable Tray,166,"FRP/HDGI/ZAM, Perforated type, Cable Tray 200mm wide, 50mm Hight,1.6mm Thick with cover and connecting plate & nutbolt & other installation item."
+OPX-167,2280,197,Cable Tray,167,PVC Cable Tray 50mm wide with cover
+OPX-168,2290,198,Earthing,168,25x3 GI Strip (min. 80 micron)
+OPX-169,2300,199,Earthing,169,M8 x 25mm GI Nut Bolt with 2 nos Washers of 10mm Dia (To joint earthing Strip eand )
+OPX-170,2310,200,Earthing,170,"Copper Bonded Earthing Electrode 17.2 MM dia having 250 micron Cu coating, 3 mtrs long"
+OPX-171,2320,201,Earthing,171,"Copper Bonded Earthing Electrode 25 MM dia having 250 micron Cu coating, 2 mtrs long"
+OPX-172,2330,202,Earthing,172,300MM X 300MM Square Type Precast concrete enclosure with Earthing Chamber Cover
+OPX-173,2340,203,Earthing,173,25Kg Chemical Earthing Compound Bags BFC
+OPX-174,2350,204,Earthing,174,40mm Height Epoxy Insulator for 25 X 3 MM Earth strip installation With Nut Bolt
+OPX-175,2360,205,Earthing,175,"Conventional type Lightning Arresters , as per NFC 17-102:2011, with all necessory accessories"
+OPX-176,2370,206,Earthing,176,"ESE Type II Lightning Arresters , as per NFC 17-102:2011, with all necessory accessories LA diameter 107 Meter and mast height of 5Meter."
+OPX-177,2380,207,Earthing,177,"1 Set of Nut and Bolt 4mm diax20mm length, 1 Teeth Washer,1 Cut Washer and 1 Plain Washer, outerdia 10mm & inner dia 4mm around (For Module to Module earthing)"
+OPX-178,2390,208,Solar Meter + CT,178,"Below 20KW Inverter CT is not required. Solar Generation Meter with Accuracy class 1.0s, and RS 485/RS 232 compatible with enclosure box, suitable for communication with data logger (Saral 305 Sequre meter)"
+OPX-179,2400,209,Solar Meter + CT,179,"Above 20KW Inverter CT is required. Solar Generation Meter with Accuracy class 0.5s, and RS 485/RS 232 compatible with enclosure box, suitable for communication with data . (Secure Premier 300 LT CT)"
+OPX-180,2410,210,Solar Meter + CT,180,"CT 50/5A, 0.5S, 5VA (Set =3 Nos, RYB)"
+OPX-181,2420,211,Solar Meter + CT,181,"CT 100/5A, 0.5S, 5VA (Set =3 Nos, RYB)"
+OPX-182,2430,212,Solar Meter + CT,182,"CT 150/5A, 0.5S, 5VA (Set =3 Nos, RYB)"
+OPX-183,2440,213,Solar Meter + CT,183,"CT 200/5A, 0.5S, 5VA (Set =3 Nos, RYB)"
+OPX-268,2450,214,Solar Meter + CT,268,"CT 250/5A, 0.5S, 5VA (Set =3 Nos, RYB)"
+OPX-269,2460,215,Solar Meter + CT,269,"CT 300/5A, 0.5S, 5VA (Set =3 Nos, RYB)"
+OPX-270,2470,216,Solar Meter + CT,270,"CT 400/5A, 0.5S, 5VA (Set =3 Nos, RYB)"
+OPX-184,2480,217,Data Logger+ WMS,184,Data Logger RS485 2No's + Ethernet + 4 AI (4-20 mA ) + 4 DI/O + USB
+OPX-185,2490,218,Data Logger+ WMS,185,"Supply of 4Pair twisted, 0.5 Sq.mm Shielded/Armoured RS485 Cable"
+OPX-186,2500,219,Data Logger+ WMS,186,WMS (Data Logger) for Sensor communication (a) Solar Irradiance sensor (b) Ambient temperature sensor (c ) Wind Speed sensor
+OPX-187,2510,220,Civil,187,"Underground cable laying in 500 mm depth (including digging, refilling, cable laying in DWC conduit, etc.)"
+OPX-188,2520,221,BOS,188,Cable Tie 250 MM (PVC & UV resistant) (100Nos)
+OPX-189,2530,222,BOS,189,Cable Tie 400 MM (PVC & UV resistant) (100Nos)
+OPX-190,2540,223,BOS,190,Cable Tie 500 MM (SS) (100Nos)
+OPX-191,2550,224,BOS,191,"Cast iron, Cable Route marker (Printed as ""Solar cable"")"
+OPX-192,2560,225,BOS,192,"PVC Tape (Red, Black, Yellow & Green)"
+OPX-193,2570,226,BOS,193,Silver Spray Paint
+OPX-194,2580,227,BOS,194,Fasteners for Inverter/DCDB/ACDB Mounting
+OPX-195,2590,228,BOS,195,Ferules (A-Z) (0-9)
+OPX-196,2600,229,BOS,196,GENERIC 750 ml Can PU Foam Sealant Spray for Joint filling
+OPX-197,2610,230,BOS,197,Fire Extinguisher 4KG - ABC Type
+OPX-198,2620,231,BOS,198,DANGER BOARDS
+OPX-199,2630,232,BOS,199,Display BOARDS
+OPX-200,2640,233,BOS,200,CCTV for project monitoring (either on rent or purchased)
+OPX-201,2650,234,BOS,201,Walk way 350mm with mounting attachment
+OPX-202,2660,235,BOS,202,Safety rail with mounting attachment
+OPX-203,2670,236,BOS,203,INC work 2P structure
+OPX-204,2680,237,BOS,204,INC work Tin shade
+OPX-205,2690,238,BOS,205,INC work Ballast structure
+OPX-206,2700,239,BOS,206,Insulating Rubber Mat 500*1000
+OPX-207,2710,,BOS,207,Insulating Rubber Mat 1000*1000
+OPX-271,2720,240,BOS,271,Inverter Stand
+OPX-272,2730,242,BOS,272,Ladder required for any

@@ -70,7 +70,8 @@
             <input class="form-check-input js-vo-check" type="checkbox" name="line"
                    value="{{ row.item.pk }}" id="voLine{{ row.item.pk }}"{% if row.checked %} checked{% endif %}>
             <label class="form-check-label small" for="voLine{{ row.item.pk }}">
-              {{ row.item.serial_no }}. {{ row.item.description }}
+              {# DW-4: the line's place on this page (order_views._form_context), not its serial_no. #}
+              {{ row.number }}. {{ row.item.description }}
               <span class="text-muted">· BOQ {{ row.item.boq_quantity|default_if_none:"—" }} {{ row.item.uom }}</span>
             </label>
           </div>

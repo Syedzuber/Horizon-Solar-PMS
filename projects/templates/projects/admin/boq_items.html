@@ -23,7 +23,8 @@
       {% for value, label, count in type_counts %}{% if count %}{{ count }} {{ label }}{% if not forloop.last %}, {% endif %}{% endif %}{% endfor %}.
     </p>
   </div>
-  <a href="{% url 'admin_boq_item_create' %}"
+  {# DW-4: the list's type filter goes with "Add", so the new item's default position is the end of that template. #}
+  <a href="{% url 'admin_boq_item_create' %}{% if type_filter %}?type={{ type_filter }}{% endif %}"
      class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-white whitespace-nowrap shrink-0"
      style="background:#1a7a4a;"
      onmouseover="this.style.background='#155f3a'" onmouseout="this.style.background='#1a7a4a'">

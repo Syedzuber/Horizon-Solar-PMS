@@ -905,6 +905,56 @@ UNIT_LOCKED_MESSAGE = ("This item is already used on site BOQs, so its unit can'
                        "Retire it and create a new item with the right unit.")
 
 
+def active_catalogue_positions(project_type, exclude_pk=None):
+    """`project_type`'s ACTIVE catalogue items in position order, leaving out `exclude_pk`
+    (the item being edited, so its own current place is never reported as taken or as its
+    own neighbour). ONE QUERY: the clash check and both neighbours are read from this list
+    in Python, so the form costs one query whatever it looks up (the Head's edit page has a
+    pinned count).
+
+    ACTIVE ONLY, because positions are about what the picker and the BOQ screens show, and a
+    retired item is in neither (DW-4 O5: a retired item's position does not block either).
+    Ties on a position (the pre-reorder duplicate 22) resolve by code, as every reader does.
+    """
+    items = BOQItemMaster.objects.filter(project_type=project_type, is_active=True)
+    if exclude_pk is not None:
+        items = items.exclude(pk=exclude_pk)
+    return list(items.order_by('sort_order', 'code').only('code', 'sort_order', 'description'))
+
+
+def catalogue_neighbours(positions, position):
+    """(the item just before `position`, the item just after it) in `positions`
+    (active_catalogue_positions()), either None at an end. No query."""
+    before = [item for item in positions if item.sort_order < position]
+    after = [item for item in positions if item.sort_order > position]
+    return (before[-1] if before else None), (after[0] if after else None)
+
+
+def _catalogue_place(item):
+    return f'{item.code} ({item.sort_order}, {item.description})'
+
+
+def catalogue_position_help(project_type, position, positions=None):
+    """The position field's help text: what the number does, and which items it falls
+    between (DW-4 O5), so the Head can see where an item will land before saving.
+    `positions` is active_catalogue_positions(); read here when not given."""
+    text = 'Where this item appears in the catalogue, the picker and every BOQ screen, lowest first.'
+    if project_type == 'OPEX':
+        text += ' Positions go up in steps of 10, so an item can be put between two others.'
+    if position is None:
+        return text
+    if positions is None:
+        positions = active_catalogue_positions(project_type)
+    before, after = catalogue_neighbours(positions, position)
+    if before and after:
+        text += f' Now between {_catalogue_place(before)} and {_catalogue_place(after)}.'
+    elif before:
+        text += f' At the end, after {_catalogue_place(before)}.'
+    elif after:
+        text += f' At the start, before {_catalogue_place(after)}.'
+    return text
+
+
 class BOQItemMasterForm(forms.ModelForm):
     """Create / edit one catalogue entry. `code` is create-only — it is the stable
     identifier BOQ rows and grouped procurement refer to, so the edit view drops the
@@ -966,12 +1016,77 @@ class BOQItemMasterForm(forms.ModelForm):
         # form cannot save until someone picks a unit (B-0 T1).
         if self.instance.pk:
             self.initial['unit'] = canonical_unit(self.instance.unit) or ''
-        self.fields['sort_order'].help_text = 'Position in the standard BOQ template; also becomes the line item serial number.'
+        # DW-4: the general sentence; each catalogue view calls describe_position() to add
+        # the items either side, which needs the template the item belongs to.
+        self.fields['sort_order'].help_text = catalogue_position_help(None, None)
         self.fields['is_mandatory'].help_text = (
             'RESCO only. A mandatory item is added to every new RESCO BOQ and cannot be '
             'removed by the designer. Not used for Residential — every active Residential '
             'item is already pre-populated onto every new Residential BOQ.'
         )
+
+    def _project_type(self, cleaned):
+        """The template this item belongs to. The Head's screens delete `project_type` and
+        force 'OPEX' after validation (see clean() below), so its absence means OPEX."""
+        if 'project_type' in self.fields:
+            return cleaned.get('project_type')
+        return 'OPEX'
+
+    def _check_position(self, cleaned):
+        """DW-4 (O5, answer 4): refuse a position another ACTIVE item of the same template
+        already holds, naming that item.
+
+        ONLY WHEN THE POSITION IS CHANGED (or the item is new). Until the reorder is applied
+        OPX-022 and OPX-208 share 22; checking every save would make both uneditable.
+
+        WHY ACTIVE ONLY: a retired item is in neither the picker nor any new BOQ, so its
+        number blocks nothing; WHY SAME TEMPLATE: Residential and RESCO positions are two
+        separate lists (ITM-001 and OPX-001 both started at 1). No database constraint backs
+        this (no migration, ruling O5); two saves racing for one free number could both pass,
+        which leaves a tie that every reader breaks by code, so nothing is lost.
+        """
+        position = cleaned.get('sort_order')
+        project_type = self._project_type(cleaned)
+        if position is None or not project_type:
+            return
+        if self.instance.pk and 'sort_order' not in self.changed_data:
+            return
+        positions = self._positions(project_type)
+        clash = next((item for item in positions if item.sort_order == position), None)
+        if clash is None:
+            return
+        _before, after = catalogue_neighbours(positions, position)
+        if after is None:
+            hint = f' {position + 10} would come after it, at the end.'
+        elif after.sort_order - position >= 2:
+            hint = (f' {position + (after.sort_order - position) // 2} would sit between '
+                    f'{clash.code} and {after.code}.')
+        else:
+            hint = ''
+        self.add_error('sort_order', f'Position {position} is already used by {clash.code} '
+                                     f'({clash.description}). Choose a free position.{hint}')
+
+    def describe_position(self, project_type):
+        """Set the position field's help text to name the items either side of the value
+        the form shows: the posted value on a refused save, otherwise the initial one."""
+        if 'sort_order' not in self.fields:
+            return
+        raw = self.data.get('sort_order') if self.is_bound else self.initial.get('sort_order')
+        try:
+            position = int(raw)
+        except (TypeError, ValueError):
+            position = None
+        self.fields['sort_order'].help_text = catalogue_position_help(
+            project_type, position,
+            self._positions(project_type) if position is not None else None)
+
+    def _positions(self, project_type):
+        """active_catalogue_positions() for this form, read once per template and kept, so
+        a refused save (the check, then the help text) still costs one query."""
+        cache = self.__dict__.setdefault('_dw4_positions', {})
+        if project_type not in cache:
+            cache[project_type] = active_catalogue_positions(project_type, self.instance.pk)
+        return cache[project_type]
 
     def clean(self):
         """Refuse `is_mandatory` on anything but an OPEX row.
@@ -1005,6 +1120,9 @@ class BOQItemMasterForm(forms.ModelForm):
         # the picker save put a bare ACCB line on every sheet.
         if self.instance.pk and self.instance.code == ACCB_CONFIGURED_CODE:
             raise forms.ValidationError(ACCB_CATALOGUE_LOCKED_MESSAGE)
+        # DW-4 (O5, answer 4): placed before the mandatory rules' early returns so it runs on
+        # every save, Head and Admin screens alike.
+        self._check_position(cleaned)
         if not cleaned.get('is_mandatory'):
             return cleaned
         # B-2c (C2): a CALCULATED item cannot be mandatory. Anyone who may edit the catalogue

@@ -9787,10 +9787,15 @@ def design_boq_catalogue_create(request):
         # equivalent is unscoped and is logged as a deferred finding; it is not touched
         # here, but this is new code and copying the unscoped form would have imported the
         # bug rather than inherited it.
+        # DW-4 (answer 4): + 10, not + 1, so the catalogue keeps its steps of 10 and a later
+        # item can still go between. The last position of ANY item, retired included, so a
+        # new item never lands on a retired one's number.
         next_order = (_opex_catalogue_qs()
-                      .aggregate(m=Max('sort_order'))['m'] or 0) + 1
+                      .aggregate(m=Max('sort_order'))['m'] or 0) + 10
         form = BOQItemMasterForm(initial={'sort_order': next_order, 'is_active': True})
         del form.fields['project_type']
+    # DW-4 (O5): the help text names the items either side of the position shown.
+    form.describe_position('OPEX')
 
     return render(request, 'projects/design/boq_catalogue_form.html', {
         'can_open_design_dashboard': user_can_open_design_dashboard(request.user),  # DW-8
@@ -9849,6 +9854,8 @@ def design_boq_catalogue_edit(request, item_id):
         form = BOQItemMasterForm(instance=item)
         del form.fields['code']
         del form.fields['project_type']
+    # DW-4 (O5): the help text names the items either side of the position shown.
+    form.describe_position('OPEX')
 
     return render(request, 'projects/design/boq_catalogue_form.html', {
         'can_open_design_dashboard': user_can_open_design_dashboard(request.user),  # DW-8

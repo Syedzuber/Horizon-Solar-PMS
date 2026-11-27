@@ -55,7 +55,8 @@ from .design_views import aggregate_group_boq
 from .design_nav import DesignNav  # DW-8: "← My queue" on the group screens
 from .models import (
     BOQItem, DesignAssignment, DesignBOQGroup, DesignBOQGroupMembership,
-    DesignBOQGroupSnapshot, Project, DESIGN_BOQ_COUNTED_STATUSES, log_activity,
+    DesignBOQGroupSnapshot, Project, DESIGN_BOQ_COUNTED_STATUSES, boq_line_order,
+    log_activity,
     # DW-1b: the one BOQ minimum-content rule, read per counted site for the warnings.
     BOQ_GAP_WORDS, boq_minimum_content_rules, minimum_content_gaps,
 )
@@ -306,7 +307,8 @@ def consolidate(member_rows):
         .values('boq__project__project_id', 'item_master_id', 'item_master__code',
                 'item_master__unit', 'item_master__is_active', 'accb_config__config_key',
                 'description', 'uom', 'boq_quantity', 'serial_no')
-        .order_by('boq__project__project_id', 'serial_no'))
+        # DW-4: per site, in catalogue position order, as the site's own screens list it.
+        .order_by('boq__project__project_id', *boq_line_order()))
 
     retired_items = {row['item_master_id'] for row in flagged
                      if row['item_master_id'] is not None

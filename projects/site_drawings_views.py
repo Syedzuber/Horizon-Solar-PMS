@@ -51,7 +51,7 @@ from .models import (
     CAD_PDF_EXTRACTED, CHANGE_REQUEST_OPEN_VERDICTS, DESIGN_FILE_CAD_ZIP, DESIGN_RELEASED,
     SUBJECT_DESIGN_ASSIGNMENT, BOQCorrection, BOQItem, DesignAssignment,
     DesignChangeRequest, DesignFile, DesignFilePdf, StatusTransition, VendorBrand,
-    log_activity,
+    boq_line_order, log_activity,
 )
 from .permissions import user_can_view_site_drawings
 from .site_pm import refuse_site_view_404
@@ -199,13 +199,16 @@ def _boq_rows(project):
     label, so ordered_quantity, ordered_vendor and every other column are never read from
     the database at all, let alone passed to the template. Never model_to_dict(), never a
     bare .values().
+
+    DW-4: in catalogue position order (boq_line_order), like every other BOQ screen. The
+    values_list already joins item_master for the code, so the order costs no query.
     """
     rows = (
         BOQItem.objects.filter(boq__project=project)
         .annotate(make_label=Coalesce(_make_label(category__name=OuterRef('category')),
                                       _make_label(category__isnull=True),
                                       Value('')))
-        .order_by('serial_no', 'pk')
+        .order_by(*boq_line_order())
         .values_list('item_master__code', 'description', 'category', 'uom',
                      'boq_quantity', 'make_label')
     )

@@ -37,6 +37,8 @@ from .models import (
     BOQCorrection, BOQ_CORRECTION_LINE_ADDED, BOQ_CORRECTION_QUANTITY_CHANGED,
     get_opex_boq_catalogue, opex_catalogue_category_order, get_opex_mandatory_items,
     split_opex_boq_rows, group_boq_rows_by_category,
+    # DW-4: the one line order every BOQ screen and download uses, in SQL and in Python.
+    boq_line_order, boq_line_sort_key,
     # B-3a - configured ACCBs: the configuration behind one ACCB line, and the
     # helper every sheet screen reads ACCB lines through.
     ACCBConfig, accb_rows,
@@ -9849,7 +9851,10 @@ def boq_detail(request, project_id):
 
         return redirect('boq_detail', project_id=project_id)
 
-    items = list(boq.items.select_related('make_preference', 'ordered_vendor').order_by('serial_no'))
+    # DW-4: catalogue position order (boq_line_order), not serial_no. item_master joins in
+    # the same query because the order reads it, so this is still one query.
+    items = list(boq.items.select_related('make_preference', 'ordered_vendor', 'item_master')
+                 .order_by(*boq_line_order()))
 
     # Annotate each item with make_brand_display: the brand label shown in the static
     # (non-editable) Make/Preference cell. Resolved from VendorBrand in one batch query.
@@ -9871,6 +9876,14 @@ def boq_detail(request, project_id):
     items_by_category = {}
     for item in items:
         items_by_category.setdefault(item.category, []).append(item)
+    # DW-4 (answer 5): the "#" column is the row's place on this page, 1, 2, 3… in the
+    # order shown, not the stored serial_no. serial_no is the item's position when the line
+    # was made and is never rewritten, so after a reorder it no longer runs in sequence.
+    row_number = 0
+    for category_items in items_by_category.values():
+        for item in category_items:
+            row_number += 1
+            item.row_number = row_number
 
     # Whether the Design half of the page renders INPUTS or static values. One flag,
     # because the template asked the same three-way status question in seven places and
@@ -10731,12 +10744,15 @@ def _calculated_absent_rows(formulas, catalogue_by_id):
 
     Each says why it is not on the sheet and carries what an override form needs. No query:
     `formulas` (formula_view) and the catalogue are already loaded.
+
+    DW-4: in catalogue position order. formulas.absent() returns the rules' evaluation
+    order, which is how the engine works through them, not how a reader looks for an item.
     """
     rows = []
-    for item_id, result in formulas.absent():
-        master = catalogue_by_id.get(item_id)
-        if master is None:
-            continue
+    absent = [(catalogue_by_id[item_id], result) for item_id, result in formulas.absent()
+              if item_id in catalogue_by_id]
+    for master, result in sorted(absent, key=lambda pair: boq_line_sort_key(pair[0])):
+        item_id = master.pk
         stale = ''
         if result is not None and result.computed > 0:
             # Q2 for a missing line: rules loaded since the last save give it a figure.
@@ -11214,8 +11230,10 @@ def opex_boq_download(request, project_id):
     # rather than trailing at the end — which is what the picker's renderSheet()
     # does with the same payload. Category order comes from
     # opex_catalogue_category_order() and is not derived a second time here.
-    for _category, rows in group_boq_rows_by_category(added_on + missing_mandatory,
-                                                      category_order):
+    # DW-4: sorted by catalogue position first, so a composed mandatory row takes its
+    # place among the saved lines instead of trailing them within its category.
+    for _category, rows in group_boq_rows_by_category(
+            sorted(added_on + missing_mandatory, key=boq_line_sort_key), category_order):
         for row in rows:
             values = _boq_download_row(row)
             ws.append([values[key] for _header, key in BOQ_DOWNLOAD_COLUMNS])
@@ -12081,10 +12099,13 @@ def _boq_copy_plan(source_boq, target_boq, formulas, *, predict):
     targets = formulas.targets
     # The whole source sheet in one read, each line with its catalogue row, ACCB
     # configuration and override joined in (both reverse one-to-ones), so classifying a
-    # line costs no query. Sheet order, so copied ACCBs keep the source's order.
+    # line costs no query. DW-4: catalogue position order (boq_line_order), so the preview
+    # lists lines as every other screen does; the ACCBs all sit on OPX-273 and keep their
+    # source order through its serial_no and id tie-break (and are numbered by config
+    # number below in any case).
     lines = list(source_boq.items
                  .select_related('item_master', 'accb_config', 'formula_override')
-                 .order_by('serial_no', 'pk'))
+                 .order_by(*boq_line_order()))
 
     # How many times each picker item is on the source, outside the ACCB section. An
     # ordinary item twice on one sheet cannot be one `clean` row without choosing a figure.
@@ -20131,9 +20152,23 @@ def admin_boq_item_create(request):
             messages.success(request, f'Catalogue item "{item.code}" added.')
             return redirect('admin_boq_items')
     else:
-        # Suggest the next slot at the end of the template rather than 0
-        next_order = (BOQItemMaster.objects.aggregate(m=Max('sort_order'))['m'] or 0) + 1
-        form = BOQItemMasterForm(initial={'sort_order': next_order, 'is_active': True})
+        # DW-4 (Zuber, build answer 1): the next slot at the end of the item's OWN template,
+        # + 10, as on the Head's screen. Residential and RESCO positions are separate lists,
+        # so an unscoped maximum (the old + 1 over the whole table) put a new Residential
+        # item after the last RESCO number. The template is the list's type filter, passed
+        # on by its "Add" link (?type=), else the form's default (Residential). If the Admin
+        # then switches the type, the position is still checked on save.
+        project_type = request.GET.get('type', '')
+        if project_type not in dict(Project.PROJECT_TYPE_CHOICES):
+            project_type = BOQItemMaster._meta.get_field('project_type').default
+        next_order = (BOQItemMaster.objects.filter(project_type=project_type)
+                      .aggregate(m=Max('sort_order'))['m'] or 0) + 10
+        form = BOQItemMasterForm(initial={'sort_order': next_order, 'is_active': True,
+                                          'project_type': project_type})
+    # DW-4 (O5): the help text names the items either side, in the template chosen on a
+    # refused save, else the template the form opened on.
+    form.describe_position(form.data.get('project_type') or form.initial.get('project_type')
+                           or 'Residential')
 
     return render(request, 'projects/admin/boq_item_form.html', {
         'form':  form,
@@ -20173,6 +20208,9 @@ def admin_boq_item_edit(request, item_id):
     else:
         form = BOQItemMasterForm(instance=item)
         del form.fields['code']
+    # DW-4 (O5): the help text names the items either side, in the template chosen on a
+    # refused save, else the item's own.
+    form.describe_position(form.data.get('project_type') or item.project_type)
 
     return render(request, 'projects/admin/boq_item_form.html', {
         'form':         form,

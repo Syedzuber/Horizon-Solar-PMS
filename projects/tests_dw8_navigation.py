@@ -756,7 +756,9 @@ QUERY_PINS = [
     ('design_qc_queue', 'pool', DESIGN_IN_QC, 10),             # before DW-8: 10
     ('design_qc_queue', 'head', DESIGN_IN_QC, 11),             # before DW-8: 11
     ('design_boq_catalogue', 'head', DESIGN_IN_QC, 7),        # before DW-8: 7
-    ('design_boq_catalogue_edit', 'head', DESIGN_IN_QC, 6),   # before DW-8: 6
+    # before DW-8: 6. DW-4: +1, the one read of the active positions behind the position
+    # field's help text (the items either side) and the used-position check.
+    ('design_boq_catalogue_edit', 'head', DESIGN_IN_QC, 7),
     ('design_my_sites', 'designer', DESIGN_IN_QC, 9),         # before DW-8: 9
     ('design_my_sites', 'pm', DESIGN_IN_QC, 5),               # before DW-8: 5
     ('dashboard_design', 'designer', DESIGN_IN_QC, 19),        # before DW-8: 19

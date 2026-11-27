@@ -189,7 +189,8 @@ same fact into the seven Design input gates below.
         <tbody>
           {% for item in category_items %}
           <tr>
-            <td class="text-muted small align-middle">{{ item.serial_no }}</td>
+            {# DW-4: the row's place on this page, set in boq_detail; not the stored serial_no. #}
+            <td class="text-muted small align-middle">{{ item.row_number }}</td>
 
             {% if role == 'Design' %}
               <td class="align-middle">{{ item.description }}</td>

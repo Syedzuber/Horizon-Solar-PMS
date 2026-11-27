@@ -792,8 +792,12 @@ with unsaved edits, so nothing typed is lost without a warning.
   // picker, the sheet and the reviewer's read-only panel all agree.
   var CATS = [];
   var BY_ID = {};
-  CATALOGUE.forEach(function (item) {
+  // DW-4: each item's place in that same ordered array, so the sheet sorts by catalogue
+  // position (what every other screen shows) and never by code text.
+  var POS = {};
+  CATALOGUE.forEach(function (item, index) {
     BY_ID[item.id] = item;
+    POS[item.id] = index;
     if (CATS.indexOf(item.cat) === -1) { CATS.push(item.cat); }
   });
 
@@ -963,7 +967,7 @@ with unsaved edits, so nothing typed is lost without a warning.
     CATS.forEach(function (cat) {
       var items = byCat[cat];
       if (!items) { return; }
-      items.sort(function (a, b) { return a.code < b.code ? -1 : 1; });
+      items.sort(function (a, b) { return POS[a.id] - POS[b.id]; });
       html += '<tr><td colspan="5" class="boq-cat-hdr fw-semibold py-1 small">' +
               esc(cat) + ' <span class="boq-chip">' + items.length + '</span></td></tr>';
       items.forEach(function (item) {

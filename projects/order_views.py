@@ -79,8 +79,8 @@ from .models import (
     ApprovalRequest, BOQItem, BOQItemMaster, ContractorBillDetail, PaymentRequest,
     PaymentRequestHold, Program, Project,
     SiteGroup, SiteGroupMembership, Vendor, VendorOrder, VendorOrderDocument,
-    VendorOrderLine, VendorOrderProgram, VendorOrderSite, committed_total, log_activity,
-    GROUP_TYPE_PROCUREMENT, SITE_GROUP_LOCKED,
+    VendorOrderLine, VendorOrderProgram, VendorOrderSite, boq_line_order, committed_total,
+    log_activity, GROUP_TYPE_PROCUREMENT, SITE_GROUP_LOCKED,
     VENDOR_ORDER_DOC_INVOICE, VENDOR_ORDER_DOC_PI, VENDOR_ORDER_DOC_PO,
     VENDOR_ORDER_DOC_TYPE_CHOICES,
 )
@@ -141,12 +141,13 @@ def _parse_decimal(raw, max_whole_digits):
 
 
 def _project_boq_items(project):
-    """This project's BOQ rows, in serial order. The same scoping the old raise path and
-    the SCM dashboard used (boq__project), with item_master for the line snapshot."""
+    """This project's BOQ rows, in catalogue position order (DW-4, boq_line_order). The
+    same scoping the old raise path and the SCM dashboard used (boq__project), with
+    item_master for the line snapshot; the order reads that same join."""
     return list(
         BOQItem.objects.filter(boq__project=project)
         .select_related('item_master')
-        .order_by('serial_no')
+        .order_by(*boq_line_order())
     )
 
 
@@ -377,6 +378,14 @@ def _form_context(project, boq_items, post=None, client_uuid=None):
     for category in order + sorted(set(by_category) - set(order)):
         if category in by_category:
             groups.append({'category': category, 'rows': by_category[category]})
+    # DW-4 (answer 5): each line is labelled by its place on this page, 1, 2, 3… in the
+    # order shown, not by the stored serial_no, which stops running in sequence once the
+    # catalogue is reordered (it is the item's position when the line was made).
+    number = 0
+    for group in groups:
+        for row in group['rows']:
+            number += 1
+            row['number'] = number
 
     return {
         'project':         project,
