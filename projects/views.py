@@ -11857,7 +11857,7 @@ def opex_boq_upload(request, project_id):
             # DW-7 answer 3: nothing at all would be written, so the page says "This file
             # changes nothing" and offers no Confirm. The figures the file carries for
             # calculated or 2+-line items are still listed: they are ignored, not written.
-            'no_changes':     _boq_upload_changes_nothing(summary),
+            'no_changes':     _boq_upload_changes_nothing(plan),
         })
         ctx.update({
             'stage': 'preview',
@@ -11896,6 +11896,10 @@ def opex_boq_upload(request, project_id):
         try:
             boq, added, changed, readded, formula = _boq_upload_apply(project, clean,
                                                                       actor=profile)
+        except BOQUploadChangesNothing:
+            # DW-7b (Zuber): back to the picker, with nothing written and nothing logged.
+            messages.info(request, 'This file changes nothing. Nothing was saved.')
+            return redirect('opex_boq_entry', project_id=project.project_id)
         except ValidationError as exc:
             # A4: a rule could not produce its figure; the whole upload rolled back.
             ctx['file_error'] = ' '.join(exc.messages) + ' Nothing was saved.'
@@ -12121,12 +12125,23 @@ def _boq_upload_summary(plan, results, removed, multiple, recalculated=None):
     }
 
 
-def _boq_upload_changes_nothing(summary):
-    """True if an upload with this summary would write nothing at all (DW-7 answer 3): no
-    line added, changed, put back or removed, and no calculated line brought up to date.
-    Figures the upload ignores (replaced, kept_override, on_lines) are not writes."""
-    return not (summary['added'] or summary['changed'] or summary['readded']
-                or summary['removed'] or summary['recalculated'])
+def _boq_upload_changes_nothing(plan):
+    """True if a _boq_upload_plan() made WITH ITS ENGINE PREDICTION (`sheet` given, or no
+    rules) would write nothing at all (DW-7 answer 3): no line added, changed, put back or
+    removed, and no calculated line brought up to date. Figures the upload ignores
+    (replaced, kept_override, on_lines) are not writes. A plan whose rule cannot produce its
+    figure is not "nothing": the commit must refuse it with the reason (A4).
+
+    READS THE PLAN, NOT THE SUMMARY. The summary leaves a calculated line out of its
+    catch-up list when the file's figure for it is already listed as replaced, but the
+    engine still writes that line (DW-7b)."""
+    return not (plan['error'] or plan['add'] or plan['change'] or plan['readded']
+                or plan['removed'] or plan['recalculated'])
+
+
+class BOQUploadChangesNothing(Exception):
+    """Raised by _boq_upload_apply() when the confirmed file would write nothing (DW-7b).
+    Nothing has been written: the caller returns to the picker and says so."""
 
 
 def _boq_upload_write(boq, plan):
@@ -12193,11 +12208,27 @@ def _boq_upload_apply(project, clean, actor=None):
 
     Raises ValidationError (A4) when a rule cannot produce its figure; the transaction has
     rolled back and the caller refuses with the reason.
+
+    DW-7b — RAISES BOQUploadChangesNothing, HAVING WRITTEN NOTHING, when the file would
+    change nothing at all: no BOQ created, no put-back, no engine catch-up, and (the
+    caller's part) no activity entry. The preview already offers no Confirm for such a file;
+    this is the same refusal for a confirm posted directly. It is decided on the plan the
+    commit itself makes, so it cannot disagree with what the commit would have written.
     """
     with transaction.atomic():
+        mandatory = get_opex_mandatory_items()
         try:
             boq = project.boq
         except BOQ.DoesNotExist:
+            boq = None
+        if boq is None:
+            # DW-7b: decided BEFORE the BOQ row exists, so a file that changes nothing
+            # creates nothing. There is no row to lock yet, and an empty sheet is what the
+            # engine would start from.
+            check = _boq_upload_plan([], clean, mandatory,
+                                     read_formula_rules(project.project_type), sheet=[])
+            if _boq_upload_changes_nothing(check):
+                raise BOQUploadChangesNothing()
             # The picker's three lines, and the same rule: created on commit only,
             # never on the upload screen's GET and never at preview.
             boq = BOQ.objects.create(project=project)
@@ -12210,7 +12241,17 @@ def _boq_upload_apply(project, clean, actor=None):
             boq, {m.pk for m in get_opex_boq_catalogue()})
         # The preview's own plan, read under the lock. No `sheet`: the engine runs for real
         # below, in apply_formulas(), on the sheet these writes leave.
-        plan = _boq_upload_plan(existing_on, clean, get_opex_mandatory_items(), formulas)
+        plan = _boq_upload_plan(existing_on, clean, mandatory, formulas)
+        if not (plan['add'] or plan['change'] or plan['readded']):
+            # DW-7b: the file itself writes nothing; would the engine? Predicted on the
+            # sheet as it stands, under the lock just taken, by work_out_formulas(), the
+            # function apply_formulas() runs. One more query (the sheet), only here.
+            check = _boq_upload_plan(existing_on, clean, mandatory, formulas,
+                                     sheet=read_sheet(boq) if formulas.active else None)
+            if _boq_upload_changes_nothing(check):
+                # Nothing has been written; the exception rolls back the lock with the
+                # transaction.
+                raise BOQUploadChangesNothing()
         _boq_upload_write(boq, plan)
 
         summary = apply_formulas(boq, formulas, source=FORMULA_SOURCE_UPLOAD, actor=actor)

@@ -25,6 +25,7 @@ WHAT THIS FILE PROVES
 Run with:
     python manage.py test projects.tests_dw7_master_boq_sheet --settings=solarpms.test_settings
 """
+import json
 from decimal import Decimal
 from io import BytesIO
 
@@ -38,7 +39,7 @@ from openpyxl import Workbook, load_workbook
 
 from .design_boq_group_views import SUMMARY_HEADERS, UNLINKED_HEADERS
 from .models import (
-    BOQ, BOQItem, BOQItemMaster, BOQLineOverride, BOQRecalculation,
+    ActivityLog, BOQ, BOQItem, BOQItemMaster, BOQLineOverride, BOQRecalculation,
 )
 from .tests_accb_config import EX_TYPE1
 from .tests_boq_formula_apply import FormulaBase, _profile
@@ -70,7 +71,8 @@ PINS = {
     'site download (designer)': 18,
     'blank master (designer)':  10,
     'upload preview, round trip (designer)': 19,
-    'upload confirm, round trip (designer)': 25,
+    # DW-7b: the round-trip confirm is refused before any write (was 25 when it ran).
+    'upload confirm, round trip (designer)': 20,
 }
 
 
@@ -205,14 +207,51 @@ class RoundTripTests(MasterSheetBase):
         self.assertContains(preview, 'This file changes nothing.')
         self.assertNotContains(preview, 'Confirm and apply')
 
-    def test_a_confirm_posted_anyway_leaves_every_line_identical(self):
+    def test_a_confirm_posted_directly_is_refused_and_writes_nothing(self):
+        """DW-7b: the server re-plans the confirm; a file that changes nothing returns to
+        the picker, every line, override and recalculation record as it was, no activity."""
         before = self._snapshot()
+        logged = ActivityLog.objects.filter(action_code='boq_uploaded').count()
         preview = self._preview(self._download().content)
 
         result = self._commit(preview)
 
-        self.assertEqual(result.context['stage'], 'result')
+        self.assertRedirects(result, reverse('opex_boq_entry', args=[self.site.project_id]),
+                             fetch_redirect_response=False)
+        page = self.client.get(result['Location'])
+        self.assertIn('This file changes nothing. Nothing was saved.',
+                      [str(m) for m in page.context['messages']])
         self.assertEqual(self._snapshot(), before)
+        self.assertEqual(ActivityLog.objects.filter(action_code='boq_uploaded').count(), logged)
+
+    def test_a_direct_confirm_on_a_site_with_no_boq_creates_nothing(self):
+        """DW-7b: no BOQ created and nothing put back. With no mandatory item, a blank file
+        on a site with no BOQ changes nothing."""
+        BOQItemMaster.objects.filter(code='FX-MAND').update(is_mandatory=False)
+        site, _assignment = self._opex_site('FX-NONE')
+        url = reverse('opex_boq_upload', args=[site.project_id])
+        rows_json = json.dumps([{'code': code, 'quantity': None}
+                                for code in self._catalogue_codes()])
+
+        result = self.client.post(url, {'phase': 'commit', 'rows_json': rows_json})
+
+        self.assertRedirects(result, reverse('opex_boq_entry', args=[site.project_id]),
+                             fetch_redirect_response=False)
+        self.assertFalse(BOQ.objects.filter(project=site).exists())
+        self.assertFalse(ActivityLog.objects.filter(project=site,
+                                                    action_code='boq_uploaded').exists())
+
+    def test_a_confirm_that_changes_something_is_still_applied(self):
+        """The refusal is only for "nothing at all": one changed figure goes through."""
+        wb = self._book(self._download().content)
+        for row in wb[BOQ_DOWNLOAD_SHEET].iter_rows(min_row=2):
+            if row[0].value == 'FX-PANEL':
+                row[4].value = 11
+
+        result = self._commit(self._preview(self._bytes(wb)))
+
+        self.assertEqual(result.context['stage'], 'result')
+        self.assertEqual(self._qty('FX-PANEL'), D(11))
 
     def test_a_site_with_no_boq_round_trips_to_a_put_back_only(self):
         """The blank file of a site with no BOQ: the mandatory item is put back (it is a
@@ -432,6 +471,24 @@ class UploadTests(MasterSheetBase):
         self.assertFalse(preview.context['no_changes'])
         self.assertContains(preview, '1 calculated line brought up to date by their rules')
         self.assertContains(preview, 'Confirm and apply')
+
+    def test_a_figure_typed_over_a_stale_calculated_line_is_not_changes_nothing(self):
+        """DW-7b: the summary lists the stale line only as replaced, but the engine still
+        writes it, so the preview offers Confirm and the commit brings it up to date."""
+        BOQItem.objects.filter(pk=self._lines('FX-EARTH')[0].pk).update(boq_quantity=D(7))
+        wb = self._book(self._download().content)
+        for row in wb[BOQ_DOWNLOAD_SHEET].iter_rows(min_row=2):
+            if row[0].value == 'FX-EARTH':
+                row[4].value = 99
+
+        preview = self._preview(self._bytes(wb))
+
+        summary = preview.context['upload_summary']
+        self.assertEqual((summary['replaced'], summary['recalculated']),
+                         ([{'code': 'FX-EARTH', 'file': D(99), 'calculated': D(10)}], []))
+        self.assertFalse(preview.context['no_changes'])
+        self.assertEqual(self._commit(preview).context['stage'], 'result')
+        self.assertEqual(self._qty('FX-EARTH'), D(10))
 
     def test_changes_in_the_downloaded_file_are_exactly_what_the_preview_shows(self):
         """Zuber's check 3: fill three blank rows and change one typed quantity."""

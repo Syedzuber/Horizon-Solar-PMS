@@ -751,9 +751,13 @@ class AllRulesWriteQueryTests(B2cBase):
         self._login(self.designer)
         self._upload([('FX-LA1', 3), ('FX-EARTH', 11)])   # first save adds the constants
         url, rows_json = self._upload_rows_json([('FX-LA1', 3), ('FX-EARTH', 11)])
+        # DW-7b: a confirm that changes nothing is refused before any write, so the warm-up
+        # and the measured confirm each change FX-LA1, which drives none of the file's rules:
+        # still a save in which no calculated line changes, plus its one UPDATE.
+        payloads = iter([rows_json.replace('"3"', '"4"'), rows_json.replace('"3"', '"5"')])
         n = self._count(lambda: self.client.post(url, {'phase': 'commit',
-                                                        'rows_json': rows_json}))
-        self.assertEqual(n, WRITE_BASELINE['upload'] + WRITE_WITH_RULES_EXTRA['upload'])
+                                                        'rows_json': next(payloads)}))
+        self.assertEqual(n, WRITE_BASELINE['upload'] + WRITE_WITH_RULES_EXTRA['upload'] + 1)
 
     def test_add_line(self):
         self._login(self.qc)

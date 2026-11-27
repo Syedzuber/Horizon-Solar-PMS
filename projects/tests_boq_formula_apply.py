@@ -312,9 +312,15 @@ class NoRulesTests(FormulaBase):
     def test_upload_query_count(self):
         self._login(self.designer)
         url, rows_json = self._upload_rows_json([('FX-LA1', 3), ('FX-EARTH', 11)])
+        # DW-7b: a confirm that changes nothing is refused before any write, so the measured
+        # (second) confirm changes FX-LA1 again rather than repeating the warm-up's file.
+        payloads = iter([rows_json, rows_json.replace('"3"', '"4"')])
         n = self._count(lambda: self.client.post(url, {'phase': 'commit',
-                                                        'rows_json': rows_json}))
-        self.assertEqual(n, BASELINE['upload'] + 1)
+                                                        'rows_json': next(payloads)}))
+        # +1 more since DW-7b: the measured confirm now writes one line (the UPDATE of
+        # FX-LA1), where the repeated warm-up file used to write none. No DW-7b query runs
+        # on a confirm whose file changes something.
+        self.assertEqual(n, BASELINE['upload'] + 1 + 1)
 
     def test_add_line_query_count(self):
         self._login(self.qc)
