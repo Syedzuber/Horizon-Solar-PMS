@@ -62,7 +62,12 @@ from .design_storage import (
 # than declaring a second one. forms.py imports only from .models, so this adds no cycle.
 from .forms import (
     BOQItemMasterForm, catalogue_snapshot, check_typed_date, log_catalogue_change,
+    # DW-5 (M2, M8): the Head's form adds the two module fields; the settings form.
+    HeadCatalogueItemForm, DesignSettingsForm, MODULE_DEFAULT_LOCKED_MESSAGE,
+    module_wattage_taken_by,
 )
+# DW-5 (M3): the Head's save keeps the "all modules" group in step.
+from .boq_modules import sync_module_group_membership
 from .models import (
     # Session E — the Design mirror derivation. `Task` is read and written ONLY by
     # apply_mirror_status() below, never by a view in this module: the design workspace
@@ -144,6 +149,8 @@ from .models import (
     # Part 12 — the catalogue table itself, managed by the Design Head at the foot of
     # this module. Read here directly; the helpers above stay the only readers elsewhere.
     BOQItemMaster,
+    # DW-5 (M8): the Head's design settings (the default module wattage).
+    DesignSettings,
     # O3 — counted, never rendered here: the SCM tender row carries an "Orders (n)"
     # link, and the count comes from the section's own query rather than per row.
     VendorOrderProgram, VendorOrderSite,
@@ -4834,14 +4841,17 @@ def design_file_download(request, project_id, pk):
 # ---------------------------------------------------------------------------
 
 def _minimum_content_refusal(project, gaps, sheet_saved):
-    """DW-1a: the refusal for a BOQ missing an inverter and/or a DCDB, ACDB or ACCB.
+    """DW-1a: the refusal for a BOQ missing a module (DW-5), an inverter and/or a DCDB, ACDB
+    or ACCB.
 
     Names exactly what is missing, in BOQ_GAP_WORDS (the group screen uses the same words).
     `sheet_saved` is True when the picker's Mark complete saved the sheet on the way here,
     so the designer is told nothing they typed was lost (Zuber, DW-1 Q6).
     """
     words = [BOQ_GAP_WORDS.get(gap, gap) for gap in gaps]
-    missing = words[0] if len(words) == 1 else ', and '.join(words)
+    # DW-5: up to three gaps now (a module joined the test). Two read as before ("a, and
+    # b"); three as "a, b, and c".
+    missing = words[0] if len(words) == 1 else ', '.join(words[:-1]) + ', and ' + words[-1]
     if sheet_saved:
         text = f'Your sheet was saved, but {project.project_id} can\'t be marked complete'
     else:
@@ -9774,17 +9784,23 @@ def design_boq_catalogue_create(request):
         return HttpResponseForbidden(_CATALOGUE_FORBIDDEN)
 
     if request.method == 'POST':
-        form = BOQItemMasterForm(request.POST)
+        form = HeadCatalogueItemForm(request.POST)
         del form.fields['project_type']
         if form.is_valid():
-            item = form.save(commit=False)
-            item.project_type = 'OPEX'
-            item.save()
-            # B-0 T3: a create has no "before", so every field is listed as "→ value".
-            log_catalogue_change(request.user.profile, item,
-                                 f"Created RESCO BOQ catalogue item '{item.code}'", None,
-                                 action_code='design_boq_item_created')
-            messages.success(request, f'Catalogue item "{item.code}" added.')
+            # DW-5: the item and its group membership in one transaction, so a member the
+            # rule check refuses (B-2a) leaves no item behind either.
+            with transaction.atomic():
+                item = form.save(commit=False)
+                item.project_type = 'OPEX'
+                item.save()
+                # B-0 T3: a create has no "before", so every field is listed as "→ value".
+                log_catalogue_change(request.user.profile, item,
+                                     f"Created RESCO BOQ catalogue item '{item.code}'", None,
+                                     action_code='design_boq_item_created')
+                joined = sync_module_group_membership(item, request.user.profile)
+            messages.success(request, f'Catalogue item "{item.code}" added.'
+                             + (' It is in "all modules" and is offered in the Modules '
+                                'pop-up.' if joined == 'added' else ''))
             return redirect('design_boq_catalogue')
     else:
         # The next slot at the end of the OPEX template, scoped to OPEX. The Admin screen's
@@ -9796,7 +9812,7 @@ def design_boq_catalogue_create(request):
         # new item never lands on a retired one's number.
         next_order = (_opex_catalogue_qs()
                       .aggregate(m=Max('sort_order'))['m'] or 0) + 10
-        form = BOQItemMasterForm(initial={'sort_order': next_order, 'is_active': True})
+        form = HeadCatalogueItemForm(initial={'sort_order': next_order, 'is_active': True})
         del form.fields['project_type']
     # DW-4 (O5): the help text names the items either side of the position shown.
     form.describe_position('OPEX')
@@ -9844,18 +9860,20 @@ def design_boq_catalogue_edit(request, item_id):
     if request.method == 'POST':
         # Before binding: is_valid() writes the posted values onto `item`.
         before = catalogue_snapshot(item)
-        form = BOQItemMasterForm(request.POST, instance=item)
+        form = HeadCatalogueItemForm(request.POST, instance=item)
         del form.fields['code']
         del form.fields['project_type']
         if form.is_valid():
-            form.save()
-            log_catalogue_change(request.user.profile, item,
-                                 f"Updated RESCO BOQ catalogue item '{item.code}'", before,
-                                 action_code='design_boq_item_updated')
+            with transaction.atomic():
+                form.save()
+                log_catalogue_change(request.user.profile, item,
+                                     f"Updated RESCO BOQ catalogue item '{item.code}'", before,
+                                     action_code='design_boq_item_updated')
+                sync_module_group_membership(item, request.user.profile)
             messages.success(request, f'Catalogue item "{item.code}" saved.')
             return redirect('design_boq_catalogue')
     else:
-        form = BOQItemMasterForm(instance=item)
+        form = HeadCatalogueItemForm(instance=item)
         del form.fields['code']
         del form.fields['project_type']
     # DW-4 (O5): the help text names the items either side of the position shown.
@@ -9907,6 +9925,21 @@ def design_boq_catalogue_toggle(request, item_id):
                                 f'the mandatory flag before deactivating it.')
         return redirect('design_boq_catalogue')
 
+    # DW-5: the toggle keeps the two module rules the Head's form keeps. Reactivating a
+    # module item whose wattage another active item has would put two alike in the pop-up
+    # (Q4); retiring the item the default wattage points at would leave the pop-up nothing
+    # to preselect (Q13).
+    if item.is_module and item.module_wp:
+        if not item.is_active:
+            other = module_wattage_taken_by(item.module_wp, exclude_pk=item.pk)
+            if other is not None:
+                messages.error(request, f'{item.module_wp} Wp is already {other.code} '
+                                        f'({other.description}). Each wattage is one item.')
+                return redirect('design_boq_catalogue')
+        elif DesignSettings.current().default_module_wp == item.module_wp:
+            messages.error(request, MODULE_DEFAULT_LOCKED_MESSAGE.format(wp=item.module_wp))
+            return redirect('design_boq_catalogue')
+
     before = catalogue_snapshot(item)
     item.is_active = not item.is_active
     item.save(update_fields=['is_active', 'updated_at'])
@@ -9918,3 +9951,68 @@ def design_boq_catalogue_toggle(request, item_id):
                          before, action_code=f'design_boq_item_{state}')
     messages.success(request, f'Catalogue item "{item.code}" {state}.')
     return redirect('design_boq_catalogue')
+
+
+# ---------------------------------------------------------------------------
+# DW-5 (M8, answer 11) — design settings, owned by the Design Head
+# ---------------------------------------------------------------------------
+
+#: One refusal for every caller who is not the Head, as the catalogue's four endpoints do.
+_DESIGN_SETTINGS_FORBIDDEN = 'Design settings are for the Design Head only.'
+
+
+@login_required
+def design_settings(request):
+    """The Head's design settings: today, the default module wattage the BOQ picker's
+    Modules pop-up preselects (DW-R14). GET shows the form; POST saves and logs it.
+
+    WHO: the Design Head only — user_is_design_head(), the flag itself, as the catalogue
+    screens use. QC, designers, SCM, the Admin and the Head's deputy are refused: the
+    default is a catalogue decision like adding an item, not review-queue authority.
+
+    The dropdown lists the wattages active module items have, so a wattage with no item
+    cannot be saved. A change applies from the next use of the pop-up (no sweep).
+    """
+    # Head only (see the docstring): a 403 for everyone else, before anything is read.
+    if not user_is_design_head(request.user):
+        return HttpResponseForbidden(_DESIGN_SETTINGS_FORBIDDEN)
+
+    settings_row = DesignSettings.current()
+    # The wattages active module items have, lowest first: the only values the form offers.
+    wattages = list(BOQItemMaster.objects
+                    .filter(project_type='OPEX', is_active=True, is_module=True,
+                            module_wp__isnull=False)
+                    .order_by('module_wp').values_list('module_wp', flat=True).distinct())
+
+    if request.method == 'POST':
+        form = DesignSettingsForm(request.POST, wattages=wattages)
+        if form.is_valid():
+            before = settings_row.default_module_wp
+            after = form.cleaned_data['default_module_wp']
+            if after == before:
+                messages.info(request, f'The default module wattage is already {after} Wp.')
+                return redirect('design_settings')
+            settings_row.default_module_wp = after
+            settings_row.updated_by = request.user.profile
+            # The row and its log entry together. RACE: two Head saves at once both write
+            # pk 1; the later wins and both are logged with their own before/after, which
+            # is what happened. One Head edits this, so no lock is taken.
+            with transaction.atomic():
+                settings_row.save()
+                log_activity(None, request.user.profile,
+                             f'Design settings: default module wattage: {before} Wp → '
+                             f'{after} Wp', entity_type='DesignSettings',
+                             entity_id=settings_row.pk,
+                             action_code='design_settings_changed')
+            messages.success(request, f'Default module wattage set to {after} Wp.')
+            return redirect('design_settings')
+    else:
+        form = DesignSettingsForm(initial={'default_module_wp': settings_row.default_module_wp},
+                                  wattages=wattages)
+
+    return render(request, 'projects/design/design_settings.html', {
+        'can_open_design_dashboard': user_can_open_design_dashboard(request.user),  # DW-8
+        'form':         form,
+        'settings_row': settings_row,
+        'has_wattages': bool(wattages),
+    })

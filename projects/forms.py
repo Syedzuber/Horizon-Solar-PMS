@@ -8,7 +8,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.utils.functional import cached_property
 from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory, Program, BOQItemMaster, StockLocation, VENDOR_KIND_SUPPLIER
-from .models import ActivityLog, BOQFormulaRule, BOQItem, log_activity
+from .models import ActivityLog, BOQFormulaRule, BOQItem, DesignSettings, log_activity
 # B-3a: the configured-ACCB catalogue code is locked on every catalogue form.
 from .accb import ACCB_CONFIGURED_CODE, ACCB_CATALOGUE_LOCKED_MESSAGE
 from .units import UNIT_CHOICES, canonical_unit
@@ -1216,6 +1216,112 @@ class BOQItemMasterForm(forms.ModelForm):
         return value
 
 
+#: DW-5 (Q3): why a module item's two module fields cannot change once a BOQ line uses it.
+MODULE_FIELDS_LOCKED_MESSAGE = (
+    'This item is on {count} site BOQ line{plural}, so whether it is a module and its '
+    'wattage are fixed: changing them would change those sites\' module counts. To change '
+    'them, retire this item and add a new one.')
+#: DW-5 (Q13): the item the default wattage points at cannot be retired or re-rated.
+MODULE_DEFAULT_LOCKED_MESSAGE = (
+    '{wp} Wp is the default module wattage in Design settings. Change Design settings '
+    'first.')
+
+
+def module_wattage_taken_by(module_wp, exclude_pk=None):
+    """The ACTIVE RESCO module item that already has this wattage, or None (Q4: one item
+    per wattage). One query."""
+    qs = BOQItemMaster.objects.filter(project_type='OPEX', is_active=True, is_module=True,
+                                      module_wp=module_wp)
+    if exclude_pk is not None:
+        qs = qs.exclude(pk=exclude_pk)
+    return qs.order_by('sort_order', 'code').first()
+
+
+class HeadCatalogueItemForm(BOQItemMasterForm):
+    """DW-5 (M2): the Design Head's catalogue form — the shared form plus the two module
+    fields. A SUBCLASS so the Admin's catalogue screen, which uses BOQItemMasterForm, is not
+    offered them (Zuber, Q2): group membership follows `is_module`, and the module group is
+    the Head's.
+
+    The template shows the two fields only while the category reads "Module"; this clean()
+    is what holds whatever the page showed.
+    """
+
+    class Meta(BOQItemMasterForm.Meta):
+        fields = BOQItemMasterForm.Meta.fields + ['is_module', 'module_wp']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['is_module'].label = 'Module'
+        self.fields['is_module'].help_text = (
+            'A solar PV module, one item per wattage. Module items are entered in the BOQ '
+            'picker\'s Modules pop-up and join the "all modules" group, which the earthing '
+            'rule and the Mark BOQ complete check read.')
+        self.fields['module_wp'].label = 'Module wattage (Wp)'
+        self.fields['module_wp'].help_text = 'Whole watts, e.g. 640. Required for a module item.'
+
+    def clean(self):
+        cleaned = super().clean()
+        is_module = bool(cleaned.get('is_module'))
+        module_wp = cleaned.get('module_wp')
+        instance = self.instance
+        if is_module and (cleaned.get('category') or '').strip().lower() != 'module':
+            self.add_error('is_module', 'A module item belongs to the Module category.')
+        # A wattage may be missing only on an existing module item that never had one
+        # (OPX-001, whose lines predate wattages).
+        legacy = instance.pk and instance.is_module and instance.module_wp is None
+        if is_module and module_wp is None and not legacy:
+            self.add_error('module_wp', 'Enter the module\'s wattage in Wp.')
+        if not is_module and module_wp is not None:
+            self.add_error('module_wp', 'A wattage is for module items only: tick Module, or '
+                                        'clear the wattage.')
+        changed = instance.pk and (is_module != instance.is_module
+                                   or module_wp != instance.module_wp)
+        # Q3: fixed once in use, like the unit (ruling 12), and for the same reason: the
+        # lines already counted under this item would silently change meaning. "In use" is
+        # any BOQ line, deleted sites included, as clean_unit() counts it.
+        if changed:
+            count = instance.boq_items.count()
+            if count:
+                self.add_error(None, MODULE_FIELDS_LOCKED_MESSAGE.format(
+                    count=count, plural='' if count == 1 else 's'))
+        # Q4: one ACTIVE item per wattage, so the pop-up's dropdown never offers two "640 Wp".
+        # RACE: two Head saves for one wattage could both pass; the second would leave two
+        # items the dropdown labels alike, which the next edit of either is refused on. One
+        # Head edits the catalogue, so this is not worth a database constraint.
+        if is_module and module_wp and cleaned.get('is_active', True):
+            other = module_wattage_taken_by(module_wp, exclude_pk=instance.pk)
+            if other is not None:
+                self.add_error('module_wp', f'{module_wp} Wp is already {other.code} '
+                                            f'({other.description}). Each wattage is one item.')
+        # Q13: the default wattage must keep an active item behind it.
+        if instance.pk and instance.is_module and instance.is_active and instance.module_wp:
+            leaves = (not cleaned.get('is_active', True) or not is_module
+                      or module_wp != instance.module_wp)
+            if leaves:
+                if DesignSettings.current().default_module_wp == instance.module_wp:
+                    self.add_error(None, MODULE_DEFAULT_LOCKED_MESSAGE.format(
+                        wp=instance.module_wp))
+        return cleaned
+
+
+class DesignSettingsForm(forms.Form):
+    """DW-5 (M8): the Head's design settings. One value today: the default module wattage
+    the Modules pop-up preselects. A DROPDOWN of the wattages active module items have, so a
+    wattage with no item cannot be chosen at all (the form refuses one posted anyway)."""
+
+    default_module_wp = forms.TypedChoiceField(
+        coerce=int, label='Default module wattage',
+        help_text='Preselected on a new row in the BOQ picker\'s Modules pop-up. A change '
+                  'applies from the next use; BOQs already saved are not changed.',
+        error_messages={'invalid_choice': 'Choose a wattage an active module item has.'})
+
+    def __init__(self, *args, wattages=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['default_module_wp'].choices = [(wp, f'{wp} Wp') for wp in wattages]
+        self.fields['default_module_wp'].widget.attrs['class'] = 'form-select'
+
+
 # ---------------------------------------------------------------------------
 # Catalogue edit log — before and after values (B-0 T3)
 #
@@ -1239,7 +1345,12 @@ _CATALOGUE_LOG_FIELDS = (
     ('is_active',    'active'),
     ('is_mandatory', 'mandatory'),
     ('sort_order',   'sort order'),
+    # DW-5 (M2): logged like the others. A create lists them only for a module item, so the
+    # entry for every other new item reads exactly as before.
+    ('is_module',    'module'),
+    ('module_wp',    'wattage'),
 )
+_CATALOGUE_LOG_MODULE = {'is_module', 'module_wp'}
 _CATALOGUE_LOG_QUOTED = {'description', 'category'}
 _CATALOGUE_LOG_VALUE_MAX = 95
 _ACTION_MAX = ActivityLog._meta.get_field('action').max_length
@@ -1257,6 +1368,8 @@ def _catalogue_log_value(name, value, limit):
         return 'yes' if value else 'no'
     if name == 'project_type':
         return dict(Project.PROJECT_TYPE_CHOICES).get(value, value)
+    if name == 'module_wp':
+        return 'not recorded' if value is None else f'{value} Wp'
     text = str(value)
     if name in _CATALOGUE_LOG_QUOTED:
         if len(text) > limit:
@@ -1277,6 +1390,8 @@ def catalogue_change_entries(prefix, before, after):
     limit = max(20, min(_CATALOGUE_LOG_VALUE_MAX, (_ACTION_MAX - overhead) // 2))
     parts = {}
     for name, label in _CATALOGUE_LOG_FIELDS:
+        if before is None and name in _CATALOGUE_LOG_MODULE and not after['is_module']:
+            continue
         new = _catalogue_log_value(name, after[name], limit)
         if before is None:
             parts[name] = f'{label}: → {new}'

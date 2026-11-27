@@ -224,6 +224,43 @@ screen's ACCB pop-up, so both pages draw the same card.
             Save your changes first: Override, Remove and Restore work on the saved BOQ.
           </div>
         {% endif %}
+        {% comment %}
+        DW-5 (M7) — THE MODULES BLOCK. Every module line on this BOQ, by wattage: one line
+        per wattage, OPX-001's lines as "Wattage not recorded" (its count moves to a wattage
+        only when the designer picks one in the pop-up). Module lines are drawn here and
+        nowhere else on this page. The designer changes them in the Edit modules pop-up,
+        which writes the hidden fields in #boqModulesFields and saves this form; those fields
+        are posted on every save, so a save also re-states the modules as they are. Edit
+        modules carries data-ovr: like Override, it is off while the sheet has unsaved
+        changes (B-2b.1), and its show handler is the backstop.
+        {% endcomment %}
+        <div class="border-bottom mb-2 pb-2" id="boqModules">
+          <div class="d-flex align-items-center px-1 mb-1">
+            <span class="small fw-semibold">Modules</span>
+            {% if module_block %}<span class="boq-muted ms-2" id="boqModulesTotal">{{ module_total|floatformat:"-2" }} in all</span>{% endif %}
+            {% if can_edit %}<button type="button" class="btn btn-sm btn-outline-secondary ms-auto py-0"
+                    id="boqModulesEdit" data-ovr data-bs-toggle="modal"
+                    data-bs-target="#boqModulesModal">Edit modules</button>{% endif %}
+          </div>
+          {% if module_block %}
+            <table class="table table-sm mb-0">
+              <tbody>
+                {% for row in module_block %}
+                  <tr class="js-module-row">
+                    <td class="boq-muted ps-3" style="width:74px">{{ row.code }}</td>
+                    <td class="boq-desc">{{ row.label }}</td>
+                    <td class="small text-end pe-3" style="width:112px">{{ row.qty|floatformat:"-2"|default:"—" }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          {% else %}
+            <div class="px-1 small text-muted" id="boqModulesNone">
+              No module line yet{% if can_edit %}: use Edit modules to enter the count by wattage{% endif %}.
+            </div>
+          {% endif %}
+          {% if can_edit %}<div id="boqModulesFields"></div>{% endif %}
+        </div>
         <div class="boq-sheet" id="boqSheet"></div>
 
         {% if calc_multi_rows %}
@@ -429,6 +466,55 @@ screen's ACCB pop-up, so both pages draw the same card.
   </div>
 </form>
 
+{% if can_edit %}
+  {% comment %}
+  DW-5 (M7) — THE MODULES POP-UP. Rows of wattage + count; the Head's default wattage is
+  preselected on a new row (DW-R14). OPX-001's lines (and any other module line that is not
+  "the" line of an active wattage) are rows of their own: their count can be edited, or a
+  wattage picked to move the count there (the line then goes). Its inputs carry no `name`:
+  Save modules writes the hidden fields inside boqForm and saves that form, so this is the
+  picker's normal save and the rules recalculate once. The server re-checks everything
+  (plan_module_save), including a wattage chosen twice.
+  {% endcomment %}
+  {{ module_data|json_script:"boqModulesData" }}
+  <div class="modal fade" id="boqModulesModal" tabindex="-1" aria-labelledby="boqModulesTitle" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h6 class="modal-title" id="boqModulesTitle">Modules on this BOQ</h6>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <p class="small text-muted mb-2">
+            One line per wattage. A count of 0 removes that line. Saving saves the whole BOQ.
+          </p>
+          {% if not module_data.choices %}
+            <div class="alert alert-warning py-2 small" id="boqModNoChoices">
+              No module wattages in the catalogue yet. The Design Head adds them on the RESCO BOQ catalogue.
+            </div>
+          {% endif %}
+          <table class="table table-sm mb-2">
+            <thead>
+              <tr class="small text-muted"><th>Wattage</th><th style="width:120px">Count</th><th style="width:38px"></th></tr>
+            </thead>
+            <tbody id="boqModRows"></tbody>
+          </table>
+          {% if module_data.choices %}
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="boqModAdd">
+              <i class="bi bi-plus-lg"></i> Add row
+            </button>
+          {% endif %}
+          <div class="small text-danger mt-2" id="boqModError" hidden></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-sm text-white" style="background-color:#1a7a4a;" id="boqModSave">Save modules</button>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endif %}
+
 {% if can_edit and formulas_active %}
   {% comment %}
   B-2b.1 — THE OVERRIDE FORMS, OUTSIDE boqForm because HTML forbids nested forms. Both post
@@ -614,6 +700,9 @@ with unsaved edits, so nothing typed is lost without a warning.
   // B-3a: configured ACCB lines are drawn by the ACCB section, not this sheet, but they
   // are lines on this BOQ, so the item count includes them.
   var accbRows = {{ accb_count }};
+  // DW-5: module lines are drawn by the Modules block, not this sheet; they are lines on
+  // this BOQ, so the item count includes them, and their category counts as used.
+  var moduleRows = {{ module_line_count }};
   var dirty   = false;
 
   var elSearch  = document.getElementById('boqSearch');
@@ -643,6 +732,10 @@ with unsaved edits, so nothing typed is lost without a warning.
   function usedCats() {
     var used = {};
     order.forEach(function (id) { used[BY_ID[id].cat] = true; });
+    // DW-5: a module line makes the module category used (the block, not the sheet).
+    if (moduleRows) {
+      CATALOGUE.forEach(function (item) { if (item.mod) { used[item.cat] = true; } });
+    }
     return used;
   }
 
@@ -657,6 +750,8 @@ with unsaved edits, so nothing typed is lost without a warning.
       // B-2b.1: a calculated item reaches the sheet through its rule (or an override),
       // never by hand, so it is not offered. The server ignores one posted anyway.
       if (item.calc) { return false; }
+      // DW-5: module items are entered in the Modules pop-up, one line per wattage.
+      if (item.mod) { return false; }
       if (cat !== '__all' && item.cat !== cat) { return false; }
       if (!query) { return true; }
       return item.desc.toLowerCase().indexOf(lower) >= 0 ||
@@ -750,12 +845,12 @@ with unsaved edits, so nothing typed is lost without a warning.
   }
 
   function renderSheet() {
-    var total = order.length + offRows + accbRows + multiRows;
+    var total = order.length + offRows + accbRows + multiRows + moduleRows;
     elCount.textContent = total + ' item' + (total === 1 ? '' : 's');
     if (elTotal) { elTotal.textContent = total; }
 
     if (!order.length) {
-      elSheet.innerHTML = (offRows || accbRows || multiRows)
+      elSheet.innerHTML = (offRows || accbRows || multiRows || moduleRows)
         ? '<div class="p-3 boq-muted text-center">No catalogue items yet — ' +
           'search on the left and add what this site needs.</div>'
         : '<div class="p-4 text-center boq-muted">Nothing on this BOQ yet.<br>' +
@@ -888,8 +983,11 @@ with unsaved edits, so nothing typed is lost without a warning.
   if (CAN_EDIT) {
     elCat.innerHTML = '<option value="__all">All categories</option>' +
       CATS.map(function (c) {
-        // Calculated items are not offered, so they are not counted either.
-        var n = CATALOGUE.filter(function (i) { return i.cat === c && !i.calc; }).length;
+        // Calculated items are not offered, so they are not counted either; nor are module
+        // items (DW-5), and a category of module items only is left out of the list.
+        var n = CATALOGUE.filter(function (i) { return i.cat === c && !i.calc && !i.mod; }).length;
+        var modulesOnly = !n && CATALOGUE.some(function (i) { return i.cat === c && i.mod; });
+        if (modulesOnly) { return ''; }
         return '<option value="' + esc(c) + '">' + esc(c) + ' (' + n + ')</option>';
       }).join('');
 
@@ -995,6 +1093,118 @@ with unsaved edits, so nothing typed is lost without a warning.
         }
       });
       rmNote.addEventListener('input', function () { rmError.hidden = true; });
+    }
+
+    // DW-5 (M7) — the Modules pop-up. MOD is the saved state (server-built, json_script).
+    // The hidden fields in #boqModulesFields always state the modules to save: written from
+    // MOD on load (so a plain Save draft re-states them unchanged), and from the pop-up's
+    // rows on Save modules, which then saves boqForm. Every value is re-checked by the
+    // server; the checks here only answer the designer in the pop-up.
+    var elModData = document.getElementById('boqModulesData');
+    var MOD = elModData ? JSON.parse(elModData.textContent) : null;
+    var elModFields = document.getElementById('boqModulesFields');
+    var elModModal = document.getElementById('boqModulesModal');
+    if (MOD && elModFields && elModModal) {
+      var MOD_LABEL = {};
+      MOD.choices.forEach(function (c) { MOD_LABEL[c.id] = c.label; });
+
+      function hidden(name, value) {
+        return '<input type="hidden" name="' + esc(name) + '" value="' + esc(value) + '">';
+      }
+      // rows: [{id, qty}]; others: [{line, qty, to}]
+      function writeModFields(rows, others) {
+        var html = hidden('modules', '1');
+        rows.forEach(function (r) {
+          html += hidden('module_item', r.id) + hidden('module_qty', r.qty);
+        });
+        others.forEach(function (o) {
+          html += hidden('module_line', o.line) + hidden('module_line_qty_' + o.line, o.qty) +
+                  hidden('module_line_to_' + o.line, o.to || '');
+        });
+        elModFields.innerHTML = html;
+      }
+      writeModFields(MOD.rows, MOD.others);
+
+      var elModRows = document.getElementById('boqModRows');
+      var elModError = document.getElementById('boqModError');
+
+      function wattageSelect(selected, keepLabel) {
+        var opts = keepLabel !== undefined
+          ? '<option value="">' + esc(keepLabel) + '</option>'
+          : (selected ? '' : '<option value="">Choose a wattage</option>');
+        MOD.choices.forEach(function (c) {
+          opts += '<option value="' + c.id + '"' + (String(c.id) === String(selected) ? ' selected' : '') +
+                  '>' + (keepLabel !== undefined ? 'Move to ' : '') + esc(c.label) + '</option>';
+        });
+        return '<select class="form-select form-select-sm" data-mod-id>' + opts + '</select>';
+      }
+      function countInput(qty) {
+        return '<input class="form-control form-control-sm boq-qty" type="number" min="0" ' +
+               'step="any" data-mod-qty value="' + esc(qty) + '">';
+      }
+      function otherRow(o) {
+        return '<tr data-mod-other="' + o.line + '"><td>' + wattageSelect('', o.label) +
+               '</td><td>' + countInput(o.qty) + '</td><td></td></tr>';
+      }
+      function wattageRow(r) {
+        return '<tr data-mod-row><td>' + wattageSelect(r.id) + '</td><td>' + countInput(r.qty) +
+               '</td><td><button type="button" class="btn btn-sm btn-link text-danger p-0" ' +
+               'data-mod-del title="Remove this row">&times;</button></td></tr>';
+      }
+
+      elModModal.addEventListener('show.bs.modal', function (event) {
+        // Like Override: off while the sheet has unsaved changes (the button is disabled
+        // too, through data-ovr); this is the backstop.
+        if (dirty) { event.preventDefault(); return; }
+        elModRows.innerHTML = MOD.others.map(otherRow).join('') + MOD.rows.map(wattageRow).join('');
+        elModError.hidden = true;
+      });
+      var elModAdd = document.getElementById('boqModAdd');
+      if (elModAdd) {
+        elModAdd.addEventListener('click', function () {
+          // DW-R14: the Head's default wattage preselected on a new row.
+          elModRows.insertAdjacentHTML('beforeend', wattageRow({id: MOD['default'] || '', qty: ''}));
+        });
+      }
+      elModRows.addEventListener('click', function (event) {
+        var button = event.target.closest('[data-mod-del]');
+        if (button) { button.closest('tr').remove(); }
+      });
+
+      document.getElementById('boqModSave').addEventListener('click', function () {
+        var rows = [], others = [], seen = {}, problems = [];
+        function claim(id) {
+          if (seen[id]) {
+            problems.push(MOD_LABEL[id] + ' is chosen twice. Each wattage can appear once: ' +
+                          'put its whole count on one row.');
+            return false;
+          }
+          seen[id] = true;
+          return true;
+        }
+        elModRows.querySelectorAll('tr').forEach(function (tr) {
+          var id = tr.querySelector('[data-mod-id]').value;
+          var qty = tr.querySelector('[data-mod-qty]').value.trim();
+          if (qty === '') { problems.push('Enter a count on every row (0 removes it).'); return; }
+          if (tr.hasAttribute('data-mod-other')) {
+            if (id && !claim(id)) { return; }
+            others.push({line: tr.getAttribute('data-mod-other'), qty: qty, to: id});
+            return;
+          }
+          if (!id) { problems.push('Choose a wattage on every module row.'); return; }
+          if (claim(id)) { rows.push({id: id, qty: qty}); }
+        });
+        if (problems.length) {
+          elModError.textContent = problems.filter(function (p, i) {
+            return problems.indexOf(p) === i;
+          }).join(' ');
+          elModError.hidden = false;
+          return;
+        }
+        writeModFields(rows, others);
+        window.boqSetAction('save_draft');
+        document.getElementById('boqForm').submit();
+      });
     }
 
     window.addEventListener('beforeunload', function (event) {

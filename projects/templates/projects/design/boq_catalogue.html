@@ -43,6 +43,10 @@ removal this product has, and it changes what every future sheet is offered.
     {% if can_download_master %}<a href="{% url 'opex_boq_master_download' %}" class="btn btn-sm btn-outline-secondary js-boq-master-download">
       <i class="bi bi-download me-1"></i>Download master BOQ
     </a>{% endif %}
+    {# DW-5 (M8): the Head's design settings (the default module wattage). #}
+    <a href="{% url 'design_settings' %}" class="btn btn-sm btn-outline-secondary js-design-settings">
+      <i class="bi bi-gear me-1"></i>Design settings
+    </a>
     <a href="{% url 'design_boq_catalogue_create' %}" class="btn btn-sm text-white"
        style="background-color:#1a7a4a;">
       <i class="bi bi-plus-lg"></i> Add item
@@ -88,6 +92,10 @@ removal this product has, and it changes what every future sheet is offered.
             {% else %}
             <a href="{% url 'design_boq_catalogue_edit' item.pk %}"
                class="text-decoration-none" style="color:#1a7a4a;">{{ item.description }}</a>
+            {% endif %}
+            {# DW-5: module items, with their wattage (OPX-001 has none recorded). #}
+            {% if item.is_module %}
+              <span class="badge rounded-pill text-bg-light border ms-1 js-module-badge">Module · {% if item.module_wp %}{{ item.module_wp }} Wp{% else %}wattage not recorded{% endif %}</span>
             {% endif %}
           </td>
           <td class="text-muted">{{ item.unit }}</td>

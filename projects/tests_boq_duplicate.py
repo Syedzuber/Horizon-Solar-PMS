@@ -45,8 +45,9 @@ TYPE1 = {'type': 'Type-1',
 #: Picker GET, measured on 54aab27 (before B-4) with this file's fixture under
 #: solarpms.test_settings: an empty BOQ (no BOQ row) and DisplayBase.SHEET. B-4 adds nothing:
 #: its two entry points are decided from rows the page already loads.
-PICKER_BASELINE = {'empty': 17, 'full': 19}
-PICKER_BASELINE_FIVE_RULES = {'empty': 20, 'full': 23}
+#: DW-5: +1 each — the Modules pop-up's default wattage (DesignSettings.current()).
+PICKER_BASELINE = {'empty': 18, 'full': 20}
+PICKER_BASELINE_FIVE_RULES = {'empty': 21, 'full': 24}
 
 
 class DuplicateBase(DisplayBase):

@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% comment %}
+DW-5 (M8, answer 11) — the Design Head's design settings. One value today: the default
+module wattage the BOQ picker's Modules pop-up preselects on a new row. Head only (the view
+refuses everyone else). The dropdown offers only wattages an active module item has.
+{% endcomment %}
+
+{% block title %}Design settings — SolarPMS{% endblock %}
+
+{% block content %}
+
+<div class="mb-3">
+  <a href="{% url 'design_boq_catalogue' %}" class="text-decoration-none small text-muted">
+    <i class="bi bi-arrow-left"></i> Back to RESCO BOQ Catalogue
+  </a>
+  {% if can_open_design_dashboard %}<span class="text-muted small mx-1">·</span><a href="{% url 'dashboard_design' %}" class="text-decoration-none small text-muted js-back-to-design-dashboard">
+    <i class="bi bi-arrow-left"></i> Design dashboard
+  </a>{% endif %}
+  <h5 class="mt-2 mb-0">Design settings</h5>
+  <div class="text-muted small mt-1">
+    Changes are logged with the value before and after, and apply from the next use.
+    BOQs already saved are not changed.
+  </div>
+</div>
+
+<div class="card shadow-sm border-0" style="max-width:42rem;">
+  <div class="card-body">
+    {% if not has_wattages %}
+      <div class="alert alert-warning py-2 small mb-0" id="designSettingsNoWattages">
+        No active module item has a wattage yet. Add one on the RESCO BOQ catalogue
+        (category Module, tick Module, enter its wattage), then come back here.
+      </div>
+    {% else %}
+      <form method="post" id="designSettingsForm">
+        {% csrf_token %}
+        {% for field in form %}
+          <div class="mb-3">
+            <label for="{{ field.id_for_label }}" class="form-label small fw-semibold">{{ field.label }}</label>
+            {{ field }}
+            {% if field.help_text %}<div class="form-text small">{{ field.help_text }}</div>{% endif %}
+            {% for error in field.errors %}<div class="text-danger small mt-1">{{ error }}</div>{% endfor %}
+          </div>
+        {% endfor %}
+        {% if settings_row.updated_by %}
+          <div class="text-muted small mb-3">
+            Last changed by {{ settings_row.updated_by.user.get_full_name|default:settings_row.updated_by.user.username }}
+            on {{ settings_row.updated_at|date:"d M Y H:i" }}.
+          </div>
+        {% endif %}
+        <button type="submit" class="btn btn-sm text-white" style="background-color:#1a7a4a;">
+          <i class="bi bi-save"></i> Save
+        </button>
+      </form>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}

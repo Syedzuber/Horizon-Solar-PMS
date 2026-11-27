@@ -1095,6 +1095,12 @@ class BOQItemMaster(models.Model):
     #
     # INERT AS OF THIS COMMIT. Nothing reads it but the two catalogue list templates.
     is_mandatory = models.BooleanField(default=False)
+    # DW-5 (DW-R11, M2). A site's modules are one catalogue item per wattage. `is_module`
+    # marks those items; the Head's catalogue form adds each one to the "all modules" formula
+    # group (MODULE_GROUP_NAME), which is what the rules and the minimum-content test read.
+    # Set by the Head's form and by apply_dw5_modules only; the Admin screen does not offer it.
+    is_module   = models.BooleanField(default=False)                 # DW-5: a solar PV module item (OPX-001 and one item per wattage)
+    module_wp   = models.PositiveIntegerField(null=True, blank=True)  # DW-5: the module's wattage in Wp; null = not recorded (OPX-001, retired)
     sort_order  = models.PositiveIntegerField(default=0)         # The item's position: every BOQ screen orders lines by it, read live (DW-4); also copied to BOQItem.serial_no when a line is made
     created_at  = models.DateTimeField(auto_now_add=True)
     updated_at  = models.DateTimeField(auto_now=True)
@@ -1106,6 +1112,13 @@ class BOQItemMaster(models.Model):
         # the one screen that does not (the admin catalogue) orders explicitly. Adding
         # project_type here would silently reorder aggregate_group_boq()'s output.
         ordering = ['sort_order', 'code']
+        constraints = [
+            # DW-5: a recorded wattage is a real one. Null stays allowed: OPX-001's lines
+            # predate wattages and are shown as "Wattage not recorded".
+            models.CheckConstraint(
+                condition=models.Q(module_wp__isnull=True) | models.Q(module_wp__gt=0),
+                name='boqitemmaster_module_wp_positive'),
+        ]
 
     def __str__(self):
         return f"{self.code} — {self.description}"
@@ -1235,7 +1248,17 @@ def get_opex_mandatory_items():
 #: DW-2b (A6): the board test's key, named so a reviewer's ACCB remove can ask for it.
 BOQ_GAP_NO_BOARD = 'no_dcdb_acdb_accb'
 
+#: DW-5 (M3): the formula group every module item belongs to. An EXPLICIT group like the
+#: others (B-2a), kept in step by the Head's catalogue form (sync_module_group_membership)
+#: and marked "open" in the rules file, so the loader adds its members and never removes
+#: one the Head added. OPX-001 is a member: its lines still count (answer 9).
+MODULE_GROUP_NAME = 'all modules'
+BOQ_GAP_NO_MODULE = 'no_module'
+
 BOQ_MINIMUM_CONTENT = (
+    # DW-5 (M6): first, because modules are what a BOQ is for. Replaces OPX-001's mandatory
+    # flag: any module line with a quantity passes, whatever its wattage.
+    (BOQ_GAP_NO_MODULE,   (MODULE_GROUP_NAME,),       False),
     ('no_inverter',       ('all inverters',),         False),
     (BOQ_GAP_NO_BOARD,    ('all DCDBs', 'all ACDBs'), True),
 )
@@ -1245,6 +1268,7 @@ BOQ_MINIMUM_CONTENT = (
 #: count, and a designer looking at such a line would otherwise read "no inverter line" as
 #: a bug. A snapshot stores the KEYS, so it is worded by these words when it is shown.
 BOQ_GAP_WORDS = {
+    'no_module':         'no module line with a quantity',
     'no_inverter':       'no inverter line with a quantity',
     'no_dcdb_acdb_accb': 'no DCDB, ACDB or ACCB line with a quantity',
 }
@@ -3741,6 +3765,46 @@ class NotificationLog(models.Model):
 
     def __str__(self):
         return f"{self.channel}/{self.status} → {self.recipient} at {self.created_at:%Y-%m-%d %H:%M}"
+
+
+class DesignSettings(models.Model):
+    """DW-5 (answer 11, DW-R14): the design team's global settings, set by the Design Head.
+    One row (pk 1, a CHECK). Read through DesignSettings.current().
+
+    NOT SystemSettings: that screen is the Admin's, and the default module wattage is the
+    Head's call. Today it holds one value; it is a model of its own so the next design-wide
+    setting does not have to be squeezed into an Admin screen.
+
+    A CHANGE APPLIES FROM THE NEXT USE (no sweep): the picker's Modules pop-up preselects it
+    on a new row; nothing already saved is touched.
+    """
+
+    default_module_wp = models.PositiveIntegerField(default=640)  # The wattage the Modules pop-up preselects on a new row (Wp); the form offers only wattages an active module item has
+    updated_by = models.ForeignKey('UserProfile', null=True, blank=True,
+                                   on_delete=models.SET_NULL,
+                                   related_name='+')  # Who last saved the form; null for a system write (apply_dw5_modules)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = 'design settings'
+        constraints = [
+            models.CheckConstraint(condition=models.Q(pk=1), name='designsettings_single_row'),
+            models.CheckConstraint(condition=models.Q(default_module_wp__gt=0),
+                                   name='designsettings_default_module_wp_positive'),
+        ]
+
+    @classmethod
+    def current(cls):
+        """The stored row, or an UNSAVED one holding the defaults. One query.
+
+        Unlike SystemSettings.get() this never writes: the picker's GET reads it, and a page
+        load must not create rows. apply_dw5_modules creates the row; until then the model
+        default (640) is what everyone sees.
+        """
+        return cls.objects.filter(pk=1).first() or cls(pk=1)
+
+    def __str__(self):
+        return f'Design settings (default module {self.default_module_wp} Wp)'
 
 
 class SystemSettings(models.Model):

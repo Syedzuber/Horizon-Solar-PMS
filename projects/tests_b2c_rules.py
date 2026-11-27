@@ -303,7 +303,8 @@ class LoaderTests(B2cBase):
     def test_the_dry_run_writes_nothing(self):
         out = self.load()
         self.assertIn('DRY RUN', out)
-        self.assertIn('Summary: rules create 39; groups create 5', out)
+        # DW-5: six groups — the DW-5 file (now the default) adds "all modules".
+        self.assertIn('Summary: rules create 39; groups create 6', out)
         self.assertEqual(_rows(), ([], [], [], []))
 
     def test_every_rule_in_the_file_is_active_including_r24_and_r25(self):
@@ -320,7 +321,7 @@ class LoaderTests(B2cBase):
         self.assertEqual(BOQFormulaRule.objects.filter(is_active=True).count(), len(on))
         self.assertFalse(BOQFormulaRule.objects.filter(is_active=False).exists())
         self.assertEqual(BOQFormulaDriver.objects.count(), sum(len(r['drivers']) for r in on))
-        self.assertEqual(BOQItemGroup.objects.count(), 5)
+        self.assertEqual(BOQItemGroup.objects.count(), 6)   # DW-5: + "all modules"
         self.assertEqual(BOQItemGroupMember.objects.count(),
                          sum(len(g['members']) for g in data['groups']))
         _groups, parsed = parse_rules(DEFAULT_FILE.read_bytes())
@@ -332,7 +333,7 @@ class LoaderTests(B2cBase):
                     self.assertEqual(_db_definition(rule), _file_definition(entry))
                 else:
                     self.assertIsNone(rule)
-        self.assertIn('Written: 5 group create, 39 create', out)
+        self.assertIn('Written: 6 group create, 39 create', out)   # DW-5: + "all modules"
         self.assertEqual(ActivityLog.objects.filter(
             action_code='boq_formula_rules_loaded').count(), 1)
 
@@ -345,7 +346,7 @@ class LoaderTests(B2cBase):
                   if q['sql'].lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))]
         self.assertEqual(writes, [])
         self.assertEqual((_rows(), ActivityLog.objects.count()), (before, logs))
-        self.assertIn('Summary: rules same 39; groups same 5', out)
+        self.assertIn('Summary: rules same 39; groups same 6', out)   # DW-5: + "all modules"
         self.assertIn('Written: nothing (the database already matches the file)', out)
 
     def _refused(self, data=None, contains=''):

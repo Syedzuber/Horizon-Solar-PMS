@@ -174,6 +174,8 @@ urlpatterns = [
     path('design/boq-catalogue/add/',                   design_views.design_boq_catalogue_create, name='design_boq_catalogue_create'),
     path('design/boq-catalogue/<int:item_id>/edit/',    design_views.design_boq_catalogue_edit,   name='design_boq_catalogue_edit'),
     path('design/boq-catalogue/<int:item_id>/toggle/',  design_views.design_boq_catalogue_toggle, name='design_boq_catalogue_toggle'),
+    # DW-5 (M8): the Head's design settings (the default module wattage). Head only.
+    path('design/settings/',                            design_views.design_settings,             name='design_settings'),
 
     path('design/qc/',                              design_views.design_qc_queue,        name='design_qc_queue'),
     path('design/<str:project_id>/qc/',             design_views.design_qc_review,       name='design_qc_review'),

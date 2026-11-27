@@ -1301,11 +1301,12 @@ class QueryCountTests(ACCBBase):
             call()
         return len(queries)
 
-    def test_the_picker_page_is_19_queries_with_0_or_3_accbs(self):
-        self.assertEqual(self._count(lambda: self.client.get(self.url)), 19)
+    # DW-5: 20, was 19 — the Modules pop-up's default wattage (DesignSettings.current()).
+    def test_the_picker_page_is_20_queries_with_0_or_3_accbs(self):
+        self.assertEqual(self._count(lambda: self.client.get(self.url)), 20)
         for config in (EX_TYPE1, EX_TYPE2, EX_TYPE1):
             self._seed_accb(config)
-        self.assertEqual(self._count(lambda: self.client.get(self.url)), 19)
+        self.assertEqual(self._count(lambda: self.client.get(self.url)), 20)
 
     def test_the_accb_save_post_is_17_queries(self):
         accb = self._seed_accb(EX_TYPE1)

@@ -48,7 +48,7 @@ grouped under. Neither is hidden — both are gone, so a crafted POST cannot set
       {% endif %}
 
       {% for field in form %}
-        <div class="mb-3">
+        <div class="mb-3"{% if field.name == 'is_module' or field.name == 'module_wp' %} data-module-field{% endif %}>
           <label for="{{ field.id_for_label }}" class="form-label small fw-semibold">
             {{ field.label }}{% if field.field.required %}
               <span class="text-danger">*</span>{% endif %}
@@ -72,5 +72,27 @@ grouped under. Neither is hidden — both are gone, so a crafted POST cannot set
     </form>
   </div>
 </div>
+
+{% comment %}
+DW-5 (M2): the two module fields show only while the category reads "Module". A plain
+`hidden` on the wrapper (a .mb-3 div with no display class), so nothing fights it. The
+fields stay in the form either way; HeadCatalogueItemForm.clean() is the rule.
+{% endcomment %}
+<script>
+(function () {
+  var category = document.getElementById('id_category');
+  var wrappers = document.querySelectorAll('[data-module-field]');
+  if (!category || !wrappers.length) { return; }
+  function sync() {
+    var isModule = category.value.trim().toLowerCase() === 'module';
+    wrappers.forEach(function (el) {
+      // Never hide a field that carries an error: the Head must see why the save failed.
+      el.hidden = !isModule && !el.querySelector('.text-danger');
+    });
+  }
+  category.addEventListener('input', sync);
+  sync();
+})();
+</script>
 
 {% endblock %}

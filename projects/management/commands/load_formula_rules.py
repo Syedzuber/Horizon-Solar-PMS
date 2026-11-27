@@ -6,8 +6,9 @@ load_formula_rules — make the BOQ formula rules match the rules file (B-2c, 24
     python manage.py load_formula_rules --deactivate R15      # dry run of a switch-off
     python manage.py load_formula_rules --deactivate R15 --apply
 
-THE FILE IS THE SOURCE OF TRUTH (Zuber, B-2c Q6). projects/data/b2c_formula_rules_24nov.json
-holds Praveen's Master BOQ Excel formulas, one entry per rule with a stable key (R1 ... R25,
+THE FILE IS THE SOURCE OF TRUTH (Zuber, B-2c Q6). projects/data/dw5_formula_rules_27nov.json
+(DW-5: the B-2c file of 24 Nov with R12 reading the "all modules" group) holds Praveen's
+Master BOQ Excel formulas, one entry per rule with a stable key (R1 ... R25,
 a letter for a rule with several targets: R7a/R7b). --apply makes the active rules match it:
 
     create      no rule on the target: a new rule
@@ -20,6 +21,11 @@ a letter for a rule with several targets: R7a/R7b). --apply makes the active rul
     off         the file says "active": false and nothing is active: nothing written
 
 A second --apply writes nothing. Rules the file does not name are listed and left alone.
+
+AN "OPEN" GROUP (DW-5, "open": true) lists its members as a MINIMUM: the loader adds any it
+lacks and never removes one. "all modules" is open because the Head's catalogue form adds
+each new module item to it (sync_module_group_membership); a closed group would lose that
+item on the next --apply. Every other group is closed: the file's list is the whole list.
 REACTIVATE lines are printed in their own section, above the rest (Q6), because they undo
 a switch-off someone made on purpose.
 
@@ -72,7 +78,9 @@ from projects.models import (
 from ._demo_support import print_db_banner
 from .seed_formula_demo import DEMO_GROUP_PREFIX, DEMO_SUMMARY_PREFIX
 
-DEFAULT_FILE = Path(settings.BASE_DIR) / 'projects' / 'data' / 'b2c_formula_rules_24nov.json'
+# DW-5 (Q9): the DW-5 file. The B-2c file stays for the record; loading it now would point
+# R12 back at OPX-001 alone.
+DEFAULT_FILE = Path(settings.BASE_DIR) / 'projects' / 'data' / 'dw5_formula_rules_27nov.json'
 
 ACTOR = 'load_formula_rules (system)'
 LOADED_ACTION_CODE = 'boq_formula_rules_loaded'
@@ -151,8 +159,16 @@ def parse_rules(raw):
         members = [_text(code, 'member', where).upper() for code in members]
         if len(set(members)) != len(members):
             raise RulesFileError(f'{where}: a member is listed twice.')
-        groups.append({'name': name, 'label': _text(entry.get('label'), 'label', where),
-                       'members': sorted(members)})
+        group = {'name': name, 'label': _text(entry.get('label'), 'label', where),
+                 'members': sorted(members)}
+        # DW-5: "open" is stored only when true, so a file without it parses (and checksums)
+        # exactly as before.
+        if 'open' in entry:
+            if not isinstance(entry['open'], bool):
+                raise RulesFileError(f'{where}: open must be true or false.')
+            if entry['open']:
+                group['open'] = True
+        groups.append(group)
 
     rules, keys, targets = [], set(), {}
     for n, entry in enumerate(data['rules'], start=1):
@@ -405,8 +421,10 @@ def plan_load(groups, rules):
             continue
         have = {m.item.code for m in group.members.all()}
         want = set(entry['members'])
+        # DW-5: an open group's extra members (added by the Head's catalogue form) stay.
+        remove = [] if entry.get('open') else sorted(have - want)
         step = GroupStep(G_SAME, entry, group, add=sorted(want - have),
-                         remove=sorted(have - want), new_label=group.label != entry['label'])
+                         remove=remove, new_label=group.label != entry['label'])
         if step.add or step.remove or step.new_label:
             step.kind = G_UPDATE
         plan.groups.append(step)
@@ -548,7 +566,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('--file', default=str(DEFAULT_FILE),
-                            help='The rules file (default: the B-2c file in projects/data).')
+                            help='The rules file (default: the DW-5 file in projects/data).')
         parser.add_argument('--apply', action='store_true',
                             help='Write. Without it nothing is written.')
         parser.add_argument('--deactivate', action='append', metavar='KEY', default=[],

@@ -88,7 +88,9 @@ CATALOGUE = [
 REDIRECTED_EXTRA = 1
 #: DW-8: add_line / set_quantity +1 — they follow the redirect to the correction screen,
 #: whose "← My queue" asks Head authority (the deputy lookup) for the open-pool QC reviewer.
-BASELINE = {'picker': 36, 'upload': 19, 'add_line': 41, 'set_quantity': 43}
+#: DW-5: 'picker' +1 — the page it redirects to reads the Modules pop-up's default wattage
+#: (DesignSettings.current()); the POST itself costs what it did.
+BASELINE = {'picker': 37, 'upload': 19, 'add_line': 41, 'set_quantity': 43}
 
 
 def _profile(username, role, **flags):

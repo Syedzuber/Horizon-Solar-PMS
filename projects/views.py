@@ -41,6 +41,8 @@ from .models import (
     BOQ_GAP_NO_BOARD, boq_minimum_content_gaps,
     get_opex_boq_catalogue, opex_catalogue_category_order, get_opex_mandatory_items,
     split_opex_boq_rows, group_boq_rows_by_category,
+    # DW-5 (M8): the Head's default module wattage, preselected in the Modules pop-up.
+    DesignSettings,
     # DW-4: the one line order every BOQ screen and download uses, in SQL and in Python.
     boq_line_order, boq_line_sort_key,
     # DW-7 (answer 11): DW-1's minimum-content tests, read to mark rows on the BOQ download.
@@ -80,6 +82,12 @@ from .models import (
     REASON_RESUBMITTED, REASON_ZOHO_WEBHOOK, REASON_EXECUTION_STARTED,
 )
 from .number_input import decimal_field_max, parse_decimal_input
+# DW-5 — modules by wattage: the picker's Modules pop-up and the module messages.
+from .boq_modules import (
+    MODULE_RETIRED_COPY_REASON, MODULE_RETIRED_UPLOAD_MESSAGE, MODULE_REVIEWER_ADD_MESSAGE,
+    is_module_line, module_choices, module_label, other_line_label, plan_module_save,
+    split_module_lines, write_module_save,
+)
 from .notifications import send_notification
 # T3a: issue, PM-assigned, unassigned-project, BOQ and payment-milestone emails go
 # through notify(); their WhatsApp legs use resolve_recipients() so every channel
@@ -10104,9 +10112,14 @@ def opex_boq_entry(request, project_id):
 
         # The chosen catalogue rows, in the order the sheet lists them. Anything that is
         # not an active OPEX master pk is dropped rather than trusted — this is a POST.
+        # DW-5: MODULE ITEMS ARE NOT THE PER-ITEM SHEET'S. They are written only by the
+        # Modules section below (`modules=1`), so one posted here as an `item` is dropped,
+        # and a module line is never deleted for being absent from the sheet.
+        module_master_ids = {pk for pk, m in catalogue_by_id.items() if m.is_module}
         chosen = []
         for raw in request.POST.getlist('item'):
-            if raw.isdigit() and int(raw) in catalogue_by_id and int(raw) not in chosen:
+            if (raw.isdigit() and int(raw) in catalogue_by_id and int(raw) not in chosen
+                    and int(raw) not in module_master_ids):
                 chosen.append(int(raw))
         chosen_set = set(chosen)
 
@@ -10123,6 +10136,10 @@ def opex_boq_entry(request, project_id):
         mandatory = get_opex_mandatory_items()
         readded   = []
         for master in mandatory:
+            # DW-5: a module item is never put back blank; the minimum-content test asks
+            # for a module line instead (M6).
+            if master.pk in module_master_ids:
+                continue
             if master.pk not in chosen_set:
                 chosen.append(master.pk)
                 chosen_set.add(master.pk)
@@ -10177,6 +10194,14 @@ def opex_boq_entry(request, project_id):
                 computed = formulas.targets
 
                 existing_on, existing_off = split_opex_boq_rows(boq, set(catalogue_by_id))
+                # DW-5: the module lines (any wattage, OPX-001, a retired wattage) are taken
+                # out of both lists, so neither the per-item loops nor the off-catalogue
+                # loops below can delete or re-quantify them. Read here, under the lock
+                # prepare_formula_save() just took, for the Modules section.
+                module_lines = [row for row in existing_on + existing_off
+                                if is_module_line(row)]
+                existing_on = [row for row in existing_on if not is_module_line(row)]
+                existing_off = [row for row in existing_off if not is_module_line(row)]
 
                 # Q9 (Zuber, B-2b.1): A COMPUTED ITEM ON 2+ LINES IS NOT CALCULATED, so its
                 # lines are ordinary lines here, addressed one by one (the GET draws them
@@ -10239,6 +10264,17 @@ def opex_boq_entry(request, project_id):
                                                      row.boq_quantity)
                         row.save(update_fields=['boq_quantity'])
 
+                # DW-5 (M7): the Modules section, one line per wattage. Only when the page
+                # posted it: a save without it (a page drawn before DW-5) leaves every
+                # module line as it was. Planned from the lines read under the lock, written
+                # before apply_formulas() so the rules recalculate once for the whole save.
+                if request.POST.get('modules') == '1':
+                    module_by_id = {m.pk: m for m in module_choices(catalogue)}
+                    module_plan = plan_module_save(request.POST, module_lines, module_by_id)
+                    qty_errors.extend(module_plan.errors)
+                    if not module_plan.errors:
+                        write_module_save(boq, module_plan)
+
                 # Raised INSIDE the atomic block so it rolls back the rows the loops above
                 # already created, updated or deleted — including a BOQ created by this
                 # very save. Caught just below; the designer sees every refused box.
@@ -10287,6 +10323,42 @@ def opex_boq_entry(request, project_id):
     # ---- GET ----
     added_on, added_off = split_opex_boq_rows(boq, set(catalogue_by_id))
 
+    # DW-5 (M7) — THE MODULES BLOCK. Module lines (every wattage, OPX-001's "wattage not
+    # recorded", a retired wattage) are drawn there and nowhere else, so they are taken out
+    # of the per-item sheet and the off-catalogue block. No query: the lines and the
+    # catalogue are loaded already. In catalogue position order across both lists.
+    module_lines = sorted((row for row in added_on + added_off if is_module_line(row)),
+                          key=boq_line_sort_key)
+    added_on = [row for row in added_on if not is_module_line(row)]
+    added_off = [row for row in added_off if not is_module_line(row)]
+    module_options = module_choices(catalogue)
+    module_by_id = {m.pk: m for m in module_options}
+    wattage_lines, other_module_lines = split_module_lines(module_lines, module_by_id)
+    other_pks = {row.pk for row in other_module_lines}
+
+    def _qty_text(value):
+        return '' if value is None else f'{value.normalize():f}'
+
+    module_block = [{
+        'code':  row.item_master.code,
+        'label': (other_line_label(row, module_by_id) if row.pk in other_pks
+                  else module_label(row.item_master)),
+        'qty':   row.boq_quantity,
+    } for row in module_lines]
+    module_data = None
+    if can_edit:
+        # The pop-up's preselection (DW-R14): the active item with the Head's default
+        # wattage, if there is one. One query, and only for the designer who can edit.
+        default_wp = DesignSettings.current().default_module_wp
+        module_data = {
+            'choices': [{'id': m.pk, 'label': module_label(m)} for m in module_options],
+            'default': next((m.pk for m in module_options if m.module_wp == default_wp), None),
+            'rows':    [{'id': master_id, 'qty': _qty_text(row.boq_quantity)}
+                        for master_id, row in wattage_lines.items()],
+            'others':  [{'line': row.pk, 'label': other_line_label(row, module_by_id),
+                         'qty': _qty_text(row.boq_quantity)} for row in other_module_lines],
+        }
+
     # B-2b.1 — which items are calculated, and what each calculated line says. One exists()
     # query with no rules; with rules, the rules and one read of the lines (formula_view).
     formulas = formula_view(boq, project.project_type)
@@ -10316,10 +10388,13 @@ def opex_boq_entry(request, project_id):
     # B-2b.1: `calc` is set ONLY on a calculated item (so a site with no rules gets the
     # payload byte for byte as before), and renderResults() leaves those items out of the
     # search: a calculated item reaches the sheet through its rule, never by hand.
+    # DW-5: `mod` is set ONLY on a module item, which the search and the per-item sheet
+    # leave out (the Modules pop-up enters them), so every other item's payload is as before.
     catalogue_json = json.dumps([
         dict({'id': m.pk, 'code': m.code, 'cat': m.category,
               'desc': m.description, 'unit': m.unit, 'mand': m.is_mandatory},
-             **({'calc': True} if m.pk in calculated else {}))
+             **({'calc': True} if m.pk in calculated else {}),
+             **({'mod': True} if m.is_module else {}))
         for m in catalogue
     ])
 
@@ -10332,8 +10407,10 @@ def opex_boq_entry(request, project_id):
     # the POST union would put them back regardless.
     on_master_ids     = {row.item_master_id for row in added_on}
     # A calculated item is never composed in blank: its rule puts it on the sheet (B-2b).
+    # DW-5: nor is a module item (M6: no item is put back blank; a module line is asked for).
     missing_mandatory = [m for m in get_opex_mandatory_items()
-                         if m.pk not in on_master_ids and m.pk not in calculated]
+                         if m.pk not in on_master_ids and m.pk not in calculated
+                         and not m.is_module]
 
     # DW-3 (R5, answer 1) — what Remove would change, per calculated line, for the pop-up.
     # Pure (no query): the rules and the lines are the ones formula_view() just loaded.
@@ -10389,6 +10466,8 @@ def opex_boq_entry(request, project_id):
     # used the moment the JS ran.
     used_categories = {row.category for row in added_on}
     used_categories.update(m.category for m in missing_mandatory)
+    # DW-5: the Modules block's lines are on the sheet too.
+    used_categories.update(row.item_master.category for row in module_lines)
     empty_categories = [c for c in category_order if c not in used_categories]
 
     # Why the screen is read-only, when it is. Most specific first: the procurement lock is
@@ -10415,10 +10494,12 @@ def opex_boq_entry(request, project_id):
     # an empty BOQ (ruling 32); Clear only when there is something to clear and no loaded
     # line has an ordered quantity. The order-line check is the clear POST's, so the page
     # pays nothing for it.
-    has_lines = bool(added_on or added_off or accbs)
+    # DW-5: module lines are lines on this BOQ like any other.
+    has_lines = bool(added_on or added_off or accbs or module_lines)
     copy_offered = can_edit and not has_lines
     clear_offered = can_edit and has_lines and not any(
-        row.ordered_quantity is not None for row in (*added_on, *added_off, *accbs))
+        row.ordered_quantity is not None
+        for row in (*added_on, *added_off, *accbs, *module_lines))
 
     # DW-8: "← My queue", and "← Design workspace" only for someone the workspace admits
     # (it refuses QC, SCM and the PM outside their approval, who can all read this sheet).
@@ -10447,7 +10528,12 @@ def opex_boq_entry(request, project_id):
         'added_json':       added_json,
         'added_off':        group_boq_rows_by_category(added_off, category_order),
         'added_off_count':  len(added_off),
-        'added_count':      len(added_on) + len(added_off),
+        'added_count':      len(added_on) + len(added_off) + len(module_lines),
+        # DW-5 (M7) — the Modules block and, for the designer, its pop-up's data.
+        'module_block':      module_block,
+        'module_line_count': len(module_lines),
+        'module_total':      sum((row.boq_quantity or 0) for row in module_lines),
+        'module_data':       module_data,
         # B-2b.1 — calculated lines. `formulas_active` draws the override modal only when
         # a rule exists, so a site with no rules renders as it did before.
         'formulas_active':   formulas.active,
@@ -11314,6 +11400,8 @@ BOQ_MARK_REQUIRED = 'Required'
 #: whose groups are missing is dropped (and logged once) by that helper, so its rows simply
 #: carry no mark.
 BOQ_MINIMUM_CONTENT_MARKS = {
+    # DW-5 (M6): every wattage row; OPX-001 is retired, so it is on Other lines, not here.
+    'no_module':         'At least one module',
     'no_inverter':       'At least one inverter',
     'no_dcdb_acdb_accb': 'At least one DCDB, ACDB or ACCB',
 }
@@ -11872,6 +11960,9 @@ def _validate_boq_rows(rows, catalogue_by_code):
     and is only meaningful when `errors` is empty — nothing is written otherwise.
     """
     errors, clean, seen = [], [], {}
+    # DW-5 (P7, Q11): codes not in the catalogue, by their place in `errors`, so a retired
+    # MODULE item (OPX-001, on every download made before DW-5) is named as such below.
+    unknown = []
 
     for row in rows:
         index, code = row['index'], row['code']
@@ -11895,6 +11986,7 @@ def _validate_boq_rows(rows, catalogue_by_code):
         # validates its posted pks against.
         master = catalogue_by_code.get(code)
         if master is None:
+            unknown.append((len(errors), index, code))
             errors.append(f'Row {index}: item code "{code}" is not in the RESCO catalogue.')
             continue
 
@@ -11911,6 +12003,17 @@ def _validate_boq_rows(rows, catalogue_by_code):
 
         clean.append({'index': index, 'code': code, 'master': master,
                       'quantity': quantity})
+
+    # Still refused whole (B-1), with words that say why and what to do. One query, and only
+    # for a file that is refused anyway, so an accepted upload costs nothing more.
+    if unknown:
+        retired = {m.code: m for m in BOQItemMaster.objects.filter(
+            code__in={code for _at, _index, code in unknown}, project_type='OPEX',
+            is_module=True, is_active=False)}
+        for at, index, code in unknown:
+            if code in retired:
+                errors[at] = f'Row {index}: ' + MODULE_RETIRED_UPLOAD_MESSAGE.format(
+                    code=code, description=retired[code].description)
 
     return clean, errors
 
@@ -12596,7 +12699,10 @@ def _boq_copy_plan(source_boq, target_boq, formulas, *, predict):
             if master.project_type != 'OPEX':
                 reason = 'not a RESCO catalogue item'
             elif not master.is_active:
-                reason = 'retired from the catalogue'
+                # DW-5 (Q12): OPX-001 is not copied as a new line; the designer enters
+                # this site's modules by wattage.
+                reason = (MODULE_RETIRED_COPY_REASON if master.is_module
+                          else 'retired from the catalogue')
             elif code == ACCB_CONFIGURED_CODE:
                 reason = 'an ACCB line with no configuration; add it in the ACCB section'
             else:
@@ -13532,6 +13638,13 @@ def boq_correct(request, project_id):
                 return redirect('boq_correct', project_id=project_id)
             master = catalogue_by_id[int(raw)]
 
+            # DW-5 (M9): a reviewer does not add module lines; modules are the designer's,
+            # through the picker's Modules pop-up. Correcting a module line's quantity
+            # (set_quantity) still works on every wattage line.
+            if master.is_module:
+                messages.error(request, MODULE_REVIEWER_ADD_MESSAGE)
+                return redirect('boq_correct', project_id=project_id)
+
             if boq.items.filter(item_master=master).exists():
                 messages.error(request, f'{master.code} {master.description} is already on '
                                         f'this BOQ — correct its quantity instead.')
@@ -13703,7 +13816,9 @@ def boq_correct(request, project_id):
     # Q5 (B-2b.1): calculated items are left out; add_line refuses them (D2).
     addable = {}
     for master in catalogue:
-        if master.pk not in on_master_ids and master.pk not in formulas.targets:
+        # DW-5 (M9): module items are left out too; add_line refuses them.
+        if (master.pk not in on_master_ids and master.pk not in formulas.targets
+                and not master.is_module):
             addable.setdefault(master.category, []).append(master)
     addable_groups = [(c, addable[c]) for c in category_order if c in addable]
 
