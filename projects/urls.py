@@ -3,6 +3,7 @@ from django.views.generic import RedirectView
 from . import views
 from . import design_views   # OPEX design workflow (Part 2) — separate module, no existing view changed
 from . import report_views   # Read-only management reports — separate module, same pattern
+from . import report_pages   # RPT-B2a Reports section (list + one report) — separate module, same pattern
 from . import order_views    # O2 vendor orders — separate module, same pattern
 from . import payment_views  # O5 Finance payments queue — separate module, same pattern
 from . import purchases_views  # O8a purchases & payments workspace — separate module, same pattern
@@ -692,6 +693,12 @@ urlpatterns = [
     # CEO daily report — CEO / Admin / System Admin only
     path('reports/user-status/', report_views.ceo_daily_report,
          name='ceo_daily_report'),
+    # Reports list (RPT-B2a) — CEO / Admin / System Admin, active login and profile
+    path('reports/', report_pages.reports_home, name='reports_home'),
+    # One report for one period (RPT-B2a) — the same three roles. AFTER user-status/ on
+    # purpose: URLs match in order, so the Daily Report keeps its address and is never
+    # taken for a report slug (which would 404).
+    path('reports/<slug:slug>/', report_pages.report_detail, name='report_detail'),
 
     # ---------------------------------------------------------------------------
     # Delivery Challans — SCM Delivery Tracker (Day 9)

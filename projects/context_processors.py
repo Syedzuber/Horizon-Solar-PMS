@@ -3,7 +3,7 @@ from .forms import TYPED_DATE_FLOOR, typed_date_ceiling
 from .models import Notification
 from .permissions import (
     user_can_manage_stock_locations, user_can_view_payment_queue,
-    user_can_view_purchases_workspace, user_can_view_site_dashboard,
+    user_can_view_purchases_workspace, user_can_view_reports, user_can_view_site_dashboard,
     user_can_view_vendor_list,
 )
 
@@ -69,6 +69,19 @@ def payment_queue_nav(request):
     if not request.user.is_authenticated:
         return {'can_view_payment_queue': False}
     return {'can_view_payment_queue': user_can_view_payment_queue(request.user)}
+
+
+def reports_nav(request):
+    """Whether to show the Reports nav entry (RPT-B2a, D6).
+
+    The answer comes from permissions.user_can_view_reports() (R-13), the same helper
+    reports_home and report_detail call, so the link and the pages cannot disagree: CEO,
+    Admin and System Admin with an active login and profile. Visibility only. No query:
+    the helper reads the profile the request already holds.
+    """
+    if not request.user.is_authenticated:
+        return {'can_view_reports': False}
+    return {'can_view_reports': user_can_view_reports(request.user)}
 
 
 def purchases_nav(request):

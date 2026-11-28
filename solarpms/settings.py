@@ -124,6 +124,7 @@ TEMPLATES = [
                 'projects.context_processors.purchases_nav',  # can_view_purchases_workspace, for the Purchases & payments nav entry (O8a)
                 'projects.context_processors.site_dashboard_nav',  # can_view_site_dashboard, for the Site Dashboard nav entry (DASH-B2)
                 'projects.context_processors.approvals_nav',  # can_view_approvals, for the Approvals nav entry (Approvals S2a)
+                'projects.context_processors.reports_nav',  # can_view_reports, for the Reports nav entry (RPT-B2a)
                 'projects.context_processors.typed_date_bounds',  # typed_date_min / typed_date_max for date inputs
             ],
         },

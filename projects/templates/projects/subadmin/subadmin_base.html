@@ -96,6 +96,16 @@
           </a>
         {% endif %}
 
+        {# Reports (RPT-B2a, D6) — permissions.user_can_view_reports via the reports_nav #}
+        {# context processor, the helper the pages call. Like the Daily Report, the     #}
+        {# pages live in the Bootstrap shell, so no nav_ block is marked active here.   #}
+        {% if can_view_reports %}
+          <a href="{% url 'reports_home' %}" class="nav-item">
+            <i data-lucide="bar-chart-3" class="w-4 h-4 shrink-0"></i>
+            Reports
+          </a>
+        {% endif %}
+
       </nav>
     </aside>
 

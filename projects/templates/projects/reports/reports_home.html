@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Reports — SolarPMS{% endblock %}
+
+{% block extra_head %}
+{% comment %}RPT-B2a level 1 (D2): one card per report that exists, plus the existing Daily
+   Report. Bootstrap 5.3.3 and Bootstrap Icons come from base.html; Alpine 3.14.8 only
+   shows and hides the date inputs, loaded here as site_dashboard.html loads it. Layout
+   follows docs/prototypes/rpt-prototype.html. No fetch, no XHR.{% endcomment %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+{% include "projects/reports/_print_css.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="rpt">
+  <div class="mb-4">
+    <h1>Reports</h1>
+    <p class="def mt-1 mb-0">Pick a period on a report and press Generate. Default is Today.</p>
+  </div>
+
+  <section class="mb-4" aria-labelledby="grp-overview">
+    <div class="mb-3">
+      <h2 class="grp" id="grp-overview">Overview</h2>
+      <p class="def mb-0">Who and what is active</p>
+    </div>
+    <div class="cards">
+      {% for r in reports %}
+        <article class="box rcard">
+          <div class="d-flex gap-3">
+            <div class="ico" aria-hidden="true"><i class="bi bi-{{ r.icon }}"></i></div>
+            <div>
+              <h3>{{ r.title }}</h3>
+              <p class="desc">{{ r.description }}</p>
+            </div>
+          </div>
+          <details class="def">
+            <summary>How it's counted</summary>
+            <p class="mt-1 mb-0">{{ r.definition }}</p>
+          </details>
+          {% url 'report_detail' r.slug as action %}
+          {% include "projects/reports/_period_chips.html" with action=action prefix=r.slug %}
+        </article>
+      {% endfor %}
+
+      {# The existing Daily Report, linked unchanged (D2). It reads one day, so it takes a #}
+      {# date rather than the period chips, sent as the ?date= it already accepts.          #}
+      <article class="box rcard">
+        <div class="d-flex gap-3">
+          <div class="ico" aria-hidden="true"><i class="bi bi-clipboard-data"></i></div>
+          <div>
+            <h3>Daily user status</h3>
+            <p class="desc">Per user, for one day: projects and tasks held, done, blocked and overdue, and whether they were active.</p>
+          </div>
+        </div>
+        <details class="def">
+          <summary>How it's counted</summary>
+          <p class="mt-1 mb-0">The Daily Report's own rules, unchanged. There, signing in or opening a page counts as active, so its figures differ from Active users above.</p>
+        </details>
+        <form method="get" action="{% url 'ceo_daily_report' %}" class="pform no-print">
+          <div class="dates">
+            <label class="def" for="daily-date">Date</label>
+            <input type="date" id="daily-date" name="date" value="{{ form.date }}" max="{{ form.max }}">
+          </div>
+          <div>
+            <button type="submit" class="btn btn-brand btn-gen"><i class="bi bi-box-arrow-up-right me-1" aria-hidden="true"></i>Open report</button>
+          </div>
+        </form>
+      </article>
+    </div>
+  </section>
+</div>
+{% endblock %}

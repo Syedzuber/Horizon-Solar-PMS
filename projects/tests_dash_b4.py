@@ -261,19 +261,19 @@ class MoreRowTests(B4Fixture):
             self.ceo:      {'Tasks': self.TASKS,
                             'Finance': ['Finance Head', 'Finance work', 'Payments queue · to pay'],
                             'CEO': ['Portfolio analytics (Residential)', 'Tenders overview',
-                                    'Overdue tasks list']},
+                                    'Overdue tasks list', 'Reports']},
             self.admin:    {'Tasks': self.TASKS,
                             'SCM': ['Contractors to map',
                                     'Vendor attendance · 0 sites · 0 people'],
                             'Finance': ['Finance Head', 'Finance work', 'Payments queue · to pay'],
                             'Admin': ['Manage users', 'Activity log', 'Admin panel'],
                             'CEO': ['Portfolio analytics (Residential)', 'Tenders overview',
-                                    'Overdue tasks list']},
+                                    'Overdue tasks list', 'Reports']},
             self.sysadmin: {'Tasks': self.TASKS,
                             'Finance': ['Finance Head', 'Finance work', 'Payments queue · to pay'],
                             'Admin': ['Sub-admin portal'],
                             'CEO': ['Portfolio analytics (Residential)', 'Tenders overview',
-                                    'Overdue tasks list']},
+                                    'Overdue tasks list', 'Reports']},
         }
         for profile, groups in expected.items():
             with self.subTest(role=profile.role, head=profile.is_design_head):

@@ -1,0 +1,17 @@
+{% comment %}
+RPT-B2a — one report tile (D4): label, figure, and EITHER the change vs the previous
+period OR "as of now" (printed as "as of <generated date, time>"), never both. `t` is
+report_pages.tile(); this partial decides nothing. The arrow is hidden from screen
+readers, which read "up" / "down" instead.
+{% endcomment %}
+<div class="tile {{ t.tone }}">
+  <div class="l">{{ t.label }}</div>
+  <div class="v">{{ t.value }}</div>
+  {% if t.as_of_now %}
+    {# On paper "now" has no meaning, so the printed copy names the moment instead. #}
+    <div class="d"><span class="screen-only">as of now</span><span class="print-only">as of {{ generated_at|date:"j M Y, H:i" }}</span></div>
+  {% elif t.compare %}
+    <div class="d"><span class="cmp {{ t.compare.tone }}">{% if t.compare.arrow %}<span aria-hidden="true">{{ t.compare.arrow }}</span><span class="visually-hidden">{{ t.compare.word }}</span> {% endif %}{{ t.compare.text }}</span> {{ t.compare.label }}</div>
+  {% endif %}
+  {% if t.note %}<div class="d">{{ t.note }}</div>{% endif %}
+</div>

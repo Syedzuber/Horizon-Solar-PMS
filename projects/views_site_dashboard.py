@@ -72,6 +72,7 @@ from .permissions import (DASHBOARD_MANAGER_ROLES, user_can_map_attendance,
                           user_can_view_finance_work,  # FIN-M-B8b: the More row's link
                           user_can_view_finance_head_page,  # FIN-H-B3: the More row's link
                           user_can_view_payment_queue, user_can_view_site_dashboard,
+                          user_can_view_reports,  # RPT-B2a: the More row's CEO link
                           user_can_view_vendor_attendance, user_sees_payment_totals)
 from .punch_points import open_punch_point_counts
 from .qaqc_views import last_visit_lines, qaqc_engineer_dashboard_context
@@ -757,7 +758,8 @@ def _more_links(user, profile):
                  (system_admin_required)
         CEO      user_can_view_ceo_dashboard_lists, the same CEO / Admin / System Admin set
                  as dashboard_ceo's decorator: its kept Residential and Tenders views
-                 (ruling 5) and the overdue-task list
+                 (ruling 5) and the overdue-task list; Reports (RPT-B2a) by
+                 user_can_view_reports, the check the Reports pages make
     """
     role = profile.role
     groups = []
@@ -832,10 +834,17 @@ def _more_links(user, profile):
     # roles dashboard_ceo and dashboard_ceo_overdue_tasks admit (CEO_DASHBOARD_ROLES).
     if user_can_view_ceo_dashboard_lists(user):
         ceo = reverse('dashboard_ceo')
-        groups.append({'label': 'CEO', 'links': [
+        ceo_links = [
             _link('Portfolio analytics (Residential)', f'{ceo}?context=residential'),
             _link('Tenders overview', f'{ceo}?context=tenders'),
-            _link('Overdue tasks list', reverse('dashboard_ceo_overdue_tasks'))]})
+            _link('Overdue tasks list', reverse('dashboard_ceo_overdue_tasks'))]
+        # RPT-B2a (D6): the Reports section, for whoever its pages admit
+        # (user_can_view_reports: the same three roles, but also requiring an active
+        # profile, which the CEO lists' check does not). Its own check, so a deactivated
+        # profile is never shown a link that answers 403. No query, no count.
+        if user_can_view_reports(user):
+            ceo_links.append(_link('Reports', reverse('reports_home')))
+        groups.append({'label': 'CEO', 'links': ceo_links})
     return groups
 
 

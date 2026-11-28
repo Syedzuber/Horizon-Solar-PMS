@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PMS Reports prototype</title>
+<script src="https://cdn.tailwindcss.com/3.4.10"></script>
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<style>
+/* VOICE: plain working screen, same shell as Horizon Solar PMS
+   IDEA: a report counter — pick a report, pick a period, press Generate
+   PICTURE: the report cards themselves (level 1) and the generated sheet (level 2)
+   COLOUR and TYPE: PMS brand green #1a7a4a, gold #f0a829, navy #243a6b; Inter
+   LAYOUT: role bar, two report groups as card grids; level 2 = tiles then tables */
+:root{color-scheme:light}
+*{box-sizing:border-box;min-width:0}
+body{font-family:Inter,system-ui,sans-serif;background:#f5f7f6;color:#1f2933;overflow-x:clip}
+.chip{min-height:36px;padding:0 12px;border-radius:999px;border:1px solid #d6dedb;background:#fff;font-size:13px;font-weight:500;color:#334;white-space:nowrap}
+.chip[aria-pressed=true]{background:#1a7a4a;border-color:#1a7a4a;color:#fff}
+.chip:focus-visible,.btn:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #f0a829;outline-offset:2px}
+.btn{min-height:44px;padding:0 16px;border-radius:10px;font-weight:600;font-size:14px;display:inline-flex;align-items:center;gap:8px;justify-content:center}
+.btn-p{background:#1a7a4a;color:#fff}.btn-p:hover{background:#156540}
+.btn-s{background:#fff;border:1px solid #d6dedb;color:#243a6b}
+.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+table{border-collapse:collapse;width:100%}
+th{font-size:12px;font-weight:600;color:#5b6770;text-align:left;padding:8px 10px;border-bottom:1px solid #e3e8e6;background:#fafbfb}
+td{font-size:14px;padding:9px 10px;border-bottom:1px solid #eef1f0;vertical-align:top}
+.scroll{overflow-x:auto}
+.def{font-size:12.5px;color:#5b6770}
+.pill{font-size:11.5px;font-weight:600;padding:2px 8px;border-radius:999px;white-space:nowrap}
+@media(max-width:600px){table{font-size:13px}.stack thead{display:none}.stack tr{display:grid;padding-block:8px;border-bottom:1px solid #eef1f0}.stack td{display:flow-root;border:0;padding:3px 10px;padding-inline-start:9em;text-align:start}.stack td::before{content:attr(data-l);float:inline-start;width:8.5em;margin-inline-start:-9em;color:#5b6770;font-size:12px}}
+</style>
+</head>
+<body>
+
+<header class="bg-white border-b border-slate-200 sticky top-0 z-10">
+  <div class="max-w-6xl mx-auto px-4 py-3 flex flex-wrap items-center gap-3 justify-between">
+    <div class="flex items-center gap-2">
+      <div class="w-8 h-8 rounded-lg bg-[#1a7a4a] text-white grid place-items-center font-bold text-sm">H</div>
+      <div><div class="font-semibold text-[15px] leading-tight">Horizon Solar PMS</div><div class="text-xs text-slate-500">Reports</div></div>
+    </div>
+    <div class="flex items-center gap-2 text-sm">
+      <span class="text-slate-500 text-xs">Prototype — viewing as</span>
+      <div id="roles" class="flex gap-1"></div>
+    </div>
+  </div>
+</header>
+
+<main id="app" class="max-w-6xl mx-auto px-4 py-6"></main>
+
+<p class="max-w-6xl mx-auto px-4 pb-8 text-xs text-slate-400">Sample numbers for layout review only — not production data. Generated report layout is level 2; detail drill-downs (level 3) are not drawn yet.</p>
+
+<script>
+{
+const TODAY = new Date('2026-11-28T09:00:00+05:30');
+const ROLES = ['Admin','CEO','Sub Admin'];
+const PERIODS = [['today','Today'],['yesterday','Yesterday'],['week','This week'],['month','This month'],['date','On date'],['range','Date range']];
+const FACTOR = {today:1,yesterday:.92,week:4.6,month:17.5,date:1.05};
+const state = {role:'Admin', view:'hub', report:null, period:{}, date:{}, from:{}, to:{}, payTab:'done'};
+const getFrom = id => state.from[id]||'2026-11-16', getTo = id => state.to[id]||'2026-11-25';
+const dayCount = id => Math.round((new Date(getTo(id))-new Date(getFrom(id)))/864e5)+1;
+const rangeBad = id => getFrom(id)>getTo(id);
+
+const esc = s => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtD = d => d.toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'});
+const inr = n => '₹' + Math.round(n).toLocaleString('en-IN');
+function periodLabel(id){
+  const p = state.period[id]||'today';
+  if(p==='today') return 'Today, '+fmtD(TODAY);
+  if(p==='yesterday'){const d=new Date(TODAY);d.setDate(d.getDate()-1);return 'Yesterday, '+fmtD(d)}
+  if(p==='week') return 'This week, 23 Nov – 28 Nov 2026';
+  if(p==='month') return 'This month, 1 Nov – 28 Nov 2026';
+  if(p==='range'){const d=dayCount(id);return fmtD(new Date(getFrom(id)+'T09:00:00+05:30'))+' – '+fmtD(new Date(getTo(id)+'T09:00:00+05:30'))+` (${d} day${d>1?'s':''})`}
+  const v = state.date[id]||'2026-11-25'; return 'On '+fmtD(new Date(v+'T09:00:00+05:30'));
+}
+function prevLabel(id){return {today:'vs yesterday',yesterday:'vs day before',week:'vs last week',month:'vs last month',date:'vs day before',range:'vs previous '+dayCount(id)+' days'}[state.period[id]||'today']}
+const F = id => (state.period[id]==='range') ? Math.max(1,dayCount(id))*.95 : FACTOR[state.period[id]||'today'];
+const S = (id,n) => Math.max(0,Math.round(n*F(id)));
+// users/sites are distinct counts: grow slower than event counts over longer periods
+const U = (id,n,cap) => Math.min(cap, Math.round(n*Math.sqrt(F(id))));
+
+function tile(label,value,sub,tone){
+  const c = {g:'text-[#1a7a4a]',r:'text-red-600',a:'text-amber-600',n:'text-[#243a6b]'}[tone||'n'];
+  return `<div class="bg-white rounded-xl border border-slate-200 p-4"><div class="text-xs font-medium text-slate-500">${esc(label)}</div><div class="text-[28px] font-bold leading-tight mt-1 ${c} num" style="text-align:left">${esc(value)}</div>${sub?`<div class="text-xs text-slate-500 mt-1">${sub}</div>`:''}</div>`;
+}
+function delta(cur,prev,id,goodUp=true){
+  const d = cur-prev; if(!prev) return '';
+  const pct = Math.round(d/prev*100); const up = d>=0;
+  const good = up===goodUp; const col = d===0?'text-slate-500':good?'text-[#1a7a4a]':'text-red-600';
+  return `<span class="${col} font-semibold">${up?'▲':'▼'} ${Math.abs(pct)}%</span> ${prevLabel(id)}`;
+}
+function table(title,heads,rows,numCols=[],note=''){
+  return `<section class="bg-white rounded-xl border border-slate-200 mt-4">
+    <div class="px-4 pt-4 pb-2 flex flex-wrap items-baseline justify-between gap-2"><h3 class="font-semibold text-[15px]">${esc(title)}</h3>${note?`<span class="def">${note}</span>`:''}</div>
+    <div class="scroll"><table class="stack"><thead><tr>${heads.map((h,i)=>`<th class="${numCols.includes(i)?'num':''}">${esc(h)}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map(r=>`<tr>${r.map((c,i)=>`<td data-l="${esc(heads[i])}" class="${numCols.includes(i)?'num':''}">${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>`;
+}
+const pill = (t,tone) => `<span class="pill ${{g:'bg-green-50 text-green-700',r:'bg-red-50 text-red-700',a:'bg-amber-50 text-amber-700',s:'bg-slate-100 text-slate-600'}[tone]}">${esc(t)}</span>`;
+const grid = s => `<div class="grid gap-3 grid-cols-2 md:grid-cols-4">${s}</div>`;
+
+const TENDERS = [['IPGCL','RESCO',92],['MPUVL','RESCO',86],['UKRU001 Dehradun','RESCO',41],['RUDEH','RESCO',38],['Residential','Residential',48],['CAPEX (standalone)','CAPEX',7]];
+
+const REPORTS = [
+ // ---------- Group A
+ {id:'users',grp:'A',icon:'users',title:'Active users',
+  desc:'Who used PMS in the period, by role — and who has open tasks but did nothing.',
+  defn:'Active = at least one recorded action (update, upload, approval). A login with no action is shown separately.',
+  render:id=>{
+    const a=U(id,46,112), l=U(id,9,30), idle=Math.max(4,31-Math.round(F(id)*2));
+    const roles=[['Site Engineer',58,30],['PM / Coordinator',19,14],['SCM',8,6],['Design',12,9],['Finance',5,4],['Sales & BD',6,3],['CEO / Admin / Sub Admin',4,3]];
+    return grid(tile('Active users',a,delta(a,a-3,id),'g')+tile('Logged in, no action',l,'Opened PMS, changed nothing','a')+tile('Open tasks, no activity',idle,'Have due/overdue tasks','r')+tile('Total active accounts','118','Deactivated excluded'))
+    +table('By role',['Role','Accounts','Active','Active %','Actions'],roles.map(r=>{const act=Math.min(r[1],U(id,r[2],r[1]));return [esc(r[0]),r[1],act,Math.round(act/r[1]*100)+'%',S(id,act*6)]}),[1,2,3,4])
+    +table('Open tasks but no activity in period',['User','Role','Open tasks','Overdue','Last action'],[
+      ['Ramesh K.','Site Engineer',14,6,'21 Nov 2026'],['Vikas S.','Site Engineer',11,4,'19 Nov 2026'],['Amit P.','Site Engineer',9,5,'24 Nov 2026'],['Neha T.','Design',6,1,'25 Nov 2026'],['Manoj R.','PM / Coordinator',22,8,'26 Nov 2026']
+     ].map(r=>[esc(r[0]),esc(r[1]),r[2],`<span class="text-red-600 font-semibold">${r[3]}</span>`,r[4]]),[2,3],'The list people act on')
+    +table('Active users and the sites they were active on',['User','Role','Active sites','Sites','Actions'],[
+      ['Sudhanshu Rawat','Site Engineer',['UKRU001-09','UKRU001-11','UKRU001-14','UKRU001-02'],38],
+      ['Chetan','PM',['IPGCL-047','IPGCL-019','IPGCL-033','IPGCL-021','IPGCL-008','IPGCL-040'],31],
+      ['Ashish','PM',['MPUVL-112','MPUVL-088','MPUVL-061','MPUVL-031','RUDEH-04'],24],
+      ['Ramesh K.','Site Engineer',['IPGCL-047'],6],
+      ['Sudhir','SCM',['IPGCL-047','MPUVL-112','UKRU001-09'],27]
+     ].map(r=>{const n=Math.min(r[2].length,U(id,Math.ceil(r[2].length/2),r[2].length));const sh=r[2].slice(0,n);return [esc(r[0]),esc(r[1]),sh.slice(0,3).map(x=>pill(x,'s')).join(' ')+(n>3?` <span class="def">+${n-3} more</span>`:''),n,S(id,r[3])]}),[3,4],'Site = any site where the user recorded an action')
+    +table('Most active users',['User','Role','Actions','Projects touched'],[['Sudhanshu Rawat','Site Engineer',38,4],['Chetan','PM',31,22],['Sudhir','SCM',27,18],['Ashish','PM',24,19],['Santosh','Finance',15,11]].map(r=>[esc(r[0]),esc(r[1]),S(id,r[2]),U(id,r[3],60)]),[2,3]);
+  }},
+ {id:'portfolio',grp:'A',icon:'layers',title:'Active projects, tenders & sites',
+  desc:'How many tenders, sites and Residential/CAPEX projects actually moved in the period.',
+  defn:'Active = any PMS update in the period, contractor attendance excluded (same rule as "Active today" on the snapshot).',
+  render:id=>{
+    const rows=TENDERS.map(t=>{const act=U(id,Math.round(t[2]*.27),t[2]);return [esc(t[0]),pill(t[1],t[1]==='Residential'?'a':t[1]==='CAPEX'?'s':'g'),t[2],act,Math.round(act/t[2]*100)+'%',Math.max(0,Math.round(t[2]*.12)-Math.round(F(id)))]});
+    const sites=rows.reduce((s,r)=>s+r[3],0);
+    return grid(tile('Active tenders',`${Math.min(4,U(id,3,4))} / 4`,'RESCO tenders with ≥1 active site','g')+tile('Active sites (all types)',sites,delta(sites,sites-6,id),'g')+tile('Residential projects active',rows[4][3],'of 48 in execution')+tile('Gone quiet (7+ days)',rows.reduce((s,r)=>s+r[5],0),'Activated, no update in 7 days','r'))
+    +table('By tender / project type',['Tender / group','Type','Sites in execution','Active in period','Active %','Gone quiet'],rows,[2,3,4,5])
+    +table('Most active sites — and who was active there',['Site','Tender','Updates','Active users','Last update'],[['IPGCL-047','IPGCL',19,'Chetan (PM), Ramesh K. (SE), Sudhir (SCM)','Today 08:41'],['MPUVL-112','MPUVL',15,'Ashish (PM), Sudhir (SCM)','Today 08:10'],['UKRU001-09','UKRU001 Dehradun',12,'Sudhanshu Rawat (SE), Sudhir (SCM)','Yesterday 18:52'],['RES-2291','Residential',9,'Residential PM, BD','Yesterday 17:30']].map(r=>[esc(r[0]),esc(r[1]),S(id,r[2]),esc(r[3]),r[4]]),[2]);
+  }},
+ {id:'activity',grp:'A',icon:'activity',title:'Site activities by type',
+  desc:'What kind of work happened on sites, split Residential / RESCO (OPEX) / CAPEX.',
+  defn:'Counts PMS events on sites: task updates and completions, DCs, GRNs, design actions, issues, approvals. Attendance shown but not counted as activity.',
+  render:id=>{
+    const T={Residential:[22,6,3,2,4,1],RESCO:[96,31,14,11,9,13],CAPEX:[7,2,0,0,1,0]};
+    const kinds=['Task updates','Tasks completed','DCs created','GRNs confirmed','Issues raised','Design actions'];
+    const tot=k=>T[k].reduce((a,b)=>a+b,0);
+    return grid(tile('Residential',S(id,tot('Residential')),'events','n')+tile('RESCO (OPEX)',S(id,tot('RESCO')),'events','g')+tile('CAPEX',S(id,tot('CAPEX')),'events','n')+tile('Sites with attendance only',U(id,9,60),'Crew on site, nothing updated in PMS','r'))
+    +table('Activity by kind',['Activity','Residential','RESCO (OPEX)','CAPEX','Total'],kinds.map((k,i)=>[k,S(id,T.Residential[i]),S(id,T.RESCO[i]),S(id,T.CAPEX[i]),`<b>${S(id,T.Residential[i]+T.RESCO[i]+T.CAPEX[i])}</b>`]),[1,2,3,4])
+    +table('By phase (RESCO)',['Phase','Sites with activity','Events'],[['Design & BOQ',U(id,18,90),S(id,21)],['Procurement / delivery',U(id,14,90),S(id,25)],['Installation',U(id,22,90),S(id,58)],['Testing & commissioning',U(id,4,40),S(id,6)],['Approvals & closeout',U(id,3,40),S(id,4)]].map(r=>r.map(esc)),[1,2]);
+  }},
+ // ---------- Group B
+ {id:'attendance',grp:'B',icon:'hard-hat',title:'Attendance on sites',
+  desc:'Contractor crews logged by Site Engineers — sites, man-days, trades.',
+  defn:'One man-day per person per entry (agreed rule). Open = time-in without time-out.',
+  render:id=>{
+    const md=S(id,212);
+    return grid(tile('Sites with attendance',U(id,27,120),'of 84 active sites','g')+tile('Man-days',md,delta(md,md-14,id))+tile('Active sites, no attendance',Math.max(3,U(id,11,40)-Math.round(F(id))),'Work recorded, crew not logged','r')+tile('Open entries',S(id,6),'No time-out','a'))
+    +table('By trade',['Trade','Sites','Headcount / man-days'],[['Civil',U(id,12,80),S(id,88)],['Structure/Mounting',U(id,9,80),S(id,61)],['Electrical',U(id,8,80),S(id,49)],['Other',U(id,2,30),S(id,14)]].map(r=>r.map(esc)),[1,2])
+    +table('By tender',['Tender','Sites logged','Man-days','Contractors'],TENDERS.slice(0,5).map((t,i)=>[esc(t[0]),U(id,[9,8,5,3,2][i],t[2]),S(id,[74,63,38,22,15][i]),[4,3,2,2,3][i]]),[1,2,3]);
+  }},
+ {id:'dc',grp:'B',icon:'file-text',title:'DCs created',
+  desc:'Delivery challans raised by SCM, by category and warehouse.',
+  defn:'Counted on DC creation date. Edits to an existing DC are not counted again.',
+  render:id=>{
+    const n=S(id,14);
+    return grid(tile('DCs created',n,delta(n,n-2,id),'g')+tile('Sites covered',U(id,11,90),'')+tile('For unreleased sites',S(id,1),'Phase warning shown','a')+tile('Linked to PO/PI',Math.round(n*.64),'rest "not linked"'))
+    +table('By category',['Category','DCs','Sites'],[['Modules',S(id,4),U(id,4,60)],['Inverter',S(id,2),U(id,2,60)],['Structure / MMS',S(id,5),U(id,4,60)],['Cables & BOS',S(id,3),U(id,3,60)]].map(r=>r.map(esc)),[1,2])
+    +table('Latest DCs',['DC no.','Site','Category','From','Created by'],[['DC-1184','IPGCL-047','Structure / MMS','Delhi central','Sudhir'],['DC-1183','MPUVL-112','Modules','Vendor direct','Sudhir'],['DC-1182','UKRU001-09','Cables & BOS','Dehradun','SCM user']].map(r=>r.map(esc)));
+  }},
+ {id:'delivery',grp:'B',icon:'package-check',title:'Deliveries done',
+  desc:'Goods received at site (GRNs) — full, partial, damaged, and what is still waiting.',
+  defn:'Received = every DC line has a recorded quantity (0 counts). Partial = some lines recorded.',
+  render:id=>{
+    const g=S(id,11);
+    return grid(tile('GRNs confirmed',g,delta(g,g-1,id),'g')+tile('DCs fully received',S(id,8),'')+tile('Partial / damaged',`${S(id,2)} / ${S(id,1)}`,'Damage raises an Issue to PM','a')+tile('Awaiting SE confirmation',23,'7 overdue (as of now)','r'))
+    +table('By tender',['Tender','GRNs','Full','Partial','Damaged'],TENDERS.slice(0,4).map((t,i)=>[esc(t[0]),S(id,[4,4,2,1][i]),S(id,[3,3,1,1][i]),S(id,[1,0,1,0][i]),S(id,[0,1,0,0][i])]),[1,2,3,4])
+    +table('Waiting longest for confirmation',['DC no.','Site','Dispatched','Days waiting','Site Engineer'],[['DC-1131','MPUVL-077','16 Nov 2026',12,'Vikas S.'],['DC-1140','IPGCL-019','18 Nov 2026',10,'Ramesh K.'],['DC-1152','RUDEH-12','20 Nov 2026',8,'Amit P.']].map(r=>[r[0],r[1],r[2],`<span class="text-red-600 font-semibold">${r[3]}</span>`,r[4]]),[3],'Snapshot as of now, not period-bound');
+  }},
+ {id:'payments',grp:'B',icon:'indian-rupee',title:'Payments',roles:['Admin','CEO'],
+  desc:'Payments done, payments overdue, and approval requests waiting — Admin & CEO only.',
+  defn:'Vendor/contractor payment requests. Split by Residential / RESCO / CAPEX like the Finance queue. "Overdue" rule to be confirmed.',
+  render:id=>{
+    const tabs=[['done','Payments done'],['overdue','Payment overdue'],['approval','Approval requests']];
+    const t=state.payTab;
+    const head=`<div class="flex gap-2 flex-wrap mb-4">${tabs.map(x=>`<button class="chip" data-pay="${x[0]}" aria-pressed="${t===x[0]}">${x[1]}</button>`).join('')}</div>`;
+    let body='';
+    if(t==='done'){const n=S(id,5);body=grid(tile('Paid to vendors',n,delta(n,n-1,id),'g')+tile('Amount paid',inr(S(id,640000)),'')+tile('Partial payments',S(id,1),'Approved less than requested')+tile('Paid without invoice yet',S(id,1),'Advance against PO/PI','a'))
+      +table('Paid in period',['Request','Vendor','Type','Tender / project','Amount','Paid on'],[['PR-221','Sunrise Modules','RESCO','IPGCL',inr(320000),'Today'],['PR-219','Ganga Cables','RESCO','MPUVL',inr(185000),'Today'],['PR-214','Civil crew — R. Yadav','RESCO','UKRU001',inr(135000),'Yesterday']].map(r=>r.map(esc).map((c,i)=>i===4?c:c)),[4]);}
+    if(t==='overdue'){body=grid(tile('Overdue payments',6,'as of now','r')+tile('Amount overdue',inr(910000),'')+tile('Oldest',' 14 days','PR-188','r')+tile('Of which approved, unpaid',4,'Waiting on Finance','a'))
+      +table('Overdue list',['Request','Vendor','Type','Approved on','Days overdue','Amount'],[['PR-188','Volt Inverters','RESCO','14 Nov 2026',14,inr(420000)],['PR-196','Shree Structures','RESCO','19 Nov 2026',9,inr(260000)],['PR-201','Electrical crew — S. Khan','RESCO','21 Nov 2026',7,inr(95000)]].map(r=>[r[0],esc(r[1]),r[2],r[3],`<span class="text-red-600 font-semibold">${r[4]}</span>`,r[5]]),[4,5],'Snapshot as of now — On date shows status on that day');}
+    if(t==='approval'){const n=S(id,4);body=grid(tile('Requests raised',n,delta(n,n+1,id,false))+tile('Waiting for approval',9,'as of now','a')+tile('On hold (SCM to justify)',2,'','a')+tile('Avg time to decide','1.8 days','in period'))
+      +table('Waiting for approval',['Request','Raised by','Vendor','Type','Waiting','Amount'],[['PR-226','Sudhir','Sunrise Modules','RESCO','3 days',inr(510000)],['PR-224','SCM user','Ganga Cables','RESCO','2 days',inr(140000)],['PR-223','Sudhir','Civil crew — R. Yadav','RESCO','1 day',inr(88000)]].map(r=>r.map(esc)),[5]);}
+    return head+body;
+  }},
+ {id:'tasks',grp:'B',icon:'check-circle-2',title:'Tasks done',
+  desc:'Tasks completed and approved, plus what is waiting for approval.',
+  defn:'Done = moved to Done in the period. Two-step tasks count when approved; self-certified ones counted separately. N/A excluded.',
+  render:id=>{
+    const d=S(id,37);
+    return grid(tile('Tasks done',d,delta(d,d-5,id),'g')+tile('Submitted, awaiting approval',S(id,12),'','a')+tile('Rejected (punch point)',S(id,3),'','r')+tile('Overdue now',418,'Across all sites','r'))
+    +table('By project type',['Type','Done','Approved','Self-certified','Awaiting approval'],[['Residential',S(id,9),S(id,7),0,S(id,2)],['RESCO (OPEX)',S(id,26),S(id,19),S(id,2),S(id,9)],['CAPEX',S(id,2),S(id,1),0,S(id,1)]].map(r=>r.map(esc)),[1,2,3,4])
+    +table('By PM',['PM','Sites','Tasks done','Overdue now'],[['Chetan',64,S(id,12),97],['Ashish',71,S(id,10),132],['Praveen (kpraveen)',22,S(id,4),41],['Residential PMs',48,S(id,9),61]].map(r=>r.map(esc)),[1,2,3]);
+  }},
+ {id:'delayed',grp:'B',icon:'alarm-clock',title:'Tasks delayed',
+  desc:'Tasks past their due date — how many slipped in the period, how late, and with whom.',
+  defn:'Delayed = due date passed and task not Done (N/A excluded, same rule as the PM card). "Became delayed" counts tasks whose due date fell in the period. Blocked counted separately.',
+  render:id=>{
+    const nw=S(id,19);
+    return grid(tile('Became delayed in period',nw,delta(nw,nw-3,id,false),'r')+tile('Delayed now',418,'all open sites, as of now','r')+tile('Delayed and Blocked',S(id,4)+27,'blocked with a reason','a')+tile('Sites behind baseline',63,'forecast later than original plan','a'))
+    +table('How late (delayed now)',['Days late','Tasks','Sites'],[['1–3 days',96,41],['4–7 days',118,52],['8–15 days',121,47],['More than 15 days',83,29]].map(r=>r.map(esc)),[1,2],'Snapshot as of now')
+    +table('By PM',['PM','Became delayed','Delayed now','Oldest (days)'],[['Chetan',S(id,6),97,34],['Ashish',S(id,8),132,41],['Praveen (kpraveen)',S(id,2),41,22],['Residential PMs',S(id,3),61,19]].map(r=>r.map(esc)),[1,2,3])
+    +table('By phase (RESCO)',['Phase','Delayed now','Most common task'],[['Design & BOQ',58,'BOQ submission'],['Procurement / delivery',74,'Module delivery'],['Installation',187,'Civil Work and MMS Installation'],['Testing & commissioning',39,'Testing & Commissioning'],['Approvals & closeout',60,'Net Meter Installation']].map(r=>r.map(esc)),[1])
+    +table('Delayed longest',['Task','Site','Assigned to','Due','Days late'],[['Civil Work and MMS Installation','MPUVL-031','Vikas S.','18 Oct 2026',41],['LA and Earthing Installation','IPGCL-012','Ramesh K.','24 Oct 2026',35],['BOQ submission','RUDEH-07','Neha T.','2 Nov 2026',26]].map(r=>[esc(r[0]),esc(r[1]),esc(r[2]),r[3],`<span class="text-red-600 font-semibold">${r[4]}</span>`]),[4]);
+  }},
+ {id:'issues',grp:'B',icon:'alert-triangle',title:'Issues',
+  desc:'Issues raised and resolved on sites, what is still open, and who is sitting on them.',
+  defn:'Raised / resolved counted on their dates. Open now is a snapshot. Includes auto-raised issues (GRN damage).',
+  render:id=>{
+    const r=S(id,8),rs=S(id,6);
+    return grid(tile('Raised',r,delta(r,r-1,id,false),'a')+tile('Resolved',rs,delta(rs,rs-1,id),'g')+tile('Open now',57,'as of now','r')+tile('Open > 7 days',21,'aging list below','r'))
+    +table('By source',['Source','Raised','Resolved','Open now'],[['Site execution',S(id,4),S(id,3),29],['Delivery / GRN damage',S(id,2),S(id,1),11],['Design',S(id,1),S(id,1),8],['Blocked task',S(id,1),S(id,1),9]].map(r=>r.map(esc)),[1,2,3])
+    +table('By project type',['Type','Raised','Resolved','Open now','Avg days to resolve'],[['Residential',S(id,2),S(id,2),12,'2.1'],['RESCO (OPEX)',S(id,6),S(id,4),43,'4.6'],['CAPEX',0,0,2,'—']].map(r=>r.map(esc)),[1,2,3,4])
+    +table('Open longest',['Issue','Site','Raised by','Assigned to','Days open'],[['Roof access denied by school','IPGCL-033','Sudhanshu Rawat','Chetan',19],['Damaged modules (4 nos.)','MPUVL-088','Amit P.','Ashish',14],['Structure drawing mismatch','UKRU001-05','SE','Design Head',11]].map(r=>[esc(r[0]),esc(r[1]),esc(r[2]),esc(r[3]),`<span class="text-red-600 font-semibold">${r[4]}</span>`]),[4]);
+  }},
+ {id:'approvals',grp:'B',icon:'stamp',title:'Approvals',
+  desc:'Every approval flow in one place — raised, decided, waiting, and how long it took.',
+  defn:'Includes task, design (QC/Head/PM), material pre-order, pre-dispatch, contractor bill and payment approvals.',
+  render:id=>{
+    const ap=[['Task approval','PM / QA',22,19,15,'0.9 days'],['Design release (PM)','PM',5,4,11,'2.4 days'],['Design QC / Head','Design',7,6,9,'1.6 days'],['Material pre-order','PM + Design Head',2,1,4,'3.1 days'],['Pre-dispatch','PM + Design Head',1,1,2,'1.2 days'],['Contractor bill','SE → PM',1,0,3,'—'],['Payment request','Approver',4,3,9,'1.8 days']];
+    const pend=ap.reduce((s,a)=>s+a[4],0);
+    return grid(tile('Raised',S(id,42),'')+tile('Decided',S(id,34),'','g')+tile('Waiting now',pend,'all flows','a')+tile('Waiting > 5 days',12,'aging list below','r'))
+    +table('By approval flow',['Flow','Approver','Raised','Decided','Waiting now','Avg turnaround'],ap.map(a=>[a[0],a[1],S(id,a[2]),S(id,a[3]),a[4],a[5]].map(esc)),[2,3,4,5])
+    +table('Aging — waiting longest',['Item','Flow','Waiting with','Days'],[['MPUVL-061 design','Design release (PM)','Ashish',9],['Bill — Civil crew, IPGCL-022','Contractor bill','Chetan',8],['RUDEH-04 Civil task','Task approval','Coordinator',6]].map(r=>[esc(r[0]),esc(r[1]),esc(r[2]),`<span class="text-red-600 font-semibold">${r[3]}</span>`]),[3]);
+  }},
+ {id:'contractors',grp:'B',icon:'briefcase',title:'Contractors',
+  desc:'Contractors deployed, where, how much work — and their bills.',
+  defn:'Deployed = at least one attendance entry in the period. Bills per site, per the contractor billing flow.',
+  render:id=>{
+    return grid(tile('Contractors deployed',U(id,11,24),'of 24 on record','g')+tile('Sites worked',U(id,27,120),'')+tile('Man-days',S(id,212),'')+tile('Bills pending',5,'with SE / PM / Finance','a'))
+    +table('By contractor',['Contractor','Trade','Sites','Man-days','Bills raised'],[['R. Yadav & Co.','Civil',U(id,6,30),S(id,52),S(id,.3)],['Shree Structures','Structure/Mounting',U(id,5,30),S(id,44),S(id,.2)],['S. Khan Electricals','Electrical',U(id,4,30),S(id,39),S(id,.2)],['Not listed (SE flagged)','—',U(id,2,10),S(id,9),0]].map(r=>r.map(esc)),[2,3,4]);
+  }},
+];
+
+function visible(){return REPORTS.filter(r=>!r.roles||r.roles.includes(state.role))}
+
+function periodControls(id,compact){
+  const p=state.period[id]||'today';
+  return `<div class="flex flex-wrap gap-1.5 items-center">${PERIODS.map(([k,l])=>`<button class="chip" data-per="${k}" data-id="${id}" aria-pressed="${p===k}">${l}</button>`).join('')}
+   ${p==='date'?`<input type="date" data-date="${id}" value="${state.date[id]||'2026-11-25'}" max="2026-11-28" class="h-9 px-2 rounded-lg border border-slate-300 text-[16px]">`:''}
+   ${p==='range'?`<div class="flex flex-wrap items-center gap-1.5 w-full mt-1"><label class="def" for="f-${id}">From</label><input id="f-${id}" type="date" data-from="${id}" value="${getFrom(id)}" max="2026-11-28" class="h-9 px-2 rounded-lg border border-slate-300 text-[16px]"><label class="def" for="t-${id}">to</label><input id="t-${id}" type="date" data-to="${id}" value="${getTo(id)}" max="2026-11-28" class="h-9 px-2 rounded-lg border border-slate-300 text-[16px]">${id!=='__all'&&rangeBad(id)?'<span class="text-xs text-red-600 font-medium">From date is after To date</span>':''}</div>`:''}</div>`;
+}
+
+function hub(){
+  const groups=[['A','Overview','Who and what is active'],['B','Operations','Site, SCM, Finance and approvals work']];
+  const hidden=state.role==='Sub Admin'?`<p class="def mt-2">Payments report is hidden for Sub Admin.</p>`:'';
+  return `<div class="flex flex-wrap items-end justify-between gap-3 mb-5">
+    <div><h1 class="text-[28px] font-bold leading-tight">Reports</h1><p class="text-slate-500 text-sm mt-1">Pick a period on any report and press Generate. Default is Today.</p>${hidden}</div>
+    <div class="bg-white border border-slate-200 rounded-xl p-3"><div class="text-xs font-medium text-slate-500 mb-2">Set period for all reports</div>${periodControls('__all')}</div>
+  </div>`+groups.map(([g,t,s])=>`<section class="mb-8"><div class="mb-3"><h2 class="font-semibold text-lg">${t}</h2><p class="def">${s}</p></div>
+   <div class="grid gap-3 md:grid-cols-2 lg:grid-cols-3">${visible().filter(r=>r.grp===g).map(card).join('')}</div></section>`).join('');
+}
+function card(r){
+  return `<article class="bg-white rounded-xl border border-slate-200 p-4 flex flex-col gap-3">
+    <div class="flex gap-3"><div class="w-10 h-10 shrink-0 rounded-lg bg-green-50 text-[#1a7a4a] grid place-items-center"><i data-lucide="${r.icon}" class="w-5 h-5"></i></div>
+    <div><h3 class="font-semibold">${esc(r.title)}${r.roles?` <span class="pill bg-slate-100 text-slate-600 ml-1">Admin & CEO</span>`:''}</h3><p class="text-sm text-slate-600 mt-0.5">${esc(r.desc)}</p></div></div>
+    <details class="def"><summary class="cursor-pointer select-none">How it's counted</summary><p class="mt-1">${esc(r.defn)}</p></details>
+    ${periodControls(r.id)}
+    <button class="btn btn-p mt-auto ${state.period[r.id]==='range'&&rangeBad(r.id)?'opacity-50 pointer-events-none':''}" data-gen="${r.id}"><i data-lucide="play" class="w-4 h-4"></i>Generate report</button>
+  </article>`;
+}
+
+function report(){
+  const r=REPORTS.find(x=>x.id===state.report);
+  if(!r||(r.roles&&!r.roles.includes(state.role))){state.view='hub';return hub()}
+  const gen=new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});
+  return `<button class="btn btn-s mb-4" data-back><i data-lucide="arrow-left" class="w-4 h-4"></i>All reports</button>
+  <div class="bg-white rounded-xl border border-slate-200 p-4 mb-4">
+    <div class="flex flex-wrap justify-between gap-3 items-start">
+      <div><h1 class="text-[26px] font-bold leading-tight">${esc(r.title)}</h1>
+      <p class="text-sm text-slate-600 mt-1"><b>${esc(periodLabel(r.id))}</b> · generated ${gen} by ${esc(state.role)}</p>
+      <p class="def mt-1">${esc(r.defn)}</p></div>
+      <div class="flex gap-2 flex-wrap"><button class="btn btn-s" data-copy><i data-lucide="copy" class="w-4 h-4"></i><span>Copy summary</span></button>
+      <button class="btn btn-s opacity-60" title="Built in Django version" aria-disabled="true"><i data-lucide="download" class="w-4 h-4"></i>Excel (in build)</button></div>
+    </div>
+    <div class="mt-3 flex flex-wrap gap-3 items-center justify-between">${periodControls(r.id)}
+      <div class="flex gap-2 flex-wrap"><select class="h-9 px-2 rounded-lg border border-slate-300 text-sm"><option>All project types</option><option>Residential</option><option>RESCO (OPEX)</option><option>CAPEX</option></select>
+      <select class="h-9 px-2 rounded-lg border border-slate-300 text-sm"><option>All tenders</option>${TENDERS.slice(0,4).map(t=>`<option>${esc(t[0])}</option>`).join('')}</select></div></div>
+  </div>
+  <div id="body">${state.period[r.id]==='range'&&rangeBad(r.id)?'<p class="bg-white rounded-xl border border-red-200 p-4 text-red-700">From date is after To date — fix the range to see the report.</p>':r.render(r.id)}</div>`;
+}
+
+function render(){
+  document.getElementById('roles').innerHTML=ROLES.map(x=>`<button class="chip" data-role="${x}" aria-pressed="${state.role===x}">${x}</button>`).join('');
+  document.getElementById('app').innerHTML = state.view==='hub'?hub():report();
+  if(window.lucide) lucide.createIcons();
+}
+
+document.addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(!b) return;
+  if(b.dataset.role){state.role=b.dataset.role;render();return}
+  if(b.dataset.per){
+    const id=b.dataset.id,k=b.dataset.per;
+    if(id==='__all'){REPORTS.forEach(r=>state.period[r.id]=k);state.period.__all=k}else state.period[id]=k;
+    render();return}
+  if(b.dataset.gen){state.report=b.dataset.gen;state.view='report';location.hash='report-'+b.dataset.gen;window.scrollTo(0,0);render();return}
+  if('back' in b.dataset){state.view='hub';location.hash='reports';render();return}
+  if(b.dataset.pay){state.payTab=b.dataset.pay;render();return}
+  if('copy' in b.dataset){
+    const r=REPORTS.find(x=>x.id===state.report);
+    const tiles=[...document.querySelectorAll('#body .grid > div')].map(d=>d.children[0].textContent+': '+d.children[1].textContent).join('\n');
+    const txt=`${r.title} — ${periodLabel(r.id)}\n${tiles}`;
+    navigator.clipboard?.writeText(txt).then(()=>{b.querySelector('span').textContent='Copied'},()=>{b.querySelector('span').textContent='Copy blocked'});
+  }
+});
+document.addEventListener('change',e=>{
+  const i=e.target; if(i.dataset&&i.dataset.date){
+    const id=i.dataset.date;
+    if(id==='__all'){REPORTS.forEach(r=>state.date[r.id]=i.value)}
+    state.date[id]=i.value;render();}
+  for(const k of ['from','to']){ if(i.dataset&&i.dataset[k]){const id=i.dataset[k];
+    if(id==='__all'){REPORTS.forEach(r=>state[k][r.id]=i.value)}
+    state[k][id]=i.value;render();}}
+});
+function fromHash(){const h=location.hash.replace('#','');if(h.startsWith('report-')){state.report=h.slice(7);state.view='report'}else state.view='hub';render()}
+window.addEventListener('hashchange',fromHash);
+fromHash();
+}
+</script>
+</body>
+</html>

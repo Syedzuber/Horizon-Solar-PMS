@@ -13,6 +13,7 @@ THE SIX PERIODS (decision D2, 28 Nov 2026)
     month       the 1st of this month to today
     date        one chosen day, not after today
     range       From to To, both inclusive, at most MAX_RANGE_DAYS, not after today
+    No chosen day (On date, or a range's From) may be before REPORTS_START (RPT-B2a).
 
 THE PREVIOUS PERIOD (D3) is the same length immediately before:
     today / yesterday / date  -> the day before
@@ -60,6 +61,13 @@ ERROR_PICK_DATE = 'Pick a date'
 ERROR_FUTURE = "Dates after today can't be chosen"
 ERROR_FROM_AFTER_TO = 'From date is after To date'
 ERROR_TOO_LONG = f'Date range can be at most {MAX_RANGE_DAYS} days'
+
+#: The first day a report may cover (RPT-B2a, Zuber 28 Nov 2026). Coded `user_login` rows
+#: begin on 28 Jul 2026; before it, sign-ins were logged with a blank action_code and
+#: human_activity_q() counts them as actions, so an earlier period would credit people
+#: with actions they never took. The pages set it as the date inputs' min as well.
+REPORTS_START = date(2026, 7, 28)
+ERROR_TOO_EARLY = 'Reports start on 28 Jul 2026'
 
 EN_DASH = '–'
 
@@ -200,6 +208,8 @@ def parse_period(params, today=None):
             return default, ERROR_PICK_DATE
         if day > today:
             return default, ERROR_FUTURE
+        if day < REPORTS_START:
+            return default, ERROR_TOO_EARLY
         return build_period(key, day, day, today), None
     if key == PERIOD_RANGE:
         start, end = _read_date(params.get('from')), _read_date(params.get('to'))
@@ -209,6 +219,10 @@ def parse_period(params, today=None):
         # its length.
         if start > today or end > today:
             return default, ERROR_FUTURE
+        # Checked on From alone. A To before REPORTS_START means either From is before it
+        # too (refused here) or From is after To (refused just below).
+        if start < REPORTS_START:
+            return default, ERROR_TOO_EARLY
         if start > end:
             return default, ERROR_FROM_AFTER_TO
         if (end - start).days + 1 > MAX_RANGE_DAYS:

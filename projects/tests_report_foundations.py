@@ -752,3 +752,186 @@ class QueryBudgetTests(ActivityFixture):
         small = self._count(day_period(DAY))
         self._spread(27, 1)
         self.assertEqual(self._count(day_period(DAY)), small)
+
+
+# ---------------------------------------------------------------------------
+# RPT-B2a — action kinds and accounts by role (helpers the Active users report reads)
+# ---------------------------------------------------------------------------
+# Imported here rather than at the top so this session appends tests and edits none of
+# B1's lines (Zuber's condition: the existing tests unchanged). Not a circular import.
+from .report_activity import (ATTENDANCE_KIND, NO_ROLE, OTHER_KIND,  # noqa: E402
+                              accounts_by_role, action_kind_label, bulk_kind_label,
+                              entity_kind_label, ledger_kind_label)
+
+
+class KindLabelTests(TestCase):
+    """The label rule Zuber confirmed: drop design_, sentence case, short forms capital."""
+
+    def test_codes_read_as_words(self):
+        self.assertEqual(action_kind_label('design_head_qc_passed'), 'Head QC passed')
+        self.assertEqual(action_kind_label('design_survey_link_added'), 'Survey link added')
+        self.assertEqual(action_kind_label('boq_accb_added'), 'BOQ ACCB added')
+        self.assertEqual(action_kind_label('task_reassigned'), 'Task reassigned')
+        self.assertEqual(action_kind_label('design_pm_approved'), 'PM approved')
+
+    def test_a_bare_prefix_is_not_emptied(self):
+        self.assertEqual(action_kind_label('design_'), 'Design')
+
+    def test_ledger_codes_read_as_subject_and_status(self):
+        self.assertEqual(ledger_kind_label('task:Done'), 'Task → Done')
+        self.assertEqual(ledger_kind_label('task:In Progress'), 'Task → In Progress')
+        self.assertEqual(ledger_kind_label('design_assignment:awaiting_head_qc'),
+                         'Design → awaiting head QC')
+        self.assertEqual(action_kind_label('delivery_challan:Received'), 'DC → Received')
+
+    def test_a_blank_code_is_labelled_by_its_entity_type(self):
+        self.assertEqual(action_kind_label('', 'Project'), 'Project update')
+        self.assertEqual(action_kind_label('', 'File'), 'File upload')
+        self.assertEqual(action_kind_label('', 'DeliveryChallan'), 'Delivery challan')
+        self.assertEqual(entity_kind_label('PurchaseOrder'), 'Purchase order')
+        self.assertEqual(entity_kind_label(''), OTHER_KIND)
+
+    def test_a_bulk_action_names_every_code(self):
+        self.assertEqual(bulk_kind_label(['design_qc_assigned', 'design_allocated']),
+                         'Bulk: Allocated + QC assigned')
+
+
+class ActionKindTests(ActivityFixture):
+
+    def _blank(self, site, actor, when, entity_type):
+        row = ActivityLog.objects.create(project=site, actor=actor, action='Updated something',
+                                         action_code='', entity_type=entity_type)
+        ActivityLog.objects.filter(pk=row.pk).update(timestamp=when)
+
+    def test_every_source_of_an_action_is_counted_under_its_kind(self):
+        site = self._site()
+        for minute in range(3):
+            self._log(site, self.pm, ist(DAY, 10, minute), code='design_head_qc_passed')
+        self._log(site, self.pm, ist(DAY, 11), code='task_reassigned')
+        self._blank(site, self.pm, ist(DAY, 12), 'Project')
+        self._st(site, self.pm, ist(DAY, 13))                       # unpaired ledger row
+        self._attend(site, self.pm, DAY, ist(DAY, 14))
+        self._batch(self.pm, ist(DAY, 15), 10, code='design_allocated', gap_s=0.1)
+        row = self._user(self._report(), self.pm)
+        self.assertEqual(row.kinds, (('Head QC passed', 3), (ATTENDANCE_KIND, 1),
+                                     ('Bulk: Allocated', 1), ('Project update', 1),
+                                     ('Task reassigned', 1), ('Task → Done', 1)))
+        self.assertEqual(row.actions, 8)
+
+    def test_each_users_kinds_add_up_to_their_actions(self):
+        # A mixed day for three people, including a row on the previous day, a paired
+        # ledger row (not an action), voided attendance (not one) and a bulk batch (one).
+        a, b = self._site(), self._site(status='Draft')
+        self._log(a, self.pm, ist(DAY, 9))
+        self._st(a, self.pm, ist(DAY, 9, 0, 2))                      # paired: not counted
+        self._log(b, self.pm, ist(DAY - timedelta(days=1), 9))       # previous day
+        self._blank(None, self.designer, ist(DAY, 10), 'File')
+        self._log(None, self.designer, ist(DAY, 10, 5), code='design_boq_submitted')
+        self._batch(self.designer, ist(DAY, 16), 12, gap_s=0.2)
+        self._attend(a, self.se, DAY, ist(DAY, 11))
+        self._attend(b, self.se, DAY, ist(DAY, 12), voided=True)
+        report = self._report()
+        self.assertEqual(len(report.active_users.rows), 3)
+        for row in report.active_users.rows:
+            self.assertEqual(sum(n for _, n in row.kinds), row.actions, row.name)
+        self.assertEqual(sum(sum(n for _, n in r.kinds) for r in report.active_users.rows),
+                         report.active_users.actions)
+
+    def test_kinds_are_most_first_then_by_label(self):
+        site = self._site()
+        self._log(site, self.pm, ist(DAY, 9), code='task_reassigned')
+        self._log(site, self.pm, ist(DAY, 10), code='design_allocated')
+        self._log(site, self.pm, ist(DAY, 11), code='design_qc_passed')
+        self._log(site, self.pm, ist(DAY, 12), code='design_qc_passed')
+        row = self._user(self._report(), self.pm)
+        self.assertEqual([k for k, _ in row.kinds], ['QC passed', 'Allocated', 'Task reassigned'])
+
+    def test_the_previous_period_has_its_own_kinds(self):
+        site = self._site()
+        self._log(site, self.pm, ist(DAY, 9), code='task_reassigned')
+        self._log(site, self.pm, ist(DAY - timedelta(days=1), 9), code='design_qc_passed')
+        report = activity_report(day_period(DAY))
+        self.assertEqual(self._user(report.current, self.pm).kinds, (('Task reassigned', 1),))
+        self.assertEqual(self._user(report.previous, self.pm).kinds, (('QC passed', 1),))
+
+    def test_kinds_cost_no_query_for_1_day_or_92_days(self):
+        # The kinds ride on B1's ten queries (entity_type is a column of query 1). An open
+        # task holder is needed for all ten to run: with none, the three "last action
+        # ever" queries filter on an empty id list and Django skips them.
+        site = self._site()
+        self._task(site, self.se)
+        for i in range(40):
+            self._blank(site, self.pm, ist(DAY - timedelta(days=i % 92), 10), 'Project')
+        for period in (day_period(DAY),
+                       build_period(PERIOD_RANGE, DAY - timedelta(days=91), DAY, SAT)):
+            with CaptureQueriesContext(connection) as ctx:
+                report = activity_report(period)
+            self.assertEqual(len(ctx.captured_queries), 10)
+            self.assertTrue(self._user(report.current, self.pm).kinds)
+
+
+class AccountsByRoleTests(TestCase):
+
+    @classmethod
+    def setUpTestData(cls):
+        for i in range(3):
+            _profile(f'acc_pm{i}', 'PM')
+        _profile('acc_se', 'Site Engineer')
+        off = _profile('acc_off', 'PM')                       # profile deactivated
+        UserProfile.objects.filter(pk=off.pk).update(is_active=False)
+        gone = _profile('acc_gone', 'Site Engineer')          # login deactivated
+        User.objects.filter(pk=gone.user_id).update(is_active=False)
+        blank = _profile('acc_blank', 'PM')
+        UserProfile.objects.filter(pk=blank.pk).update(role='')
+
+    def test_active_accounts_per_role_on_both_models(self):
+        counts = accounts_by_role()
+        self.assertEqual(counts['PM'], 3)
+        self.assertEqual(counts['Site Engineer'], 1)
+        self.assertEqual(counts[NO_ROLE], 1)
+
+    def test_counts_match_the_active_profile_filter(self):
+        self.assertEqual(sum(accounts_by_role().values()),
+                         UserProfile.objects.filter(is_active=True,
+                                                    user__is_active=True).count())
+
+    def test_one_query_however_many_accounts(self):
+        with CaptureQueriesContext(connection) as small:
+            accounts_by_role()
+        for i in range(20):
+            _profile(f'acc_more{i}', 'Design')
+        with CaptureQueriesContext(connection) as big:
+            accounts_by_role()
+        self.assertEqual(len(small.captured_queries), 1)
+        self.assertEqual(len(big.captured_queries), 1)
+
+
+# Appended like the block above, so B1's import lines stay untouched. Not a circular import.
+from .report_periods import ERROR_TOO_EARLY, REPORTS_START  # noqa: E402
+
+
+class ReportsStartTests(TestCase):
+    """RPT-B2a: no report may start before 28 Jul 2026, the day coded sign-ins began."""
+
+    def _parse(self, **params):
+        return parse_period(params, today=SAT)
+
+    def test_on_date_before_the_start_is_refused_and_falls_back_to_today(self):
+        self.assertEqual(REPORTS_START, date(2026, 7, 28))
+        p, error = self._parse(period='date', date='2026-07-27')
+        self.assertEqual((error, p.key, p.start_date), (ERROR_TOO_EARLY, PERIOD_TODAY, SAT))
+        self.assertEqual(ERROR_TOO_EARLY, 'Reports start on 28 Jul 2026')
+
+    def test_the_start_day_itself_is_accepted(self):
+        p, error = self._parse(period='date', date='2026-07-28')
+        self.assertEqual((error, p.start_date), (None, date(2026, 7, 28)))
+
+    def test_a_range_from_before_the_start_is_refused(self):
+        _, error = self._parse(period='range', **{'from': '2026-07-27', 'to': '2026-08-10'})
+        self.assertEqual(error, ERROR_TOO_EARLY)
+        p, error = self._parse(period='range', **{'from': '2026-07-28', 'to': '2026-08-10'})
+        self.assertEqual((error, p.days), (None, 14))
+
+    def test_a_to_before_the_start_with_a_later_from_is_from_after_to(self):
+        _, error = self._parse(period='range', **{'from': '2026-08-01', 'to': '2026-07-20'})
+        self.assertEqual(error, ERROR_FROM_AFTER_TO)

@@ -1,0 +1,45 @@
+{% comment %}
+RPT-B2a — the period form (D2), shared by every report card (level 1) and the report
+header (level 2). A plain GET form to the report's own URL: no fetch, no XHR. Alpine
+does one thing, show or hide the date inputs for "On date" and "Date range"; with no
+script the chosen period still submits, and parse_period reads it.
+
+Takes:  action   the report URL the form submits to
+        prefix   makes the input ids unique when several cards share a page
+        form     {'period', 'date', 'from', 'to', 'min', 'max'}, strings (report_pages)
+        period_choices, button
+
+The hidden inputs are also DISABLED, so a Today report's URL carries no stray date. The
+server writes the first state (style and disabled) and Alpine keeps it in step after.
+form.period is always one of report_pages.PERIOD_CHOICES' fixed keys, never typed text,
+which is why it may sit inside the x-data string.
+{% endcomment %}
+<form method="get" action="{{ action }}" class="pform no-print" x-data="{ p: '{{ form.period }}' }">
+  <fieldset>
+    <legend class="visually-hidden">Period</legend>
+    <div class="chips">
+      {% for key, label in period_choices %}
+        <label class="chip">
+          <input type="radio" name="period" value="{{ key }}" x-model="p"{% if key == form.period %} checked{% endif %}>
+          <span>{{ label }}</span>
+        </label>
+      {% endfor %}
+    </div>
+    <div class="dates" x-show="p === 'date'"{% if form.period != 'date' %} style="display: none"{% endif %}>
+      <label class="def" for="{{ prefix }}-date">Date</label>
+      <input type="date" id="{{ prefix }}-date" name="date" value="{{ form.date }}" min="{{ form.min }}" max="{{ form.max }}"
+             :disabled="p !== 'date'"{% if form.period != 'date' %} disabled{% endif %}>
+    </div>
+    <div class="dates" x-show="p === 'range'"{% if form.period != 'range' %} style="display: none"{% endif %}>
+      <label class="def" for="{{ prefix }}-from">From</label>
+      <input type="date" id="{{ prefix }}-from" name="from" value="{{ form.from }}" min="{{ form.min }}" max="{{ form.max }}"
+             :disabled="p !== 'range'"{% if form.period != 'range' %} disabled{% endif %}>
+      <label class="def" for="{{ prefix }}-to">to</label>
+      <input type="date" id="{{ prefix }}-to" name="to" value="{{ form.to }}" min="{{ form.min }}" max="{{ form.max }}"
+             :disabled="p !== 'range'"{% if form.period != 'range' %} disabled{% endif %}>
+    </div>
+  </fieldset>
+  <div>
+    <button type="submit" class="btn btn-brand btn-gen"><i class="bi bi-play-fill me-1" aria-hidden="true"></i>{{ button|default:"Generate report" }}</button>
+  </div>
+</form>

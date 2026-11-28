@@ -5,7 +5,9 @@ RPT-B1 — who was active, and where, over a reporting Period. Pure reads, no vi
     report.current.active_users.rows              # per user: actions, sites, last action
     report.current.active_sites.in_execution      # per site, split execution / design
     report.current.bulk_actions                   # each bulk batch, counted once
+    row.kinds                                     # per user: (kind label, count), most first
     active_users(period).current / .previous      # one figure, both periods
+    accounts_by_role()                            # active accounts per role, one query
 
 Every public function takes a report_periods.Period and issues a FIXED number of queries
 (ten) whatever the period's length or the number of sites: the rows of both periods are
@@ -65,9 +67,21 @@ WHICH SITES COUNT FOR WHAT (D11 and B1 answer 2)
     every other site       counts for the user and, under the rule above, as active
 Rows with no site are kept: a Design BOQ group or a material approval is a real action
 with nowhere to put it (edge case 2), counted under `actions_without_site`.
+
+ACTION KINDS (RPT-B2a, Zuber's Q2/Q3 answers, 28 Nov 2026)
+    Every action a user is credited with is also counted under a KIND, in the same pass
+    that counts it, so a user's kinds always add up to their actions: there is one
+    counting path, not a second one that could drift. The kind is a readable label:
+      - an ActivityLog row with a code: action_kind_label(code)
+      - an ActivityLog row with NO code (the ~80 legacy call sites): its entity type,
+        ENTITY_KIND_LABELS, read from the same fetch (no extra query)
+      - an unpaired ledger row: "Task → Done"
+      - attendance: ATTENDANCE_KIND
+      - a bulk action: "Bulk: " and the labels of every code it merged
 """
 
-from collections import defaultdict
+import re
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
@@ -141,6 +155,113 @@ def _person_name(profile):
 
 
 # ---------------------------------------------------------------------------
+# Action kinds (RPT-B2a, Q3): the readable name of what an action was
+# ---------------------------------------------------------------------------
+# There is no code -> label map anywhere in the app (pre-flight 3), and ActivityLog's
+# `action` text is free-form (it carries task names and DC numbers), so grouping by it
+# would scatter one kind of work over dozens of rows. The label is built from the code
+# instead, by the rule Zuber confirmed: drop a leading "design_", underscores to spaces,
+# sentence case, short forms in capitals. design_head_qc_passed -> "Head QC passed".
+
+#: Words kept in capitals when a code is turned into words.
+SHORT_FORMS = frozenset({'qc', 'qa', 'boq', 'pm', 'se', 'accb', 'acdb', 'dcdb', 'grn', 'dc',
+                         'po', 'pi', 'cod'})
+
+#: The prefix dropped from a code: most of the app's codes are design workflow codes, and
+#: on a report of who did what, "Design" in front of each of them says nothing.
+DROPPED_CODE_PREFIX = 'design_'
+
+ATTENDANCE_KIND = 'Attendance recorded'
+BULK_KIND_PREFIX = 'Bulk: '
+
+#: The kind of an ActivityLog row with NO action_code, by its entity_type (Q3 (ii)). The
+#: legacy call sites never got a code (migration 0043 left them blank on purpose); their
+#: entity type is the stable part of what they wrote. Built from every entity type a
+#: blank-code human activity row carries on the 27 Nov production restore.
+ENTITY_KIND_LABELS = {
+    'Task': 'Task update',                    # nearly all "Updated due date for task: …"
+    'Project': 'Project update',              # activated, coordinators, fields edited
+    'User': 'User account',                   # profile edits (and pre-28 Jul login rows)
+    'File': 'File upload',
+    'ChecklistItemCompletion': 'Checklist answered',
+    'DeliveryChallan': 'Delivery challan',    # DC created, GRN confirmed
+    'Notification': 'Notification setting',   # "Notification pref updated for …"
+    'NotificationEventSetting': 'Notification setting',
+    'Milestone': 'Milestone update',
+    'Issue': 'Issue update',
+    'BOQItemMaster': 'BOQ catalogue edit',
+    'Comment': 'Comment',
+    'System': 'System setting',               # master switches, feature gates
+    'PaymentRequest': 'Payment request',
+}
+#: A blank-code row with no entity type either.
+OTHER_KIND = 'Other'
+
+#: Ledger subjects (StatusTransition.subject_type) as they read on a report.
+LEDGER_SUBJECT_LABELS = {
+    'design_assignment': 'Design',
+    'delivery_challan': 'DC',
+    'payment_milestone': 'Milestone',
+    'payment_request': 'Payment request',
+    'payment_receipt': 'Receipt',
+    'approval_request': 'Approval',
+}
+
+
+def _words(text):
+    """`text` split on underscores and spaces, short forms in capitals, the rest as stored."""
+    return [w.upper() if w.lower() in SHORT_FORMS else w
+            for w in text.replace('_', ' ').split()]
+
+
+def _sentence(words):
+    """The words with the first one capitalised. A short form is already in capitals."""
+    if not words:
+        return ''
+    first = words[0]
+    return ' '.join([first[:1].upper() + first[1:]] + words[1:])
+
+
+def ledger_kind_label(code):
+    """'task:Done' -> 'Task → Done'; 'design_assignment:awaiting_head_qc' ->
+    'Design → awaiting head QC'. The status keeps its stored case: task statuses are
+    already words ('In Progress'), design ones are codes."""
+    subject, _, status = code.partition(':')
+    subject_text = LEDGER_SUBJECT_LABELS.get(subject) or _sentence(_words(subject))
+    return f'{subject_text} → {" ".join(_words(status))}'
+
+
+def entity_kind_label(entity_type):
+    """The kind of a blank-code row: ENTITY_KIND_LABELS, else the entity type in words
+    ('PurchaseOrder' -> 'Purchase order'), else OTHER_KIND."""
+    if entity_type in ENTITY_KIND_LABELS:
+        return ENTITY_KIND_LABELS[entity_type]
+    if not entity_type:
+        return OTHER_KIND
+    # An entity type no blank-code row carried on 27 Nov: split its CamelCase so a new
+    # one reads sensibly without a code change here.
+    return _sentence(re.sub(r'(?<!^)(?=[A-Z])', ' ', entity_type).lower().split())
+
+
+def action_kind_label(code, entity_type=''):
+    """The readable kind of one action. `code` is an ActivityLog action_code, a ledger
+    "subject_type:to_status" code, or blank (then `entity_type` decides)."""
+    if not code:
+        return entity_kind_label(entity_type)
+    if ':' in code:
+        return ledger_kind_label(code)
+    if code.startswith(DROPPED_CODE_PREFIX) and len(code) > len(DROPPED_CODE_PREFIX):
+        code = code[len(DROPPED_CODE_PREFIX):]
+    return _sentence(_words(code))
+
+
+def bulk_kind_label(codes):
+    """'Bulk: Allocated + QC assigned' for a merged batch of design_allocated and
+    design_qc_assigned. Codes in sorted order, as BulkAction.action_code joins them."""
+    return BULK_KIND_PREFIX + ' + '.join(action_kind_label(c) for c in sorted(codes))
+
+
+# ---------------------------------------------------------------------------
 # Result types
 # ---------------------------------------------------------------------------
 
@@ -180,6 +301,9 @@ class UserActivity:
     bulk_only_site_count: int  # sites reached only through their bulk batches
     actions_without_site: int
     last_action_at: datetime
+    # ((kind label, count), ...), most first then by label; the counts add up to `actions`.
+    # Defaulted, and last, so the field order B1 shipped is unchanged.
+    kinds: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -289,11 +413,15 @@ def _fetch(lo, hi, lo_date, hi_date, today):
     widened by BATCH_LOOKAROUND), `lo_date`/`hi_date` the attendance days."""
     # 1. Human activity rows, both periods plus the look-around. order_by() drops the
     #    model's newest-first ordering: the rows are sorted in Python for batching.
+    #    entity_type rides along as a SIXTH column (RPT-B2a Q3): a blank-code row's kind is
+    #    read from it, so labelling those rows costs no extra query. It is last so every
+    #    r[0]..r[4] index _batches() and _merged() read is where it was.
     log_rows = list(ActivityLog.objects
                     .filter(human_activity_between(lo, hi))
                     .filter(_credited_or_no_site_q())
                     .order_by()
-                    .values_list('pk', 'actor_id', 'action_code', 'timestamp', 'project_id'))
+                    .values_list('pk', 'actor_id', 'action_code', 'timestamp', 'project_id',
+                                 'entity_type'))
 
     # 2. UNPAIRED ledger rows only (pre-flight ruling 3). A row is paired when the same
     #    actor wrote any ActivityLog row on the same site within PAIR_WINDOW. Two EXISTS in
@@ -393,7 +521,8 @@ def _fetch(lo, hi, lo_date, hi_date, today):
 # ---------------------------------------------------------------------------
 
 def _batches(rows):
-    """Split `rows` — (pk, actor_id, code, moment, site_id) — into bulk batches.
+    """Split `rows` — (pk, actor_id, code, moment, site_id, ...) — into bulk batches.
+    Only the first five columns are read; ActivityLog rows carry entity_type sixth.
 
     Returns [(actor_id, code, [row, ...]), ...]. Rows are grouped by (actor, code) and
     walked in time order; a gap above BULK_BATCH_GAP_SECONDS ends a run, and a run touching
@@ -469,16 +598,20 @@ def _period_activity(period, log_rows, ledger_rows, merged_batches,
     def inside(moment):
         return start <= moment < end
 
-    # Per actor: action count, sites, site-less actions, latest moment.
+    # Per actor: action count, sites, site-less actions, latest moment, and the count per
+    # kind. The kind is counted HERE, beside the action itself (Q2: one counting path), so
+    # a user's kinds can never disagree with their action count.
     actions = defaultdict(int)
     user_sites = defaultdict(set)
     no_site = defaultdict(int)
     latest = {}
+    kinds = defaultdict(Counter)
 
-    def act(actor, site_id, moment):
+    def act(actor, site_id, moment, kind):
         if actor is None:
             return
         actions[actor] += 1
+        kinds[actor][kind] += 1
         if site_id is None:
             no_site[actor] += 1
         else:
@@ -509,6 +642,7 @@ def _period_activity(period, log_rows, ledger_rows, merged_batches,
                                    started_at=first, ended_at=batch['last'],
                                    site_ids=run_sites))
             actions[actor] += 1
+            kinds[actor][bulk_kind_label(batch['codes'])] += 1
             bulk_sites_by_actor[actor].update(run_sites)
             if actor not in latest or first > latest[actor]:
                 latest[actor] = first
@@ -517,10 +651,11 @@ def _period_activity(period, log_rows, ledger_rows, merged_batches,
     site_actions = defaultdict(int)
     site_people = defaultdict(set)
     site_latest = {}
-    for pk, actor, _code, moment, site_id in log_rows:
+    for pk, actor, code, moment, site_id, entity_type in log_rows:
         if (SOURCE_LOG, pk) in bulk_pks or not inside(moment):
             continue
-        act(actor if actor in profiles else None, site_id, moment)
+        act(actor if actor in profiles else None, site_id, moment,
+            action_kind_label(code, entity_type))
         # A Cancelled site credits the user (act() above) but is never an active site.
         if site_id is not None and sites[site_id].stage != STAGE_CANCELLED:
             site_actions[site_id] += 1
@@ -531,15 +666,15 @@ def _period_activity(period, log_rows, ledger_rows, merged_batches,
 
     # Unpaired ledger rows: actions only. They never make a site active, because D6's
     # active site is the ActivityLog rule site_breakdown() applies.
-    for pk, actor, _code, moment, site_id in ledger_rows:
+    for pk, actor, code, moment, site_id in ledger_rows:
         if (SOURCE_LEDGER, pk) in bulk_pks or not inside(moment):
             continue
-        act(actor if actor in profiles else None, site_id, moment)
+        act(actor if actor in profiles else None, site_id, moment, ledger_kind_label(code))
 
     # Attendance: an action for whoever recorded it, on its date, timed by recorded_at.
     for actor, site_id, day, recorded_at in attendance_rows:
         if period.start_date <= day <= period.end_date and actor in profiles:
-            act(actor, site_id, recorded_at)
+            act(actor, site_id, recorded_at, ATTENDANCE_KIND)
 
     def by_label(ids):
         return tuple(sorted(ids, key=lambda pk: (sites[pk].label if pk in sites else '', pk)))
@@ -552,7 +687,8 @@ def _period_activity(period, log_rows, ledger_rows, merged_batches,
             profile_id=actor, name=_person_name(profile), role=profile.role or '—', actions=n,
             site_ids=by_label(mine),
             bulk_only_site_count=len(bulk_sites_by_actor[actor] - mine),
-            actions_without_site=no_site[actor], last_action_at=latest[actor]))
+            actions_without_site=no_site[actor], last_action_at=latest[actor],
+            kinds=tuple(sorted(kinds[actor].items(), key=lambda kv: (-kv[1], kv[0])))))
     rows.sort(key=lambda r: (-r.last_action_at.timestamp(), r.name.lower()))
     roles = defaultdict(lambda: [0, 0])
     for r in rows:
@@ -661,3 +797,27 @@ def open_tasks_no_activity(period):
 def active_sites(period):
     """Compared(current, previous) ActiveSites."""
     return _compared(period, 'active_sites')
+
+
+#: How a profile with no role is shown, the same placeholder the activity rows use, so a
+#: role-less account and a role-less active user land in the same "By role" row.
+NO_ROLE = '—'
+
+
+def accounts_by_role():
+    """{role: active accounts} for every role that has one, in ONE query (RPT-B2a).
+
+    Active is the D11 rule every report list uses: the profile AND the login are active
+    (permissions._active_profiles() and _fetch()'s query 6 filter the same way). As of
+    now: an account's past state is not stored. The "By role" table divides a period's
+    active users by this, so the two must count the same people.
+    """
+    # Grouped in the database: one row per role, however many accounts there are.
+    # order_by() drops UserProfile's default ordering, which would otherwise split groups.
+    counts = defaultdict(int)
+    for role, n in (UserProfile.objects.filter(is_active=True, user__is_active=True)
+                    .values('role').annotate(n=Count('id')).order_by()
+                    .values_list('role', 'n')):
+        # Blank and NULL both read as NO_ROLE; summed, not overwritten, in case both occur.
+        counts[role or NO_ROLE] += n
+    return dict(counts)

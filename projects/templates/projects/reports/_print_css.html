@@ -1,0 +1,129 @@
+{% comment %}
+RPT-B2a — the Reports stylesheet, included in <head> by every Reports page: the screen
+rules (every rule under .rpt, so nothing leaks into base.html's other pages) and, at the
+end, the print layout (D5). Bootstrap 5.3.3 comes from base.html; colours are the PMS
+brand (#1a7a4a green, #f0a829 gold, #243a6b navy), as the approved prototype uses them.
+
+Named for its print section, which is why it exists as a partial: the two Reports pages
+must print the same way, and management shares these reports as PDFs.
+{% endcomment %}
+<style>
+  .rpt { --rpt-brand:#1a7a4a; --rpt-brand-dark:#155f3a; --rpt-gold:#f0a829; --rpt-navy:#243a6b;
+    --rpt-ink:#1f2933; --rpt-muted:#5b6770; --rpt-line:#dfe5e2; --rpt-line-2:#eef1f0;
+    --rpt-red:#c23b2a; --rpt-red-bg:#fae3df; --rpt-amber:#a86400;
+    color: var(--rpt-ink); padding-bottom: 40px; }
+  /* min-width:0 everywhere inside: a flex or grid child otherwise refuses to shrink below
+     its content, and one long site label would widen a 360 px screen. */
+  .rpt * { min-width: 0; }
+  .rpt h1 { font-size: 1.65rem; font-weight: 700; line-height: 1.2; margin: 0; }
+  .rpt h2.grp { font-size: 1.1rem; font-weight: 600; margin: 0; }
+  .rpt .def { font-size: 12.5px; color: var(--rpt-muted); }
+  .rpt .box { background: #fff; border: 1px solid var(--rpt-line); border-radius: 12px; padding: 16px; }
+
+  /* Level 1: report cards */
+  .rpt .cards { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 768px) { .rpt .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (min-width: 1200px) { .rpt .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  .rpt .rcard { display: flex; flex-direction: column; gap: 12px; }
+  .rpt .rcard h3 { font-size: 1rem; font-weight: 600; margin: 0; }
+  .rpt .rcard .desc { font-size: 14px; color: #4a5560; margin: 2px 0 0; }
+  .rpt .ico { width: 40px; height: 40px; flex-shrink: 0; border-radius: 10px; background: #e8f4ed;
+    color: var(--rpt-brand); display: grid; place-items: center; font-size: 1.15rem; }
+  .rpt summary { cursor: pointer; }
+
+  /* Period chips: radio buttons drawn as pills, so the choice works with no script and
+     the form submits the chosen period as a plain GET. */
+  .rpt .pform { display: flex; flex-direction: column; gap: 10px; margin-top: auto; }
+  .rpt .pform fieldset { border: 0; padding: 0; margin: 0; }
+  .rpt .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .rpt .chip { position: relative; margin: 0; }
+  .rpt .chip input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .rpt .chip span { display: inline-flex; align-items: center; min-height: 36px; padding: 0 12px;
+    border-radius: 999px; border: 1px solid #d6dedb; background: #fff; font-size: 13px;
+    font-weight: 500; color: #334; white-space: nowrap; cursor: pointer; }
+  .rpt .chip input:checked + span { background: var(--rpt-brand); border-color: var(--rpt-brand); color: #fff; }
+  .rpt .chip input:focus-visible + span, .rpt input[type=date]:focus-visible,
+  .rpt .btn:focus-visible, .rpt summary:focus-visible { outline: 3px solid var(--rpt-gold); outline-offset: 2px; }
+  .rpt .dates { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
+  /* 16 px stops iOS zooming the page when a date input takes focus. */
+  .rpt .dates input { height: 36px; padding: 0 8px; border: 1px solid #c9d2ce; border-radius: 8px;
+    font-size: 16px; max-width: 100%; }
+  .rpt .btn-gen { min-height: 44px; font-weight: 600; }
+
+  /* Level 2: header, error line, tiles */
+  .rpt .err { background: var(--rpt-red-bg); color: #8f2417; border: 1px solid #f0c2ba;
+    border-radius: 10px; padding: 10px 14px; font-weight: 500; margin: 0 0 12px; }
+  .rpt .tiles { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  @media (min-width: 768px) { .rpt .tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  .rpt .tile { background: #fff; border: 1px solid var(--rpt-line); border-radius: 12px; padding: 14px 16px; }
+  .rpt .tile .l { font-size: 12px; font-weight: 500; color: var(--rpt-muted); }
+  .rpt .tile .v { font-size: 28px; font-weight: 700; line-height: 1.15; margin-top: 4px;
+    font-variant-numeric: tabular-nums; color: var(--rpt-navy); }
+  .rpt .tile.good .v { color: var(--rpt-brand); }
+  .rpt .tile.bad .v { color: var(--rpt-red); }
+  .rpt .tile .d { font-size: 12px; color: var(--rpt-muted); margin-top: 4px; }
+  .rpt .cmp { font-weight: 600; }
+  .rpt .cmp.good { color: var(--rpt-brand); }
+  .rpt .cmp.bad { color: var(--rpt-red); }
+  .rpt .cmp.flat { color: var(--rpt-muted); }
+
+  /* Tables */
+  .rpt .tcard { background: #fff; border: 1px solid var(--rpt-line); border-radius: 12px; margin-top: 16px; }
+  .rpt .thead { padding: 14px 16px 8px; display: flex; flex-wrap: wrap; gap: 4px 12px;
+    justify-content: space-between; align-items: baseline; }
+  .rpt .thead h2 { font-size: 15px; font-weight: 600; margin: 0; }
+  .rpt .scroll { overflow-x: auto; }
+  .rpt table.rt { border-collapse: collapse; width: 100%; }
+  .rpt .rt th { font-size: 12px; font-weight: 600; color: var(--rpt-muted); text-align: left;
+    padding: 8px 10px; border-bottom: 1px solid var(--rpt-line); background: #fafbfb; }
+  .rpt .rt td { font-size: 14px; padding: 9px 10px; border-bottom: 1px solid var(--rpt-line-2);
+    vertical-align: top; overflow-wrap: break-word; }
+  /* break-word, not anywhere: "anywhere" also lowers a column's minimum width, so a
+     narrow column split "Site Engineer" mid-word. break-word splits only a token that
+     genuinely cannot fit. */
+  .rpt .rt tr:last-child td { border-bottom: 0; }
+  .rpt .num, .rpt .rt th.num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .rpt .hot { color: var(--rpt-red); font-weight: 600; }
+  .rpt .pill { display: inline-block; font-size: 11.5px; font-weight: 600; padding: 1px 7px;
+    border-radius: 999px; background: var(--rpt-line-2); color: #445; margin: 1px 3px 1px 0;
+    white-space: nowrap; }
+  .rpt .empty { padding: 4px 16px 16px; color: var(--rpt-muted); font-size: 14px; margin: 0; }
+  .rpt .foot { font-size: 12px; color: var(--rpt-muted); margin-top: 16px; }
+  .rpt .print-only { display: none; }
+
+  /* Below 600 px each row stacks as label / value pairs (the prototype's pattern): the
+     heading row is hidden and every cell draws its column name from data-l. */
+  @media (max-width: 600px) {
+    .rpt .stack thead { display: none; }
+    .rpt .stack tr { display: grid; padding-block: 8px; border-bottom: 1px solid var(--rpt-line-2); }
+    .rpt .stack tr:last-child { border-bottom: 0; }
+    .rpt .stack td { display: flow-root; border: 0; padding: 3px 12px; padding-inline-start: 9em; text-align: start; }
+    .rpt .stack td::before { content: attr(data-l); float: inline-start; width: 8.5em;
+      margin-inline-start: -9em; color: var(--rpt-muted); font-size: 12px; }
+    .rpt .stack td.num { white-space: normal; }
+  }
+
+  /* D5: Print / Save as PDF. A4, light colours, no nav, no chips or buttons; the period
+     and the "Generated" line stay. A row is never split across two pages. An open
+     <details> prints its full site list, a closed one prints collapsed: the browser's
+     own behaviour, deliberately not overridden (edge case 5). */
+  @media print {
+    @page { size: A4; margin: 12mm; }
+    body { background: #fff !important; }
+    nav.horizon-nav, .no-print, .alert, #hxMessages { display: none !important; }
+    body > .container { max-width: none !important; width: auto !important; padding: 0 !important; margin: 0 !important; }
+    .rpt { padding-bottom: 0; font-size: 12px; }
+    .rpt .box, .rpt .tile, .rpt .tcard { border-color: #cfd6d3; break-inside: avoid; }
+    .rpt .tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .rpt .scroll { overflow: visible; }
+    .rpt .rt thead { display: table-header-group; }
+    .rpt .rt tr { break-inside: avoid; page-break-inside: avoid; }
+    .rpt .rt td { font-size: 11.5px; padding: 5px 8px; }
+    .rpt .rt th { font-size: 11px; padding: 5px 8px; }
+    .rpt .thead { break-after: avoid; }
+    .rpt .print-only { display: inline; }
+    .rpt .screen-only { display: none; }
+    /* Keep the brand colours light and present: browsers drop backgrounds by default. */
+    .rpt * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+</style>

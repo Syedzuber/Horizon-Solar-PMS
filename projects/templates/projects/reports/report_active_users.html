@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+{% block title %}{{ report.title }} — Reports — SolarPMS{% endblock %}
+
+{% block extra_head %}
+{% comment %}RPT-B2a level 2 (D3-D5), report 1. Every figure comes from
+   report_pages.build_active_users(), which reads report_activity; this template computes
+   nothing and triggers no query (every value it touches is a plain string, number or
+   date). Bootstrap from base.html; Alpine only for the period form's date inputs.{% endcomment %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+{% include "projects/reports/_print_css.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="rpt">
+  <a href="{% url 'reports_home' %}" class="btn btn-outline-secondary btn-sm mb-3 no-print"><i class="bi bi-arrow-left me-1" aria-hidden="true"></i>All reports</a>
+
+  <div class="box mb-3">
+    <div class="d-flex flex-wrap justify-content-between gap-2 align-items-start">
+      <h1>{{ report.title }}</h1>
+      {# D5: the browser's own print dialog, where "Save as PDF" is a destination. #}
+      <button type="button" class="btn btn-outline-secondary no-print" onclick="window.print()"><i class="bi bi-printer me-1" aria-hidden="true"></i>Print / Save as PDF</button>
+    </div>
+    <p class="small mt-1 mb-0"><b>{{ period.label }}</b> · Generated {{ generated_at|date:"j M Y, H:i" }} by {{ generated_by }}</p>
+    <p class="def mt-1 mb-0">{{ report.definition }}</p>
+    <div class="mt-3 no-print">
+      {% include "projects/reports/_period_chips.html" with action=request.path prefix="rp" %}
+    </div>
+  </div>
+
+  {# D3: a period that could not be read is named above the figures, which are today's. #}
+  {% if period_error %}
+    <p class="err" role="alert">{{ period_error }}. Showing today's figures instead.</p>
+  {% endif %}
+
+  <div class="tiles">
+    {% for t in tiles %}{% include "projects/reports/_tile.html" %}{% endfor %}
+  </div>
+
+  {# 1. By role: every role with an active account, idle roles first (Q4). #}
+  <section class="tcard" aria-labelledby="t-role">
+    <div class="thead"><h2 id="t-role">By role</h2><span class="def">Accounts = active accounts in the role now</span></div>
+    <div class="scroll">
+      <table class="rt stack">
+        <thead><tr><th>Role</th><th class="num">Active users</th><th class="num">Actions</th><th class="num">Accounts</th><th class="num">Active %</th></tr></thead>
+        <tbody>
+          {% for r in by_role %}
+            <tr>
+              <td data-l="Role">{{ r.role }}</td>
+              <td data-l="Active users" class="num">{{ r.users }}</td>
+              <td data-l="Actions" class="num">{{ r.actions }}</td>
+              <td data-l="Accounts" class="num">{{ r.accounts }}</td>
+              <td data-l="Active %" class="num">{% if r.pct is None %}–{% else %}{{ r.pct }}%{% endif %}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  {# 2. Who was active, most actions first. #}
+  <section class="tcard" aria-labelledby="t-who">
+    <div class="thead"><h2 id="t-who">Who was active</h2><span class="def">Site = any site where the user recorded an action</span></div>
+    {% if who %}
+      <div class="scroll">
+        <table class="rt stack">
+          <thead><tr><th>User</th><th>Role</th><th class="num">Actions</th><th class="num">Sites</th><th class="num">No-site actions</th><th>What</th><th>Site list</th></tr></thead>
+          <tbody>
+            {% for r in who %}
+              <tr>
+                <td data-l="User">{{ r.name }}</td>
+                <td data-l="Role">{{ r.role }}</td>
+                <td data-l="Actions" class="num">{{ r.actions }}</td>
+                <td data-l="Sites" class="num">{% if r.sites.count %}{{ r.sites.count }}{% else %}–{% endif %}</td>
+                <td data-l="No-site actions" class="num">{{ r.no_site }}</td>
+                <td data-l="What">{% for kind, n in r.kinds %}{{ kind }} {{ n }}{% if not forloop.last %} · {% endif %}{% endfor %}</td>
+                <td data-l="Site list">
+                  {% if r.sites.more %}
+                    <details>
+                      <summary>{% for label in r.sites.shown %}<span class="pill">{{ label }}</span>{% endfor %}<span class="def">+{{ r.sites.more }} more</span></summary>
+                      <div class="mt-1">{% for label in r.sites.all %}<span class="pill">{{ label }}</span>{% endfor %}</div>
+                    </details>
+                  {% elif r.sites.count %}
+                    {% for label in r.sites.shown %}<span class="pill">{{ label }}</span>{% endfor %}
+                  {% else %}–{% endif %}
+                  {% if r.bulk_only_sites %}<div class="def">+{{ r.bulk_only_sites }} through bulk actions only</div>{% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="empty">No activity in this period</p>
+    {% endif %}
+  </section>
+
+  {# 3. Open tasks, no activity. Counts are as of now; B1 sorts overdue, then open, descending. #}
+  <section class="tcard" aria-labelledby="t-idle">
+    <div class="thead"><h2 id="t-idle">Open tasks, no activity (as of now)</h2><span class="def">The list people act on</span></div>
+    {% if idle %}
+      <div class="scroll">
+        <table class="rt stack">
+          <thead><tr><th>User</th><th>Role</th><th class="num">Open</th><th class="num">Overdue</th><th>Last action (any time)</th></tr></thead>
+          <tbody>
+            {% for r in idle %}
+              <tr>
+                <td data-l="User">{{ r.name }}</td>
+                <td data-l="Role">{{ r.role }}</td>
+                <td data-l="Open" class="num">{{ r.open }}</td>
+                <td data-l="Overdue" class="num{% if r.overdue %} hot{% endif %}">{{ r.overdue }}</td>
+                <td data-l="Last action">{% if r.last %}{{ r.last|date:"j M Y, H:i" }}{% else %}never{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="empty">Everyone holding open tasks acted in this period.</p>
+    {% endif %}
+  </section>
+
+  {# 4. Signed in, no action. #}
+  <section class="tcard" aria-labelledby="t-signed">
+    <div class="thead"><h2 id="t-signed">Signed in, no action</h2><span class="def">A sign-in is recorded only when someone logs in afresh</span></div>
+    {% if signed_in %}
+      <div class="scroll">
+        <table class="rt stack">
+          <thead><tr><th>User</th><th>Role</th><th class="num">Sign-ins</th><th>Last sign-in</th></tr></thead>
+          <tbody>
+            {% for r in signed_in %}
+              <tr>
+                <td data-l="User">{{ r.name }}</td>
+                <td data-l="Role">{{ r.role }}</td>
+                <td data-l="Sign-ins" class="num">{{ r.sign_ins }}</td>
+                <td data-l="Last sign-in">{{ r.last|date:"j M Y, H:i" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="empty">No one signed in without acting.</p>
+    {% endif %}
+  </section>
+
+  {# 5. Bulk actions, only when there are any. #}
+  {% if bulk %}
+    <section class="tcard" aria-labelledby="t-bulk">
+      <div class="thead"><h2 id="t-bulk">Bulk actions</h2><span class="def">A bulk action is one submission across many sites. It counts as one action.</span></div>
+      <div class="scroll">
+        <table class="rt stack">
+          <thead><tr><th>User</th><th>Action</th><th>Time</th><th>Sites</th></tr></thead>
+          <tbody>
+            {% for b in bulk %}
+              <tr>
+                <td data-l="User">{{ b.name }}</td>
+                <td data-l="Action">{{ b.action }}</td>
+                <td data-l="Time">{{ b.started|date:"j M, H:i" }}</td>
+                <td data-l="Sites">
+                  <details>
+                    <summary>{{ b.sites.count }} site{{ b.sites.count|pluralize }}</summary>
+                    <div class="mt-1">{% for label in b.sites.all %}<span class="pill">{{ label }}</span>{% endfor %}</div>
+                  </details>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% endif %}
+
+  <p class="foot">Source: PMS activity log and status history. Page opens and logins aren't actions. Attendance recorded counts for the user, not the site.</p>
+</div>
+{% endblock %}
