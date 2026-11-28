@@ -97,6 +97,77 @@ NON_ACTIVITY_CODES = frozenset({
 # 'pm_assigned', it is a person's decision about the site and counts as its latest activity.
 
 
+# FORMERLY_BLANK_CODES (RPT-C1, 28 Nov 2026) — the codes given to the call sites that
+# migration 0043 left blank, so the Reports "What" column names the act instead of the
+# entity type ("Task update", "Project update"). Every one is HUMAN ACTIVITY, exactly as
+# the blank row it replaces was (decision C2): none ends in `_opened`, none is in
+# NON_ACTIVITY_CODES, and tests_activity_codes_c1 fails if that ever changes. Three are
+# REUSED, not new: 'boq_catalogue_unit_fixed' (normalise_catalogue_units, as
+# fix_tin_shade_ballast), and the historic 'due_date_changed' / 'milestone_updated',
+# which relabel_blank_activity_codes gives old rows whose writers now write them.
+# report_activity.CODE_KIND_LABELS holds one readable label for each.
+FORMERLY_BLANK_CODES = frozenset({
+    'project_activated',                # views.project_activate / opex_site_activate
+    'project_fields_edited',            # views.project_field_edit
+    'project_coordinators_updated',     # views.assign_coordinators
+    'cascade_scheduling_enabled',       # views.enable_cascade_scheduling
+    'project_created_from_zoho',        # views.zoho_deal_closed_webhook (no actor)
+    'boq_acknowledged',                 # views._apply_boq_acknowledgement
+    'boq_submitted',                    # views.boq_submit (not the RESCO design_boq_submitted)
+    'boq_revision_requested',           # views.boq_request_revision
+    'project_file_uploaded',            # views.upload_project_document
+    'task_file_uploaded',               # views.upload_task_attachment
+    'file_deleted',                     # both delete views: their text is identical
+    'checklist_item_answered',          # views.checklist_item_complete
+    'task_commented',                   # views.create_task_comment
+    'task_comment_replied',
+    'issue_commented',                  # views.create_issue_comment, grn_damage.record_damage
+    'issue_comment_replied',
+    'task_comment_deleted',             # views.delete_comment
+    'issue_comment_deleted',
+    'issue_in_progress',                # views.update_issue_status
+    'issue_assigned',                   # views.assign_issue
+    'issue_unassigned',
+    'dc_created',                       # views.create_delivery_challan
+    'grn_confirmed',                    # views.confirm_grn
+    'grn_overridden',                   # views.override_grn
+    'system_setting_changed',           # views.admin_master_switches (all four settings)
+    'user_deactivated',                 # the admin / department / System Admin user screens
+    'user_reactivated',
+    'user_role_changed',
+    'user_profile_updated',
+    'user_password_reset',
+    'user_created',                     # views._subadmin_create_user
+    'notification_pref_changed',        # views.admin_notification_prefs
+    'notify_event_switched',            # notify_views.admin_notification_set_state
+    'notify_template_activated',        # notify_views.admin_notification_draft_activate
+    'notify_template_draft_discarded',  # notify_views.admin_notification_draft_discard
+    'notify_template_restored',         # notify_views.admin_notification_version_restore
+    'checklist_created',                # views.admin_checklist_* (the checklist library)
+    'checklist_published',
+    'checklist_archived',
+    'checklist_renamed',
+    'checklist_deleted',
+    'checklist_item_added',
+    'checklist_item_edited',
+    'checklist_item_deleted',
+    'checklist_item_moved',
+    'checklist_linked',
+    'checklist_unlinked',
+    'stock_location_created',           # views.stock_location_create / edit / toggle
+    'stock_location_updated',
+    'stock_location_activated',
+    'stock_location_deactivated',
+    'boq_catalogue_item_created',       # views admin BOQ catalogue, via log_catalogue_change
+    'boq_catalogue_item_updated',
+    'boq_catalogue_item_activated',
+    'boq_catalogue_item_deactivated',
+    'boq_catalogue_unit_fixed',         # REUSED: normalise_catalogue_units
+    'due_date_changed',                 # REUSED: old "Updated due date for task:" rows
+    'milestone_updated',                # REUSED: old "Milestone Mx auto-marked Received" rows
+})
+
+
 # BULK ACTIONS (RPT-B1, decision D8 and Zuber's ruling 2, 28 Nov 2026) — the Reports
 # section counts one person doing one action across many sites at once as ONE action, and
 # a site touched only by such a batch is not an active site. A batch is a run of

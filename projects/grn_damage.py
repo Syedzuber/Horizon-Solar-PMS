@@ -480,7 +480,7 @@ def record_damage(plan, challan, project, profile, stored, *, receipt=None):
         Comment.objects.create(project=project, task=None, issue=issue, parent=None,
                                author=profile, body='\n'.join(comment_lines))
         log_activity(project, profile, f'Commented on issue: {issue.title}',
-                     entity_type='Comment', entity_id=issue.pk)
+                     entity_type='Comment', entity_id=issue.pk, action_code='issue_commented')
 
     return DamageOutcome(issue=issue, created=created) if issue is not None else None
 

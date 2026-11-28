@@ -117,4 +117,4 @@ class Command(BaseCommand):
                 None, item,
                 f"normalise_catalogue_units (system) updated {kind}BOQ catalogue item "
                 f"'{item.code}'",
-                before)
+                before, action_code='boq_catalogue_unit_fixed')

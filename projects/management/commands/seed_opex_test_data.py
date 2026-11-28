@@ -422,7 +422,7 @@ class Command(BaseCommand):
             manifest.add_new_since(Task, task_mark)
 
             log_activity(site, pm, f'Activated project: {site.project_id}',
-                         entity_type='Project', entity_id=site.pk)
+                         entity_type='Project', entity_id=site.pk, action_code='project_activated')
 
     # ----------------------------------------------------------- residential
     def _create_residential(self, manifest, users):
@@ -497,7 +497,7 @@ class Command(BaseCommand):
         manifest.add_new_since(ProjectPhase, phase_mark)
         manifest.add_new_since(Task, task_mark)
         log_activity(project, pm, f'Activated project: {project.project_id}',
-                     entity_type='Project', entity_id=project.pk)
+                     entity_type='Project', entity_id=project.pk, action_code='project_activated')
         return project
 
     # ---------------------------------------------------------- design state
@@ -690,7 +690,7 @@ class Command(BaseCommand):
             project, scm,
             f'SCM created Delivery Challan {challan.dc_number} for '
             f'{vendor.name if vendor else "Unknown Vendor"}',
-            entity_type='DeliveryChallan', entity_id=challan.pk,
+            entity_type='DeliveryChallan', entity_id=challan.pk, action_code='dc_created',
         )
         return challan
 

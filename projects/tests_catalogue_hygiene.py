@@ -292,7 +292,8 @@ class EditLogTests(CatalogueBase):
             "unit: → Pair; category: → 'BOS'; type: → RESCO; active: → yes; "
             "mandatory: → no; sort order: → 1"])
 
-    def test_the_admin_screen_logs_before_and_after_with_no_action_code(self):
+    def test_the_admin_screen_logs_before_and_after_with_its_action_code(self):
+        # RPT-C1: the admin screen's catalogue lines carry a code now (they wrote '' before).
         item = self._item('ITM-901', 'Mtr', project_type='Residential')
         self._login(self.admin)
         self.client.post(reverse('admin_boq_item_edit', args=[item.pk]),
@@ -301,7 +302,7 @@ class EditLogTests(CatalogueBase):
         log = ActivityLog.objects.get(entity_type='BOQItemMaster', entity_id=item.pk)
         self.assertEqual(log.action, "Updated BOQ catalogue item 'ITM-901': "
                                      "unit: Mtr → Meter; sort order: 1 → 4")
-        self.assertEqual(log.action_code, '')
+        self.assertEqual(log.action_code, 'boq_catalogue_item_updated')
 
     def test_long_descriptions_are_shortened_and_split_into_their_own_entry(self):
         old, new = 'A' * 200, 'B' * 200

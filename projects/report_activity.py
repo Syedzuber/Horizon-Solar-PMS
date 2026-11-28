@@ -162,6 +162,8 @@ def _person_name(profile):
 # would scatter one kind of work over dozens of rows. The label is built from the code
 # instead, by the rule Zuber confirmed: drop a leading "design_", underscores to spaces,
 # sentence case, short forms in capitals. design_head_qc_passed -> "Head QC passed".
+# Since RPT-C1 one map does exist, CODE_KIND_LABELS, for the codes given to the formerly
+# blank call sites only; it is read first and the rule covers every other code.
 
 #: Words kept in capitals when a code is turned into words.
 SHORT_FORMS = frozenset({'qc', 'qa', 'boq', 'pm', 'se', 'accb', 'acdb', 'dcdb', 'grn', 'dc',
@@ -196,6 +198,72 @@ ENTITY_KIND_LABELS = {
 }
 #: A blank-code row with no entity type either.
 OTHER_KIND = 'Other'
+
+#: Labels for the codes RPT-C1 gave the formerly blank call sites
+#: (activity_codes.FORMERLY_BLANK_CODES), read BEFORE the naming rule (Zuber's C4 ruling,
+#: 28 Nov 2026). Spelt out because the rule would say "Project activated" where the
+#: Reports section says "site" everywhere, and "Task commented" for a comment. The keys
+#: equal FORMERLY_BLANK_CODES exactly; tests_activity_codes_c1 fails if the two drift.
+CODE_KIND_LABELS = {
+    'project_activated': 'Site activated',
+    'project_fields_edited': 'Site fields edited',
+    'project_coordinators_updated': 'Coordinators updated',
+    'cascade_scheduling_enabled': 'Cascade scheduling enabled',
+    'project_created_from_zoho': 'Site created from Zoho',
+    'boq_acknowledged': 'BOQ acknowledged',
+    'boq_submitted': 'BOQ submitted',
+    'boq_revision_requested': 'BOQ revision requested',
+    'project_file_uploaded': 'Site file uploaded',
+    'task_file_uploaded': 'Task file uploaded',
+    'file_deleted': 'File deleted',
+    'checklist_item_answered': 'Checklist answered',
+    'task_commented': 'Comment on task',
+    'task_comment_replied': 'Reply on task',
+    'issue_commented': 'Comment on issue',
+    'issue_comment_replied': 'Reply on issue',
+    'task_comment_deleted': 'Task comment deleted',
+    'issue_comment_deleted': 'Issue comment deleted',
+    'issue_in_progress': 'Issue in progress',
+    'issue_assigned': 'Issue assigned',
+    'issue_unassigned': 'Issue unassigned',
+    'dc_created': 'DC created',
+    'grn_confirmed': 'GRN confirmed',
+    'grn_overridden': 'GRN overridden',
+    'system_setting_changed': 'System setting changed',
+    'user_deactivated': 'User deactivated',
+    'user_reactivated': 'User reactivated',
+    'user_role_changed': 'User role changed',
+    'user_profile_updated': 'User profile updated',
+    'user_password_reset': 'User password reset',
+    'user_created': 'User created',
+    'notification_pref_changed': 'Notification preference changed',
+    'notify_event_switched': 'Notification switched',
+    'notify_template_activated': 'Notification template activated',
+    'notify_template_draft_discarded': 'Notification draft discarded',
+    'notify_template_restored': 'Notification version restored',
+    'checklist_created': 'Checklist created',
+    'checklist_published': 'Checklist published',
+    'checklist_archived': 'Checklist archived',
+    'checklist_renamed': 'Checklist renamed',
+    'checklist_deleted': 'Checklist deleted',
+    'checklist_item_added': 'Checklist item added',
+    'checklist_item_edited': 'Checklist item edited',
+    'checklist_item_deleted': 'Checklist item deleted',
+    'checklist_item_moved': 'Checklist item moved',
+    'checklist_linked': 'Checklist linked',
+    'checklist_unlinked': 'Checklist unlinked',
+    'stock_location_created': 'Warehouse created',
+    'stock_location_updated': 'Warehouse updated',
+    'stock_location_activated': 'Warehouse activated',
+    'stock_location_deactivated': 'Warehouse deactivated',
+    'boq_catalogue_item_created': 'BOQ catalogue item created',
+    'boq_catalogue_item_updated': 'BOQ catalogue item updated',
+    'boq_catalogue_item_activated': 'BOQ catalogue item activated',
+    'boq_catalogue_item_deactivated': 'BOQ catalogue item deactivated',
+    'boq_catalogue_unit_fixed': 'Catalogue unit fixed',
+    'due_date_changed': 'Due date changed',
+    'milestone_updated': 'Milestone updated',
+}
 
 #: Ledger subjects (StatusTransition.subject_type) as they read on a report.
 LEDGER_SUBJECT_LABELS = {
@@ -248,6 +316,8 @@ def action_kind_label(code, entity_type=''):
     "subject_type:to_status" code, or blank (then `entity_type` decides)."""
     if not code:
         return entity_kind_label(entity_type)
+    if code in CODE_KIND_LABELS:
+        return CODE_KIND_LABELS[code]
     if ':' in code:
         return ledger_kind_label(code)
     if code.startswith(DROPPED_CODE_PREFIX) and len(code) > len(DROPPED_CODE_PREFIX):

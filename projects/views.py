@@ -4204,6 +4204,7 @@ def project_field_edit(request, project_id):
                         project, profile,
                         f"Edited project fields: {', '.join(changed)}",
                         entity_type='Project', entity_id=project.pk,
+                        action_code='project_fields_edited',
                     )
                 # SCHED-2 trigger: DC capacity decides the band, so a change reschedules
                 # the site (or clears its system dates when emptied). Registered inside
@@ -4368,7 +4369,7 @@ def project_activate(request, project_id):
             )
 
     # Log project activation after the transaction commits
-    log_activity(project, request.user.profile, f"Activated project: {project.project_id}", entity_type='Project', entity_id=project.pk)
+    log_activity(project, request.user.profile, f"Activated project: {project.project_id}", entity_type='Project', entity_id=project.pk, action_code='project_activated')
     # FIN-M-L (R15): the milestones' own creation line, after the commit like the line above.
     _log_milestones_created(project, request.user.profile)
 
@@ -4493,7 +4494,7 @@ def opex_site_activate(request, project_id):
     log_activity(
         project, request.user.profile,
         f"Activated project: {project.project_id}",
-        entity_type='Project', entity_id=project.pk,
+        entity_type='Project', entity_id=project.pk, action_code='project_activated',
     )
 
     # Counted rather than restated: the message must not claim a template size the
@@ -4619,7 +4620,7 @@ def enable_cascade_scheduling(request, project_id):
         actor=request.user.profile,
         action=f"Cascading scheduling enabled for project '{project.project_id}'",
         entity_type='Project',
-        entity_id=project.id,
+        entity_id=project.id, action_code='cascade_scheduling_enabled',
     )
 
     messages.success(request, 'Cascading scheduling is now active for this project.')
@@ -9197,6 +9198,7 @@ def assign_coordinators(request, project_id):
                 project, actor,
                 f"Updated project coordinators (added {len(to_add)}, removed {len(to_remove)})",
                 entity_type='Project', entity_id=project.pk,
+                action_code='project_coordinators_updated',
             )
             # In-app notify newly-added coordinators (no WhatsApp template dependency).
             for _prof in UserProfile.objects.filter(pk__in=to_add).select_related('user'):
@@ -9521,7 +9523,7 @@ def _apply_boq_acknowledgement(boq, profile, request):
     log_activity(
         boq.project, profile,
         f"BOQ Acknowledged for project: {boq.project.project_id}",
-        entity_type='BOQ', entity_id=boq.pk,
+        entity_type='BOQ', entity_id=boq.pk, action_code='boq_acknowledged',
     )
 
     # _notify_boq_acknowledged dereferences boq.submitted_by.user — a BOQ acknowledged
@@ -14035,7 +14037,7 @@ def boq_submit(request, project_id):
         )
 
     # Log BOQ submission event
-    log_activity(project, profile, f"Submitted BOQ for project: {project.project_id}", entity_type='BOQ', entity_id=boq.pk)
+    log_activity(project, profile, f"Submitted BOQ for project: {project.project_id}", entity_type='BOQ', entity_id=boq.pk, action_code='boq_submitted')
     messages.success(request, 'BOQ submitted to SCM for review.')
     return redirect('boq_detail', project_id=project_id)
 
@@ -14123,7 +14125,7 @@ def boq_request_revision(request, project_id):
                     remark=reason,
                 )
             # Log BOQ revision request event
-            log_activity(project, profile, f"BOQ Revision Requested for project: {project.project_id}", entity_type='BOQ', entity_id=boq.pk)
+            log_activity(project, profile, f"BOQ Revision Requested for project: {project.project_id}", entity_type='BOQ', entity_id=boq.pk, action_code='boq_revision_requested')
             messages.success(request, 'Revision requested. Design team will be notified.')
             return redirect('boq_detail', project_id=project_id)
         except Exception as exc:
@@ -16199,7 +16201,7 @@ def zoho_deal_closed_webhook(request):
             actor=None,
             action=f"Project '{project.project_id}' created via Zoho CRM webhook",
             entity_type='Project',
-            entity_id=project.pk,
+            entity_id=project.pk, action_code='project_created_from_zoho',
         )
     except Exception:
         pass
@@ -16483,12 +16485,12 @@ def upload_project_document(request, project_id):
                  f"Failed: {', '.join(failures)}")
         is_ok = True
         log_activity(project, profile, f"Uploaded {len(successes)} file(s) to project",
-                     entity_type='File', entity_id=None)
+                     entity_type='File', entity_id=None, action_code='project_file_uploaded')
     elif successes:
         msg   = f"{len(successes)} file(s) uploaded successfully."
         is_ok = True
         log_activity(project, profile, f"Uploaded {len(successes)} file(s) to project",
-                     entity_type='File', entity_id=None)
+                     entity_type='File', entity_id=None, action_code='project_file_uploaded')
     else:
         msg   = f"No files uploaded. Failed: {', '.join(failures)}"
         is_ok = False
@@ -16546,7 +16548,7 @@ def delete_project_document(request, project_id, doc_pk):
     doc.save(update_fields=['is_deleted', 'deleted_at', 'deleted_by'])
 
     # Log the project document deletion
-    log_activity(project, profile, f"Deleted file: {doc.file_name}", entity_type='File', entity_id=doc.pk)
+    log_activity(project, profile, f"Deleted file: {doc.file_name}", entity_type='File', entity_id=doc.pk, action_code='file_deleted')
     messages.success(request, f'"{doc.file_name}" deleted.')
     # SEC-2: safe_next_url() is the one open-redirect check (utils.py); the old
     # urlparse().netloc test let http:evil.com (and /\evil.com) through. None = fallback.
@@ -16642,11 +16644,11 @@ def upload_task_attachment(request, project_id, task_id):
             f"Failed: {', '.join(failures)}"
         )
         # Log partial upload — at least some files were stored
-        log_activity(project, profile, f"Uploaded {len(successes)} file(s) to task: {task.task_name}", entity_type='File', entity_id=task.pk)
+        log_activity(project, profile, f"Uploaded {len(successes)} file(s) to task: {task.task_name}", entity_type='File', entity_id=task.pk, action_code='task_file_uploaded')
     elif successes:
         messages.success(request, f"{len(successes)} file(s) uploaded successfully.")
         # Log successful task attachment upload
-        log_activity(project, profile, f"Uploaded {len(successes)} file(s) to task: {task.task_name}", entity_type='File', entity_id=task.pk)
+        log_activity(project, profile, f"Uploaded {len(successes)} file(s) to task: {task.task_name}", entity_type='File', entity_id=task.pk, action_code='task_file_uploaded')
     else:
         messages.error(request, f"No files uploaded. Failed: {', '.join(failures)}")
 
@@ -16694,7 +16696,7 @@ def delete_task_attachment(request, project_id, task_id, attach_pk):
     attach.save(update_fields=['is_deleted', 'deleted_at', 'deleted_by'])
 
     # Log the task attachment deletion
-    log_activity(project, profile, f"Deleted file: {attach.file_name}", entity_type='File', entity_id=attach.pk)
+    log_activity(project, profile, f"Deleted file: {attach.file_name}", entity_type='File', entity_id=attach.pk, action_code='file_deleted')
     messages.success(request, f'"{attach.file_name}" deleted.')
 
     if _is_hx(request):
@@ -16900,7 +16902,8 @@ def checklist_item_complete(request, project_id, task_id, item_id):
     log_activity(project, profile,
                  f"Answered '{completion.get_answer_display()}' on checklist item "
                  f"'{answered_text}' on task: {task.task_name}",
-                 entity_type='ChecklistItemCompletion', entity_id=completion.pk)
+                 entity_type='ChecklistItemCompletion', entity_id=completion.pk,
+                 action_code='checklist_item_answered')
     messages.success(request, 'Checklist item recorded.')
 
     if _is_hx(request):
@@ -17477,7 +17480,7 @@ def update_issue_status(request, issue_id):
     if updated == 0:
         messages.warning(request, 'Issue status was already updated.')
     else:
-        log_activity(project, profile, f"Moved issue to In Progress: {issue.title}", entity_type='Issue', entity_id=issue.pk)
+        log_activity(project, profile, f"Moved issue to In Progress: {issue.title}", entity_type='Issue', entity_id=issue.pk, action_code='issue_in_progress')
         messages.success(request, 'Issue moved to In Progress.')
     return redirect('issue_detail', issue_id=issue_id)
 
@@ -17696,12 +17699,12 @@ def assign_issue(request, issue_id):
         log_activity(
             project, profile,
             f"Assigned issue to {new_assignee.user.get_full_name() or new_assignee.user.username}",
-            entity_type='Issue', entity_id=issue.pk,
+            entity_type='Issue', entity_id=issue.pk, action_code='issue_assigned',
         )
         messages.success(request, 'Issue assigned.')
     else:
         Issue.objects.filter(pk=issue.pk).update(assigned_to=None)
-        log_activity(project, profile, f"Unassigned issue: {issue.title}", entity_type='Issue', entity_id=issue.pk)
+        log_activity(project, profile, f"Unassigned issue: {issue.title}", entity_type='Issue', entity_id=issue.pk, action_code='issue_unassigned')
         messages.success(request, 'Issue unassigned.')
     return redirect('issue_detail', issue_id=issue_id)
 
@@ -17765,9 +17768,9 @@ def create_task_comment(request, project_id, task_id):
     # log_activity() is wrapped in try/except internally —
     # a failed log must never block the primary action
     if parent_comment:
-        log_activity(project, profile, f"Replied to comment on task: {task.task_name}", entity_type='Comment', entity_id=task.pk)
+        log_activity(project, profile, f"Replied to comment on task: {task.task_name}", entity_type='Comment', entity_id=task.pk, action_code='task_comment_replied')
     else:
-        log_activity(project, profile, f"Commented on task: {task.task_name}", entity_type='Comment', entity_id=task.pk)
+        log_activity(project, profile, f"Commented on task: {task.task_name}", entity_type='Comment', entity_id=task.pk, action_code='task_commented')
 
     if _is_hx(request):
         return _render_comments_hx(request, project, task)
@@ -17822,9 +17825,9 @@ def create_issue_comment(request, issue_id):
     # log_activity() is wrapped in try/except internally —
     # a failed log must never block the primary action
     if parent_comment:
-        log_activity(project, profile, f"Replied to comment on issue: {issue.title}", entity_type='Comment', entity_id=issue.pk)
+        log_activity(project, profile, f"Replied to comment on issue: {issue.title}", entity_type='Comment', entity_id=issue.pk, action_code='issue_comment_replied')
     else:
-        log_activity(project, profile, f"Commented on issue: {issue.title}", entity_type='Comment', entity_id=issue.pk)
+        log_activity(project, profile, f"Commented on issue: {issue.title}", entity_type='Comment', entity_id=issue.pk, action_code='issue_commented')
 
     return redirect('issue_detail', issue_id=issue_id)
 
@@ -17851,14 +17854,14 @@ def delete_comment(request, comment_id):
         log_activity(
             comment.project, profile,
             f"Deleted comment on task: {comment.task.task_name}",
-            entity_type='Comment', entity_id=comment.task.pk,
+            entity_type='Comment', entity_id=comment.task.pk, action_code='task_comment_deleted',
         )
         return redirect('task_detail', project_id=comment.project.project_id, task_id=comment.task.pk)
     else:
         log_activity(
             comment.project, profile,
             f"Deleted comment on issue: {comment.issue.title}",
-            entity_type='Comment', entity_id=comment.issue.pk,
+            entity_type='Comment', entity_id=comment.issue.pk, action_code='issue_comment_deleted',
         )
         return redirect('issue_detail', issue_id=comment.issue.pk)
 
@@ -18312,7 +18315,7 @@ def create_delivery_challan(request, project_id):
     log_activity(
         project, profile,
         f"SCM created Delivery Challan {dc_number} for {vendor_name}",
-        entity_type='DeliveryChallan', entity_id=challan.pk,
+        entity_type='DeliveryChallan', entity_id=challan.pk, action_code='dc_created',
     )
     messages.success(request, f'Delivery Challan {dc_number} created successfully.')
     return redirect('delivery_challan_detail', project_id=project_id, dc_id=challan.pk)
@@ -19037,7 +19040,7 @@ def confirm_grn(request, project_id, dc_id):
             log_activity(
                 project, profile,
                 f"SE confirmed GRN for DC {challan.dc_number} — {challan.status}",
-                entity_type='DeliveryChallan', entity_id=challan.pk,
+                entity_type='DeliveryChallan', entity_id=challan.pk, action_code='grn_confirmed',
             )
             if damage is not None and damage.created:
                 notify_delivery_issue_raised(damage.issue, profile)
@@ -19266,7 +19269,7 @@ def override_grn(request, project_id, dc_id):
             log_activity(
                 project, profile,
                 f"SCM overrode GRN for DC {challan.dc_number} — override by {profile.user.get_full_name() or profile.user.username}",
-                entity_type='DeliveryChallan', entity_id=challan.pk,
+                entity_type='DeliveryChallan', entity_id=challan.pk, action_code='grn_overridden',
             )
             if damage is not None and damage.created:
                 notify_delivery_issue_raised(damage.issue, profile)
@@ -19520,7 +19523,7 @@ def admin_master_switches(request):
         rule = 'working days (Sundays skipped)' if target else 'calendar days'
         log_activity(project=None, actor=actor,
                      action=f"Auto-schedule working-day switch set to {rule}",
-                     entity_type='System', entity_id=None)
+                     entity_type='System', entity_id=None, action_code='system_setting_changed')
         changed = touched = failed = 0
         for site in sites:
             try:
@@ -19561,7 +19564,7 @@ def admin_master_switches(request):
                     actor=actor,
                     action=f"Master switch '{label}' set to {'ON' if new_value else 'OFF'}",
                     entity_type='System',
-                    entity_id=None,
+                    entity_id=None, action_code='system_setting_changed',
                 )
         # Cascade scheduling feature gate — handled separately for specific log message
         old_cascade = settings.cascade_scheduling_enabled
@@ -19573,7 +19576,7 @@ def admin_master_switches(request):
                 actor=actor,
                 action=f"Cascading scheduling feature gate set to {'ON' if new_cascade else 'OFF'}",
                 entity_type='System',
-                entity_id=None,
+                entity_id=None, action_code='system_setting_changed',
             )
         # Gantt integer settings — parse defensively; keep current value on bad/negative input.
         GANTT_INT_FIELDS = {
@@ -19596,7 +19599,7 @@ def admin_master_switches(request):
                     actor=actor,
                     action=f"{label} set to {new_int}",
                     entity_type='System',
-                    entity_id=None,
+                    entity_id=None, action_code='system_setting_changed',
                 )
         settings.save()
         messages.success(request, 'Settings saved.')
@@ -19637,7 +19640,7 @@ def admin_user_management(request):
                 actor=actor,
                 action=f"User '{target_user.get_full_name() or target_user.username}' ({target_user.profile.role}) deactivated",
                 entity_type='User',
-                entity_id=target_user.id,
+                entity_id=target_user.id, action_code='user_deactivated',
             )
             messages.success(request, f'{target_user.get_full_name() or target_user.username} deactivated.')
 
@@ -19649,7 +19652,7 @@ def admin_user_management(request):
                 actor=actor,
                 action=f"User '{target_user.get_full_name() or target_user.username}' ({target_user.profile.role}) reactivated",
                 entity_type='User',
-                entity_id=target_user.id,
+                entity_id=target_user.id, action_code='user_reactivated',
             )
             messages.success(request, f'{target_user.get_full_name() or target_user.username} reactivated.')
 
@@ -19668,7 +19671,7 @@ def admin_user_management(request):
                     actor=actor,
                     action=f"User '{target_user.get_full_name() or target_user.username}' role changed from '{old_role}' to '{new_role}'",
                     entity_type='User',
-                    entity_id=target_user.id,
+                    entity_id=target_user.id, action_code='user_role_changed',
                 )
                 messages.success(request, f'Role updated for {target_user.get_full_name() or target_user.username}.')
             else:
@@ -19720,7 +19723,7 @@ def admin_notification_prefs(request):
                         f"{label} set to {'ON' if new_val else 'OFF'}"
                     ),
                     entity_type='Notification',
-                    entity_id=target_profile.id,
+                    entity_id=target_profile.id, action_code='notification_pref_changed',
                 )
         target_profile.save()
         messages.success(request, f'Preferences updated for {target_profile.user.get_full_name() or target_profile.user.username}.')
@@ -19771,7 +19774,7 @@ def admin_departments(request):
                 actor=actor,
                 action=f"User '{target_user.get_full_name() or target_user.username}' ({target_user.profile.role}) deactivated",
                 entity_type='User',
-                entity_id=target_user.id,
+                entity_id=target_user.id, action_code='user_deactivated',
             )
             messages.success(request, f'{target_user.get_full_name() or target_user.username} deactivated.')
 
@@ -19783,7 +19786,7 @@ def admin_departments(request):
                 actor=actor,
                 action=f"User '{target_user.get_full_name() or target_user.username}' ({target_user.profile.role}) reactivated",
                 entity_type='User',
-                entity_id=target_user.id,
+                entity_id=target_user.id, action_code='user_reactivated',
             )
             messages.success(request, f'{target_user.get_full_name() or target_user.username} reactivated.')
 
@@ -19802,7 +19805,7 @@ def admin_departments(request):
                     actor=actor,
                     action=f"User '{target_user.get_full_name() or target_user.username}' role changed from '{old_role}' to '{new_role}'",
                     entity_type='User',
-                    entity_id=target_user.id,
+                    entity_id=target_user.id, action_code='user_role_changed',
                 )
                 messages.success(request, f'Role updated for {target_user.get_full_name() or target_user.username}.')
 
@@ -19883,7 +19886,7 @@ def admin_user_edit(request, user_id):
                 actor=actor,
                 action=f"User '{target_user.get_full_name() or target_user.username}' profile updated by admin",
                 entity_type='User',
-                entity_id=target_user.id,
+                entity_id=target_user.id, action_code='user_profile_updated',
             )
             if cd['new_password']:
                 log_activity(
@@ -19891,7 +19894,7 @@ def admin_user_edit(request, user_id):
                     actor=actor,
                     action=f"Password reset for user '{target_user.username}' by admin",
                     entity_type='User',
-                    entity_id=target_user.id,
+                    entity_id=target_user.id, action_code='user_password_reset',
                 )
 
             messages.success(request, f'{target_user.get_full_name() or target_user.username} updated successfully.')
@@ -20648,7 +20651,7 @@ def admin_checklist_create(request):
     checklist = Checklist.objects.create(name=name, created_by=request.user)
     log_activity(None, request.user.profile,
                  f"Created checklist '{name}' as {checklist.code} v1 (draft)",
-                 entity_type='Checklist', entity_id=checklist.pk)
+                 entity_type='Checklist', entity_id=checklist.pk, action_code='checklist_created')
     messages.success(
         request,
         f'Checklist "{name}" created as a draft. Add its items, then publish it — '
@@ -20730,7 +20733,8 @@ def admin_checklist_update(request, checklist_id):
         log_activity(None, request.user.profile,
                      f"Published checklist '{checklist.name}' {checklist.code} "
                      f"v{checklist.version_no}{note}",
-                     entity_type='Checklist', entity_id=checklist.pk)
+                     entity_type='Checklist', entity_id=checklist.pk,
+                     action_code='checklist_published')
         messages.success(request, f'Published version {checklist.version_no}. '
                                   f'Its items are now frozen.')
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
@@ -20744,7 +20748,8 @@ def admin_checklist_update(request, checklist_id):
         log_activity(None, request.user.profile,
                      f"Archived checklist '{checklist.name}' {checklist.code} "
                      f"v{checklist.version_no}",
-                     entity_type='Checklist', entity_id=checklist.pk)
+                     entity_type='Checklist', entity_id=checklist.pk,
+                     action_code='checklist_archived')
         messages.success(request, 'Checklist archived. It is no longer shown on any task.')
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
@@ -20765,7 +20770,7 @@ def admin_checklist_update(request, checklist_id):
 
     log_activity(None, request.user.profile,
                  f"Renamed checklist {checklist.code} v{checklist.version_no} to '{name}'",
-                 entity_type='Checklist', entity_id=checklist.pk)
+                 entity_type='Checklist', entity_id=checklist.pk, action_code='checklist_renamed')
     messages.success(request, 'Checklist saved.')
     return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
@@ -20799,7 +20804,7 @@ def admin_checklist_delete(request, checklist_id):
 
     log_activity(None, request.user.profile,
                  f"Deleted draft checklist '{name}' (its items and links; it held no answers)",
-                 entity_type='Checklist', entity_id=None)
+                 entity_type='Checklist', entity_id=None, action_code='checklist_deleted')
     messages.success(request, f'Checklist "{name}" deleted.')
     return redirect('admin_checklists')
 
@@ -20829,7 +20834,8 @@ def admin_checklist_item_add(request, checklist_id):
 
     log_activity(None, request.user.profile,
                  f"Added item '{label}' to checklist '{checklist.name}'",
-                 entity_type='Checklist', entity_id=checklist.pk)
+                 entity_type='Checklist', entity_id=checklist.pk,
+                 action_code='checklist_item_added')
     messages.success(request, 'Item added.')
     return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
@@ -20860,7 +20866,8 @@ def admin_checklist_item_edit(request, checklist_id, item_id):
 
     log_activity(None, request.user.profile,
                  f"Edited item to '{label}' on checklist '{checklist.name}'",
-                 entity_type='Checklist', entity_id=checklist.pk)
+                 entity_type='Checklist', entity_id=checklist.pk,
+                 action_code='checklist_item_edited')
     messages.success(request, 'Item updated.')
     return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
@@ -20892,7 +20899,8 @@ def admin_checklist_item_delete(request, checklist_id, item_id):
 
     log_activity(None, request.user.profile,
                  f"Deleted item '{label}' from checklist '{checklist.name}'",
-                 entity_type='Checklist', entity_id=checklist.pk)
+                 entity_type='Checklist', entity_id=checklist.pk,
+                 action_code='checklist_item_deleted')
     messages.success(request, 'Item deleted.')
     return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
@@ -20931,7 +20939,8 @@ def admin_checklist_item_move(request, checklist_id, item_id):
             neighbor.save(update_fields=['order'])
         log_activity(None, request.user.profile,
                      f"Reordered item '{item.label}' {direction} on checklist '{checklist.name}'",
-                     entity_type='Checklist', entity_id=checklist.pk)
+                     entity_type='Checklist', entity_id=checklist.pk,
+                     action_code='checklist_item_moved')
 
     return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
@@ -20990,7 +20999,7 @@ def admin_checklist_link_add(request, checklist_id):
     log_activity(None, request.user.profile,
                  f"Assigned checklist '{checklist.name}' to task '{task_name}' "
                  f"({project_type}, template task {template_task.code})",
-                 entity_type='Checklist', entity_id=checklist.pk)
+                 entity_type='Checklist', entity_id=checklist.pk, action_code='checklist_linked')
     messages.success(request, f'Assigned to "{task_name}" ({project_type}).')
     return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
@@ -21010,7 +21019,7 @@ def admin_checklist_link_delete(request, checklist_id, link_id):
 
     log_activity(None, request.user.profile,
                  f"Unassigned checklist '{checklist.name}' from task '{task_name}' ({project_type})",
-                 entity_type='Checklist', entity_id=checklist.pk)
+                 entity_type='Checklist', entity_id=checklist.pk, action_code='checklist_unlinked')
     messages.success(request, f'Unassigned from "{task_name}" ({project_type}).')
     return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
@@ -21078,7 +21087,8 @@ def admin_boq_item_create(request):
             # B-0 T3: a create has no "before", so every field is listed as "→ value".
             # action_code stays blank on the Admin screen (Zuber, B-0).
             log_catalogue_change(request.user.profile, item,
-                                 f"Created BOQ catalogue item '{item.code}'", None)
+                                 f"Created BOQ catalogue item '{item.code}'", None,
+                                 action_code='boq_catalogue_item_created')
             messages.success(request, f'Catalogue item "{item.code}" added.')
             return redirect('admin_boq_items')
     else:
@@ -21132,7 +21142,8 @@ def admin_boq_item_edit(request, item_id):
         if form.is_valid():
             form.save()
             log_catalogue_change(request.user.profile, item,
-                                 f"Updated BOQ catalogue item '{item.code}'", before)
+                                 f"Updated BOQ catalogue item '{item.code}'", before,
+                                 action_code='boq_catalogue_item_updated')
             messages.success(request, f'Catalogue item "{item.code}" saved.')
             return redirect('admin_boq_items')
     else:
@@ -21187,7 +21198,8 @@ def admin_boq_item_toggle(request, item_id):
     state = 'activated' if item.is_active else 'deactivated'
     # B-0 T3: retire and reactivate log "active: yes → no" like any other edit.
     log_catalogue_change(request.user.profile, item,
-                         f"{state.capitalize()} BOQ catalogue item '{item.code}'", before)
+                         f"{state.capitalize()} BOQ catalogue item '{item.code}'", before,
+                         action_code=f'boq_catalogue_item_{state}')
     messages.success(request, f'Catalogue item "{item.code}" {state}.')
     return redirect('admin_boq_items')
 
@@ -21238,7 +21250,8 @@ def stock_location_create(request):
             location = form.save()
             log_activity(None, request.user.profile,
                          f"Created warehouse {_stock_location_label(location)}",
-                         entity_type='StockLocation', entity_id=location.pk)
+                         entity_type='StockLocation', entity_id=location.pk,
+                         action_code='stock_location_created')
             messages.success(request, f'Warehouse "{location.code}" added.')
             return redirect('stock_locations')
     else:
@@ -21267,7 +21280,8 @@ def stock_location_edit(request, location_id):
             log_activity(None, request.user.profile,
                          f"Updated warehouse {_stock_location_label(location)} "
                          f"(keeper={location.keeper.user.username if location.keeper else '-'})",
-                         entity_type='StockLocation', entity_id=location.pk)
+                         entity_type='StockLocation', entity_id=location.pk,
+                         action_code='stock_location_updated')
             messages.success(request, f'Warehouse "{location.code}" saved.')
             return redirect('stock_locations')
     else:
@@ -21300,7 +21314,8 @@ def stock_location_toggle(request, location_id):
     state = 'activated' if location.is_active else 'deactivated'
     log_activity(None, request.user.profile,
                  f"{state.capitalize()} warehouse {_stock_location_label(location)}",
-                 entity_type='StockLocation', entity_id=location.pk)
+                 entity_type='StockLocation', entity_id=location.pk,
+                 action_code=f'stock_location_{state}')
     messages.success(request, f'Warehouse "{location.code}" {state}.')
     return redirect('stock_locations')
 
@@ -21355,7 +21370,7 @@ def admin_reset_password(request, user_id):
                 actor=actor,
                 action=f"Admin reset password for '{target_user.get_full_name() or target_user.username}'",
                 entity_type='User',
-                entity_id=target_user.id,
+                entity_id=target_user.id, action_code='user_password_reset',
             )
             messages.success(
                 request,
@@ -21501,7 +21516,7 @@ def subadmin_departments(request):
                     actor=request.user.profile,
                     action=f"User '{target_user.get_full_name() or target_user.username}' role changed from '{old_role}' to '{new_role}' by System Admin",
                     entity_type='User',
-                    entity_id=target_user.id,
+                    entity_id=target_user.id, action_code='user_role_changed',
                 )
                 messages.success(request, f'Role updated for {target_user.get_full_name() or target_user.username}.')
             return redirect('subadmin_departments')
@@ -21549,7 +21564,7 @@ def subadmin_departments(request):
                     + (f" (role: {old_role} → {new_role})" if old_role != new_role else "")
                 ),
                 entity_type='User',
-                entity_id=target_user.id,
+                entity_id=target_user.id, action_code='user_profile_updated',
             )
             messages.success(request, f'{target_user.get_full_name() or target_user.username} updated.')
             return redirect('subadmin_departments')
@@ -21572,7 +21587,7 @@ def subadmin_departments(request):
                 actor=request.user.profile,
                 action=f"User '{target_user.get_full_name() or target_user.username}' deactivated by System Admin",
                 entity_type='User',
-                entity_id=target_user.id,
+                entity_id=target_user.id, action_code='user_deactivated',
             )
             messages.success(request, f'{target_user.get_full_name() or target_user.username} deactivated.')
             return redirect('subadmin_departments')
@@ -21595,7 +21610,7 @@ def subadmin_departments(request):
                 actor=request.user.profile,
                 action=f"User '{target_user.get_full_name() or target_user.username}' reactivated by System Admin",
                 entity_type='User',
-                entity_id=target_user.id,
+                entity_id=target_user.id, action_code='user_reactivated',
             )
             messages.success(request, f'{target_user.get_full_name() or target_user.username} reactivated.')
             return redirect('subadmin_departments')
@@ -21681,7 +21696,7 @@ def _subadmin_create_user(request):
         actor=request.user.profile,
         action=f"User '{new_user.get_full_name() or username}' ({role}) created by System Admin",
         entity_type='User',
-        entity_id=new_user.id,
+        entity_id=new_user.id, action_code='user_created',
     )
     messages.success(request, f"User '{username}' created successfully as {role}.")
     return redirect('subadmin_departments')

@@ -338,7 +338,8 @@ def admin_notification_set_state(request, event_code, channel):
     # NotificationEventSettingChange row set_state() wrote.
     log_activity(None, by, (f"Notification '{event.label}' ({channel}) switched {to_state}: "
                             f"{reason.strip()}")[:255],
-                 entity_type='NotificationEventSetting', entity_id=setting.pk)
+                 entity_type='NotificationEventSetting', entity_id=setting.pk,
+                 action_code='notify_event_switched')
     messages.success(request, f'{event.label} ({channel}) is now {to_state}.')
     return redirect(_event_url(event))
 
@@ -495,7 +496,8 @@ def admin_notification_draft_activate(request, event_code, channel, pk):
         return redirect(_draft_url(template))
     log_activity(None, by, f"Notification '{event.label}' ({channel}) version "
                            f"{template.version_no} activated",
-                 entity_type='NotificationTemplate', entity_id=template.pk)
+                 entity_type='NotificationTemplate', entity_id=template.pk,
+                 action_code='notify_template_activated')
     messages.success(request, f'Version {template.version_no} is live.')
     return redirect(_event_url(event))
 
@@ -519,7 +521,8 @@ def admin_notification_draft_discard(request, event_code, channel, pk):
     log_activity(None, by, f"Notification '{event.label}' ({channel}) draft version "
                            f"{version_no} {outcome}",
                  entity_type='NotificationTemplate',
-                 entity_id=template.pk if outcome == 'discarded' else None)
+                 entity_id=template.pk if outcome == 'discarded' else None,
+                 action_code='notify_template_draft_discarded')
     if outcome == 'deleted':
         messages.success(request, f'Draft version {version_no} deleted.')
     else:
@@ -566,7 +569,8 @@ def admin_notification_version_restore(request, event_code, channel, pk):
         return redirect(_event_url(event))
     log_activity(None, by, f"Notification '{event.label}' ({channel}) version "
                            f"{source.version_no} restored as draft version {draft.version_no}",
-                 entity_type='NotificationTemplate', entity_id=draft.pk)
+                 entity_type='NotificationTemplate', entity_id=draft.pk,
+                 action_code='notify_template_restored')
     messages.success(request, f'Version {source.version_no} copied into draft version '
                               f'{draft.version_no}. Test it, then activate it.')
     return redirect(_draft_url(draft))

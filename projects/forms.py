@@ -1406,9 +1406,13 @@ def catalogue_change_entries(prefix, before, after):
     return [f'{prefix}: {description}', f"{prefix}: {'; '.join(parts.values())}"]
 
 
-def log_catalogue_change(actor, item, prefix, before, action_code=''):
+def log_catalogue_change(actor, item, prefix, before, action_code):
     """Write the before/after entries for one catalogue save. `actor` None is a system
-    write (the normalise command), which names itself in `prefix`."""
+    write (the normalise command), which names itself in `prefix`.
+
+    `action_code` is REQUIRED (RPT-C1): its old '' default is how the admin catalogue
+    screens wrote blank-code rows unnoticed. tests_activity_codes_c1's guard fails on any
+    ActivityLog write with no code, and a required argument means no caller can skip it."""
     for text in catalogue_change_entries(prefix, before, catalogue_snapshot(item)):
         log_activity(None, actor, text, entity_type='BOQItemMaster', entity_id=item.pk,
                      action_code=action_code)
