@@ -149,6 +149,21 @@ def human_activity_q(prefix=''):
              | Q(**{f'{prefix}action_code__in': NON_ACTIVITY_CODES}))
 
 
+def human_activity_between(start, end, *, end_inclusive=False, prefix=''):
+    """human_activity_q() bounded in time: human activity rows with `start <= timestamp <
+    end`, or `<= end` when `end_inclusive` (RPT-B1, decision D7).
+
+    THE ONE BOUNDED FORM of the rule, so the tender page / strip / snapshot ("Active
+    today", through site_breakdown()) and the Reports section can never cut a window
+    differently. site_breakdown() asks for [00:00 IST, now] INCLUSIVE, because a fixed
+    `now` (the snapshot, tests) must count a row written at that instant; a report asks for
+    [start, end) EXCLUSIVE, the half-open IST day that Period.end_dt is. A range on the raw
+    timestamp, never timestamp__date, so no per-row time-zone cast."""
+    upper = 'lte' if end_inclusive else 'lt'
+    return (Q(**{f'{prefix}timestamp__gte': start, f'{prefix}timestamp__{upper}': end})
+            & human_activity_q(prefix))
+
+
 # ---------------------------------------------------------------------------
 # The card
 # ---------------------------------------------------------------------------

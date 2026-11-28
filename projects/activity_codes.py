@@ -95,3 +95,32 @@ NON_ACTIVITY_CODES = frozenset({
 # fill of an amount that was blank does not list ~49 Received milestones as changed.
 # A BD set from the overview's form writes 'bd_assigned' and is NOT here: like
 # 'pm_assigned', it is a person's decision about the site and counts as its latest activity.
+
+
+# BULK ACTIONS (RPT-B1, decision D8 and Zuber's ruling 2, 28 Nov 2026) — the Reports
+# section counts one person doing one action across many sites at once as ONE action, and
+# a site touched only by such a batch is not an active site. A batch is a run of
+# ActivityLog rows (or unpaired StatusTransition rows) by the SAME actor with the SAME
+# action code, each within BULK_BATCH_GAP_SECONDS of the previous one, touching at least
+# BULK_MIN_SITES distinct sites. Read by report_activity only.
+#
+# WHY A TIMING RULE AND NOT A LIST OF CODES. No bulk path writes a code of its own:
+# design_bulk_allocate writes the single-site 'design_allocated' / 'design_qc_assigned',
+# hand_over_sites writes 'pm_assigned' through change_site_pm, opex_site_bulk_upload writes
+# 'opex_site_created' through create_opex_site. So the code cannot tell bulk from single.
+#
+# WHY 2 SECONDS (the 27 Nov 2026 production evidence). A true bulk POST writes its rows
+# within a second: design_bulk_allocate put 30 sites in at 12:52:41-42 on 25 Nov. Fast
+# queue work is NOT bulk and counts in full: on 27 Nov the Design Head made 144 separate
+# single-site submissions (78 survey links, 66 Head QC passes), 4-8 s apart (median 4.2 s
+# and 8.6 s). Each is real work on that site. A 120 s gap would also have collapsed the
+# QC engineers' reviews and a PM's 17 design approvals.
+BULK_BATCH_GAP_SECONDS = 2
+# Ten sites: below this a run is a person working quickly, not a bulk screen.
+BULK_MIN_SITES = 10
+# One bulk ACTION per screen use (B1 answer 1, 28 Nov 2026): batches by the same actor over
+# the same set of sites whose first rows are under this many seconds apart are merged into
+# one, showing every code. design_bulk_allocate writes design_allocated and
+# design_qc_assigned for each site in the same POST (25 Nov: 12:52:41-42, 30 sites, both
+# codes), which the per-code rule above would otherwise count twice.
+BULK_MERGE_SECONDS = 1

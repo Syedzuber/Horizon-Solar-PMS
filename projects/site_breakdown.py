@@ -77,7 +77,7 @@ from .models import (DC_CATEGORY_TO_MIRROR_CODE, ActivityLog, ContractorAttendan
                      DCLineItem, DeliveryChallan, Task)
 from .permissions import dashboard_live_sites
 from .scheduling import ANCHOR_TASK_CODE
-from .site_dashboard import human_activity_q, in_block_q
+from .site_dashboard import human_activity_between, in_block_q
 from .tender_stages import (STAGE_AWAITING_PM, STAGE_IN_DESIGN, STAGE_IN_QC, STAGE_NO_SURVEY,
                             STAGE_RELEASED, STAGE_SURVEY_ON_FILE, STATUS_TO_STAGE)
 
@@ -257,10 +257,11 @@ def site_breakdown(projects, now):
                 # Today's rows only: from 00:00 IST (inclusive) up to `now`. A range on the
                 # raw timestamp rather than timestamp__date, so no per-row time-zone cast.
                 # Bounded above by `now` so a fixed `now` (the snapshot, tests) is honest.
+                # Through the shared bounded builder (RPT-B1, D7), inclusive of `now`.
                 touched=Exists(ActivityLog.objects
-                               .filter(project_id=OuterRef('pk'), timestamp__gte=day_start,
-                                       timestamp__lte=now)
-                               .filter(human_activity_q())),
+                               .filter(project_id=OuterRef('pk'))
+                               .filter(human_activity_between(day_start, now,
+                                                              end_inclusive=True))),
                 # COPY OF models.first_component_received() (phase rule R3), as a column so
                 # one statement answers for every site (ruling Q2): a line in a
                 # DC_CATEGORY_TO_MIRROR_CODE category with received_quantity > 0, on a

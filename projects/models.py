@@ -2540,6 +2540,11 @@ class ActivityLog(models.Model):
 
     class Meta:
         ordering = ['-timestamp']
+        indexes = [
+            # RPT-B1 (D12): every report and "Active today" filters this table on a
+            # timestamp range; without it each one is a sequential scan (RPT-A T12).
+            models.Index(fields=['timestamp'], name='actlog_timestamp_idx'),
+        ]
 
     def __str__(self):
         return f"{self.timestamp:%Y-%m-%d %H:%M} — {self.action}"

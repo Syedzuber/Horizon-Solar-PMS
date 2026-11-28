@@ -3707,6 +3707,57 @@ def user_can_view_finance_head_page(user):
     return profile.role in FINANCE_HEAD_PAGE_ROLES or user_is_finance_head(user)
 
 
+# ---------------------------------------------------------------------------
+# RPT-B1 — the Reports section (decision D1, 28 Nov 2026)
+#
+# Reports are about PEOPLE as well as sites (who acted, who signed in and did nothing,
+# who holds open tasks), so the audience is the CEO Daily Report's, not the portfolio
+# roles': Finance and SCM read every project but not their colleagues' activity, the
+# reason USER_STATUS_REPORT_ROLES gives for leaving them out.
+#
+# TWO SETS, NOT ONE, though they hold the same roles today. The Payments report shows
+# portfolio money; keeping its set apart means it can be narrowed (the RPT-A question
+# was whether System Admin should see it) without touching who sees the rest.
+#
+# ACTIVE ON BOTH MODELS, as the Finance Head page is (_user_and_profile_active): a
+# deactivated profile keeps its login, and these pages list every person's activity.
+# ---------------------------------------------------------------------------
+
+#: Roles that open the Reports section.
+REPORTS_ROLES = frozenset({'CEO', 'Admin', 'System Admin'})
+
+#: Roles that see the Payments report inside it. The same three today (D1), held apart.
+PAYMENT_REPORT_ROLES = frozenset({'CEO', 'Admin', 'System Admin'})
+
+
+def user_can_view_reports(user):
+    """Return True if `user` may open the Reports section (RPT-B1, D1).
+
+    Allowed: an authenticated user whose login and profile are both active, with role CEO,
+    Admin or System Admin (REPORTS_ROLES). Blocked: every other role — the reports list
+    each colleague's activity, which no other role reads (see the section note) — and any
+    inactive user, profile-less account or anonymous user. No query beyond the profile.
+    """
+    profile = _user_and_profile_active(user)
+    if profile is None:
+        return False
+    return profile.role in REPORTS_ROLES
+
+
+def user_can_view_payment_reports(user):
+    """Return True if `user` may see the Payments report (RPT-B1, D1).
+
+    Allowed: an active user and profile with role CEO, Admin or System Admin
+    (PAYMENT_REPORT_ROLES). Blocked: every other role, which does not read portfolio money
+    (AF-1), and any inactive user. Separate from user_can_view_reports() so the money
+    report can be tightened on its own; it is not implied by it.
+    """
+    profile = _user_and_profile_active(user)
+    if profile is None:
+        return False
+    return profile.role in PAYMENT_REPORT_ROLES
+
+
 def _payment_approver_other_than_requester(user, payment_request):
     """The two terms every approver predicate shares: the flag, and not being the person
     who raised this request.
